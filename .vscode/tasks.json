@@ -1,0 +1,65 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Python: Create virtual environment",
+      "type": "process",
+      "command": "python",
+      "args": [
+        "-m",
+        "venv",
+        ".venv"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Python: Install dependencies",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "requirements.txt"
+      ],
+      "dependsOn": "Python: Create virtual environment",
+      "problemMatcher": []
+    },
+    {
+      "label": "Python: Run tests",
+      "type": "process",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "options": {
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/src"
+        }
+      },
+      "dependsOn": "Python: Install dependencies",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Build",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "build"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

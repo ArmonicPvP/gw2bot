@@ -1,0 +1,5 @@
+aiohttp>=3.11,<4
+alembic>=1.15,<2
+discord.py>=2.5,<3
+python-dotenv>=1.1,<2
+SQLAlchemy>=2.0,<3

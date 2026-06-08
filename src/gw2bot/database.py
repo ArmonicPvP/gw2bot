@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+    func,
+)
+from sqlalchemy.engine import Engine, URL
+from sqlalchemy.inspection import inspect
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class SettingRecord(Base):
+    __tablename__ = "metadata"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class RaffleTotalRecord(Base):
+    __tablename__ = "raffle_totals"
+
+    username: Mapped[str] = mapped_column(String, primary_key=True)
+    coins_deposited: Mapped[int] = mapped_column(Integer, nullable=False)
+    raffle_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
+    gold_raffle_tickets: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    manual_raffle_tickets: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+
+class RaffleDepositRecord(Base):
+    __tablename__ = "raffle_deposits"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    coins_deposited: Mapped[int] = mapped_column(Integer, nullable=False)
+    raffle_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class GuildLeaveRecord(Base):
+    __tablename__ = "guild_leave_events"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class FeastAlertRecord(Base):
+    __tablename__ = "feast_alert_state"
+
+    guild_storage_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_notification_time: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class RaffleRunRecord(Base):
+    __tablename__ = "raffle_runs"
+
+    run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_time: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+    winner: Mapped[str] = mapped_column(String, nullable=False)
+    winning_ticket: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
+    announcement_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class RaffleRunEntryRecord(Base):
+    __tablename__ = "raffle_run_entries"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("raffle_runs.run_id"),
+        primary_key=True,
+    )
+    username: Mapped[str] = mapped_column(String, primary_key=True)
+    raffle_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+def create_database_engine(database_path: str) -> Engine:
+    path = Path(database_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return create_engine(URL.create("sqlite", database=str(path)))
+
+
+def initialize_database(engine: Engine) -> set[str]:
+    # New databases use ORM metadata; Alembic upgrades pre-ORM database files.
+    Base.metadata.create_all(engine)
+    added_columns: set[str] = set()
+
+    with engine.begin() as connection:
+        total_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                RaffleTotalRecord.__tablename__
+            )
+        }
+        operations = Operations(MigrationContext.configure(connection))
+        for column_name in ("gold_raffle_tickets", "manual_raffle_tickets"):
+            if column_name in total_columns:
+                continue
+            operations.add_column(
+                RaffleTotalRecord.__tablename__,
+                Column(
+                    column_name,
+                    Integer,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            added_columns.add(column_name)
+
+        run_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                RaffleRunRecord.__tablename__
+            )
+        }
+        if "announcement_sent" not in run_columns:
+            # Legacy runs predate delivery tracking and cannot be recovered.
+            operations.add_column(
+                RaffleRunRecord.__tablename__,
+                Column(
+                    "announcement_sent",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            connection.exec_driver_sql(
+                "UPDATE raffle_runs SET announcement_sent = 1"
+            )
+            added_columns.add("announcement_sent")
+
+    return added_columns

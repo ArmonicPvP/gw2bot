@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.venv
+.vscode
+__pycache__
+*.py[cod]
+.coverage
+.pytest_cache
+.ruff_cache
+.mypy_cache
+data
+tests
+README.md
+LICENSE

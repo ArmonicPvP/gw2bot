@@ -350,9 +350,54 @@ paket-files/
 # CodeRush personal settings
 **/.cr/personal
 
-# Python Tools for Visual Studio (PTVS)
+# Python bytecode and compiled extensions
 **/__pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+
+# Python environments and local interpreter selection
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Python build and package output
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test, coverage, type-checker, and linter caches
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
+
+# Local runtime state
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local application configuration
+.env
+.env.*
+!.env.example
 
 # Cake - Uncomment if you are using it
 #tools/**
