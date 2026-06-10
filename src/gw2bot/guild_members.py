@@ -1,15 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+
+LOGGER = logging.getLogger(__name__)
 
 TRIAL_RANK = "Trial"
 TRIAL_PERIOD = timedelta(days=14)
 TRIAL_REPORT_HOUR_UTC = 17
 DISCORD_MESSAGE_LIMIT = 2_000
+TRIAL_REPORT_STATUS_ORDER = {
+    "Sunborne": 0,
+    "Trial": 1,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TrialMemberReportEntry:
+    username: str
+    discord_user_id: int | None = None
+    discord_status: str | None = None
 
 
 class GuildMemberApi(Protocol):
@@ -34,15 +49,20 @@ class GuildMemberCache:
 
     async def resolve(self, username: str) -> str | None:
         await self._refresh_if_expired()
-        return self._members.get(username.strip().casefold())
+        result = self._members.get(username.strip().casefold())
+        LOGGER.debug("Guild member cache lookup completed; matched=%s", result is not None)
+        return result
 
     async def _refresh_if_expired(self) -> None:
         if self._clock() < self._expires_at:
+            LOGGER.debug("Reusing guild member cache")
             return
 
         async with self._lock:
             if self._clock() < self._expires_at:
+                LOGGER.debug("Guild member cache was refreshed by another task")
                 return
+            LOGGER.debug("Refreshing guild member cache")
             members = await self._api.get_guild_members(self._guild_id)
             self._members = {
                 str(member["name"]).casefold(): str(member["name"])
@@ -50,6 +70,11 @@ class GuildMemberCache:
                 if member.get("name")
             }
             self._expires_at = self._clock() + self._ttl_seconds
+            LOGGER.debug(
+                "Guild member cache refreshed; members=%s ttl_seconds=%s",
+                len(self._members),
+                self._ttl_seconds,
+            )
 
 
 def get_overdue_trial_members(
@@ -65,13 +90,33 @@ def get_overdue_trial_members(
         joined = _parse_api_datetime(member.get("joined"))
         if name and joined is not None and joined <= cutoff:
             overdue.append(name)
-    return sorted(overdue, key=str.casefold)
+    result = sorted(overdue, key=str.casefold)
+    LOGGER.debug(
+        "Evaluated %s guild members; overdue_trials=%s",
+        len(members),
+        len(result),
+    )
+    return result
 
 
-def format_overdue_trial_report(usernames: list[str]) -> list[str]:
-    if not usernames:
+def format_overdue_trial_report(
+    entries: Sequence[TrialMemberReportEntry | str],
+) -> list[str]:
+    if not entries:
         return []
 
+    sorted_entries = sorted(
+        (
+            TrialMemberReportEntry(value)
+            if isinstance(value, str)
+            else value
+            for value in entries
+        ),
+        key=lambda entry: (
+            TRIAL_REPORT_STATUS_ORDER.get(entry.discord_status or "", 2),
+            entry.username.casefold(),
+        ),
+    )
     header = (
         "**Trial members past the 14-day mark**\n"
         "Please confirm whether these users have completed the challenges "
@@ -79,13 +124,23 @@ def format_overdue_trial_report(usernames: list[str]) -> list[str]:
     )
     messages: list[str] = []
     current = header
-    for username in usernames:
-        line = f"- {username}\n"
+    for entry in sorted_entries:
+        line = f"* {entry.username}"
+        if entry.discord_user_id is not None:
+            line += f" - <@{entry.discord_user_id}>"
+            if entry.discord_status is not None:
+                line += f" - {entry.discord_status}"
+        line += "\n"
         if len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
             messages.append(current.rstrip())
             current = header
         current += line
     messages.append(current.rstrip())
+    LOGGER.debug(
+        "Formatted %s Trial report entries into %s Discord messages",
+        len(sorted_entries),
+        len(messages),
+    )
     return messages
 
 

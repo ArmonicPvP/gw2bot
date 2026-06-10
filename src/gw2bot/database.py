@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from alembic.migration import MigrationContext
@@ -17,6 +18,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine, URL
 from sqlalchemy.inspection import inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+LOGGER = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -116,10 +119,12 @@ class RaffleRunEntryRecord(Base):
 def create_database_engine(database_path: str) -> Engine:
     path = Path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.debug("Creating SQLite database engine at %s", path)
     return create_engine(URL.create("sqlite", database=str(path)))
 
 
 def initialize_database(engine: Engine) -> set[str]:
+    LOGGER.debug("Initializing database schema")
     # New databases use ORM metadata; Alembic upgrades pre-ORM database files.
     Base.metadata.create_all(engine)
     added_columns: set[str] = set()
@@ -168,4 +173,8 @@ def initialize_database(engine: Engine) -> set[str]:
             )
             added_columns.add("announcement_sent")
 
+    LOGGER.debug(
+        "Database schema initialization completed; added_columns=%s",
+        sorted(added_columns),
+    )
     return added_columns

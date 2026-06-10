@@ -1,5 +1,4 @@
 import tempfile
-import unittest
 from pathlib import Path
 
 from sqlalchemy import (
@@ -19,6 +18,7 @@ from gw2bot.raffle import (
     parse_gold_deposit,
     parse_guild_leave,
 )
+import pytest
 
 
 def gold_deposit(
@@ -51,42 +51,40 @@ def guild_leave(
     }
 
 
-class RaffleTests(unittest.TestCase):
+class TestRaffle:
     def test_parses_gold_deposit_and_formats_message(self) -> None:
         deposit = parse_gold_deposit(gold_deposit(101, coins=35_000))
 
-        self.assertIsNotNone(deposit)
         assert deposit is not None
-        self.assertEqual(deposit.raffle_tickets, 3)
-        self.assertEqual(
-            deposit.message,
-            "Username.1234 deposited 3.5 gold and purchased 3 raffle tickets",
+        assert deposit.raffle_tickets == 3
+        assert (
+            deposit.message
+            == "Username.1234 deposited 3.5 gold and purchased 3 raffle tickets"
         )
 
     def test_tracks_partial_gold_but_ignores_non_deposit_events(self) -> None:
         partial = parse_gold_deposit(gold_deposit(101, coins=9_999))
-        self.assertIsNotNone(partial)
         assert partial is not None
-        self.assertEqual(partial.raffle_tickets, 0)
-        self.assertIsNone(
-            parse_gold_deposit({**gold_deposit(102), "operation": "withdraw"})
+        assert partial.raffle_tickets == 0
+        assert (
+            parse_gold_deposit({**gold_deposit(102), "operation": "withdraw"}) is None
         )
-        self.assertIsNone(parse_gold_deposit({**gold_deposit(103), "type": "treasury"}))
+        assert parse_gold_deposit({**gold_deposit(103), "type": "treasury"}) is None
 
     def test_parses_guild_leave_with_exact_message(self) -> None:
         leave = parse_guild_leave(guild_leave(104))
 
-        self.assertIsNotNone(leave)
         assert leave is not None
-        self.assertEqual(leave.message, "Username.1234 has left the guild.")
-        self.assertIsNone(parse_guild_leave({**guild_leave(105), "type": "joined"}))
-        self.assertIsNone(
+        assert leave.message == "Username.1234 has left the guild."
+        assert parse_guild_leave({**guild_leave(105), "type": "joined"}) is None
+        assert (
             parse_guild_leave(
                 {
                     **guild_leave(106),
                     "kicked_by": "Officer.5678",
                 }
             )
+            is None
         )
 
     def test_persists_leave_notification_and_prevents_duplicates(self) -> None:
@@ -96,18 +94,17 @@ class RaffleTests(unittest.TestCase):
             store.initialize_cursor(100)
             store.process_events([guild_leave(101)])
 
-            self.assertEqual(
-                [leave.message for leave in store.get_pending_leave_notifications()],
-                ["Username.1234 has left the guild."],
-            )
+            assert [
+                leave.message for leave in store.get_pending_leave_notifications()
+            ] == ["Username.1234 has left the guild."]
             store.close()
 
             reopened = RaffleStore(database_path, "guild-id")
             reopened.process_events([guild_leave(101)])
             pending = reopened.get_pending_leave_notifications()
-            self.assertEqual(len(pending), 1)
+            assert len(pending) == 1
             reopened.mark_leave_notification_sent(101)
-            self.assertEqual(reopened.get_pending_leave_notifications(), [])
+            assert reopened.get_pending_leave_notifications() == []
             reopened.close()
 
     def test_repeated_join_leave_cycles_create_distinct_notifications(self) -> None:
@@ -123,17 +120,15 @@ class RaffleTests(unittest.TestCase):
                 ]
             )
 
-            self.assertEqual(
-                [leave.event_id for leave in store.get_pending_leave_notifications()],
-                [101, 103],
-            )
-            self.assertEqual(
-                [leave.message for leave in store.get_pending_leave_notifications()],
-                [
-                    "Username.1234 has left the guild.",
-                    "Username.1234 has left the guild.",
-                ],
-            )
+            assert [
+                leave.event_id for leave in store.get_pending_leave_notifications()
+            ] == [101, 103]
+            assert [
+                leave.message for leave in store.get_pending_leave_notifications()
+            ] == [
+                "Username.1234 has left the guild.",
+                "Username.1234 has left the guild.",
+            ]
             store.close()
 
     def test_processes_raffle_deposit_and_guild_leave_before_advancing_cursor(
@@ -145,9 +140,9 @@ class RaffleTests(unittest.TestCase):
 
             store.process_events([guild_leave(102), gold_deposit(101)])
 
-            self.assertEqual(store.get_cursor(), 102)
-            self.assertEqual(len(store.get_pending_notifications()), 1)
-            self.assertEqual(len(store.get_pending_leave_notifications()), 1)
+            assert store.get_cursor() == 102
+            assert len(store.get_pending_notifications()) == 1
+            assert len(store.get_pending_leave_notifications()) == 1
             store.close()
 
     def test_persists_totals_cursor_and_notification_state(self) -> None:
@@ -162,13 +157,12 @@ class RaffleTests(unittest.TestCase):
                 ]
             )
 
-            self.assertEqual(store.get_cursor(), 102)
-            self.assertEqual(store.get_totals()[0].coins_deposited, 30_000)
-            self.assertEqual(store.get_totals()[0].raffle_tickets, 3)
-            self.assertEqual(
-                [deposit.event_id for deposit in store.get_pending_notifications()],
-                [101, 102],
-            )
+            assert store.get_cursor() == 102
+            assert store.get_totals()[0].coins_deposited == 30_000
+            assert store.get_totals()[0].raffle_tickets == 3
+            assert [
+                deposit.event_id for deposit in store.get_pending_notifications()
+            ] == [101, 102]
             store.mark_notification_sent(101)
             store.close()
 
@@ -177,12 +171,11 @@ class RaffleTests(unittest.TestCase):
                 [gold_deposit(101), gold_deposit(102, coins=20_000)]
             )
 
-            self.assertEqual(reopened.get_cursor(), 102)
-            self.assertEqual(reopened.get_totals()[0].raffle_tickets, 3)
-            self.assertEqual(
-                [deposit.event_id for deposit in reopened.get_pending_notifications()],
-                [102],
-            )
+            assert reopened.get_cursor() == 102
+            assert reopened.get_totals()[0].raffle_tickets == 3
+            assert [
+                deposit.event_id for deposit in reopened.get_pending_notifications()
+            ] == [102]
             reopened.close()
 
     def test_caps_gold_purchased_tickets_at_ten_per_raffle(self) -> None:
@@ -199,24 +192,20 @@ class RaffleTests(unittest.TestCase):
             )
 
             total = store.get_totals()[0]
-            self.assertEqual(total.coins_deposited, 135_000)
-            self.assertEqual(total.raffle_tickets, 10)
-            self.assertEqual(total.gold_raffle_tickets, 10)
-            self.assertEqual(
-                [
-                    deposit.raffle_tickets
-                    for deposit in store.get_pending_notifications()
-                ],
-                [8, 2, 0],
-            )
+            assert total.coins_deposited == 135_000
+            assert total.raffle_tickets == 10
+            assert total.gold_raffle_tickets == 10
+            assert [
+                deposit.raffle_tickets for deposit in store.get_pending_notifications()
+            ] == [8, 2, 0]
 
             store.run_raffle(randbelow=lambda total: 0)
             store.process_events([gold_deposit(104, coins=20_000)])
 
             reset_total = store.get_totals()[0]
-            self.assertEqual(reset_total.coins_deposited, 155_000)
-            self.assertEqual(reset_total.raffle_tickets, 2)
-            self.assertEqual(reset_total.gold_raffle_tickets, 2)
+            assert reset_total.coins_deposited == 155_000
+            assert reset_total.raffle_tickets == 2
+            assert reset_total.gold_raffle_tickets == 2
             store.close()
 
     def test_manual_tickets_and_weighted_run_reset_current_tickets(self) -> None:
@@ -236,18 +225,16 @@ class RaffleTests(unittest.TestCase):
 
             result = store.run_raffle(randbelow=lambda total: 10)
 
-            self.assertIsNotNone(result)
             assert result is not None
-            self.assertEqual(result.winner, "User B.2222")
-            self.assertEqual(result.total_tickets, 18)
+            assert result.winner == "User B.2222"
+            assert result.total_tickets == 18
             for total in store.get_totals():
-                self.assertEqual(total.raffle_tickets, 0)
-                self.assertEqual(total.gold_raffle_tickets, 0)
-                self.assertEqual(total.manual_raffle_tickets, 0)
-            self.assertEqual(
-                {total.username: total.coins_deposited for total in store.get_totals()},
-                {"User A.1111": 100_000, "User B.2222": 50_000},
-            )
+                assert total.raffle_tickets == 0
+                assert total.gold_raffle_tickets == 0
+                assert total.manual_raffle_tickets == 0
+            assert {
+                total.username: total.coins_deposited for total in store.get_totals()
+            } == {"User A.1111": 100_000, "User B.2222": 50_000}
             store.close()
 
             engine = create_engine(f"sqlite:///{database_path}")
@@ -255,16 +242,14 @@ class RaffleTests(unittest.TestCase):
             runs = Table("raffle_runs", metadata, autoload_with=engine)
             entries = Table("raffle_run_entries", metadata, autoload_with=engine)
             with engine.connect() as connection:
-                self.assertEqual(
+                assert connection.execute(
+                    select(runs.c.winner, runs.c.total_tickets)
+                ).one() == ("User B.2222", 18)
+                assert (
                     connection.execute(
-                        select(runs.c.winner, runs.c.total_tickets)
-                    ).one(),
-                    ("User B.2222", 18),
-                )
-                self.assertEqual(
-                    connection.execute(select(func.count()).select_from(entries))
-                    .scalar_one(),
-                    2,
+                        select(func.count()).select_from(entries)
+                    ).scalar_one()
+                    == 2
                 )
             engine.dispose()
 
@@ -277,26 +262,24 @@ class RaffleTests(unittest.TestCase):
 
             first = store.run_raffle(randbelow=lambda total: 0)
 
-            self.assertIsNotNone(first)
             assert first is not None
             store.close()
 
             reopened = RaffleStore(database_path, "guild-id")
-            self.assertEqual(reopened.get_pending_raffle_result(), first)
+            assert reopened.get_pending_raffle_result() == first
             reopened.process_events([gold_deposit(102, coins=10_000)])
 
             retry = reopened.run_raffle(randbelow=lambda total: 0)
 
-            self.assertEqual(retry, first)
-            self.assertEqual(reopened.get_totals()[0].raffle_tickets, 1)
+            assert retry == first
+            assert reopened.get_totals()[0].raffle_tickets == 1
             reopened.mark_raffle_announcement_sent(first.run_id)
-            self.assertIsNone(reopened.get_pending_raffle_result())
+            assert reopened.get_pending_raffle_result() is None
 
             second = reopened.run_raffle(randbelow=lambda total: 0)
 
-            self.assertIsNotNone(second)
             assert second is not None
-            self.assertNotEqual(second.run_id, first.run_id)
+            assert second.run_id != first.run_id
             reopened.close()
 
     def test_manual_ticket_addition_caps_at_three_per_raffle(self) -> None:
@@ -307,9 +290,9 @@ class RaffleTests(unittest.TestCase):
             store.add_manual_ticket("Member.1234")
             total = store.add_manual_ticket("Member.1234")
 
-            self.assertEqual(total.raffle_tickets, 3)
-            self.assertEqual(total.manual_raffle_tickets, 3)
-            with self.assertRaisesRegex(ValueError, "maximum of 3"):
+            assert total.raffle_tickets == 3
+            assert total.manual_raffle_tickets == 3
+            with pytest.raises(ValueError, match="maximum of 3"):
                 store.add_manual_ticket("Member.1234")
             store.close()
 
@@ -339,10 +322,10 @@ class RaffleTests(unittest.TestCase):
             store = RaffleStore(database_path, "guild-id")
 
             total = store.get_totals()[0]
-            self.assertEqual(total.coins_deposited, 150_000)
-            self.assertEqual(total.raffle_tickets, 10)
-            self.assertEqual(total.gold_raffle_tickets, 10)
-            self.assertEqual(total.manual_raffle_tickets, 0)
+            assert total.coins_deposited == 150_000
+            assert total.raffle_tickets == 10
+            assert total.gold_raffle_tickets == 10
+            assert total.manual_raffle_tickets == 0
             store.close()
 
     def test_migrates_existing_raffle_runs_as_already_announced(self) -> None:
@@ -373,7 +356,7 @@ class RaffleTests(unittest.TestCase):
 
             store = RaffleStore(database_path, "guild-id")
 
-            self.assertIsNone(store.get_pending_raffle_result())
+            assert store.get_pending_raffle_result() is None
             store.close()
 
     def test_new_store_cursor_skips_historical_events(self) -> None:
@@ -383,8 +366,8 @@ class RaffleTests(unittest.TestCase):
 
             store.process_events([gold_deposit(499), gold_deposit(500)])
 
-            self.assertEqual(store.get_totals(), [])
-            self.assertEqual(store.get_pending_notifications(), [])
+            assert store.get_totals() == []
+            assert store.get_pending_notifications() == []
             store.close()
 
     def test_database_cannot_be_reused_for_another_guild(self) -> None:
@@ -393,7 +376,7 @@ class RaffleTests(unittest.TestCase):
             store = RaffleStore(database_path, "first-guild")
             store.close()
 
-            with self.assertRaisesRegex(ValueError, "different guild"):
+            with pytest.raises(ValueError, match="different guild"):
                 RaffleStore(database_path, "second-guild")
 
     def test_persists_and_clears_feast_alert_times(self) -> None:
@@ -404,15 +387,11 @@ class RaffleTests(unittest.TestCase):
             store.close()
 
             reopened = RaffleStore(database_path, "guild-id")
-            self.assertEqual(reopened.get_feast_alert_times(), {1078: 123.5})
+            assert reopened.get_feast_alert_times() == {1078: 123.5}
             reopened.clear_feast_alert(1078)
-            self.assertEqual(reopened.get_feast_alert_times(), {})
+            assert reopened.get_feast_alert_times() == {}
             reopened.close()
 
     def test_formats_whole_and_fractional_gold(self) -> None:
-        self.assertEqual(format_gold(10_000), "1")
-        self.assertEqual(format_gold(12_345), "1.2345")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert format_gold(10_000) == "1"
+        assert format_gold(12_345) == "1.2345"

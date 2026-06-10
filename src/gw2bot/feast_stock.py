@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+LOGGER = logging.getLogger(__name__)
 
 LOW_STOCK_THRESHOLD = 10
 LOW_STOCK_REMINDER_SECONDS = 8 * 60 * 60
@@ -61,4 +64,11 @@ def get_due_low_stock_alerts(
             >= LOW_STOCK_REMINDER_SECONDS
         )
     ]
+    LOGGER.debug(
+        "Evaluated feast stock; storage_entries=%s tracked=%s low=%s alerts=%s",
+        len(storage),
+        len(TRACKED_FEASTS),
+        len(currently_low),
+        len(alerts),
+    )
     return alerts, currently_low

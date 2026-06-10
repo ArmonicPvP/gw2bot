@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+
+LOGGER = logging.getLogger(__name__)
 
 
 class Gw2ApiClient:
@@ -65,13 +68,26 @@ class Gw2ApiClient:
         path: str,
         params: dict[str, str] | None = None,
     ) -> Any:
+        LOGGER.debug("Sending GW2 API GET request to %s", path)
         async with self._session.get(
             f"{self._base_url}{path}",
             headers=self._headers,
             params=params,
         ) as response:
+            LOGGER.debug(
+                "GW2 API GET %s returned HTTP %s",
+                path,
+                getattr(response, "status", "unknown"),
+            )
             response.raise_for_status()
-            return await response.json()
+            payload = await response.json()
+            LOGGER.debug(
+                "Decoded GW2 API response for %s; result_type=%s result_count=%s",
+                path,
+                type(payload).__name__,
+                len(payload) if isinstance(payload, (dict, list)) else "n/a",
+            )
+            return payload
 
     @staticmethod
     def _guild_path(guild_id: str) -> str:

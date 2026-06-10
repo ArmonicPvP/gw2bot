@@ -23,6 +23,7 @@ For local development, copy `.env.example` to `.env`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs. |
 | `DISCORD_FEAST_NOTIFICATION_USER_ID` | unset | Discord user ID that also receives feast stock alerts by private message. |
 | `GW2_POLL_INTERVAL_SECONDS` | `300` | Guild Storage polling interval in seconds. Must be a positive integer of at least `30`. |
 | `GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` | `60` | Guild log polling interval in seconds. Must be a positive integer of at least `30`. |
@@ -35,9 +36,20 @@ precedence over `.env`, so an Unraid container can inject the same variables at
 runtime without using or mounting a `.env` file. The `.env` file is excluded
 from Git and the Docker build context.
 
+When `DEBUG=true`, detailed `gw2bot` diagnostics are written to the console.
+Third-party library debug logging remains disabled, and credentials and full
+notification contents are not included in application debug messages. All
+console records, including third-party logs and exception tracebacks, pass
+through a final credential-redacting formatter.
+
 The bot must have `View Channel` and `Send Messages` permissions in the
 configured notification channel. Users running raffle commands must have
 `Use Application Commands` permission.
+
+Enable the privileged `Message Content Intent` for the bot in the Discord
+Developer Portal. The bot also needs `View Channel` and `Read Message History`
+permissions for forum channel `1317206104727621693` so it can link Trial
+applications to Discord members.
 
 ## Feast Stock Alerts
 
@@ -77,8 +89,23 @@ receives a report like:
 ```text
 Trial members past the 14-day mark
 Please confirm whether these users have completed the challenges and can be ranked up to Sunborne:
-- Username.1234
+* Linked.1234 - @DiscordUser - Sunborne
+* Unresolved.5678
 ```
+
+For each overdue account, the bot first scans `Accepted` thread-title metadata
+in forum channel `1317206104727621693` without reading message histories. It
+then uses Discord's indexed guild message search for bodies and comments only
+for account names that remain unresolved. If Discord's search endpoint is
+unavailable, it falls back to the full forum history scan. When indexed searches
+are repeatedly delayed by Discord rate limiting, the bot increases the delay
+between subsequent searches from 10 seconds up to a maximum of 30 seconds. When
+found, the post creator is linked using their Discord user ID. The creator's
+cached Discord roles determine the status: Sunborne role `1317140660188352584`
+or Trial role `1450164501696741597`. A matched post always includes the creator
+mention; accounts without a matching post remain plain usernames.
+Report entries are grouped with Sunborne first, Trial second, and unresolved
+roles last. Names are alphabetical within each group.
 
 The check runs again every day at 17:00 UTC. Reports are split into multiple
 messages when necessary to stay within Discord's message-length limit. Nothing
@@ -149,10 +176,11 @@ Username.1234 has left the guild.
 ```
 
 Guild-leave messages, raffle audit messages, raffle-deposit notifications,
-stock alerts, startup notices, and polling-status messages are posted in
+stock alerts, and polling-status messages are posted in
 `DISCORD_NOTIFICATION_CHANNEL_ID`. Leave events and delivery state are persisted
-so each departure is posted once, including across restarts. Guild-log polling
-failures and recovery are written only to the application console logs.
+so each departure is posted once, including across restarts. Startup status and
+guild-log polling failures and recovery are written only to the application
+console logs.
 
 Docker Compose stores the database in the persistent `bot-data` volume. To view
 the current totals:
@@ -191,16 +219,21 @@ docker compose up --build -d
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 $env:PYTHONPATH = "$PWD\src"
 python -m gw2bot
 ```
 
-Run the unit tests:
+Run the tests:
 
 ```powershell
-$env:PYTHONPATH = "$PWD\src"
-python -m unittest discover -s tests
+python -m pytest
+```
+
+Run the same Pylance/Pyright type checking used by CI:
+
+```powershell
+pyright
 ```
 
 ## Continuous Integration
@@ -208,8 +241,8 @@ python -m unittest discover -s tests
 The `CI` GitHub Actions workflow runs for pull requests targeting `main`, pushes
 to `main`, and merge-queue groups. It provides these status checks:
 
-- `Python checks`: installs dependencies, compiles the Python source, and runs
-  the unit tests
+- `Python checks`: installs dependencies, compiles and type-checks the Python
+  source, and runs the pytest suite
 - `Docker build`: builds the production Docker image
 
 To prevent merges when either check fails, configure an active GitHub branch

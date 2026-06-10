@@ -1,12 +1,10 @@
-import unittest
-
 from gw2bot.feast_stock import (
     LOW_STOCK_REMINDER_SECONDS,
     get_due_low_stock_alerts,
 )
 
 
-class FeastStockTests(unittest.TestCase):
+class TestFeastStock:
     def test_alerts_at_or_below_threshold_and_treats_missing_as_zero(self) -> None:
         alerts, currently_low = get_due_low_stock_alerts(
             [
@@ -18,15 +16,12 @@ class FeastStockTests(unittest.TestCase):
             now=100.0,
         )
 
-        self.assertEqual(
-            [alert.message for alert in alerts],
-            [
-                "Guild Storage is low on **Bowl of Fruit Salad with Mint Garnish**: "
-                "10 left",
-                "Guild Storage is low on **Spherified Cilantro Oyster Soup**: 0 left",
-            ],
-        )
-        self.assertEqual(currently_low, {1078, 1112})
+        assert [alert.message for alert in alerts] == [
+            "Guild Storage is low on **Bowl of Fruit Salad with Mint Garnish**: "
+            "10 left",
+            "Guild Storage is low on **Spherified Cilantro Oyster Soup**: 0 left",
+        ]
+        assert currently_low == {1078, 1112}
 
     def test_repeats_alert_every_eight_hours_while_low(self) -> None:
         low_storage = [
@@ -48,10 +43,6 @@ class FeastStockTests(unittest.TestCase):
             now=100.0 + LOW_STOCK_REMINDER_SECONDS,
         )
 
-        self.assertEqual(len(first_alerts), 1)
-        self.assertEqual(early_alerts, [])
-        self.assertEqual(len(repeated_alerts), 1)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert len(first_alerts) == 1
+        assert early_alerts == []
+        assert len(repeated_alerts) == 1

@@ -84,7 +84,10 @@ Discord.
 Returns account name, rank, join timestamp, and WvW membership selection for
 each guild member. The bot checks this endpoint at startup and daily at 17:00
 UTC, then reports members whose rank is `Trial` and whose join timestamp is at
-least 14 days old.
+least 14 days old. Before posting the report, the bot searches the configured
+Discord Trial application forum's `Accepted` posts for each GW2 account name
+and includes the linked post creator's Discord mention. The cached or current
+Trial or Sunborne role is included when available.
 
 ### `/v2/guild/:id/ranks`
 

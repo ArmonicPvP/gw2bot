@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from gw2bot.database import (
     create_database_engine,
     initialize_database,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 COPPER_PER_GOLD = 10_000
 MAX_GOLD_RAFFLE_TICKETS = 10
@@ -72,6 +75,7 @@ class GuildLeave:
 
 class RaffleStore:
     def __init__(self, database_path: str, guild_id: str):
+        LOGGER.debug("Opening raffle store")
         self._engine = create_database_engine(database_path)
         added_columns = initialize_database(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
@@ -82,22 +86,31 @@ class RaffleStore:
         except Exception:
             self.close()
             raise
+        LOGGER.debug(
+            "Raffle store initialized; migrated_columns=%s",
+            sorted(added_columns),
+        )
 
     def close(self) -> None:
+        LOGGER.debug("Closing raffle store")
         self._engine.dispose()
 
     def get_cursor(self) -> int | None:
         with self._sessions() as session:
             record = session.get(SettingRecord, "guild_log_cursor")
-            return int(record.value) if record is not None else None
+            cursor = int(record.value) if record is not None else None
+            LOGGER.debug("Loaded guild log cursor %s", cursor)
+            return cursor
 
     def get_feast_alert_times(self) -> dict[int, float]:
         with self._sessions() as session:
             records = session.scalars(select(FeastAlertRecord)).all()
-            return {
+            results = {
                 record.guild_storage_id: record.last_notification_time
                 for record in records
             }
+            LOGGER.debug("Loaded %s persisted feast alert times", len(results))
+            return results
 
     def mark_feast_alert_sent(
         self,
@@ -115,12 +128,14 @@ class RaffleStore:
                 )
             else:
                 record.last_notification_time = notification_time
+        LOGGER.debug("Marked feast alert %s sent", guild_storage_id)
 
     def clear_feast_alert(self, guild_storage_id: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(FeastAlertRecord, guild_storage_id)
             if record is not None:
                 session.delete(record)
+                LOGGER.debug("Cleared feast alert %s", guild_storage_id)
 
     def initialize_cursor(self, event_id: int) -> None:
         with self._sessions.begin() as session:
@@ -128,8 +143,12 @@ class RaffleStore:
                 session.add(
                     SettingRecord(key="guild_log_cursor", value=str(event_id))
                 )
+                LOGGER.debug("Initialized guild log cursor at event %s", event_id)
 
     def process_events(self, events: list[dict[str, Any]]) -> None:
+        processed = 0
+        deposits = 0
+        leaves = 0
         with self._sessions.begin() as session:
             cursor_record = session.get(SettingRecord, "guild_log_cursor")
             if cursor_record is None:
@@ -144,6 +163,7 @@ class RaffleStore:
                 deposit = parse_gold_deposit(event)
                 if deposit is not None:
                     self._process_deposit(session, deposit)
+                    deposits += 1
 
                 leave = parse_guild_leave(event)
                 if (
@@ -157,10 +177,20 @@ class RaffleStore:
                             event_time=leave.event_time,
                         )
                     )
+                    leaves += 1
 
                 cursor = event_id
+                processed += 1
 
             cursor_record.value = str(cursor)
+        LOGGER.debug(
+            "Processed guild log events; fetched=%s new=%s deposits=%s leaves=%s cursor=%s",
+            len(events),
+            processed,
+            deposits,
+            leaves,
+            cursor,
+        )
 
     def get_pending_notifications(self) -> list[RaffleDeposit]:
         statement = (
@@ -169,10 +199,12 @@ class RaffleStore:
             .order_by(RaffleDepositRecord.event_id)
         )
         with self._sessions() as session:
-            return [
+            results = [
                 _to_raffle_deposit(record)
                 for record in session.scalars(statement).all()
             ]
+            LOGGER.debug("Loaded %s pending raffle notifications", len(results))
+            return results
 
     def get_pending_leave_notifications(self) -> list[GuildLeave]:
         statement = (
@@ -181,18 +213,22 @@ class RaffleStore:
             .order_by(GuildLeaveRecord.event_id)
         )
         with self._sessions() as session:
-            return [
+            results = [
                 _to_guild_leave(record)
                 for record in session.scalars(statement).all()
             ]
+            LOGGER.debug("Loaded %s pending guild-leave notifications", len(results))
+            return results
 
     def get_totals(self) -> list[RaffleTotal]:
         statement = select(RaffleTotalRecord).order_by(RaffleTotalRecord.username)
         with self._sessions() as session:
-            return [
+            results = [
                 _to_raffle_total(record)
                 for record in session.scalars(statement).all()
             ]
+            LOGGER.debug("Loaded %s raffle totals", len(results))
+            return results
 
     def add_manual_ticket(self, username: str) -> RaffleTotal:
         with self._sessions.begin() as session:
@@ -216,6 +252,11 @@ class RaffleStore:
                 total.raffle_tickets += 1
                 total.manual_raffle_tickets += 1
             result = _to_raffle_total(total)
+        LOGGER.debug(
+            "Added manual raffle ticket; current_tickets=%s manual_tickets=%s",
+            result.raffle_tickets,
+            result.manual_raffle_tickets,
+        )
         return result
 
     def run_raffle(
@@ -224,6 +265,7 @@ class RaffleStore:
     ) -> RaffleResult | None:
         pending = self.get_pending_raffle_result()
         if pending is not None:
+            LOGGER.debug("Reusing pending raffle result run_id=%s", pending.run_id)
             return pending
 
         statement = (
@@ -235,6 +277,7 @@ class RaffleStore:
             totals = session.scalars(statement).all()
             total_tickets = sum(total.raffle_tickets for total in totals)
             if total_tickets == 0:
+                LOGGER.debug("Raffle draw skipped because no tickets are available")
                 return None
 
             winning_ticket = randbelow(total_tickets) + 1
@@ -269,12 +312,19 @@ class RaffleStore:
                 total.gold_raffle_tickets = 0
                 total.manual_raffle_tickets = 0
 
-        return RaffleResult(
+        result = RaffleResult(
             run_id=run_id,
             winner=winner,
             winning_ticket=winning_ticket,
             total_tickets=total_tickets,
         )
+        LOGGER.debug(
+            "Created raffle run %s; participants=%s total_tickets=%s",
+            run_id,
+            len(totals),
+            total_tickets,
+        )
+        return result
 
     def get_pending_raffle_result(self) -> RaffleResult | None:
         statement = (
@@ -284,28 +334,34 @@ class RaffleStore:
         )
         with self._sessions() as session:
             record = session.scalars(statement).first()
-            return _to_raffle_result(record) if record is not None else None
+            result = _to_raffle_result(record) if record is not None else None
+            LOGGER.debug("Loaded pending raffle result; found=%s", result is not None)
+            return result
 
     def mark_raffle_announcement_sent(self, run_id: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(RaffleRunRecord, run_id)
             if record is not None:
                 record.announcement_sent = True
+                LOGGER.debug("Marked raffle run %s announcement sent", run_id)
 
     def mark_notification_sent(self, event_id: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(RaffleDepositRecord, event_id)
             if record is not None:
                 record.notification_sent = True
+                LOGGER.debug("Marked raffle deposit event %s notification sent", event_id)
 
     def mark_leave_notification_sent(self, event_id: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(GuildLeaveRecord, event_id)
             if record is not None:
                 record.notification_sent = True
+                LOGGER.debug("Marked guild-leave event %s notification sent", event_id)
 
     def _process_deposit(self, session: Session, deposit: RaffleDeposit) -> None:
         if session.get(RaffleDepositRecord, deposit.event_id) is not None:
+            LOGGER.debug("Skipping duplicate raffle deposit event %s", deposit.event_id)
             return
 
         total = session.get(RaffleTotalRecord, deposit.username)
@@ -337,8 +393,14 @@ class RaffleStore:
             total.coins_deposited += deposit.coins_deposited
             total.raffle_tickets += tickets_awarded
             total.gold_raffle_tickets += tickets_awarded
+        LOGGER.debug(
+            "Processed raffle deposit event %s; tickets_awarded=%s",
+            deposit.event_id,
+            tickets_awarded,
+        )
 
     def _migrate_legacy_totals(self) -> None:
+        migrated = 0
         with self._sessions.begin() as session:
             for total in session.scalars(select(RaffleTotalRecord)).all():
                 capped_tickets = min(
@@ -347,6 +409,8 @@ class RaffleStore:
                 )
                 total.raffle_tickets = capped_tickets
                 total.gold_raffle_tickets = capped_tickets
+                migrated += 1
+        LOGGER.debug("Migrated %s legacy raffle totals", migrated)
 
     def _bind_guild(self, guild_id: str) -> None:
         with self._sessions.begin() as session:
@@ -358,6 +422,7 @@ class RaffleStore:
                 )
             if record is None:
                 session.add(SettingRecord(key="guild_id", value=guild_id))
+        LOGGER.debug("Validated raffle database guild binding")
 
 
 def _to_raffle_deposit(record: RaffleDepositRecord) -> RaffleDeposit:

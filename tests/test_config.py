@@ -1,10 +1,10 @@
-import unittest
 from unittest.mock import patch
 
 from gw2bot.config import Config, ConfigurationError
+import pytest
 
 
-class ConfigTests(unittest.TestCase):
+class TestConfig:
     def test_reads_required_values_and_defaults(self) -> None:
         config = Config.from_env(
             {
@@ -16,15 +16,43 @@ class ConfigTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(config.discord_command_guild_id, 5678)
-        self.assertEqual(config.discord_notification_channel_id, 9012)
-        self.assertIsNone(config.discord_feast_notification_user_id)
-        self.assertEqual(config.gw2_guild_id, "guild-id")
-        self.assertEqual(config.poll_interval_seconds, 300)
-        self.assertEqual(config.guild_log_poll_interval_seconds, 60)
-        self.assertEqual(config.guild_member_cache_seconds, 900)
-        self.assertEqual(config.raffle_db_path, "data/gw2bot.db")
-        self.assertEqual(config.gw2_api_base_url, "https://api.guildwars2.com")
+        assert config.discord_command_guild_id == 5678
+        assert config.discord_notification_channel_id == 9012
+        assert config.discord_feast_notification_user_id is None
+        assert config.gw2_guild_id == "guild-id"
+        assert config.poll_interval_seconds == 300
+        assert config.guild_log_poll_interval_seconds == 60
+        assert config.guild_member_cache_seconds == 900
+        assert config.raffle_db_path == "data/gw2bot.db"
+        assert config.gw2_api_base_url == "https://api.guildwars2.com"
+        assert not config.debug
+
+    def test_reads_debug_boolean(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                "GW2_API_KEY": "gw2-key",
+                "GW2_GUILD_ID": "guild-id",
+                "DEBUG": "true",
+            }
+        )
+
+        assert config.debug
+
+    def test_rejects_invalid_debug_boolean(self) -> None:
+        with pytest.raises(ConfigurationError, match="DEBUG must be true or false"):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "DEBUG": "sometimes",
+                }
+            )
 
     def test_reads_optional_feast_notification_user_id(self) -> None:
         config = Config.from_env(
@@ -38,7 +66,7 @@ class ConfigTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(config.discord_feast_notification_user_id, 3456)
+        assert config.discord_feast_notification_user_id == 3456
 
     def test_blank_optional_path_and_url_use_defaults(self) -> None:
         config = Config.from_env(
@@ -53,8 +81,8 @@ class ConfigTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(config.raffle_db_path, "data/gw2bot.db")
-        self.assertEqual(config.gw2_api_base_url, "https://api.guildwars2.com")
+        assert config.raffle_db_path == "data/gw2bot.db"
+        assert config.gw2_api_base_url == "https://api.guildwars2.com"
 
     def test_strips_optional_path_and_url_values(self) -> None:
         config = Config.from_env(
@@ -69,13 +97,13 @@ class ConfigTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(config.raffle_db_path, "custom.db")
-        self.assertEqual(config.gw2_api_base_url, "https://example.test")
+        assert config.raffle_db_path == "custom.db"
+        assert config.gw2_api_base_url == "https://example.test"
 
     def test_rejects_invalid_feast_notification_user_id(self) -> None:
-        with self.assertRaisesRegex(
+        with pytest.raises(
             ConfigurationError,
-            "DISCORD_FEAST_NOTIFICATION_USER_ID must be greater than zero",
+            match="DISCORD_FEAST_NOTIFICATION_USER_ID must be greater than zero",
         ):
             Config.from_env(
                 {
@@ -89,9 +117,9 @@ class ConfigTests(unittest.TestCase):
             )
 
     def test_reports_all_missing_required_values(self) -> None:
-        with self.assertRaisesRegex(
+        with pytest.raises(
             ConfigurationError,
-            (
+            match=(
                 "DISCORD_TOKEN, DISCORD_COMMAND_GUILD_ID, "
                 "DISCORD_NOTIFICATION_CHANNEL_ID, GW2_API_KEY, GW2_GUILD_ID"
             ),
@@ -99,7 +127,7 @@ class ConfigTests(unittest.TestCase):
             Config.from_env({})
 
     def test_rejects_short_poll_interval(self) -> None:
-        with self.assertRaisesRegex(ConfigurationError, "must be at least 30"):
+        with pytest.raises(ConfigurationError, match="must be at least 30"):
             Config.from_env(
                 {
                     "DISCORD_TOKEN": "discord-token",
@@ -112,7 +140,7 @@ class ConfigTests(unittest.TestCase):
             )
 
     def test_rejects_short_guild_log_poll_interval(self) -> None:
-        with self.assertRaisesRegex(ConfigurationError, "must be at least 30"):
+        with pytest.raises(ConfigurationError, match="must be at least 30"):
             Config.from_env(
                 {
                     "DISCORD_TOKEN": "discord-token",
@@ -142,11 +170,7 @@ class ConfigTests(unittest.TestCase):
     ) -> None:
         config = Config.from_env()
 
-        self.assertEqual(config.discord_token, "runtime-token")
-        self.assertEqual(config.gw2_api_key, "runtime-key")
-        self.assertEqual(config.gw2_guild_id, "runtime-guild")
+        assert config.discord_token == "runtime-token"
+        assert config.gw2_api_key == "runtime-key"
+        assert config.gw2_guild_id == "runtime-guild"
         load_dotenv.assert_called_once_with(override=False)  # type: ignore[attr-defined]
-
-
-if __name__ == "__main__":
-    unittest.main()
