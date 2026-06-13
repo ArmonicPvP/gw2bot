@@ -15,7 +15,11 @@ def main() -> None:
     try:
         totals = sorted(
             store.get_totals(),
-            key=lambda total: (-total.raffle_tickets, total.username),
+            key=lambda total: (
+                -total.raffle_tickets,
+                total.username.casefold(),
+                total.username,
+            ),
         )
     finally:
         store.close()

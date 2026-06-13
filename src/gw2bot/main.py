@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import aiohttp
@@ -17,18 +17,22 @@ from gw2bot.config import Config, ConfigurationError
 from gw2bot.feast_stock import get_due_low_stock_alerts
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
+    DISCORD_MESSAGE_LIMIT,
     GuildMemberCache,
     TrialMemberReportEntry,
     format_overdue_trial_report,
     get_overdue_trial_members,
     seconds_until_trial_report,
 )
-from gw2bot.raffle import RaffleResult, RaffleStore, RaffleTotal
+from gw2bot.raffle import RaffleContribution, RaffleResult, RaffleStore, RaffleTotal
 
 LOGGER = logging.getLogger(__name__)
 
 RAFFLE_DRAW_ROLE_ID = 1317124663847157880
 RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
+RAFFLE_TICKETS_PAGE_SIZE = 10
+RAFFLE_CONTRIBUTION_CHANNEL_ID = 1513046696781676584
+RAFFLE_CONTRIBUTION_REPORT_HOURS = 6
 TRIAL_FORUM_CHANNEL_ID = 1317206104727621693
 TRIAL_ROLE_ID = 1450164501696741597
 SUNBORNE_ROLE_ID = 1317140660188352584
@@ -66,6 +70,185 @@ def user_has_role(user: Any, required_role_id: int) -> bool:
 
 def format_addticket_audit(discord_user_id: int, username: str) -> str:
     return f"<@{discord_user_id}> added 1 raffle ticket to {username}."
+
+
+def raffle_ticket_embed(total: RaffleTotal) -> discord.Embed:
+    embed = discord.Embed(title=f"Raffle Tickets: {total.username}")
+    embed.add_field(
+        name="Purchased Tickets",
+        value=str(total.gold_raffle_tickets),
+    )
+    embed.add_field(
+        name="Free Tickets",
+        value=str(total.manual_raffle_tickets),
+    )
+    embed.add_field(
+        name="Total Tickets",
+        value=str(total.raffle_tickets),
+    )
+    return embed
+
+
+def raffle_ticket_list_embed(
+    totals: list[RaffleTotal],
+    page: int,
+) -> discord.Embed:
+    page_count = max(
+        1,
+        (len(totals) + RAFFLE_TICKETS_PAGE_SIZE - 1) // RAFFLE_TICKETS_PAGE_SIZE,
+    )
+    page = max(0, min(page, page_count - 1))
+    first = page * RAFFLE_TICKETS_PAGE_SIZE
+    page_totals = totals[first : first + RAFFLE_TICKETS_PAGE_SIZE]
+    description = "\n".join(
+        f"**{total.username}**\n"
+        f"Purchased: {total.gold_raffle_tickets} | "
+        f"Free: {total.manual_raffle_tickets} | "
+        f"Total: {total.raffle_tickets}"
+        for total in page_totals
+    )
+    embed = discord.Embed(
+        title="Raffle Tickets",
+        description=description or "No players have raffle ticket records.",
+    )
+    embed.set_footer(text=f"Page {page + 1} of {page_count}")
+    return embed
+
+
+def format_raffle_contribution_report(
+    contributions: list[RaffleContribution],
+) -> list[str]:
+    if not contributions:
+        return []
+
+    header = "**Raffle contributions from the last 6 hours**\n"
+    messages: list[str] = []
+    current = header
+    for contribution in contributions:
+        details = [
+            f"Total: {contribution.purchased_tickets + contribution.event_tickets}"
+        ]
+        if contribution.purchased_tickets:
+            details.append(f"Purchased: {contribution.purchased_tickets}")
+        if contribution.event_tickets:
+            details.append(f"Free: {contribution.event_tickets}")
+        line = f"* **{contribution.username}** - {' | '.join(details)}\n"
+        if len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
+            messages.append(current.rstrip())
+            current = header
+        current += line
+    messages.append(current.rstrip())
+    return messages
+
+
+def raffle_contribution_report_end(now: datetime) -> datetime:
+    now_utc = now.astimezone(UTC)
+    return now_utc.replace(
+        hour=(
+            now_utc.hour // RAFFLE_CONTRIBUTION_REPORT_HOURS
+        ) * RAFFLE_CONTRIBUTION_REPORT_HOURS,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def seconds_until_raffle_contribution_report(now: datetime) -> float:
+    report_end = raffle_contribution_report_end(now)
+    next_report = report_end + timedelta(hours=RAFFLE_CONTRIBUTION_REPORT_HOURS)
+    return (next_report - now.astimezone(UTC)).total_seconds()
+
+
+class RaffleTicketsPageButton(discord.ui.Button["RaffleTicketsListView"]):
+    def __init__(self, direction: int):
+        super().__init__(
+            label="←" if direction < 0 else "→",
+            style=discord.ButtonStyle.secondary,
+        )
+        self._direction = direction
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.view is not None:
+            await self.view.change_page(interaction, self._direction)
+
+
+class RaffleTicketsListView(discord.ui.View):
+    def __init__(self, totals: list[RaffleTotal]):
+        super().__init__(timeout=180)
+        self._totals = totals
+        self._page = 0
+        self._previous = RaffleTicketsPageButton(-1)
+        self._next = RaffleTicketsPageButton(1)
+        self.add_item(self._previous)
+        self.add_item(self._next)
+        self._sync_buttons()
+
+    @property
+    def embed(self) -> discord.Embed:
+        return raffle_ticket_list_embed(self._totals, self._page)
+
+    async def change_page(
+        self,
+        interaction: discord.Interaction,
+        direction: int,
+    ) -> None:
+        page_count = (
+            len(self._totals) + RAFFLE_TICKETS_PAGE_SIZE - 1
+        ) // RAFFLE_TICKETS_PAGE_SIZE
+        self._page = max(0, min(self._page + direction, page_count - 1))
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.embed, view=self)
+
+    def _sync_buttons(self) -> None:
+        page_count = (
+            len(self._totals) + RAFFLE_TICKETS_PAGE_SIZE - 1
+        ) // RAFFLE_TICKETS_PAGE_SIZE
+        self._previous.disabled = self._page == 0
+        self._next.disabled = self._page >= page_count - 1
+
+
+class RaffleAccountLinkModal(discord.ui.Modal):
+    def __init__(self, bot: Gw2Bot):
+        super().__init__(title="Link GW2 Account")
+        self._bot = bot
+        self.username = discord.ui.TextInput(
+            label="GW2 account name",
+            placeholder="Username.1234",
+            min_length=6,
+            max_length=42,
+        )
+        self.add_item(self.username)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            canonical_username = await self._bot.resolve_guild_member(
+                self.username.value,
+                force_refresh=True,
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            LOGGER.error("Could not refresh the guild member cache")
+            await interaction.followup.send(
+                "Could not verify guild membership. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        if canonical_username is None:
+            await interaction.followup.send(
+                f"`{self.username.value}` is not a member of the configured guild.",
+                ephemeral=True,
+            )
+            return
+
+        self._bot.link_raffle_account(interaction.user.id, canonical_username)
+        await interaction.followup.send(
+            f"Linked your Discord account to **{canonical_username}**.",
+            embed=raffle_ticket_embed(
+                self._bot.get_raffle_total(canonical_username)
+            ),
+            ephemeral=True,
+        )
 
 
 def get_trial_member_discord_status(member: Any) -> str | None:
@@ -193,7 +376,7 @@ class RaffleCommands(app_commands.Group):
         try:
             canonical_username = await self._bot.resolve_guild_member(username)
         except (aiohttp.ClientError, asyncio.TimeoutError):
-            LOGGER.exception("Could not refresh the guild member cache")
+            LOGGER.error("Could not refresh the guild member cache")
             await interaction.followup.send(
                 "Could not verify guild membership. Try again later.",
                 ephemeral=True,
@@ -227,6 +410,77 @@ class RaffleCommands(app_commands.Group):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="tickets",
+        description="View your or another player's tickets",
+    )
+    @app_commands.describe(
+        username="Enter your GW2 account name, including the four digits",
+    )
+    async def tickets(
+        self,
+        interaction: discord.Interaction,
+        username: str | None = None,
+    ) -> None:
+        if username is None:
+            linked_username = self._bot.get_linked_raffle_username(
+                interaction.user.id
+            )
+            if linked_username is None:
+                await interaction.response.send_modal(
+                    RaffleAccountLinkModal(self._bot)
+                )
+                return
+            await interaction.response.send_message(
+                embed=raffle_ticket_embed(
+                    self._bot.get_raffle_total(linked_username)
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            canonical_username = await self._bot.resolve_guild_member(username)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            LOGGER.error("Could not refresh the guild member cache")
+            await interaction.followup.send(
+                "Could not verify guild membership. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        if canonical_username is None:
+            await interaction.followup.send(
+                f"`{username}` is not a member of the configured guild.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            embed=raffle_ticket_embed(
+                self._bot.get_raffle_total(canonical_username)
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="list",
+        description="List all users' tickets",
+    )
+    async def list_tickets(self, interaction: discord.Interaction) -> None:
+        totals = self._bot.get_raffle_totals()
+        view = (
+            RaffleTicketsListView(totals)
+            if len(totals) > RAFFLE_TICKETS_PAGE_SIZE
+            else None
+        )
+        embed = raffle_ticket_list_embed(totals, 0)
+        if view is None:
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.response.send_message(embed=embed, view=view)
+
 
 class Gw2Bot(discord.Client):
     def __init__(self, config: Config):
@@ -239,6 +493,7 @@ class Gw2Bot(discord.Client):
         self._session: aiohttp.ClientSession | None = None
         self._poll_tasks: list[asyncio.Task[None]] = []
         self._notification_channel: Any | None = None
+        self._raffle_contribution_channel: Any | None = None
         self._feast_notification_user: Any | None = None
         self._last_errors: dict[str, str] = {}
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
@@ -277,6 +532,10 @@ class Gw2Bot(discord.Client):
                 self._poll_overdue_trials(),
                 name="gw2-overdue-trial-poller",
             ),
+            asyncio.create_task(
+                self._poll_raffle_contributions(),
+                name="gw2-raffle-contribution-poller",
+            ),
         ]
 
     async def close(self) -> None:
@@ -298,7 +557,8 @@ class Gw2Bot(discord.Client):
             f"Storage polling every {self._config.poll_interval_seconds} seconds; "
             "guild log polling every "
             f"{self._config.guild_log_poll_interval_seconds} seconds; "
-            "overdue Trial member reporting daily at 17:00 UTC."
+            "overdue Trial member reporting daily at 17:00 UTC; "
+            "raffle contribution reporting every 6 hours UTC."
         )
         self._ready_announced = True
 
@@ -330,10 +590,18 @@ class Gw2Bot(discord.Client):
     async def send_notification(self, message: str) -> bool:
         return await self._try_send_notification(message)
 
-    async def resolve_guild_member(self, username: str) -> str | None:
+    async def resolve_guild_member(
+        self,
+        username: str,
+        *,
+        force_refresh: bool = False,
+    ) -> str | None:
         if self._guild_members is None:
             raise RuntimeError("Guild member cache was not initialized")
-        resolved = await self._guild_members.resolve(username)
+        resolved = await self._guild_members.resolve(
+            username,
+            force_refresh=force_refresh,
+        )
         LOGGER.debug("Guild member resolution completed; matched=%s", resolved is not None)
         return resolved
 
@@ -342,6 +610,25 @@ class Gw2Bot(discord.Client):
         username: str,
     ) -> RaffleTotal:
         return self._raffle_store.add_manual_ticket(username)
+
+    def get_raffle_total(self, username: str) -> RaffleTotal:
+        return self._raffle_store.get_total(username)
+
+    def get_raffle_totals(self) -> list[RaffleTotal]:
+        return self._raffle_store.get_totals()
+
+    def get_raffle_contributions(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> list[RaffleContribution]:
+        return self._raffle_store.get_contributions(start, end)
+
+    def get_linked_raffle_username(self, discord_user_id: int) -> str | None:
+        return self._raffle_store.get_linked_username(discord_user_id)
+
+    def link_raffle_account(self, discord_user_id: int, username: str) -> None:
+        self._raffle_store.link_account(discord_user_id, username)
 
     def run_raffle(self) -> RaffleResult | None:
         return self._raffle_store.run_raffle()
@@ -476,26 +763,23 @@ class Gw2Bot(discord.Client):
         await self.wait_until_ready()
         LOGGER.debug("Trial Members poller started")
         while not self.is_closed():
+            delay = seconds_until_trial_report(datetime.now(UTC))
+            LOGGER.debug("Trial Members poll scheduled in %s seconds", delay)
+            await asyncio.sleep(delay)
+            if self.is_closed():
+                return
+
             LOGGER.debug("Starting Trial Members poll")
             try:
                 delivered = await self._check_overdue_trials()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 await self._handle_poll_error("Trial Members", exc)
-                delay = self._config.poll_interval_seconds
             else:
                 await self._handle_poll_success("Trial Members")
-                delay = (
-                    seconds_until_trial_report(datetime.now(UTC))
-                    if delivered
-                    else self._config.poll_interval_seconds
-                )
                 LOGGER.debug(
-                    "Trial Members poll completed; delivered=%s next_delay=%s",
+                    "Trial Members poll completed; delivered=%s",
                     delivered,
-                    delay,
                 )
-
-            await asyncio.sleep(delay)
 
     async def _check_overdue_trials(self, now: datetime | None = None) -> bool:
         if self._api is None:
@@ -514,6 +798,63 @@ class Gw2Bot(discord.Client):
             if not await self._try_send_notification(message):
                 return False
         return True
+
+    async def _poll_raffle_contributions(self) -> None:
+        await self.wait_until_ready()
+        LOGGER.debug("Raffle Contributions poller started")
+        while not self.is_closed():
+            delay = seconds_until_raffle_contribution_report(datetime.now(UTC))
+            LOGGER.debug("Raffle Contributions poll scheduled in %s seconds", delay)
+            await asyncio.sleep(delay)
+            if self.is_closed():
+                return
+
+            report_end = raffle_contribution_report_end(datetime.now(UTC))
+            try:
+                await self.refresh_guild_log()
+                await self._send_raffle_contribution_report(report_end)
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                discord.DiscordException,
+                SQLAlchemyError,
+            ) as exc:
+                await self._handle_poll_error("Raffle Contributions", exc)
+            else:
+                await self._handle_poll_success("Raffle Contributions")
+                LOGGER.debug("Raffle Contributions poll completed successfully")
+
+    async def _send_raffle_contribution_report(self, report_end: datetime) -> None:
+        report_start = report_end - timedelta(
+            hours=RAFFLE_CONTRIBUTION_REPORT_HOURS
+        )
+        contributions = self.get_raffle_contributions(report_start, report_end)
+        messages = format_raffle_contribution_report(contributions)
+        LOGGER.debug(
+            "Formatted %s raffle contributors into %s messages",
+            len(contributions),
+            len(messages),
+        )
+        for message in messages:
+            await self._send_raffle_contribution_message(message)
+
+    async def _send_raffle_contribution_message(self, message: str) -> None:
+        if self._raffle_contribution_channel is None:
+            LOGGER.debug(
+                "Fetching raffle contribution channel %s",
+                RAFFLE_CONTRIBUTION_CHANNEL_ID,
+            )
+            channel = await self.fetch_channel(RAFFLE_CONTRIBUTION_CHANNEL_ID)
+            if (
+                getattr(getattr(channel, "guild", None), "id", None)
+                != self._config.discord_command_guild_id
+            ):
+                raise discord.ClientException(
+                    "Raffle contribution channel must belong to "
+                    "DISCORD_COMMAND_GUILD_ID"
+                )
+            self._raffle_contribution_channel = channel
+        await self._raffle_contribution_channel.send(message)
 
     async def _resolve_trial_member_discord_statuses(
         self,
@@ -865,7 +1206,7 @@ class Gw2Bot(discord.Client):
         pending = self._raffle_store.get_pending_notifications()
         LOGGER.debug("Found %s pending raffle notifications", len(pending))
         for deposit in pending:
-            if await self._try_send_notification(deposit.message):
+            if await self._try_send_raffle_contribution_message(deposit.message):
                 self._raffle_store.mark_notification_sent(deposit.event_id)
 
     async def _send_pending_leave_notifications(self) -> None:
@@ -912,6 +1253,14 @@ class Gw2Bot(discord.Client):
             LOGGER.exception("Could not send Discord notification")
             return False
         LOGGER.debug("Discord notification sent")
+        return True
+
+    async def _try_send_raffle_contribution_message(self, message: str) -> bool:
+        try:
+            await self._send_raffle_contribution_message(message)
+        except discord.DiscordException:
+            LOGGER.error("Could not send raffle contribution message")
+            return False
         return True
 
     async def _send_notification(self, message: str) -> None:

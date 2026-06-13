@@ -1,4 +1,6 @@
+import logging
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import (
@@ -25,10 +27,11 @@ def gold_deposit(
     event_id: int,
     username: str = "Username.1234",
     coins: int = 10_000,
+    event_time: str = "2026-06-07T06:26:17.000Z",
 ) -> dict[str, object]:
     return {
         "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
+        "time": event_time,
         "type": "stash",
         "user": username,
         "operation": "deposit",
@@ -178,6 +181,146 @@ class TestRaffle:
             ] == [102]
             reopened.close()
 
+    def test_persists_and_updates_discord_account_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+
+            assert store.get_linked_username(1234) is None
+            store.link_account(1234, "First.1234")
+            assert store.get_linked_username(1234) == "First.1234"
+            store.link_account(1234, "Second.5678")
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            assert reopened.get_linked_username(1234) == "Second.5678"
+            reopened.close()
+
+    def test_returns_zero_ticket_total_for_player_without_a_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            total = store.get_total("No Tickets.1234")
+
+            assert total.username == "No Tickets.1234"
+            assert total.raffle_tickets == 0
+            assert total.gold_raffle_tickets == 0
+            assert total.manual_raffle_tickets == 0
+            store.close()
+
+    def test_orders_current_totals_by_ticket_count_then_username(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    gold_deposit(101, username="Zulu.1234", coins=20_000),
+                    gold_deposit(102, username="alpha.1234", coins=20_000),
+                    gold_deposit(103, username="Highest.1234", coins=30_000),
+                    gold_deposit(104, username="Beta.1234", coins=20_000),
+                ]
+            )
+            store.add_manual_ticket("Free Only.1234")
+
+            assert [
+                (total.username, total.raffle_tickets)
+                for total in store.get_totals()
+            ] == [
+                ("Highest.1234", 3),
+                ("alpha.1234", 2),
+                ("Beta.1234", 2),
+                ("Zulu.1234", 2),
+                ("Free Only.1234", 1),
+            ]
+            store.close()
+
+    def test_aggregates_purchased_and_event_tickets_in_six_hour_window(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    gold_deposit(
+                        101,
+                        username="Alpha.1234",
+                        coins=20_000,
+                        event_time="2026-06-07T00:00:00Z",
+                    ),
+                    gold_deposit(
+                        102,
+                        username="Alpha.1234",
+                        event_time="2026-06-07T05:59:59Z",
+                    ),
+                    gold_deposit(
+                        103,
+                        username="Boundary.1234",
+                        event_time="2026-06-07T06:00:00Z",
+                    ),
+                    gold_deposit(
+                        104,
+                        username="Partial.1234",
+                        coins=5_000,
+                        event_time="2026-06-07T04:00:00Z",
+                    ),
+                    gold_deposit(
+                        105,
+                        username="Zulu.1234",
+                        coins=20_000,
+                        event_time="2026-06-07T04:00:00Z",
+                    ),
+                    gold_deposit(
+                        106,
+                        username="able.1234",
+                        coins=20_000,
+                        event_time="2026-06-07T04:00:00Z",
+                    ),
+                    gold_deposit(
+                        107,
+                        username="Bravo.1234",
+                        coins=20_000,
+                        event_time="2026-06-07T04:00:00Z",
+                    ),
+                ]
+            )
+            store.add_manual_ticket(
+                "Alpha.1234",
+                datetime(2026, 6, 7, 1, tzinfo=UTC),
+            )
+            store.add_manual_ticket(
+                "Beta.1234",
+                datetime(2026, 6, 7, 3, tzinfo=UTC),
+            )
+            store.add_manual_ticket(
+                "Boundary.1234",
+                datetime(2026, 6, 7, 6, tzinfo=UTC),
+            )
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            contributions = reopened.get_contributions(
+                datetime(2026, 6, 7, 0, tzinfo=UTC),
+                datetime(2026, 6, 7, 6, tzinfo=UTC),
+            )
+
+            assert [
+                (
+                    contribution.username,
+                    contribution.purchased_tickets,
+                    contribution.event_tickets,
+                )
+                for contribution in contributions
+            ] == [
+                ("Alpha.1234", 3, 1),
+                ("able.1234", 2, 0),
+                ("Bravo.1234", 2, 0),
+                ("Zulu.1234", 2, 0),
+                ("Beta.1234", 0, 1),
+            ]
+            reopened.close()
+
     def test_caps_gold_purchased_tickets_at_ten_per_raffle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
@@ -220,14 +363,12 @@ class TestRaffle:
                 ]
             )
             store.add_manual_ticket("User B.2222")
-            store.add_manual_ticket("User B.2222")
-            store.add_manual_ticket("User B.2222")
 
             result = store.run_raffle(randbelow=lambda total: 10)
 
             assert result is not None
             assert result.winner == "User B.2222"
-            assert result.total_tickets == 18
+            assert result.total_tickets == 16
             for total in store.get_totals():
                 assert total.raffle_tickets == 0
                 assert total.gold_raffle_tickets == 0
@@ -244,7 +385,7 @@ class TestRaffle:
             with engine.connect() as connection:
                 assert connection.execute(
                     select(runs.c.winner, runs.c.total_tickets)
-                ).one() == ("User B.2222", 18)
+                ).one() == ("User B.2222", 16)
                 assert (
                     connection.execute(
                         select(func.count()).select_from(entries)
@@ -282,18 +423,22 @@ class TestRaffle:
             assert second.run_id != first.run_id
             reopened.close()
 
-    def test_manual_ticket_addition_caps_at_three_per_raffle(self) -> None:
+    def test_manual_ticket_addition_caps_at_one_per_raffle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
 
-            store.add_manual_ticket("Member.1234")
-            store.add_manual_ticket("Member.1234")
             total = store.add_manual_ticket("Member.1234")
 
-            assert total.raffle_tickets == 3
-            assert total.manual_raffle_tickets == 3
-            with pytest.raises(ValueError, match="maximum of 3"):
+            assert total.raffle_tickets == 1
+            assert total.manual_raffle_tickets == 1
+            with pytest.raises(ValueError, match="maximum of 1 manually added ticket"):
                 store.add_manual_ticket("Member.1234")
+
+            store.run_raffle(randbelow=lambda total: 0)
+            reset_total = store.add_manual_ticket("Member.1234")
+
+            assert reset_total.raffle_tickets == 1
+            assert reset_total.manual_raffle_tickets == 1
             store.close()
 
     def test_migrates_existing_totals_and_caps_current_gold_tickets(self) -> None:
@@ -327,6 +472,100 @@ class TestRaffle:
             assert total.gold_raffle_tickets == 10
             assert total.manual_raffle_tickets == 0
             store.close()
+
+    def test_one_time_migration_caps_existing_free_tickets_at_one(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            secret = "migration-secret"
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            totals = Table(
+                "raffle_totals",
+                metadata,
+                Column("username", String, primary_key=True),
+                Column("coins_deposited", Integer, nullable=False),
+                Column("raffle_tickets", Integer, nullable=False),
+                Column("gold_raffle_tickets", Integer, nullable=False),
+                Column("manual_raffle_tickets", Integer, nullable=False),
+            )
+            metadata.create_all(engine)
+            with engine.begin() as connection:
+                connection.execute(
+                    totals.insert(),
+                    [
+                        {
+                            "username": "Purchased And Free.1234",
+                            "coins_deposited": 20_000,
+                            "raffle_tickets": 5,
+                            "gold_raffle_tickets": 2,
+                            "manual_raffle_tickets": 3,
+                        },
+                        {
+                            "username": f"Free Only {secret}.1234",
+                            "coins_deposited": 0,
+                            "raffle_tickets": 4,
+                            "gold_raffle_tickets": 0,
+                            "manual_raffle_tickets": 4,
+                        },
+                        {
+                            "username": "Already Valid.1234",
+                            "coins_deposited": 10_000,
+                            "raffle_tickets": 2,
+                            "gold_raffle_tickets": 1,
+                            "manual_raffle_tickets": 1,
+                        },
+                    ],
+                )
+            engine.dispose()
+
+            with caplog.at_level(logging.INFO, logger="gw2bot.raffle"):
+                store = RaffleStore(database_path, "guild-id")
+
+            assert {
+                total.username: (
+                    total.raffle_tickets,
+                    total.gold_raffle_tickets,
+                    total.manual_raffle_tickets,
+                )
+                for total in store.get_totals()
+            } == {
+                "Purchased And Free.1234": (3, 2, 1),
+                "Already Valid.1234": (2, 1, 1),
+                f"Free Only {secret}.1234": (1, 0, 1),
+            }
+            assert secret not in caplog.text
+            store.close()
+
+    def test_free_ticket_cap_migration_runs_only_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.close()
+
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            totals = Table("raffle_totals", metadata, autoload_with=engine)
+            with engine.begin() as connection:
+                connection.execute(
+                    totals.insert().values(
+                        username="After Migration.1234",
+                        coins_deposited=0,
+                        raffle_tickets=2,
+                        gold_raffle_tickets=0,
+                        manual_raffle_tickets=2,
+                    )
+                )
+            engine.dispose()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            total = reopened.get_totals()[0]
+
+            assert total.raffle_tickets == 2
+            assert total.manual_raffle_tickets == 2
+            reopened.close()
 
     def test_migrates_existing_raffle_runs_as_already_announced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

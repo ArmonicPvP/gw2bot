@@ -79,11 +79,15 @@ someone removed the member and is not reported as a voluntary leave. The bot
 persists voluntary departures before posting the exact leave message to
 Discord.
 
+Raffle gold deposits are also aggregated into fixed six-hour UTC reporting
+windows ending at `00:00`, `06:00`, `12:00`, and `18:00`. The bot refreshes the
+guild log at each boundary before posting contributors.
+
 ### `/v2/guild/:id/members`
 
 Returns account name, rank, join timestamp, and WvW membership selection for
-each guild member. The bot checks this endpoint at startup and daily at 17:00
-UTC, then reports members whose rank is `Trial` and whose join timestamp is at
+each guild member. The bot checks this endpoint daily at 17:00 UTC, then
+reports members whose rank is `Trial` and whose join timestamp is at
 least 14 days old. Before posting the report, the bot searches the configured
 Discord Trial application forum's `Accepted` posts for each GW2 account name
 and includes the linked post creator's Discord mention. The cached or current

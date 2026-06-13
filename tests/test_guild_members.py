@@ -43,6 +43,19 @@ class TestGuildMemberCache:
         assert await cache.resolve("another member.5678") == "Another Member.5678"
         assert api.calls == 2
 
+    async def test_force_refresh_verifies_current_guild_membership(self) -> None:
+        api = FakeGuildApi()
+        cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
+
+        assert await cache.resolve("Member One.1234") == "Member One.1234"
+        api.members = []
+
+        assert (
+            await cache.resolve("Member One.1234", force_refresh=True)
+            is None
+        )
+        assert api.calls == 2
+
 
 class TestTrialMemberReport:
     def test_finds_trial_members_at_or_past_fourteen_days(self) -> None:

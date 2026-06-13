@@ -47,19 +47,24 @@ class GuildMemberCache:
         self._expires_at = 0.0
         self._lock = asyncio.Lock()
 
-    async def resolve(self, username: str) -> str | None:
-        await self._refresh_if_expired()
+    async def resolve(
+        self,
+        username: str,
+        *,
+        force_refresh: bool = False,
+    ) -> str | None:
+        await self._refresh_if_expired(force=force_refresh)
         result = self._members.get(username.strip().casefold())
         LOGGER.debug("Guild member cache lookup completed; matched=%s", result is not None)
         return result
 
-    async def _refresh_if_expired(self) -> None:
-        if self._clock() < self._expires_at:
+    async def _refresh_if_expired(self, *, force: bool = False) -> None:
+        if not force and self._clock() < self._expires_at:
             LOGGER.debug("Reusing guild member cache")
             return
 
         async with self._lock:
-            if self._clock() < self._expires_at:
+            if not force and self._clock() < self._expires_at:
                 LOGGER.debug("Guild member cache was refreshed by another task")
                 return
             LOGGER.debug("Refreshing guild member cache")

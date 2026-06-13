@@ -107,7 +107,8 @@ mention; accounts without a matching post remain plain usernames.
 Report entries are grouped with Sunborne first, Trial second, and unresolved
 roles last. Names are alphabetical within each group.
 
-The check runs again every day at 17:00 UTC. Reports are split into multiple
+The check runs once every day at 17:00 UTC and does not run immediately when
+the bot starts. Reports are split into multiple
 messages when necessary to stay within Discord's message-length limit. Nothing
 is posted when no Trial members are past the 14-day mark.
 
@@ -131,6 +132,17 @@ Gold deposits can purchase at most 10 tickets per user in the current raffle.
 Deposited gold above that limit still contributes to the user's lifetime gold
 total. The gold-purchased ticket count resets when a raffle runs.
 
+On the first startup after upgrading to the one-free-ticket limit, existing
+players with multiple free tickets are reduced to one free ticket. Purchased
+tickets are preserved. The correction is recorded and does not run again.
+
+Purchase notifications are posted to the raffle contribution channel. Every
+six hours at `00:00`, `06:00`, `12:00`, and `18:00` UTC, the bot also posts the
+players who purchased tickets or received free tickets during the preceding
+six-hour window to that channel. The report shows purchased, free, and total
+tickets, ordered by total tickets descending and then username without regard
+to case. Empty windows do not produce a message.
+
 ## Raffle Commands
 
 The commands are server-only and require the bot application to be installed
@@ -153,12 +165,19 @@ registration is unavailable.
 - `/raffle addticket username:<account>`: adds one manual ticket to a current
   guild member and requires role `1318357141521825872`. The command uses a
   case-insensitive guild-member cache and returns an error for accounts outside
-  the configured guild. Each user may receive at most three manually added
-  tickets per raffle.
+  the configured guild. Each user may receive at most one manually added
+  ticket per raffle.
+- `/raffle tickets [username:<account>]`: shows purchased, free, and total
+  current raffle tickets. Without a username, the command uses the caller's
+  linked GW2 account and prompts unlinked users to enter their account name.
+- `/raffle list`: publicly lists recorded players and their purchased, free,
+  and total current tickets in an embed, ten players per page, ordered by total
+  tickets descending and then username without regard to case.
 
 `/raffle draw` announces the winner publicly. `/raffle addticket` confirmations
-and errors are visible only to the command user. Successful ticket additions
-also send this audit log through the same destination as guild-leave messages:
+and errors and `/raffle tickets` results are visible only to the command user.
+Successful ticket additions also send this audit log through the same
+destination as guild-leave messages:
 
 ```text
 @DiscordUser added 1 raffle ticket to Username.1234.
@@ -175,12 +194,12 @@ message:
 Username.1234 has left the guild.
 ```
 
-Guild-leave messages, raffle audit messages, raffle-deposit notifications,
-stock alerts, and polling-status messages are posted in
-`DISCORD_NOTIFICATION_CHANNEL_ID`. Leave events and delivery state are persisted
-so each departure is posted once, including across restarts. Startup status and
-guild-log polling failures and recovery are written only to the application
-console logs.
+Guild-leave messages, raffle audit messages, stock alerts, and polling-status
+messages are posted in `DISCORD_NOTIFICATION_CHANNEL_ID`. Raffle-deposit
+notifications are posted in the raffle contribution channel. Leave events and
+delivery state are persisted so each departure is posted once, including across
+restarts. Startup status and guild-log polling failures and recovery are written
+only to the application console logs.
 
 Docker Compose stores the database in the persistent `bot-data` volume. To view
 the current totals:

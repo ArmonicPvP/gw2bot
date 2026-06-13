@@ -4,6 +4,7 @@ import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -12,7 +13,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from gw2bot.database import (
     FeastAlertRecord,
     GuildLeaveRecord,
+    RaffleAccountLinkRecord,
     RaffleDepositRecord,
+    RaffleManualTicketRecord,
     RaffleRunEntryRecord,
     RaffleRunRecord,
     RaffleTotalRecord,
@@ -25,7 +28,8 @@ LOGGER = logging.getLogger(__name__)
 
 COPPER_PER_GOLD = 10_000
 MAX_GOLD_RAFFLE_TICKETS = 10
-MAX_MANUAL_RAFFLE_TICKETS = 3
+MAX_MANUAL_RAFFLE_TICKETS = 1
+MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,13 @@ class RaffleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RaffleContribution:
+    username: str
+    purchased_tickets: int
+    event_tickets: int
+
+
+@dataclass(frozen=True, slots=True)
 class GuildLeave:
     event_id: int
     username: str
@@ -83,6 +94,7 @@ class RaffleStore:
             self._migrate_legacy_totals()
         try:
             self._bind_guild(guild_id)
+            self._apply_manual_ticket_cap_once()
         except Exception:
             self.close()
             raise
@@ -221,23 +233,64 @@ class RaffleStore:
             return results
 
     def get_totals(self) -> list[RaffleTotal]:
-        statement = select(RaffleTotalRecord).order_by(RaffleTotalRecord.username)
         with self._sessions() as session:
-            results = [
-                _to_raffle_total(record)
-                for record in session.scalars(statement).all()
-            ]
+            results = sorted(
+                (
+                    _to_raffle_total(record)
+                    for record in session.scalars(select(RaffleTotalRecord)).all()
+                ),
+                key=lambda total: (
+                    -total.raffle_tickets,
+                    total.username.casefold(),
+                    total.username,
+                ),
+            )
             LOGGER.debug("Loaded %s raffle totals", len(results))
             return results
 
-    def add_manual_ticket(self, username: str) -> RaffleTotal:
+    def get_total(self, username: str) -> RaffleTotal:
+        with self._sessions() as session:
+            record = session.get(RaffleTotalRecord, username)
+            if record is not None:
+                return _to_raffle_total(record)
+        return RaffleTotal(
+            username=username,
+            coins_deposited=0,
+            raffle_tickets=0,
+            gold_raffle_tickets=0,
+            manual_raffle_tickets=0,
+        )
+
+    def get_linked_username(self, discord_user_id: int) -> str | None:
+        with self._sessions() as session:
+            record = session.get(RaffleAccountLinkRecord, discord_user_id)
+            return record.username if record is not None else None
+
+    def link_account(self, discord_user_id: int, username: str) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(RaffleAccountLinkRecord, discord_user_id)
+            if record is None:
+                session.add(
+                    RaffleAccountLinkRecord(
+                        discord_user_id=discord_user_id,
+                        username=username,
+                    )
+                )
+            else:
+                record.username = username
+
+    def add_manual_ticket(
+        self,
+        username: str,
+        event_time: datetime | None = None,
+    ) -> RaffleTotal:
         with self._sessions.begin() as session:
             total = session.get(RaffleTotalRecord, username)
             manual_tickets = total.manual_raffle_tickets if total else 0
             if manual_tickets >= MAX_MANUAL_RAFFLE_TICKETS:
                 raise ValueError(
                     f"{username} already has the maximum of "
-                    f"{MAX_MANUAL_RAFFLE_TICKETS} manually added tickets"
+                    f"{MAX_MANUAL_RAFFLE_TICKETS} manually added ticket"
                 )
             if total is None:
                 total = RaffleTotalRecord(
@@ -251,6 +304,12 @@ class RaffleStore:
             else:
                 total.raffle_tickets += 1
                 total.manual_raffle_tickets += 1
+            session.add(
+                RaffleManualTicketRecord(
+                    username=username,
+                    event_time=(event_time or datetime.now(UTC)).isoformat(),
+                )
+            )
             result = _to_raffle_total(total)
         LOGGER.debug(
             "Added manual raffle ticket; current_tickets=%s manual_tickets=%s",
@@ -258,6 +317,47 @@ class RaffleStore:
             result.manual_raffle_tickets,
         )
         return result
+
+    def get_contributions(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> list[RaffleContribution]:
+        start_utc = start.astimezone(UTC)
+        end_utc = end.astimezone(UTC)
+        contributions: dict[str, list[int]] = {}
+        with self._sessions() as session:
+            deposits = session.scalars(
+                select(RaffleDepositRecord).where(
+                    RaffleDepositRecord.raffle_tickets > 0
+                )
+            ).all()
+            manual_tickets = session.scalars(select(RaffleManualTicketRecord)).all()
+
+        for deposit in deposits:
+            if _event_in_window(deposit.event_time, start_utc, end_utc):
+                counts = contributions.setdefault(deposit.username, [0, 0])
+                counts[0] += deposit.raffle_tickets
+        for ticket in manual_tickets:
+            if _event_in_window(ticket.event_time, start_utc, end_utc):
+                counts = contributions.setdefault(ticket.username, [0, 0])
+                counts[1] += 1
+
+        return [
+            RaffleContribution(
+                username=username,
+                purchased_tickets=counts[0],
+                event_tickets=counts[1],
+            )
+            for username, counts in sorted(
+                contributions.items(),
+                key=lambda item: (
+                    -(item[1][0] + item[1][1]),
+                    item[0].casefold(),
+                    item[0],
+                ),
+            )
+        ]
 
     def run_raffle(
         self,
@@ -412,6 +512,30 @@ class RaffleStore:
                 migrated += 1
         LOGGER.debug("Migrated %s legacy raffle totals", migrated)
 
+    def _apply_manual_ticket_cap_once(self) -> None:
+        updated = 0
+        with self._sessions.begin() as session:
+            if session.get(SettingRecord, MANUAL_TICKET_CAP_MIGRATION_KEY) is not None:
+                return
+            for total in session.scalars(
+                select(RaffleTotalRecord).where(
+                    RaffleTotalRecord.manual_raffle_tickets
+                    > MAX_MANUAL_RAFFLE_TICKETS
+                )
+            ).all():
+                total.manual_raffle_tickets = MAX_MANUAL_RAFFLE_TICKETS
+                total.raffle_tickets = (
+                    total.gold_raffle_tickets + MAX_MANUAL_RAFFLE_TICKETS
+                )
+                updated += 1
+            session.add(
+                SettingRecord(
+                    key=MANUAL_TICKET_CAP_MIGRATION_KEY,
+                    value="complete",
+                )
+            )
+        LOGGER.info("Applied one-time free-ticket cap; updated_users=%s", updated)
+
     def _bind_guild(self, guild_id: str) -> None:
         with self._sessions.begin() as session:
             record = session.get(SettingRecord, "guild_id")
@@ -505,3 +629,14 @@ def format_gold(coins: int) -> str:
     if remainder == 0:
         return str(whole)
     return f"{whole}.{remainder:04d}".rstrip("0")
+
+
+def _event_in_window(event_time: str, start: datetime, end: datetime) -> bool:
+    try:
+        parsed = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    parsed_utc = parsed.astimezone(UTC)
+    return start <= parsed_utc < end

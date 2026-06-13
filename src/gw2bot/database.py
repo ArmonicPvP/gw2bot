@@ -51,6 +51,25 @@ class RaffleTotalRecord(Base):
     )
 
 
+class RaffleAccountLinkRecord(Base):
+    __tablename__ = "raffle_account_links"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class RaffleManualTicketRecord(Base):
+    __tablename__ = "raffle_manual_tickets"
+
+    ticket_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class RaffleDepositRecord(Base):
     __tablename__ = "raffle_deposits"
 
