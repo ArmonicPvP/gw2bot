@@ -98,10 +98,10 @@ For each overdue account, the bot first scans `Accepted` thread-title metadata
 in forum channel `1317206104727621693` without reading message histories. It
 then uses Discord's indexed guild message search for bodies and comments only
 for account names that remain unresolved. If Discord's search endpoint is
-unavailable, it falls back to the full forum history scan. When indexed searches
-are repeatedly delayed by Discord rate limiting, the bot increases the delay
-between subsequent searches from 10 seconds up to a maximum of 30 seconds. When
-found, the post creator is linked using their Discord user ID. The creator's
+unavailable, it falls back to the full forum history scan. Indexed searches run
+without a per-member delay; when Discord returns rate-limit error code `110000`,
+the bot waits for the returned `retry_after` duration before retrying. When found,
+the post creator is linked using their Discord user ID. The creator's
 cached Discord roles determine the status: Sunborne role `1317140660188352584`
 or Trial role `1450164501696741597`. A matched post always includes the creator
 mention; accounts without a matching post remain plain usernames.
