@@ -44,28 +44,58 @@ class GuildMemberCache:
         self._ttl_seconds = ttl_seconds
         self._clock = clock
         self._members: dict[str, str] = {}
+        self._member_ranks: dict[str, str] = {}
         self._expires_at = 0.0
         self._lock = asyncio.Lock()
 
-    async def resolve(self, username: str) -> str | None:
-        await self._refresh_if_expired()
+    async def resolve(
+        self,
+        username: str,
+        *,
+        force_refresh: bool = False,
+    ) -> str | None:
+        await self._refresh_if_expired(force=force_refresh)
         result = self._members.get(username.strip().casefold())
         LOGGER.debug("Guild member cache lookup completed; matched=%s", result is not None)
         return result
 
-    async def _refresh_if_expired(self) -> None:
-        if self._clock() < self._expires_at:
+    async def usernames_with_rank(
+        self,
+        rank: str,
+        *,
+        force_refresh: bool = False,
+    ) -> set[str]:
+        await self._refresh_if_expired(force=force_refresh)
+        rank_key = rank.strip().casefold()
+        results = {
+            username
+            for account_key, username in self._members.items()
+            if self._member_ranks.get(account_key, "").casefold() == rank_key
+        }
+        LOGGER.debug(
+            "Guild member rank cache lookup completed; matches=%s",
+            len(results),
+        )
+        return results
+
+    async def _refresh_if_expired(self, *, force: bool = False) -> None:
+        if not force and self._clock() < self._expires_at:
             LOGGER.debug("Reusing guild member cache")
             return
 
         async with self._lock:
-            if self._clock() < self._expires_at:
+            if not force and self._clock() < self._expires_at:
                 LOGGER.debug("Guild member cache was refreshed by another task")
                 return
             LOGGER.debug("Refreshing guild member cache")
             members = await self._api.get_guild_members(self._guild_id)
             self._members = {
                 str(member["name"]).casefold(): str(member["name"])
+                for member in members
+                if member.get("name")
+            }
+            self._member_ranks = {
+                str(member["name"]).casefold(): str(member.get("rank", ""))
                 for member in members
                 if member.get("name")
             }

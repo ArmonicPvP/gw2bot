@@ -51,6 +51,37 @@ class RaffleTotalRecord(Base):
     )
 
 
+class RaffleAccountLinkRecord(Base):
+    __tablename__ = "raffle_account_links"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class RaffleManualTicketRecord(Base):
+    __tablename__ = "raffle_manual_tickets"
+
+    ticket_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class RaffleMilestoneRecord(Base):
+    __tablename__ = "raffle_milestones"
+
+    threshold: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tier_name: Mapped[str] = mapped_column(String, nullable=False)
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
 class RaffleDepositRecord(Base):
     __tablename__ = "raffle_deposits"
 
@@ -64,10 +95,28 @@ class RaffleDepositRecord(Base):
         nullable=False,
         default=False,
     )
+    audit_notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
 
 
 class GuildLeaveRecord(Base):
     __tablename__ = "guild_leave_events"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class GuildJoinRecord(Base):
+    __tablename__ = "guild_join_events"
 
     event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String, nullable=False)
@@ -116,6 +165,19 @@ class RaffleRunEntryRecord(Base):
     raffle_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class RaffleRunWinnerRecord(Base):
+    __tablename__ = "raffle_run_winners"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("raffle_runs.run_id"),
+        primary_key=True,
+    )
+    draw_position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    winning_ticket: Mapped[int] = mapped_column(Integer, nullable=False)
+    tickets_before_draw: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 def create_database_engine(database_path: str) -> Engine:
     path = Path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +212,28 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add(column_name)
+
+        deposit_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                RaffleDepositRecord.__tablename__
+            )
+        }
+        if "audit_notification_sent" not in deposit_columns:
+            operations.add_column(
+                RaffleDepositRecord.__tablename__,
+                Column(
+                    "audit_notification_sent",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            # Existing deposits were already handled before audit delivery existed.
+            connection.exec_driver_sql(
+                "UPDATE raffle_deposits SET audit_notification_sent = 1"
+            )
+            added_columns.add("audit_notification_sent")
 
         run_columns = {
             column["name"]

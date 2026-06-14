@@ -47,9 +47,10 @@ configured notification channel. Users running raffle commands must have
 `Use Application Commands` permission.
 
 Enable the privileged `Message Content Intent` for the bot in the Discord
-Developer Portal. The bot also needs `View Channel` and `Read Message History`
-permissions for forum channel `1317206104727621693` so it can link Trial
-applications to Discord members.
+Developer Portal so it can respond to the notification-channel `diag` message.
+The bot also needs `View Channel` and `Read Message History` permissions for
+forum channel `1317206104727621693` so it can link Trial applications to
+Discord members.
 
 ## Feast Stock Alerts
 
@@ -107,7 +108,8 @@ mention; accounts without a matching post remain plain usernames.
 Report entries are grouped with Sunborne first, Trial second, and unresolved
 roles last. Names are alphabetical within each group.
 
-The check runs again every day at 17:00 UTC. Reports are split into multiple
+The check runs once every day at 17:00 UTC and does not run immediately when
+the bot starts. Reports are split into multiple
 messages when necessary to stay within Discord's message-length limit. Nothing
 is posted when no Trial members are past the 14-day mark.
 
@@ -122,14 +124,73 @@ Username.1234 deposited 3 gold and purchased 3 raffle tickets
 
 The SQLite ledger stores exact lifetime deposited coins, current raffle tickets,
 gold-purchased tickets, manually added tickets, credited event IDs, pending
-notifications, completed raffle runs, and the last processed guild-log event
-ID. On the first run, the cursor starts at the latest existing event so
-historical deposits are not credited. Deposits made while the bot is offline
-are processed when it starts again.
+notifications and reward milestones, completed raffle runs, and the last
+processed guild-log event ID. On the first run, the cursor starts at the latest
+existing event so historical deposits are not credited. Deposits made while the
+bot is offline are processed when it starts again.
 
 Gold deposits can purchase at most 10 tickets per user in the current raffle.
 Deposited gold above that limit still contributes to the user's lifetime gold
-total. The gold-purchased ticket count resets when a raffle runs.
+total. Accounts with the exact in-game rank `Officer` receive tickets only when
+an individual deposit is 10 gold or less. Larger Officer deposits are ignored
+by the raffle workflow, so they create no purchase record, lifetime-deposit
+total, or deposit notification. The gold-purchased ticket count resets when a
+raffle runs.
+
+On the first startup after upgrading to the one-free-ticket limit, existing
+players with multiple free tickets are reduced to one free ticket. Purchased
+tickets are preserved. The correction is recorded and does not run again.
+
+Deposit notifications are posted to both the raffle contribution channel and
+`DISCORD_NOTIFICATION_CHANNEL_ID`, alongside join and leave logs. Delivery to
+each channel is tracked independently and retried after failures. Every six
+hours at `00:00`, `06:00`, `12:00`, and `18:00` UTC, the bot also posts the
+players who purchased tickets or received free tickets during the preceding
+six-hour window to the raffle contribution channel. The report uses the same
+mobile-friendly layout as `/raffle list`: each bolded account name is followed
+by separate `Purchased`, `Free`, and `Total` lines. It is ordered by total
+tickets descending and then username without regard to case, with page buttons
+when more than ten players contributed. Empty windows do not produce a message.
+If the boundary-time guild-log refresh times out, the bot logs the refresh
+failure and still posts the report from contributions already persisted by the
+one-minute guild-log poller.
+
+Purchased-ticket reward milestones are also posted to the raffle contribution
+channel once per raffle. The defaults are:
+
+| Purchased tickets | Reward tier |
+| ---: | --- |
+| 50 | Tier 1 |
+| 100 | Tier 2 |
+| 150 | Tier 3 |
+| 200 | Tier 4 |
+
+Modify `RAFFLE_REWARD_TIERS` in `gw2bot.raffle` to add tiers or change their
+thresholds and labels. Pending milestone announcements persist across restarts
+and retry after Discord delivery failures.
+
+The raffle draw count is also data-driven through `RAFFLE_DRAW_TIERS`:
+
+| Current purchased-ticket tier | Winners drawn |
+| --- | ---: |
+| Guaranteed / Tier 0 | 2 |
+| Tier 1 | 2 |
+| Tier 2 | 3 |
+| Tier 3 | 4 |
+| Tier 4 | 5 |
+
+Each winner is selected from the remaining weighted ticket pool, then exactly
+one of that winner's tickets is removed before the next draw. A player may win
+multiple times while they still have tickets in the pool. If fewer tickets
+remain than the configured winner count, every remaining ticket is drawn once.
+Free tickets participate in the weighted draw but do not increase the current
+purchased-ticket reward tier.
+
+ArenaNet's guild-log API does not identify which guild-vault tab received a
+coin deposit. The bot therefore cannot safely exclude only Officer or Guild
+Master deposits made into a tab named `Treasure Trove`; excluding those ranks
+would necessarily exclude their deposits into every guild-vault tab. The
+Officer deposit-size rule above applies regardless of the destination tab.
 
 ## Raffle Commands
 
@@ -144,43 +205,86 @@ server ID, then reinstall the application into that server with both the `bot`
 and `applications.commands` scopes. The bot continues monitoring while command
 registration is unavailable.
 
-- `/raffle draw`: requires role `1317124663847157880`. Randomly selects a winner,
-  weighted by each user's current tickets after refreshing the guild log. The
-  run and participant ticket counts are archived, then every user's current,
-  gold-purchased, and manually added ticket counts reset to zero. A completed
-  draw remains pending until Discord accepts its winner announcement; running
-  the command again retries that announcement before allowing another draw.
+- `/raffle draw`: requires role `1317124663847157880`. Randomly selects the
+  tier-configured number of winners, weighted by each user's current tickets
+  after refreshing the guild log. One winning ticket leaves the pool after
+  each selection, so users with multiple tickets may win multiple times. The
+  ordered winners and participant ticket counts are archived, then every
+  user's current, gold-purchased, and manually added ticket counts reset to
+  zero. A completed draw remains pending until Discord accepts its winner
+  announcement; running the command again retries that announcement before
+  allowing another draw.
 - `/raffle addticket username:<account>`: adds one manual ticket to a current
   guild member and requires role `1318357141521825872`. The command uses a
   case-insensitive guild-member cache and returns an error for accounts outside
-  the configured guild. Each user may receive at most three manually added
-  tickets per raffle.
+  the configured guild. Each user may receive at most one manually added
+  ticket per raffle.
+- `/raffle removetickets username:<account> [amount:<number>]`: requires the
+  same officer role as `/raffle draw` and removes only current purchased
+  tickets. The amount defaults to one. Free tickets and lifetime deposited gold
+  are unchanged.
+- `/raffle tickets [username:<account>]`: shows purchased, free, and total
+  current raffle tickets. Without a username, the command uses the caller's
+  linked GW2 account and prompts unlinked users to enter their account name.
+- `/raffle list`: publicly lists recorded players with each account name bolded
+  above its purchased, free, and total ticket counts. It shows ten players per
+  page, ordered by total tickets descending and then username without regard to
+  case.
 
-`/raffle draw` announces the winner publicly. `/raffle addticket` confirmations
-and errors are visible only to the command user. Successful ticket additions
-also send this audit log through the same destination as guild-leave messages:
+`/raffle draw` announces the ordered winners publicly. `/raffle addticket` and
+`/raffle removetickets` confirmations and errors and `/raffle tickets` results
+are visible only to the command user. Successful ticket additions and removals
+also send audit logs through the same destination as guild-leave messages:
 
 ```text
 @DiscordUser added 1 raffle ticket to Username.1234.
 ```
 
-## Guild Leave Messages
+## Guild Membership Messages
 
-The one-minute guild-log poller also detects new voluntary member departures.
+The one-minute guild-log poller also detects new members and voluntary member
+departures. For every `joined` event, the bot posts:
+
+```text
+Username.1234 has joined the guild.
+```
+
 For every voluntary departure event, reported by the GW2 API as a `kick` event
-where `user` and `kicked_by` are the same account, the bot posts this exact
-message:
+where `user` and `kicked_by` are the same account, the bot posts:
 
 ```text
 Username.1234 has left the guild.
 ```
 
-Guild-leave messages, raffle audit messages, raffle-deposit notifications,
-stock alerts, and polling-status messages are posted in
-`DISCORD_NOTIFICATION_CHANNEL_ID`. Leave events and delivery state are persisted
-so each departure is posted once, including across restarts. Startup status and
+Guild membership messages, raffle deposit audit messages, raffle command audit
+messages, stock alerts, and
+polling-status messages are posted in `DISCORD_NOTIFICATION_CHANNEL_ID`.
+Raffle-deposit notifications are also posted in the raffle contribution
+channel. Join, leave, and deposit delivery state is persisted so each message
+is posted once per destination, including across restarts. Startup status and
 guild-log polling failures and recovery are written only to the application
 console logs.
+
+## Automated Message Diagnostics
+
+When a non-bot user sends exactly `diag`, ignoring case and surrounding spaces,
+in `DISCORD_NOTIFICATION_CHANNEL_ID`, the bot posts read-only previews of:
+
+- the next six-hour raffle contribution report using contributions currently
+  recorded in its active interval, including free tickets;
+- a gold-deposit ticket purchase, guild join, guild leave, and next reward-tier
+  message;
+- a low feast-stock alert, overdue Trial member report, and polling
+  failure/recovery messages.
+
+If the raffle is already at the highest configured reward tier, the highest-tier
+message is shown with a note that it has already been reached. Running `diag`
+does not refresh the guild log, advance either scheduled report, or mark any
+pending notification as sent. Feast alerts can also be sent as a configured
+private message. Startup status and Guild Log poll failure/recovery messages are
+console-only and therefore are not previewed as Discord messages. Every
+diagnostic preview delivery is attempted independently, so one failed preview
+does not prevent later previews from being sent.
 
 Docker Compose stores the database in the persistent `bot-data` volume. To view
 the current totals:
