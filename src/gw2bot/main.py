@@ -573,6 +573,16 @@ class Gw2Bot(discord.Client):
             }
             return bool(accepted_tag_ids & applied_tag_ids)
 
+        def contains_normalized_account_name(value: object, key: str) -> bool:
+            normalized = str(value).strip().casefold()
+            return (
+                re.search(
+                    rf"(?<![\w.]){re.escape(key)}(?![\w.])",
+                    normalized,
+                )
+                is not None
+            )
+
         async def resolve_owner_status(owner_id: int, owner: Any) -> str | None:
             if owner_id in owner_statuses:
                 return owner_statuses[owner_id]
@@ -642,10 +652,11 @@ class Gw2Bot(discord.Client):
             owner = getattr(thread, "owner", None)
             owner_status = get_trial_member_discord_status(owner)
 
+            thread_name = getattr(thread, "name", "")
             matches = {
                 key
                 for key in unresolved
-                if key in str(getattr(thread, "name", "")).casefold()
+                if contains_normalized_account_name(thread_name, key)
             }
             if inspect_history:
                 try:
@@ -656,8 +667,12 @@ class Gw2Bot(discord.Client):
                             and getattr(author, "id", None) == owner_id
                         ):
                             owner_status = get_trial_member_discord_status(author)
-                        content = str(getattr(message, "content", "")).casefold()
-                        matches.update(key for key in unresolved if key in content)
+                        content = getattr(message, "content", "")
+                        matches.update(
+                            key
+                            for key in unresolved
+                            if contains_normalized_account_name(content, key)
+                        )
                         if len(matches) == len(unresolved) and owner_status is not None:
                             break
                 except discord.DiscordException:
@@ -749,7 +764,9 @@ class Gw2Bot(discord.Client):
                 for message in message_group:
                     if not isinstance(message, dict):
                         continue
-                    if key not in str(message.get("content", "")).casefold():
+                    if not contains_normalized_account_name(
+                        message.get("content", ""), key
+                    ):
                         continue
                     channel_id = as_int(message.get("channel_id"))
                     if channel_id is None:

@@ -880,6 +880,55 @@ class TestTrialMemberNotification:
         guild.fetch_member.assert_not_awaited()
         search.assert_not_awaited()
 
+    async def test_requires_exact_normalized_account_name_match(self) -> None:
+        owner = SimpleNamespace(id=777, roles=[SimpleNamespace(id=TRIAL_ROLE_ID)])
+
+        async def messages() -> Any:
+            yield SimpleNamespace(content="  OTHERUSER.1234  ", author=owner)
+
+        accepted_thread = SimpleNamespace(
+            id=900,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            owner_id=777,
+            owner=owner,
+            applied_tags=[SimpleNamespace(name="Accepted")],
+            name="OtherUser.1234 application",
+            history=lambda **_: messages(),
+        )
+        guild = SimpleNamespace(
+            id=123,
+            active_threads=AsyncMock(return_value=[accepted_thread]),
+            fetch_member=AsyncMock(),
+        )
+
+        async def archived_threads(**_: Any) -> Any:
+            if False:
+                yield None
+
+        forum = SimpleNamespace(
+            id=TRIAL_FORUM_CHANNEL_ID,
+            guild=guild,
+            available_tags=[SimpleNamespace(id=42, name="Accepted")],
+            archived_threads=archived_threads,
+        )
+        search = AsyncMock(
+            return_value={"total_results": 0, "messages": [], "threads": []}
+        )
+        bot = SimpleNamespace(
+            fetch_channel=AsyncMock(return_value=forum),
+            http=SimpleNamespace(request=search),
+        )
+
+        entries = await Gw2Bot._resolve_trial_member_discord_statuses(
+            cast(Gw2Bot, bot),
+            ["User.1234", "OtherUser.1234"],
+        )
+
+        assert entries == [
+            TrialMemberReportEntry("User.1234"),
+            TrialMemberReportEntry("OtherUser.1234", 777, "Trial"),
+        ]
+
     async def test_skips_forum_posts_without_accepted_tag(self) -> None:
         async def empty_messages() -> Any:
             if False:
