@@ -71,13 +71,20 @@ restart.
 
 Gold deposits are `stash` events with `operation` set to `deposit`. The `coins`
 field is measured in copper, where `10000` copper is one gold. The API does not
-identify which guild-vault section received the deposit.
+identify which guild-vault section received the deposit. The stash snapshot
+endpoint exposes current tab contents but cannot reliably attribute a tab
+balance change to a specific guild-log event or depositor. As a result,
+Treasure Trove-only deposit exclusions cannot be enforced from the API.
+The bot instead checks the depositor's current rank from `/v2/guild/:id/members`.
+Accounts with the exact rank `Officer` receive raffle tickets only for
+individual deposits of 10 gold or less. Larger Officer deposits are ignored by
+the raffle workflow and do not produce deposit notifications.
 
 Voluntary member departures are `kick` events where `user` and `kicked_by` are
 the same account. A `kick` event with a different `kicked_by` account means
 someone removed the member and is not reported as a voluntary leave. The bot
 persists voluntary departures before posting the exact leave message to
-Discord.
+Discord. It also persists `joined` events before posting the exact join message.
 
 Raffle gold deposits are also aggregated into fixed six-hour UTC reporting
 windows ending at `00:00`, `06:00`, `12:00`, and `18:00`. The bot refreshes the

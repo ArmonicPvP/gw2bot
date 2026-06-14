@@ -7,17 +7,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.database import (
     FeastAlertRecord,
+    GuildJoinRecord,
     GuildLeaveRecord,
     RaffleAccountLinkRecord,
     RaffleDepositRecord,
     RaffleManualTicketRecord,
+    RaffleMilestoneRecord,
     RaffleRunEntryRecord,
     RaffleRunRecord,
+    RaffleRunWinnerRecord,
     RaffleTotalRecord,
     SettingRecord,
     create_database_engine,
@@ -30,6 +33,8 @@ COPPER_PER_GOLD = 10_000
 MAX_GOLD_RAFFLE_TICKETS = 10
 MAX_MANUAL_RAFFLE_TICKETS = 1
 MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
+OFFICER_RANK = "Officer"
+OFFICER_MAX_TICKET_DEPOSIT_COINS = 10 * COPPER_PER_GOLD
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,10 +64,16 @@ class RaffleTotal:
 
 
 @dataclass(frozen=True, slots=True)
+class RaffleWinner:
+    username: str
+    winning_ticket: int
+    tickets_before_draw: int
+
+
+@dataclass(frozen=True, slots=True)
 class RaffleResult:
     run_id: int
-    winner: str
-    winning_ticket: int
+    winners: tuple[RaffleWinner, ...]
     total_tickets: int
 
 
@@ -71,6 +82,47 @@ class RaffleContribution:
     username: str
     purchased_tickets: int
     event_tickets: int
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleRewardTier:
+    threshold: int
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleDrawTier:
+    minimum_purchased_tickets: int
+    winner_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleMilestone:
+    threshold: int
+    tier_name: str
+
+    @property
+    def message(self) -> str:
+        return (
+            f"{self.threshold} total tickets have been purchased for this raffle. "
+            f"{self.tier_name} rewards have been reached!"
+        )
+
+
+RAFFLE_REWARD_TIERS = (
+    RaffleRewardTier(50, "Tier 1"),
+    RaffleRewardTier(100, "Tier 2"),
+    RaffleRewardTier(150, "Tier 3"),
+    RaffleRewardTier(200, "Tier 4"),
+)
+
+RAFFLE_DRAW_TIERS = (
+    RaffleDrawTier(0, 2),
+    RaffleDrawTier(50, 2),
+    RaffleDrawTier(100, 3),
+    RaffleDrawTier(150, 4),
+    RaffleDrawTier(200, 5),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +136,28 @@ class GuildLeave:
         return f"{self.username} has left the guild."
 
 
+@dataclass(frozen=True, slots=True)
+class GuildJoin:
+    event_id: int
+    username: str
+    event_time: str
+
+    @property
+    def message(self) -> str:
+        return f"{self.username} has joined the guild."
+
+
 class RaffleStore:
-    def __init__(self, database_path: str, guild_id: str):
+    def __init__(
+        self,
+        database_path: str,
+        guild_id: str,
+        reward_tiers: tuple[RaffleRewardTier, ...] = RAFFLE_REWARD_TIERS,
+        draw_tiers: tuple[RaffleDrawTier, ...] = RAFFLE_DRAW_TIERS,
+    ):
         LOGGER.debug("Opening raffle store")
+        self._reward_tiers = _validate_reward_tiers(reward_tiers)
+        self._draw_tiers = _validate_draw_tiers(draw_tiers)
         self._engine = create_database_engine(database_path)
         added_columns = initialize_database(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
@@ -157,10 +228,19 @@ class RaffleStore:
                 )
                 LOGGER.debug("Initialized guild log cursor at event %s", event_id)
 
-    def process_events(self, events: list[dict[str, Any]]) -> None:
+    def process_events(
+        self,
+        events: list[dict[str, Any]],
+        officer_usernames: set[str] | None = None,
+    ) -> None:
         processed = 0
         deposits = 0
+        officer_deposits_skipped = 0
+        joins = 0
         leaves = 0
+        officer_keys = {
+            username.casefold() for username in officer_usernames or set()
+        }
         with self._sessions.begin() as session:
             cursor_record = session.get(SettingRecord, "guild_log_cursor")
             if cursor_record is None:
@@ -174,8 +254,37 @@ class RaffleStore:
 
                 deposit = parse_gold_deposit(event)
                 if deposit is not None:
-                    self._process_deposit(session, deposit)
-                    deposits += 1
+                    is_officer = deposit.username.casefold() in officer_keys
+                    if (
+                        is_officer
+                        and deposit.coins_deposited
+                        > OFFICER_MAX_TICKET_DEPOSIT_COINS
+                    ):
+                        LOGGER.debug(
+                            "Skipped oversized Officer raffle deposit event %s; "
+                            "coins=%s maximum=%s",
+                            deposit.event_id,
+                            deposit.coins_deposited,
+                            OFFICER_MAX_TICKET_DEPOSIT_COINS,
+                        )
+                        officer_deposits_skipped += 1
+                    else:
+                        self._process_deposit(session, deposit)
+                        deposits += 1
+
+                join = parse_guild_join(event)
+                if (
+                    join is not None
+                    and session.get(GuildJoinRecord, join.event_id) is None
+                ):
+                    session.add(
+                        GuildJoinRecord(
+                            event_id=join.event_id,
+                            username=join.username,
+                            event_time=join.event_time,
+                        )
+                    )
+                    joins += 1
 
                 leave = parse_guild_leave(event)
                 if (
@@ -194,12 +303,16 @@ class RaffleStore:
                 cursor = event_id
                 processed += 1
 
+            self._create_reached_milestones(session)
             cursor_record.value = str(cursor)
         LOGGER.debug(
-            "Processed guild log events; fetched=%s new=%s deposits=%s leaves=%s cursor=%s",
+            "Processed guild log events; fetched=%s new=%s deposits=%s "
+            "officer_deposits_skipped=%s joins=%s leaves=%s cursor=%s",
             len(events),
             processed,
             deposits,
+            officer_deposits_skipped,
+            joins,
             leaves,
             cursor,
         )
@@ -218,6 +331,23 @@ class RaffleStore:
             LOGGER.debug("Loaded %s pending raffle notifications", len(results))
             return results
 
+    def get_pending_deposit_audit_notifications(self) -> list[RaffleDeposit]:
+        statement = (
+            select(RaffleDepositRecord)
+            .where(RaffleDepositRecord.audit_notification_sent.is_(False))
+            .order_by(RaffleDepositRecord.event_id)
+        )
+        with self._sessions() as session:
+            results = [
+                _to_raffle_deposit(record)
+                for record in session.scalars(statement).all()
+            ]
+            LOGGER.debug(
+                "Loaded %s pending raffle deposit audit notifications",
+                len(results),
+            )
+            return results
+
     def get_pending_leave_notifications(self) -> list[GuildLeave]:
         statement = (
             select(GuildLeaveRecord)
@@ -230,6 +360,34 @@ class RaffleStore:
                 for record in session.scalars(statement).all()
             ]
             LOGGER.debug("Loaded %s pending guild-leave notifications", len(results))
+            return results
+
+    def get_pending_join_notifications(self) -> list[GuildJoin]:
+        statement = (
+            select(GuildJoinRecord)
+            .where(GuildJoinRecord.notification_sent.is_(False))
+            .order_by(GuildJoinRecord.event_id)
+        )
+        with self._sessions() as session:
+            results = [
+                _to_guild_join(record)
+                for record in session.scalars(statement).all()
+            ]
+            LOGGER.debug("Loaded %s pending guild-join notifications", len(results))
+            return results
+
+    def get_pending_milestones(self) -> list[RaffleMilestone]:
+        statement = (
+            select(RaffleMilestoneRecord)
+            .where(RaffleMilestoneRecord.notification_sent.is_(False))
+            .order_by(RaffleMilestoneRecord.threshold)
+        )
+        with self._sessions() as session:
+            results = [
+                _to_raffle_milestone(record)
+                for record in session.scalars(statement).all()
+            ]
+            LOGGER.debug("Loaded %s pending raffle milestones", len(results))
             return results
 
     def get_totals(self) -> list[RaffleTotal]:
@@ -318,6 +476,27 @@ class RaffleStore:
         )
         return result
 
+    def remove_gold_tickets(self, username: str, amount: int = 1) -> RaffleTotal:
+        if amount <= 0:
+            raise ValueError("Ticket removal amount must be greater than zero")
+        with self._sessions.begin() as session:
+            total = session.get(RaffleTotalRecord, username)
+            purchased = total.gold_raffle_tickets if total is not None else 0
+            if total is None or purchased < amount:
+                noun = "ticket" if purchased == 1 else "tickets"
+                raise ValueError(
+                    f"{username} has only {purchased} purchased raffle {noun}"
+                )
+            total.gold_raffle_tickets -= amount
+            total.raffle_tickets -= amount
+            result = _to_raffle_total(total)
+        LOGGER.info(
+            "Removed purchased raffle tickets; amount=%s remaining_purchased=%s",
+            amount,
+            result.gold_raffle_tickets,
+        )
+        return result
+
     def get_contributions(
         self,
         start: datetime,
@@ -380,18 +559,40 @@ class RaffleStore:
                 LOGGER.debug("Raffle draw skipped because no tickets are available")
                 return None
 
-            winning_ticket = randbelow(total_tickets) + 1
-            cursor = 0
-            winner = ""
-            for total in totals:
-                cursor += total.raffle_tickets
-                if winning_ticket <= cursor:
-                    winner = total.username
-                    break
+            purchased_tickets = sum(total.gold_raffle_tickets for total in totals)
+            draw_count = min(
+                _winner_count_for_purchased_tickets(
+                    purchased_tickets,
+                    self._draw_tiers,
+                ),
+                total_tickets,
+            )
+            remaining_tickets = {
+                total.username: total.raffle_tickets for total in totals
+            }
+            winners: list[RaffleWinner] = []
+            for _ in range(draw_count):
+                tickets_before_draw = sum(remaining_tickets.values())
+                winning_ticket = randbelow(tickets_before_draw) + 1
+                cursor = 0
+                winner = ""
+                for username, ticket_count in remaining_tickets.items():
+                    cursor += ticket_count
+                    if winning_ticket <= cursor:
+                        winner = username
+                        break
+                remaining_tickets[winner] -= 1
+                winners.append(
+                    RaffleWinner(
+                        username=winner,
+                        winning_ticket=winning_ticket,
+                        tickets_before_draw=tickets_before_draw,
+                    )
+                )
 
             run = RaffleRunRecord(
-                winner=winner,
-                winning_ticket=winning_ticket,
+                winner=winners[0].username,
+                winning_ticket=winners[0].winning_ticket,
                 total_tickets=total_tickets,
             )
             session.add(run)
@@ -407,22 +608,35 @@ class RaffleStore:
                     for total in totals
                 ]
             )
+            session.add_all(
+                [
+                    RaffleRunWinnerRecord(
+                        run_id=run_id,
+                        draw_position=position,
+                        username=winner.username,
+                        winning_ticket=winner.winning_ticket,
+                        tickets_before_draw=winner.tickets_before_draw,
+                    )
+                    for position, winner in enumerate(winners, start=1)
+                ]
+            )
             for total in totals:
                 total.raffle_tickets = 0
                 total.gold_raffle_tickets = 0
                 total.manual_raffle_tickets = 0
+            session.execute(delete(RaffleMilestoneRecord))
 
         result = RaffleResult(
             run_id=run_id,
-            winner=winner,
-            winning_ticket=winning_ticket,
+            winners=tuple(winners),
             total_tickets=total_tickets,
         )
         LOGGER.debug(
-            "Created raffle run %s; participants=%s total_tickets=%s",
+            "Created raffle run %s; participants=%s total_tickets=%s winners=%s",
             run_id,
             len(totals),
             total_tickets,
+            len(winners),
         )
         return result
 
@@ -434,7 +648,9 @@ class RaffleStore:
         )
         with self._sessions() as session:
             record = session.scalars(statement).first()
-            result = _to_raffle_result(record) if record is not None else None
+            result = (
+                _to_raffle_result(session, record) if record is not None else None
+            )
             LOGGER.debug("Loaded pending raffle result; found=%s", result is not None)
             return result
 
@@ -452,6 +668,16 @@ class RaffleStore:
                 record.notification_sent = True
                 LOGGER.debug("Marked raffle deposit event %s notification sent", event_id)
 
+    def mark_deposit_audit_notification_sent(self, event_id: int) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(RaffleDepositRecord, event_id)
+            if record is not None:
+                record.audit_notification_sent = True
+                LOGGER.debug(
+                    "Marked raffle deposit event %s audit notification sent",
+                    event_id,
+                )
+
     def mark_leave_notification_sent(self, event_id: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(GuildLeaveRecord, event_id)
@@ -459,7 +685,25 @@ class RaffleStore:
                 record.notification_sent = True
                 LOGGER.debug("Marked guild-leave event %s notification sent", event_id)
 
-    def _process_deposit(self, session: Session, deposit: RaffleDeposit) -> None:
+    def mark_join_notification_sent(self, event_id: int) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(GuildJoinRecord, event_id)
+            if record is not None:
+                record.notification_sent = True
+                LOGGER.debug("Marked guild-join event %s notification sent", event_id)
+
+    def mark_milestone_notification_sent(self, threshold: int) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(RaffleMilestoneRecord, threshold)
+            if record is not None:
+                record.notification_sent = True
+                LOGGER.debug("Marked raffle milestone %s notification sent", threshold)
+
+    def _process_deposit(
+        self,
+        session: Session,
+        deposit: RaffleDeposit,
+    ) -> None:
         if session.get(RaffleDepositRecord, deposit.event_id) is not None:
             LOGGER.debug("Skipping duplicate raffle deposit event %s", deposit.event_id)
             return
@@ -498,6 +742,21 @@ class RaffleStore:
             deposit.event_id,
             tickets_awarded,
         )
+
+    def _create_reached_milestones(self, session: Session) -> None:
+        purchased_tickets = sum(
+            session.scalars(select(RaffleTotalRecord.gold_raffle_tickets)).all()
+        )
+        for tier in self._reward_tiers:
+            if purchased_tickets < tier.threshold:
+                break
+            if session.get(RaffleMilestoneRecord, tier.threshold) is None:
+                session.add(
+                    RaffleMilestoneRecord(
+                        threshold=tier.threshold,
+                        tier_name=tier.name,
+                    )
+                )
 
     def _migrate_legacy_totals(self) -> None:
         migrated = 0
@@ -567,6 +826,21 @@ def _to_guild_leave(record: GuildLeaveRecord) -> GuildLeave:
     )
 
 
+def _to_guild_join(record: GuildJoinRecord) -> GuildJoin:
+    return GuildJoin(
+        event_id=record.event_id,
+        username=record.username,
+        event_time=record.event_time,
+    )
+
+
+def _to_raffle_milestone(record: RaffleMilestoneRecord) -> RaffleMilestone:
+    return RaffleMilestone(
+        threshold=record.threshold,
+        tier_name=record.tier_name,
+    )
+
+
 def _to_raffle_total(record: RaffleTotalRecord) -> RaffleTotal:
     return RaffleTotal(
         username=record.username,
@@ -577,11 +851,31 @@ def _to_raffle_total(record: RaffleTotalRecord) -> RaffleTotal:
     )
 
 
-def _to_raffle_result(record: RaffleRunRecord) -> RaffleResult:
+def _to_raffle_result(session: Session, record: RaffleRunRecord) -> RaffleResult:
+    winner_records = session.scalars(
+        select(RaffleRunWinnerRecord)
+        .where(RaffleRunWinnerRecord.run_id == record.run_id)
+        .order_by(RaffleRunWinnerRecord.draw_position)
+    ).all()
+    winners = tuple(
+        RaffleWinner(
+            username=winner.username,
+            winning_ticket=winner.winning_ticket,
+            tickets_before_draw=winner.tickets_before_draw,
+        )
+        for winner in winner_records
+    )
+    if not winners:
+        winners = (
+            RaffleWinner(
+                username=record.winner,
+                winning_ticket=record.winning_ticket,
+                tickets_before_draw=record.total_tickets,
+            ),
+        )
     return RaffleResult(
         run_id=record.run_id,
-        winner=record.winner,
-        winning_ticket=record.winning_ticket,
+        winners=winners,
         total_tickets=record.total_tickets,
     )
 
@@ -622,6 +916,56 @@ def parse_guild_leave(event: dict[str, Any]) -> GuildLeave | None:
         username=str(event["user"]),
         event_time=str(event.get("time", "")),
     )
+
+
+def parse_guild_join(event: dict[str, Any]) -> GuildJoin | None:
+    if event.get("type") != "joined" or not event.get("user"):
+        return None
+    return GuildJoin(
+        event_id=int(event["id"]),
+        username=str(event["user"]),
+        event_time=str(event.get("time", "")),
+    )
+
+
+def _validate_reward_tiers(
+    tiers: tuple[RaffleRewardTier, ...],
+) -> tuple[RaffleRewardTier, ...]:
+    ordered = tuple(sorted(tiers, key=lambda tier: tier.threshold))
+    thresholds = [tier.threshold for tier in ordered]
+    if any(threshold <= 0 for threshold in thresholds):
+        raise ValueError("Raffle reward tier thresholds must be greater than zero")
+    if len(thresholds) != len(set(thresholds)):
+        raise ValueError("Raffle reward tier thresholds must be unique")
+    if any(not tier.name.strip() for tier in ordered):
+        raise ValueError("Raffle reward tier names must not be blank")
+    return ordered
+
+
+def _validate_draw_tiers(
+    tiers: tuple[RaffleDrawTier, ...],
+) -> tuple[RaffleDrawTier, ...]:
+    ordered = tuple(sorted(tiers, key=lambda tier: tier.minimum_purchased_tickets))
+    thresholds = [tier.minimum_purchased_tickets for tier in ordered]
+    if not thresholds or thresholds[0] != 0:
+        raise ValueError("Raffle draw tiers must start at zero purchased tickets")
+    if len(thresholds) != len(set(thresholds)):
+        raise ValueError("Raffle draw tier thresholds must be unique")
+    if any(tier.winner_count <= 0 for tier in ordered):
+        raise ValueError("Raffle draw winner counts must be greater than zero")
+    return ordered
+
+
+def _winner_count_for_purchased_tickets(
+    purchased_tickets: int,
+    draw_tiers: tuple[RaffleDrawTier, ...],
+) -> int:
+    winner_count = draw_tiers[0].winner_count
+    for tier in draw_tiers:
+        if purchased_tickets < tier.minimum_purchased_tickets:
+            break
+        winner_count = tier.winner_count
+    return winner_count
 
 
 def format_gold(coins: int) -> str:

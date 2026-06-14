@@ -15,8 +15,8 @@ class FakeGuildApi:
     def __init__(self):
         self.calls = 0
         self.members: list[dict[str, Any]] = [
-            {"name": "Member One.1234"},
-            {"name": "Another Member.5678"},
+            {"name": "Member One.1234", "rank": "Officer"},
+            {"name": "Another Member.5678", "rank": "Member"},
         ]
 
     async def get_guild_members(self, guild_id: str) -> list[dict[str, Any]]:
@@ -42,6 +42,14 @@ class TestGuildMemberCache:
         now[0] = 161.0
         assert await cache.resolve("another member.5678") == "Another Member.5678"
         assert api.calls == 2
+
+    async def test_returns_usernames_with_rank_case_insensitively(self) -> None:
+        api = FakeGuildApi()
+        cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
+
+        assert await cache.usernames_with_rank("officer") == {"Member One.1234"}
+        assert await cache.usernames_with_rank("Member") == {"Another Member.5678"}
+        assert api.calls == 1
 
     async def test_force_refresh_verifies_current_guild_membership(self) -> None:
         api = FakeGuildApi()

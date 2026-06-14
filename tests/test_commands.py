@@ -23,12 +23,17 @@ from gw2bot.main import (
     TRIAL_ROLE_ID,
     Gw2Bot,
     RaffleAccountLinkModal,
+    RaffleContributionReportView,
     RedactingFormatter,
     RaffleCommands,
     RaffleTicketsListView,
     configure_logging,
     format_addticket_audit,
-    format_raffle_contribution_report,
+    format_automated_message_diagnostics,
+    format_removetickets_audit,
+    format_raffle_milestone_preview,
+    format_raffle_result,
+    raffle_contribution_report_embed,
     raffle_contribution_report_end,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
@@ -47,7 +52,13 @@ class TestCommand:
 
         assert group.name == "raffle"
         assert group.guild_only
-        assert set(commands) == {"draw", "addticket", "tickets", "list"}
+        assert set(commands) == {
+            "draw",
+            "addticket",
+            "removetickets",
+            "tickets",
+            "list",
+        }
         assert "tickets-list" not in commands
         assert "win" not in commands
         addticket = commands["addticket"]
@@ -56,6 +67,12 @@ class TestCommand:
         tickets = commands["tickets"]
         assert isinstance(tickets, app_commands.Command)
         assert [parameter.name for parameter in tickets.parameters] == ["username"]
+        removetickets = commands["removetickets"]
+        assert isinstance(removetickets, app_commands.Command)
+        assert [parameter.name for parameter in removetickets.parameters] == [
+            "username",
+            "amount",
+        ]
 
     def test_checks_required_raffle_roles(self) -> None:
         draw_user = SimpleNamespace(roles=[SimpleNamespace(id=RAFFLE_DRAW_ROLE_ID)])
@@ -71,6 +88,13 @@ class TestCommand:
         assert (
             format_addticket_audit(123456789, "Username.1234")
             == "<@123456789> added 1 raffle ticket to Username.1234."
+        )
+
+    def test_formats_removetickets_audit_with_discord_mention(self) -> None:
+        assert (
+            format_removetickets_audit(123456789, "Username.1234", 2)
+            == "<@123456789> removed 2 purchased raffle tickets "
+            "from Username.1234."
         )
 
     @patch("gw2bot.main.logging.basicConfig")
@@ -346,14 +370,72 @@ class TestRaffleTicketsCommand:
             response=SimpleNamespace(edit_message=AsyncMock()),
         )
 
-        assert "Member 09.1234" in (first_embed.description or "")
-        assert "Member 10.1234" not in (first_embed.description or "")
+        assert "Member 10.1234" in (first_embed.description or "")
+        assert "Member 01.1234" in (first_embed.description or "")
+        assert "Member 00.1234" not in (first_embed.description or "")
+        assert (
+            "**Member 10.1234**\nPurchased: 10\nFree: 0\nTotal: 10"
+            in (first_embed.description or "")
+        )
+        assert (
+            "**Member 01.1234**\nPurchased: 1\nFree: 0\nTotal: 1"
+            in (first_embed.description or "")
+        )
+        assert "```" not in (first_embed.description or "")
 
         await view.change_page(interaction, 1)  # type: ignore[arg-type]
 
         second_embed = interaction.response.edit_message.await_args.kwargs["embed"]
-        assert "Member 10.1234" in (second_embed.description or "")
-        assert "Member 09.1234" not in (second_embed.description or "")
+        assert "Member 00.1234" in (second_embed.description or "")
+        assert "Member 01.1234" not in (second_embed.description or "")
+        assert (
+            second_embed.description
+            == "**Member 00.1234**\nPurchased: 0\nFree: 0\nTotal: 0"
+        )
+
+    def test_list_orders_total_descending_then_username_case_insensitively(
+        self,
+    ) -> None:
+        totals = [
+            raffle_total("Zulu.1234", purchased=2),
+            raffle_total("alpha.1234", purchased=2),
+            raffle_total("Lowest.1234", purchased=1),
+            raffle_total("Highest.1234", purchased=3),
+            raffle_total("Beta.1234", purchased=2),
+        ]
+
+        description = raffle_ticket_list_embed(totals, 0).description or ""
+
+        positions = [
+            description.index(name)
+            for name in (
+                "Highest.1234",
+                "alpha.1234",
+                "Beta.1234",
+                "Zulu.1234",
+                "Lowest.1234",
+            )
+        ]
+        assert positions == sorted(positions)
+
+    def test_list_ordering_logs_counts_without_account_names(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "list-account-secret"
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            raffle_ticket_list_embed(
+                [raffle_total(f"{secret}.1234", purchased=1)],
+                0,
+            )
+
+        assert secret not in caplog.text
+        assert "Ordered raffle totals for display; players=1" in caplog.text
+        assert (
+            "Rendering raffle ticket list page; page=1 page_count=1 players=1"
+            in caplog.text
+        )
 
     def test_formats_ticket_embed(self) -> None:
         embed = raffle_ticket_embed(
@@ -380,7 +462,10 @@ class TestRaffleDrawCommand:
                     events.append("run"),
                     SimpleNamespace(
                         run_id=7,
-                        winner="Winner.1234",
+                        winners=(
+                            SimpleNamespace(username="Winner A.1234"),
+                            SimpleNamespace(username="Winner B.5678"),
+                        ),
                         total_tickets=10,
                     ),
                 )[1]
@@ -402,7 +487,11 @@ class TestRaffleDrawCommand:
         assert events == ["defer", "refresh", "run"]
         interaction.response.send_message.assert_not_awaited()
         interaction.followup.send.assert_awaited_once_with(
-            "Raffle winner: **Winner.1234**! Selected from 10 tickets. "
+            "Raffle winners:\n"
+            "1. **Winner A.1234**\n"
+            "2. **Winner B.5678**\n"
+            "Selected 2 winners from 10 tickets. "
+            "One winning ticket was removed from the pool after each draw. "
             "All current raffle tickets have been reset."
         )
         bot.mark_raffle_announcement_sent.assert_called_once_with(7)
@@ -412,7 +501,7 @@ class TestRaffleDrawCommand:
     ) -> None:
         pending = SimpleNamespace(
             run_id=7,
-            winner="Winner.1234",
+            winners=(SimpleNamespace(username="Winner.1234"),),
             total_tickets=10,
         )
         bot = SimpleNamespace(
@@ -445,7 +534,7 @@ class TestRaffleDrawCommand:
             run_raffle=MagicMock(
                 return_value=SimpleNamespace(
                     run_id=7,
-                    winner="Winner.1234",
+                    winners=(SimpleNamespace(username="Winner.1234"),),
                     total_tickets=10,
                 )
             ),
@@ -466,6 +555,25 @@ class TestRaffleDrawCommand:
             await draw.callback(group, interaction)  # type: ignore[arg-type]
 
         bot.mark_raffle_announcement_sent.assert_not_called()
+
+    def test_formats_repeat_winners_in_draw_order(self) -> None:
+        result = SimpleNamespace(
+            winners=(
+                SimpleNamespace(username="Repeat.1234"),
+                SimpleNamespace(username="Other.5678"),
+                SimpleNamespace(username="Repeat.1234"),
+            ),
+            total_tickets=20,
+        )
+
+        message = format_raffle_result(result)  # type: ignore[arg-type]
+
+        assert message.startswith(
+            "Raffle winners:\n"
+            "1. **Repeat.1234**\n"
+            "2. **Other.5678**\n"
+            "3. **Repeat.1234**\n"
+        )
 
     async def test_does_not_draw_when_guild_log_refresh_fails(
         self,
@@ -493,6 +601,115 @@ class TestRaffleDrawCommand:
         bot.run_raffle.assert_not_called()
         interaction.followup.send.assert_awaited_once_with(
             "Could not refresh guild deposits. No raffle was drawn.",
+            ephemeral=True,
+        )
+
+
+class TestRemoveRaffleTicketsCommand:
+    async def test_officer_removes_purchased_tickets_with_default_amount(
+        self,
+    ) -> None:
+        total = raffle_total("Member.1234", purchased=2, free=1)
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value=total.username),
+            remove_gold_raffle_tickets=MagicMock(return_value=total),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command
+            for command in group.commands
+            if command.name == "removetickets"
+        )
+
+        await command.callback(group, interaction, "member.1234")  # type: ignore[arg-type]
+
+        bot.authorize_raffle_command.assert_awaited_once_with(
+            interaction,
+            RAFFLE_DRAW_ROLE_ID,
+        )
+        bot.remove_gold_raffle_tickets.assert_called_once_with(
+            "Member.1234",
+            1,
+        )
+        bot.send_notification.assert_awaited_once_with(
+            "<@1234> removed 1 purchased raffle ticket from Member.1234."
+        )
+        interaction.followup.send.assert_awaited_once_with(
+            "Removed 1 purchased raffle ticket from **Member.1234**. "
+            "They now have 2 purchased and 3 total current tickets.",
+            ephemeral=True,
+        )
+
+    async def test_rejects_excess_ticket_removal_without_audit(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value="Member.1234"),
+            remove_gold_raffle_tickets=MagicMock(
+                side_effect=ValueError(
+                    "Member.1234 has only 1 purchased raffle ticket"
+                )
+            ),
+            send_notification=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command
+            for command in group.commands
+            if command.name == "removetickets"
+        )
+
+        await command.callback(group, interaction, "Member.1234", 2)  # type: ignore[arg-type]
+
+        bot.send_notification.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once_with(
+            "Member.1234 has only 1 purchased raffle ticket",
+            ephemeral=True,
+        )
+
+    async def test_lookup_failure_does_not_log_secret_bearing_exception(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "removal-lookup-secret"
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(
+                side_effect=aiohttp.ClientError(
+                    f"request failed with access_token={secret}"
+                )
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command
+            for command in group.commands
+            if command.name == "removetickets"
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            await command.callback(group, interaction, "Member.1234", 1)  # type: ignore[arg-type]
+
+        assert secret not in caplog.text
+        assert "Could not refresh the guild member cache" in caplog.text
+        interaction.followup.send.assert_awaited_once_with(
+            "Could not verify guild membership. Try again later.",
             ephemeral=True,
         )
 
@@ -553,9 +770,279 @@ class TestBotIntent:
             bot = Gw2Bot(config)
 
         assert bot.intents.guilds
+        assert bot.intents.guild_messages
         assert not bot.intents.members
         assert bot.intents.message_content
         raffle_store.assert_called_once()
+
+
+class TestAutomatedMessageDiagnostics:
+    def test_formats_all_non_command_automated_message_previews(self) -> None:
+        messages = format_automated_message_diagnostics(
+            [RaffleContribution("Free Only.1234", 0, 1)],
+            purchased_tickets=125,
+        )
+        output = "\n".join(messages)
+
+        assert (
+            "DiagnosticUser.1234 deposited 3 gold and purchased 3 raffle tickets"
+            in output
+        )
+        assert "DiagnosticUser.1234 has joined the guild." in output
+        assert "DiagnosticUser.1234 has left the guild." in output
+        assert (
+            "150 total tickets have been purchased for this raffle. "
+            "Tier 3 rewards have been reached!"
+        ) in output
+        assert "Guild Storage is low on **Diagnostic Feast**: 5 left" in output
+        assert "Trial members past the 14-day mark" in output
+        assert "Guild Storage polling failed: API unavailable" in output
+        assert "Guild Storage polling recovered." in output
+
+    def test_highest_tier_preview_notes_that_it_is_already_reached(self) -> None:
+        assert format_raffle_milestone_preview(200) == (
+            "200 total tickets have been purchased for this raffle. "
+            "Tier 4 rewards have been reached! "
+            "This raffle is already at the highest configured tier."
+        )
+
+    async def test_diag_in_notification_channel_sends_read_only_previews(
+        self,
+    ) -> None:
+        channel = SimpleNamespace(id=9012, send=AsyncMock())
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _send_automated_message_diagnostics=AsyncMock(),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            channel=channel,
+            content=" DiAg ",
+        )
+
+        await Gw2Bot.on_message(cast(Gw2Bot, bot), message)  # type: ignore[arg-type]
+
+        bot._send_automated_message_diagnostics.assert_awaited_once_with(channel)
+
+    async def test_diag_debug_logging_does_not_include_message_details(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        author_secret = "author-secret"
+        channel_secret = "channel-secret"
+        channel = SimpleNamespace(
+            id=9012,
+            name=channel_secret,
+            send=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _send_automated_message_diagnostics=AsyncMock(),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=False, name=author_secret),
+            channel=channel,
+            content="diag",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            await Gw2Bot.on_message(cast(Gw2Bot, bot), message)  # type: ignore[arg-type]
+
+        assert author_secret not in caplog.text
+        assert channel_secret not in caplog.text
+        assert (
+            "Discord message received; author_is_bot=False "
+            "notification_channel=True characters=4 diag_candidate=True"
+            in caplog.text
+        )
+        assert "Starting automated message diagnostics request" in caplog.text
+        assert "Automated message diagnostics request completed" in caplog.text
+
+    async def test_diag_request_failure_logs_only_error_type(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "diag-request-secret"
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _send_automated_message_diagnostics=AsyncMock(
+                side_effect=RuntimeError(secret)
+            ),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            channel=SimpleNamespace(id=9012),
+            content="diag",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            await Gw2Bot.on_message(cast(Gw2Bot, bot), message)  # type: ignore[arg-type]
+
+        assert secret not in caplog.text
+        assert (
+            "Automated message diagnostics request failed; error_type=RuntimeError"
+            in caplog.text
+        )
+        assert "Automated message diagnostics request completed" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("author_is_bot", "channel_id", "content"),
+        (
+            (True, 9012, "diag"),
+            (False, 3456, "diag"),
+            (False, 9012, "diagnostic"),
+        ),
+    )
+    async def test_ignores_bot_wrong_channel_and_non_exact_diag_messages(
+        self,
+        author_is_bot: bool,
+        channel_id: int,
+        content: str,
+    ) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _send_automated_message_diagnostics=AsyncMock(),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=author_is_bot),
+            channel=SimpleNamespace(id=channel_id),
+            content=content,
+        )
+
+        await Gw2Bot.on_message(cast(Gw2Bot, bot), message)  # type: ignore[arg-type]
+
+        bot._send_automated_message_diagnostics.assert_not_awaited()
+
+    async def test_preview_reads_current_interval_without_changing_schedule(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 12, 14, 30, tzinfo=UTC)
+        channel = SimpleNamespace(send=AsyncMock())
+        bot = SimpleNamespace(
+            get_raffle_contributions=MagicMock(
+                return_value=[RaffleContribution("Free Only.1234", 0, 1)]
+            ),
+            get_raffle_totals=MagicMock(
+                return_value=[
+                    RaffleTotal(
+                        username="Buyer.1234",
+                        coins_deposited=750_000,
+                        raffle_tickets=76,
+                        gold_raffle_tickets=75,
+                        manual_raffle_tickets=1,
+                    )
+                ]
+            ),
+        )
+
+        await Gw2Bot._send_automated_message_diagnostics(
+            cast(Gw2Bot, bot),
+            channel,
+            now,
+        )
+
+        bot.get_raffle_contributions.assert_called_once_with(
+            datetime(2026, 6, 12, 12, tzinfo=UTC),
+            now,
+        )
+        bot.get_raffle_totals.assert_called_once_with()
+        output = "\n".join(
+            call_.args[0]
+            for call_ in channel.send.await_args_list
+            if call_.args
+        )
+        report_embed = next(
+            call_.kwargs["embed"]
+            for call_ in channel.send.await_args_list
+            if "embed" in call_.kwargs
+        )
+        assert (
+            report_embed.description
+            == "**Free Only.1234**\nPurchased: 0\nFree: 1\nTotal: 1"
+        )
+        assert (
+            "100 total tickets have been purchased for this raffle. "
+            "Tier 2 rewards have been reached!"
+        ) in output
+
+    async def test_preview_logging_does_not_include_contributor_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "contributor-secret"
+        bot = SimpleNamespace(
+            get_raffle_contributions=MagicMock(
+                return_value=[RaffleContribution(secret, 1, 0)]
+            ),
+            get_raffle_totals=MagicMock(return_value=[]),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            await Gw2Bot._send_automated_message_diagnostics(
+                cast(Gw2Bot, bot),
+                SimpleNamespace(send=AsyncMock()),
+                datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
+            )
+
+        assert secret not in caplog.text
+        assert (
+            "Prepared automated message diagnostics; messages=8 contributors=1"
+            in caplog.text
+        )
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 9
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 9
+        assert (
+            "Automated message diagnostics completed; attempted=9 delivered=9 "
+            "failed=0"
+            in caplog.text
+        )
+
+    async def test_preview_failure_is_logged_and_remaining_previews_continue(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "diagnostic-failure-secret"
+        channel = SimpleNamespace(
+            send=AsyncMock(
+                side_effect=[
+                    None,
+                    RuntimeError(secret),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ]
+            )
+        )
+        bot = SimpleNamespace(
+            get_raffle_contributions=MagicMock(
+                return_value=[RaffleContribution("Buyer.1234", 1, 0)]
+            ),
+            get_raffle_totals=MagicMock(return_value=[]),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            await Gw2Bot._send_automated_message_diagnostics(
+                cast(Gw2Bot, bot),
+                channel,
+                datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
+            )
+
+        assert channel.send.await_count == 9
+        assert secret not in caplog.text
+        assert (
+            "Automated diagnostic delivery failed; kind=contribution-report "
+            "error_type=RuntimeError"
+            in caplog.text
+        )
+        assert (
+            "Automated message diagnostics completed; attempted=9 delivered=8 "
+            "failed=1"
+            in caplog.text
+        )
 
 
 class TestStartupStatus:
@@ -593,22 +1080,83 @@ class TestStartupStatus:
 
 class TestGuildLogRefresh:
     async def test_processes_new_events_before_returning(self) -> None:
-        events = [{"id": 101, "type": "stash"}]
+        events = [
+            {
+                "id": 101,
+                "type": "stash",
+                "operation": "deposit",
+                "user": "Officer.1234",
+                "coins": 110_000,
+            }
+        ]
         api = SimpleNamespace(get_guild_log=AsyncMock(return_value=events))
         store = MagicMock()
         store.get_cursor.return_value = 100
+        guild_members = SimpleNamespace(
+            usernames_with_rank=AsyncMock(return_value={"Officer.1234"})
+        )
         bot = SimpleNamespace(
             _api=api,
             _raffle_store=store,
+            _guild_members=guild_members,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
         )
 
         await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
 
         api.get_guild_log.assert_awaited_once_with("guild-id", 100)
-        store.process_events.assert_called_once_with(events)
+        guild_members.usernames_with_rank.assert_awaited_once_with(
+            "Officer",
+            force_refresh=True,
+        )
+        store.process_events.assert_called_once_with(events, {"Officer.1234"})
         store.initialize_cursor.assert_not_called()
 
+    async def test_does_not_refresh_member_ranks_without_new_deposits(self) -> None:
+        events = [{"id": 101, "type": "joined", "user": "Member.1234"}]
+        api = SimpleNamespace(get_guild_log=AsyncMock(return_value=events))
+        store = MagicMock()
+        store.get_cursor.return_value = 100
+        guild_members = SimpleNamespace(usernames_with_rank=AsyncMock())
+        bot = SimpleNamespace(
+            _api=api,
+            _raffle_store=store,
+            _guild_members=guild_members,
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+        )
+
+        await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
+
+        guild_members.usernames_with_rank.assert_not_awaited()
+        store.process_events.assert_called_once_with(events, set())
+
+    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_guild_log_poller_sends_deposits_to_main_and_audit_channels(
+        self,
+        sleep: AsyncMock,
+    ) -> None:
+        bot = SimpleNamespace(
+            wait_until_ready=AsyncMock(),
+            is_closed=MagicMock(side_effect=[False, True]),
+            _session=object(),
+            _api=object(),
+            refresh_guild_log=AsyncMock(),
+            _send_pending_raffle_notifications=AsyncMock(),
+            _send_pending_deposit_audit_notifications=AsyncMock(),
+            _send_pending_raffle_milestones=AsyncMock(),
+            _send_pending_join_notifications=AsyncMock(),
+            _send_pending_leave_notifications=AsyncMock(),
+            _handle_poll_error=AsyncMock(),
+            _handle_poll_success=AsyncMock(),
+            _config=SimpleNamespace(guild_log_poll_interval_seconds=60),
+        )
+
+        await Gw2Bot._poll_guild_log(cast(Gw2Bot, bot))
+
+        bot._send_pending_raffle_notifications.assert_awaited_once()
+        bot._send_pending_deposit_audit_notifications.assert_awaited_once()
+        bot._handle_poll_success.assert_awaited_once_with("Guild Log")
+        sleep.assert_awaited_once_with(60)
 
 class TestFeastNotification:
     async def test_sends_same_feast_message_to_channel_and_private_user(self) -> None:
@@ -1323,24 +1871,32 @@ class TestRaffleContributionNotification:
             datetime(2026, 6, 7, 6, tzinfo=UTC)
         ) == 6 * 60 * 60
 
-    def test_formats_contributors_and_skips_empty_report(self) -> None:
+    def test_formats_contributors_as_mobile_friendly_blocks(self) -> None:
         contributions = [
             RaffleContribution("Alpha.1234", 2, 1),
             RaffleContribution("Beta.1234", 0, 2),
         ]
 
-        messages = format_raffle_contribution_report(contributions)
+        embed = raffle_contribution_report_embed(contributions, 0)
+        description = embed.description or ""
 
-        assert len(messages) == 1
-        assert "**Alpha.1234** - Total: 3 | Purchased: 2 | Free: 1" in messages[0]
-        assert "**Beta.1234** - Total: 2 | Free: 2" in messages[0]
-        assert format_raffle_contribution_report([]) == []
+        assert embed.title == "Raffle contributions from the last 6 hours"
+        assert description == (
+            "**Alpha.1234**\n"
+            "Purchased: 2\n"
+            "Free: 1\n"
+            "Total: 3\n\n"
+            "**Beta.1234**\n"
+            "Purchased: 0\n"
+            "Free: 2\n"
+            "Total: 2"
+        )
 
     async def test_empty_window_does_not_send_message(self) -> None:
         report_end = datetime(2026, 6, 7, 6, tzinfo=UTC)
         bot = SimpleNamespace(
             get_raffle_contributions=MagicMock(return_value=[]),
-            _send_raffle_contribution_message=AsyncMock(),
+            _send_raffle_contribution_embed=AsyncMock(),
         )
 
         await Gw2Bot._send_raffle_contribution_report(
@@ -1352,15 +1908,15 @@ class TestRaffleContributionNotification:
             datetime(2026, 6, 7, 0, tzinfo=UTC),
             report_end,
         )
-        bot._send_raffle_contribution_message.assert_not_awaited()
+        bot._send_raffle_contribution_embed.assert_not_awaited()
 
-    async def test_free_ticket_only_window_sends_message(self) -> None:
+    async def test_free_ticket_only_window_sends_embed(self) -> None:
         report_end = datetime(2026, 6, 7, 6, tzinfo=UTC)
         bot = SimpleNamespace(
             get_raffle_contributions=MagicMock(
                 return_value=[RaffleContribution("Free Only.1234", 0, 1)]
             ),
-            _send_raffle_contribution_message=AsyncMock(),
+            _send_raffle_contribution_embed=AsyncMock(),
         )
 
         await Gw2Bot._send_raffle_contribution_report(
@@ -1368,10 +1924,43 @@ class TestRaffleContributionNotification:
             report_end,
         )
 
-        bot._send_raffle_contribution_message.assert_awaited_once_with(
-            "**Raffle contributions from the last 6 hours**\n"
-            "* **Free Only.1234** - Total: 1 | Free: 1"
+        bot._send_raffle_contribution_embed.assert_awaited_once()
+        embed, view = bot._send_raffle_contribution_embed.await_args.args
+        assert view is None
+        assert (
+            embed.description
+            == "**Free Only.1234**\nPurchased: 0\nFree: 1\nTotal: 1"
         )
+
+    async def test_contribution_report_paginates_ten_users_at_a_time(self) -> None:
+        report_end = datetime(2026, 6, 7, 6, tzinfo=UTC)
+        contributions = [
+            RaffleContribution(f"Member {index:02d}.1234", index, 0)
+            for index in range(11)
+        ]
+        bot = SimpleNamespace(
+            get_raffle_contributions=MagicMock(return_value=contributions),
+            _send_raffle_contribution_embed=AsyncMock(),
+        )
+
+        await Gw2Bot._send_raffle_contribution_report(
+            cast(Gw2Bot, bot),
+            report_end,
+        )
+
+        embed, view = bot._send_raffle_contribution_embed.await_args.args
+        assert isinstance(view, RaffleContributionReportView)
+        assert "Member 09.1234" in (embed.description or "")
+        assert "Member 10.1234" not in (embed.description or "")
+
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+        await view.change_page(interaction, 1)  # type: ignore[arg-type]
+
+        second_embed = interaction.response.edit_message.await_args.kwargs["embed"]
+        assert "Member 10.1234" in (second_embed.description or "")
+        assert "Member 09.1234" not in (second_embed.description or "")
 
     async def test_sends_pending_purchase_messages_to_raffle_channel(self) -> None:
         deposit = SimpleNamespace(event_id=101, message="purchase message")
@@ -1388,6 +1977,89 @@ class TestRaffleContributionNotification:
             "purchase message"
         )
         store.mark_notification_sent.assert_called_once_with(101)
+
+    async def test_sends_pending_deposit_audits_to_notification_channel(self) -> None:
+        deposit = SimpleNamespace(event_id=101, message="purchase message")
+        store = MagicMock()
+        store.get_pending_deposit_audit_notifications.return_value = [deposit]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_deposit_audit_notifications(cast(Gw2Bot, bot))
+
+        bot._try_send_notification.assert_awaited_once_with("purchase message")
+        store.mark_deposit_audit_notification_sent.assert_called_once_with(101)
+
+    async def test_retries_pending_deposit_audit_after_delivery_failure(self) -> None:
+        deposit = SimpleNamespace(event_id=101, message="purchase message")
+        store = MagicMock()
+        store.get_pending_deposit_audit_notifications.return_value = [deposit]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=False),
+        )
+
+        await Gw2Bot._send_pending_deposit_audit_notifications(cast(Gw2Bot, bot))
+
+        store.mark_deposit_audit_notification_sent.assert_not_called()
+
+    async def test_sends_pending_join_messages_to_notification_channel(self) -> None:
+        join = SimpleNamespace(event_id=101, message="join message")
+        store = MagicMock()
+        store.get_pending_join_notifications.return_value = [join]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_join_notifications(cast(Gw2Bot, bot))
+
+        bot._try_send_notification.assert_awaited_once_with("join message")
+        store.mark_join_notification_sent.assert_called_once_with(101)
+
+    async def test_retries_pending_join_after_delivery_failure(self) -> None:
+        join = SimpleNamespace(event_id=101, message="join message")
+        store = MagicMock()
+        store.get_pending_join_notifications.return_value = [join]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=False),
+        )
+
+        await Gw2Bot._send_pending_join_notifications(cast(Gw2Bot, bot))
+
+        store.mark_join_notification_sent.assert_not_called()
+
+    async def test_sends_pending_milestones_to_raffle_channel(self) -> None:
+        milestone = SimpleNamespace(threshold=50, message="milestone message")
+        store = MagicMock()
+        store.get_pending_milestones.return_value = [milestone]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_raffle_contribution_message=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_raffle_milestones(cast(Gw2Bot, bot))
+
+        bot._try_send_raffle_contribution_message.assert_awaited_once_with(
+            "milestone message"
+        )
+        store.mark_milestone_notification_sent.assert_called_once_with(50)
+
+    async def test_retries_pending_milestone_after_delivery_failure(self) -> None:
+        milestone = SimpleNamespace(threshold=50, message="milestone message")
+        store = MagicMock()
+        store.get_pending_milestones.return_value = [milestone]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_raffle_contribution_message=AsyncMock(return_value=False),
+        )
+
+        await Gw2Bot._send_pending_raffle_milestones(cast(Gw2Bot, bot))
+
+        store.mark_milestone_notification_sent.assert_not_called()
 
     async def test_retries_pending_purchase_after_raffle_channel_failure(
         self,
@@ -1438,6 +2110,13 @@ class TestRaffleContributionNotification:
             fetch_channel=AsyncMock(return_value=channel),
         )
 
+        async def get_channel() -> Any:
+            return await Gw2Bot._get_raffle_contribution_channel(
+                cast(Gw2Bot, bot)
+            )
+
+        bot._get_raffle_contribution_channel = get_channel
+
         await Gw2Bot._send_raffle_contribution_message(
             cast(Gw2Bot, bot),
             "first",
@@ -1449,6 +2128,26 @@ class TestRaffleContributionNotification:
 
         bot.fetch_channel.assert_awaited_once_with(RAFFLE_CONTRIBUTION_CHANNEL_ID)
         assert channel.send.await_args_list == [call("first"), call("second")]
+
+    async def test_sends_contribution_embed_with_pagination_view(self) -> None:
+        channel = SimpleNamespace(
+            guild=SimpleNamespace(id=5678),
+            send=AsyncMock(),
+        )
+        bot = SimpleNamespace(
+            _get_raffle_contribution_channel=AsyncMock(return_value=channel),
+        )
+        embed = discord.Embed(title="Report")
+        view = discord.ui.View()
+
+        await Gw2Bot._send_raffle_contribution_embed(
+            cast(Gw2Bot, bot),
+            embed,
+            view,
+        )
+
+        channel.send.assert_awaited_once_with(embed=embed, view=view)
+        bot._get_raffle_contribution_channel.assert_awaited_once_with()
 
     @patch("gw2bot.main.raffle_contribution_report_end")
     @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
@@ -1477,6 +2176,77 @@ class TestRaffleContributionNotification:
         bot._send_raffle_contribution_report.assert_awaited_once_with(boundary)
         bot._handle_poll_success.assert_awaited_once_with("Raffle Contributions")
         bot._handle_poll_error.assert_not_awaited()
+
+    @patch("gw2bot.main.raffle_contribution_report_end")
+    @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
+    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_poller_posts_persisted_report_after_refresh_timeout(
+        self,
+        sleep: AsyncMock,
+        seconds_until_report: MagicMock,
+        report_end: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        boundary = datetime(2026, 6, 7, 6, tzinfo=UTC)
+        report_end.return_value = boundary
+        bot = SimpleNamespace(
+            wait_until_ready=AsyncMock(),
+            is_closed=MagicMock(side_effect=[False, False, True]),
+            refresh_guild_log=AsyncMock(side_effect=TimeoutError("secret-timeout")),
+            _send_raffle_contribution_report=AsyncMock(),
+            _handle_poll_error=AsyncMock(),
+            _handle_poll_success=AsyncMock(),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            await Gw2Bot._poll_raffle_contributions(bot)  # type: ignore[arg-type]
+
+        sleep.assert_awaited_once_with(123)
+        bot.refresh_guild_log.assert_awaited_once()
+        bot._send_raffle_contribution_report.assert_awaited_once_with(boundary)
+        bot._handle_poll_success.assert_awaited_once_with("Raffle Contributions")
+        bot._handle_poll_error.assert_not_awaited()
+        assert "secret-timeout" not in caplog.text
+        assert (
+            "Raffle Contributions guild-log refresh failed; posting persisted "
+            "report; error_type=TimeoutError"
+            in caplog.text
+        )
+        assert (
+            "Raffle Contributions poll completed successfully; "
+            "guild_log_refreshed=False"
+            in caplog.text
+        )
+
+    @patch("gw2bot.main.raffle_contribution_report_end")
+    @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
+    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_poller_reports_actual_contribution_delivery_timeout(
+        self,
+        sleep: AsyncMock,
+        seconds_until_report: MagicMock,
+        report_end: MagicMock,
+    ) -> None:
+        boundary = datetime(2026, 6, 7, 6, tzinfo=UTC)
+        report_end.return_value = boundary
+        error = TimeoutError("Discord unavailable")
+        bot = SimpleNamespace(
+            wait_until_ready=AsyncMock(),
+            is_closed=MagicMock(side_effect=[False, False, True]),
+            refresh_guild_log=AsyncMock(),
+            _send_raffle_contribution_report=AsyncMock(side_effect=error),
+            _handle_poll_error=AsyncMock(),
+            _handle_poll_success=AsyncMock(),
+        )
+
+        await Gw2Bot._poll_raffle_contributions(bot)  # type: ignore[arg-type]
+
+        sleep.assert_awaited_once_with(123)
+        bot._handle_poll_error.assert_awaited_once_with(
+            "Raffle Contributions",
+            error,
+        )
+        bot._handle_poll_success.assert_not_awaited()
 
     async def test_report_failure_does_not_log_credentials(
         self,

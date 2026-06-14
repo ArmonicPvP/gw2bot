@@ -16,6 +16,17 @@
   changes to prove secrets cannot appear in console output.
 - Never read, print, commit, or include the local `.env` file in diagnostics.
 
+## Diagnostic Logging Coverage
+
+- Add credential-safe debug logging for every meaningful action, decision,
+  skip, external delivery attempt, success, and failure.
+- Diagnostic logs must make it possible to trace a workflow end to end without
+  logging raw messages, event payloads, request or response bodies, or other
+  user-provided content. Prefer sanitized action names, counts, result flags,
+  character counts, and exception type names.
+- A failure in one diagnostic preview must be logged and must not prevent the
+  remaining previews from being attempted.
+
 ## Python Verification
 
 - Create and maintain tests with pytest, not unittest. Use pytest fixtures,

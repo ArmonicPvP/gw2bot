@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     MetaData,
@@ -15,9 +16,14 @@ from sqlalchemy import (
 )
 
 from gw2bot.raffle import (
+    RAFFLE_DRAW_TIERS,
+    RAFFLE_REWARD_TIERS,
+    RaffleDrawTier,
+    RaffleRewardTier,
     RaffleStore,
     format_gold,
     parse_gold_deposit,
+    parse_guild_join,
     parse_guild_leave,
 )
 import pytest
@@ -54,7 +60,39 @@ def guild_leave(
     }
 
 
+def guild_join(
+    event_id: int,
+    username: str = "Username.1234",
+) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "time": "2026-06-07T06:26:17.000Z",
+        "type": "joined",
+        "user": username,
+    }
+
+
 class TestRaffle:
+    def test_default_reward_tiers_are_data_driven(self) -> None:
+        assert [
+            (tier.threshold, tier.name) for tier in RAFFLE_REWARD_TIERS
+        ] == [
+            (50, "Tier 1"),
+            (100, "Tier 2"),
+            (150, "Tier 3"),
+            (200, "Tier 4"),
+        ]
+        assert [
+            (tier.minimum_purchased_tickets, tier.winner_count)
+            for tier in RAFFLE_DRAW_TIERS
+        ] == [
+            (0, 2),
+            (50, 2),
+            (100, 3),
+            (150, 4),
+            (200, 5),
+        ]
+
     def test_parses_gold_deposit_and_formats_message(self) -> None:
         deposit = parse_gold_deposit(gold_deposit(101, coins=35_000))
 
@@ -90,6 +128,14 @@ class TestRaffle:
             is None
         )
 
+    def test_parses_guild_join_with_exact_message(self) -> None:
+        join = parse_guild_join(guild_join(104))
+
+        assert join is not None
+        assert join.message == "Username.1234 has joined the guild."
+        assert parse_guild_join({**guild_join(105), "type": "invited"}) is None
+        assert parse_guild_join({**guild_join(106), "user": ""}) is None
+
     def test_persists_leave_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")
@@ -118,11 +164,21 @@ class TestRaffle:
             store.process_events(
                 [
                     guild_leave(101),
-                    {**guild_leave(102), "type": "joined"},
+                    guild_join(102),
                     guild_leave(103),
+                    guild_join(104),
                 ]
             )
 
+            assert [
+                join.event_id for join in store.get_pending_join_notifications()
+            ] == [102, 104]
+            assert [
+                join.message for join in store.get_pending_join_notifications()
+            ] == [
+                "Username.1234 has joined the guild.",
+                "Username.1234 has joined the guild.",
+            ]
             assert [
                 leave.event_id for leave in store.get_pending_leave_notifications()
             ] == [101, 103]
@@ -134,18 +190,57 @@ class TestRaffle:
             ]
             store.close()
 
-    def test_processes_raffle_deposit_and_guild_leave_before_advancing_cursor(
+    def test_persists_join_notification_and_prevents_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([guild_join(101)])
+
+            assert [
+                join.message for join in store.get_pending_join_notifications()
+            ] == ["Username.1234 has joined the guild."]
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            reopened.process_events([guild_join(101)])
+            pending = reopened.get_pending_join_notifications()
+            assert len(pending) == 1
+            reopened.mark_join_notification_sent(101)
+            assert reopened.get_pending_join_notifications() == []
+            reopened.close()
+
+    def test_processes_deposit_join_and_leave_before_advancing_cursor(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
             store.initialize_cursor(100)
 
-            store.process_events([guild_leave(102), gold_deposit(101)])
+            store.process_events(
+                [guild_leave(103), guild_join(102), gold_deposit(101)]
+            )
 
-            assert store.get_cursor() == 102
+            assert store.get_cursor() == 103
             assert len(store.get_pending_notifications()) == 1
+            assert len(store.get_pending_join_notifications()) == 1
             assert len(store.get_pending_leave_notifications()) == 1
+            store.close()
+
+    def test_guild_event_logging_does_not_include_raw_event_secrets(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+
+            with caplog.at_level(logging.DEBUG, logger="gw2bot.raffle"):
+                store.process_events(
+                    [{**guild_join(101), "api_key": "join-event-secret"}]
+                )
+
+            assert "join-event-secret" not in caplog.text
             store.close()
 
     def test_persists_totals_cursor_and_notification_state(self) -> None:
@@ -351,6 +446,295 @@ class TestRaffle:
             assert reset_total.gold_raffle_tickets == 2
             store.close()
 
+    def test_officer_deposits_over_ten_gold_do_not_fire_purchase_event(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+
+            with caplog.at_level(logging.DEBUG, logger="gw2bot.raffle"):
+                store.process_events(
+                    [
+                        gold_deposit(
+                            101,
+                            username="Officer Allowed.1234",
+                            coins=100_000,
+                        ),
+                        {
+                            **gold_deposit(
+                                102,
+                                username="Officer Blocked.1234",
+                                coins=100_001,
+                            ),
+                            "api_key": "blocked-deposit-secret",
+                        },
+                        gold_deposit(
+                            103,
+                            username="Member.1234",
+                            coins=110_000,
+                        ),
+                    ],
+                    {"officer allowed.1234", "OFFICER BLOCKED.1234"},
+                )
+
+            totals = {
+                total.username: total
+                for total in store.get_totals()
+            }
+            assert totals["Officer Allowed.1234"].gold_raffle_tickets == 10
+            assert "Officer Blocked.1234" not in totals
+            assert totals["Member.1234"].gold_raffle_tickets == 10
+            assert [
+                deposit.event_id
+                for deposit in store.get_pending_notifications()
+            ] == [101, 103]
+            assert [
+                deposit.event_id
+                for deposit in store.get_pending_deposit_audit_notifications()
+            ] == [101, 103]
+            assert store.get_cursor() == 103
+            assert "Skipped oversized Officer raffle deposit event 102" in caplog.text
+            assert "blocked-deposit-secret" not in caplog.text
+            store.close()
+
+    def test_deposit_main_and_audit_notifications_track_delivery_independently(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101)])
+
+            assert [deposit.event_id for deposit in store.get_pending_notifications()] == [
+                101
+            ]
+            assert [
+                deposit.event_id
+                for deposit in store.get_pending_deposit_audit_notifications()
+            ] == [101]
+
+            store.mark_notification_sent(101)
+            assert store.get_pending_notifications() == []
+            assert [
+                deposit.event_id
+                for deposit in store.get_pending_deposit_audit_notifications()
+            ] == [101]
+
+            store.mark_deposit_audit_notification_sent(101)
+            assert store.get_pending_deposit_audit_notifications() == []
+            store.close()
+
+    def test_removes_only_purchased_tickets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101, coins=30_000)])
+            store.add_manual_ticket("Username.1234")
+
+            total = store.remove_gold_tickets("Username.1234", 2)
+
+            assert total.coins_deposited == 30_000
+            assert total.gold_raffle_tickets == 1
+            assert total.manual_raffle_tickets == 1
+            assert total.raffle_tickets == 2
+
+            default_removal = store.remove_gold_tickets("Username.1234")
+            assert default_removal.gold_raffle_tickets == 0
+            assert default_removal.manual_raffle_tickets == 1
+            assert default_removal.raffle_tickets == 1
+
+            with pytest.raises(ValueError, match="greater than zero"):
+                store.remove_gold_tickets("Username.1234", 0)
+            with pytest.raises(ValueError, match="only 0 purchased"):
+                store.remove_gold_tickets("Username.1234")
+            store.close()
+
+    def test_creates_configurable_milestones_once_and_resets_after_draw(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                reward_tiers=(
+                    RaffleRewardTier(2, "Tier A"),
+                    RaffleRewardTier(4, "Tier B"),
+                ),
+            )
+            store.initialize_cursor(100)
+
+            store.process_events([gold_deposit(101, coins=40_000)])
+
+            assert [
+                milestone.message for milestone in store.get_pending_milestones()
+            ] == [
+                "2 total tickets have been purchased for this raffle. "
+                "Tier A rewards have been reached!",
+                "4 total tickets have been purchased for this raffle. "
+                "Tier B rewards have been reached!",
+            ]
+            store.mark_milestone_notification_sent(2)
+            store.process_events([])
+            store.close()
+
+            reopened = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                reward_tiers=(
+                    RaffleRewardTier(2, "Tier A"),
+                    RaffleRewardTier(4, "Tier B"),
+                ),
+            )
+            assert [
+                milestone.threshold
+                for milestone in reopened.get_pending_milestones()
+            ] == [4]
+
+            reopened.run_raffle(randbelow=lambda total: 0)
+            assert reopened.get_pending_milestones() == []
+            reopened.process_events([gold_deposit(102, coins=20_000)])
+            assert [
+                milestone.threshold
+                for milestone in reopened.get_pending_milestones()
+            ] == [2]
+            reopened.close()
+
+    def test_free_tickets_do_not_count_toward_purchase_milestones(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                reward_tiers=(RaffleRewardTier(1, "Purchased Tier"),),
+            )
+            store.initialize_cursor(100)
+            store.add_manual_ticket("Free Only.1234")
+            store.process_events([])
+
+            assert store.get_pending_milestones() == []
+
+            store.process_events([gold_deposit(101)])
+            assert [
+                milestone.threshold for milestone in store.get_pending_milestones()
+            ] == [1]
+            store.close()
+
+    def test_rejects_invalid_reward_tier_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            with pytest.raises(ValueError, match="must be unique"):
+                RaffleStore(
+                    database_path,
+                    "guild-id",
+                    reward_tiers=(
+                        RaffleRewardTier(50, "First"),
+                        RaffleRewardTier(50, "Duplicate"),
+                    ),
+                )
+
+    def test_draws_same_user_multiple_times_and_removes_one_ticket_each_draw(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(
+                database_path,
+                "guild-id",
+                draw_tiers=(RaffleDrawTier(0, 3),),
+            )
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101, coins=30_000)])
+
+            result = store.run_raffle(randbelow=lambda total: 0)
+
+            assert result is not None
+            assert [
+                (
+                    winner.username,
+                    winner.winning_ticket,
+                    winner.tickets_before_draw,
+                )
+                for winner in result.winners
+            ] == [
+                ("Username.1234", 1, 3),
+                ("Username.1234", 1, 2),
+                ("Username.1234", 1, 1),
+            ]
+            store.close()
+
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            winners = Table("raffle_run_winners", metadata, autoload_with=engine)
+            with engine.connect() as connection:
+                assert connection.execute(
+                    select(
+                        winners.c.draw_position,
+                        winners.c.username,
+                        winners.c.tickets_before_draw,
+                    ).order_by(winners.c.draw_position)
+                ).all() == [
+                    (1, "Username.1234", 3),
+                    (2, "Username.1234", 2),
+                    (3, "Username.1234", 1),
+                ]
+            engine.dispose()
+
+    def test_draw_count_uses_current_purchased_ticket_tier(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                draw_tiers=(
+                    RaffleDrawTier(0, 1),
+                    RaffleDrawTier(2, 2),
+                    RaffleDrawTier(4, 3),
+                ),
+            )
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101, coins=40_000)])
+
+            result = store.run_raffle(randbelow=lambda total: 0)
+
+            assert result is not None
+            assert len(result.winners) == 3
+            store.close()
+
+    def test_draw_count_ignores_free_tickets_and_cannot_exceed_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                draw_tiers=(
+                    RaffleDrawTier(0, 1),
+                    RaffleDrawTier(2, 5),
+                ),
+            )
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101)])
+            store.add_manual_ticket("Username.1234")
+
+            result = store.run_raffle(randbelow=lambda total: 0)
+
+            assert result is not None
+            assert len(result.winners) == 1
+            store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                draw_tiers=(RaffleDrawTier(0, 5),),
+            )
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101)])
+
+            result = store.run_raffle(randbelow=lambda total: 0)
+
+            assert result is not None
+            assert len(result.winners) == 1
+            store.close()
+
     def test_manual_tickets_and_weighted_run_reset_current_tickets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")
@@ -367,7 +751,13 @@ class TestRaffle:
             result = store.run_raffle(randbelow=lambda total: 10)
 
             assert result is not None
-            assert result.winner == "User B.2222"
+            assert [winner.username for winner in result.winners] == [
+                "User B.2222",
+                "User B.2222",
+            ]
+            assert [
+                winner.tickets_before_draw for winner in result.winners
+            ] == [16, 15]
             assert result.total_tickets == 16
             for total in store.get_totals():
                 assert total.raffle_tickets == 0
@@ -382,6 +772,7 @@ class TestRaffle:
             metadata = MetaData()
             runs = Table("raffle_runs", metadata, autoload_with=engine)
             entries = Table("raffle_run_entries", metadata, autoload_with=engine)
+            winners = Table("raffle_run_winners", metadata, autoload_with=engine)
             with engine.connect() as connection:
                 assert connection.execute(
                     select(runs.c.winner, runs.c.total_tickets)
@@ -389,6 +780,12 @@ class TestRaffle:
                 assert (
                     connection.execute(
                         select(func.count()).select_from(entries)
+                    ).scalar_one()
+                    == 2
+                )
+                assert (
+                    connection.execute(
+                        select(func.count()).select_from(winners)
                     ).scalar_one()
                     == 2
                 )
@@ -471,6 +868,43 @@ class TestRaffle:
             assert total.raffle_tickets == 10
             assert total.gold_raffle_tickets == 10
             assert total.manual_raffle_tickets == 0
+            store.close()
+
+    def test_migrates_existing_deposits_without_replaying_audit_notifications(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            legacy_deposits = Table(
+                "raffle_deposits",
+                metadata,
+                Column("event_id", Integer, primary_key=True),
+                Column("username", String, nullable=False),
+                Column("coins_deposited", Integer, nullable=False),
+                Column("raffle_tickets", Integer, nullable=False),
+                Column("event_time", String, nullable=False),
+                Column("notification_sent", Boolean, nullable=False),
+            )
+            metadata.create_all(engine)
+            with engine.begin() as connection:
+                connection.execute(
+                    legacy_deposits.insert().values(
+                        event_id=101,
+                        username="Existing.1234",
+                        coins_deposited=10_000,
+                        raffle_tickets=1,
+                        event_time="2026-06-07T06:26:17.000Z",
+                        notification_sent=True,
+                    )
+                )
+            engine.dispose()
+
+            store = RaffleStore(database_path, "guild-id")
+
+            assert store.get_pending_notifications() == []
+            assert store.get_pending_deposit_audit_notifications() == []
             store.close()
 
     def test_one_time_migration_caps_existing_free_tickets_at_one(
@@ -596,6 +1030,49 @@ class TestRaffle:
             store = RaffleStore(database_path, "guild-id")
 
             assert store.get_pending_raffle_result() is None
+            store.close()
+
+    def test_loads_legacy_pending_single_winner_as_one_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            legacy_runs = Table(
+                "raffle_runs",
+                metadata,
+                Column("run_id", Integer, primary_key=True, autoincrement=True),
+                Column("run_time", String, nullable=False),
+                Column("winner", String, nullable=False),
+                Column("winning_ticket", Integer, nullable=False),
+                Column("total_tickets", Integer, nullable=False),
+                Column("announcement_sent", Boolean, nullable=False),
+            )
+            metadata.create_all(engine)
+            with engine.begin() as connection:
+                connection.execute(
+                    legacy_runs.insert().values(
+                        run_time="2026-06-07 12:00:00",
+                        winner="Winner.1234",
+                        winning_ticket=4,
+                        total_tickets=10,
+                        announcement_sent=False,
+                    )
+                )
+            engine.dispose()
+
+            store = RaffleStore(database_path, "guild-id")
+            result = store.get_pending_raffle_result()
+
+            assert result is not None
+            assert result.total_tickets == 10
+            assert [
+                (
+                    winner.username,
+                    winner.winning_ticket,
+                    winner.tickets_before_draw,
+                )
+                for winner in result.winners
+            ] == [("Winner.1234", 4, 10)]
             store.close()
 
     def test_new_store_cursor_skips_historical_events(self) -> None:
