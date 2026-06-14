@@ -870,7 +870,7 @@ class TestRaffle:
             assert total.manual_raffle_tickets == 0
             store.close()
 
-    def test_migrates_existing_deposits_without_replaying_audit_notifications(
+    def test_migrates_existing_deposits_preserving_pending_audit_notifications(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -890,21 +890,33 @@ class TestRaffle:
             metadata.create_all(engine)
             with engine.begin() as connection:
                 connection.execute(
-                    legacy_deposits.insert().values(
-                        event_id=101,
-                        username="Existing.1234",
-                        coins_deposited=10_000,
-                        raffle_tickets=1,
-                        event_time="2026-06-07T06:26:17.000Z",
-                        notification_sent=True,
-                    )
+                    legacy_deposits.insert(),
+                    [
+                        {
+                            "event_id": 101,
+                            "username": "Delivered.1234",
+                            "coins_deposited": 10_000,
+                            "raffle_tickets": 1,
+                            "event_time": "2026-06-07T06:26:17.000Z",
+                            "notification_sent": True,
+                        },
+                        {
+                            "event_id": 102,
+                            "username": "Pending.1234",
+                            "coins_deposited": 20_000,
+                            "raffle_tickets": 2,
+                            "event_time": "2026-06-07T06:27:17.000Z",
+                            "notification_sent": False,
+                        },
+                    ],
                 )
             engine.dispose()
 
             store = RaffleStore(database_path, "guild-id")
 
             assert store.get_pending_notifications() == []
-            assert store.get_pending_deposit_audit_notifications() == []
+            pending_audits = store.get_pending_deposit_audit_notifications()
+            assert [deposit.event_id for deposit in pending_audits] == [102]
             store.close()
 
     def test_one_time_migration_caps_existing_free_tickets_at_one(

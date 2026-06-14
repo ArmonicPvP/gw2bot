@@ -229,9 +229,12 @@ def initialize_database(engine: Engine) -> set[str]:
                     server_default="0",
                 ),
             )
-            # Existing deposits were already handled before audit delivery existed.
+            # The legacy flag tracked audit delivery. Preserve pending audits while
+            # treating the newly introduced contribution-channel delivery as done.
             connection.exec_driver_sql(
-                "UPDATE raffle_deposits SET audit_notification_sent = 1"
+                "UPDATE raffle_deposits "
+                "SET audit_notification_sent = notification_sent, "
+                "notification_sent = 1"
             )
             added_columns.add("audit_notification_sent")
 
