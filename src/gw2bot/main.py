@@ -558,6 +558,16 @@ def get_trial_member_discord_status(member: Any) -> str | None:
     return None
 
 
+def _log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
+    LOGGER.error(
+        message + " (type=%s status=%s code=%s)",
+        *args,
+        type(error).__name__,
+        getattr(error, "status", "unknown"),
+        getattr(error, "code", "unknown"),
+    )
+
+
 def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
     if isinstance(error, aiohttp.ClientResponseError):
         status = f"HTTP {error.status}" if error.status else type(error).__name__
@@ -1393,8 +1403,8 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Resolving %s Trial members from application forum", len(unresolved))
         try:
             forum = await self.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
-        except discord.DiscordException:
-            LOGGER.exception("Could not access the Trial application forum")
+        except discord.DiscordException as error:
+            _log_discord_failure("Could not access the Trial application forum", error)
             return entries
         if not hasattr(forum, "archived_threads") or not hasattr(forum, "guild"):
             LOGGER.error(
@@ -1469,9 +1479,10 @@ class Gw2Bot(discord.Client):
                         "Trial application creator %s is no longer a guild member",
                         owner_id,
                     )
-                except discord.DiscordException:
-                    LOGGER.exception(
+                except discord.DiscordException as error:
+                    _log_discord_failure(
                         "Could not resolve Trial application creator %s",
+                        error,
                         owner_id,
                     )
                 else:
@@ -1541,9 +1552,10 @@ class Gw2Bot(discord.Client):
                         )
                         if len(matches) == len(unresolved) and owner_status is not None:
                             break
-                except discord.DiscordException:
-                    LOGGER.exception(
+                except discord.DiscordException as error:
+                    _log_discord_failure(
                         "Could not inspect Trial application forum thread %s",
+                        error,
                         thread_id,
                     )
 
@@ -1594,9 +1606,10 @@ class Gw2Bot(discord.Client):
                     )
                     try:
                         response = await request(route, params=page_params)
-                    except discord.DiscordException:
-                        LOGGER.exception(
+                    except discord.DiscordException as error:
+                        _log_discord_failure(
                             "Discord message search failed for Trial member %s",
+                            error,
                             unresolved[key],
                         )
                         return False
@@ -1670,8 +1683,11 @@ class Gw2Bot(discord.Client):
         forum_threads: list[Any] = []
         try:
             active_threads = await forum.guild.active_threads()
-        except discord.DiscordException:
-            LOGGER.exception("Could not inspect active Trial application threads")
+        except discord.DiscordException as error:
+            _log_discord_failure(
+                "Could not inspect active Trial application threads",
+                error,
+            )
             active_threads = []
         LOGGER.debug("Inspecting metadata for %s active forum threads", len(active_threads))
         forum_threads.extend(active_threads)
@@ -1693,8 +1709,13 @@ class Gw2Bot(discord.Client):
                     "Inspected metadata for %s archived forum threads",
                     archived_count,
                 )
-            except (discord.DiscordException, AttributeError):
-                LOGGER.exception("Could not inspect archived Trial application threads")
+            except discord.DiscordException as error:
+                _log_discord_failure(
+                    "Could not inspect archived Trial application threads",
+                    error,
+                )
+            except AttributeError:
+                LOGGER.error("Could not inspect archived Trial application threads")
 
         if unresolved:
             indexed_search_total = len(unresolved)
