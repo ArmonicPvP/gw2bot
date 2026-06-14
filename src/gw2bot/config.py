@@ -24,6 +24,7 @@ class Config:
     guild_member_cache_seconds: int = 900
     raffle_db_path: str = "data/gw2bot.db"
     gw2_api_base_url: str = "https://api.guildwars2.com"
+    debug: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -92,6 +93,7 @@ class Config:
                 values.get("GW2_API_BASE_URL"),
                 "https://api.guildwars2.com",
             ).rstrip("/"),
+            debug=_boolean(values.get("DEBUG", "false"), "DEBUG"),
         )
 
 
@@ -115,3 +117,12 @@ def _optional_string(value: str | None, default: str) -> str:
     if value is None or not value.strip():
         return default
     return value.strip()
+
+
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
