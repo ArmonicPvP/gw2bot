@@ -25,6 +25,7 @@ from gw2bot.main import (
     RaffleCommands,
     configure_logging,
     format_addticket_audit,
+    log_discord_failure,
     main as run_main,
     redact_log_text,
     user_has_role,
@@ -136,6 +137,23 @@ class TestCommand:
 
         assert secret not in formatted
         assert "[REDACTED]" in formatted
+
+    def test_discord_failure_logging_omits_raw_exception_body(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50001
+
+            def __str__(self) -> str:
+                return "raw-response-body-secret"
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            log_discord_failure("Could not access the Trial application forum", DiscordFailure())
+
+        assert "raw-response-body-secret" not in caplog.text
+        assert "type=DiscordFailure status=403 code=50001" in caplog.text
 
     @patch("gw2bot.main.Gw2Bot")
     @patch("gw2bot.main.configure_logging")
