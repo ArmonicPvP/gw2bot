@@ -643,7 +643,7 @@ class TestTrialMemberNotification:
         bot.fetch_channel.assert_awaited_once_with(TRIAL_FORUM_CHANNEL_ID)
         guild.fetch_member.assert_awaited_once_with(303)
 
-    async def test_uses_discord_indexed_search_without_reading_thread_history(
+    async def test_paginates_discord_indexed_search_without_reading_thread_history(
         self,
     ) -> None:
         history = MagicMock()
@@ -669,25 +669,28 @@ class TestTrialMemberNotification:
             archived_threads=archived_threads,
         )
         search = AsyncMock(
-            return_value={
-                "total_results": 1,
-                "messages": [
-                    [
+            side_effect=[
+                {"total_results": 26, "messages": [], "threads": []},
+                {
+                    "total_results": 26,
+                    "messages": [
+                        [
+                            {
+                                "content": "GW2 account is Indexed.1234",
+                                "channel_id": "900",
+                            }
+                        ]
+                    ],
+                    "threads": [
                         {
-                            "content": "GW2 account is Indexed.1234",
-                            "channel_id": "900",
+                            "id": "900",
+                            "parent_id": str(TRIAL_FORUM_CHANNEL_ID),
+                            "owner_id": "777",
+                            "applied_tags": ["42"],
                         }
-                    ]
-                ],
-                "threads": [
-                    {
-                        "id": "900",
-                        "parent_id": str(TRIAL_FORUM_CHANNEL_ID),
-                        "owner_id": "777",
-                        "applied_tags": ["42"],
-                    }
-                ],
-            }
+                    ],
+                },
+            ]
         )
         bot = SimpleNamespace(
             fetch_channel=AsyncMock(return_value=forum),
@@ -702,12 +705,13 @@ class TestTrialMemberNotification:
         assert entries == [TrialMemberReportEntry("Indexed.1234", 777, "Sunborne")]
         history.assert_not_called()
         guild.fetch_member.assert_not_awaited()
-        search.assert_awaited_once()
-        search_call = search.await_args
+        assert search.await_count == 2
+        search_call = search.await_args_list[1]
         assert search_call is not None
         route = search_call.args[0]
         assert route.path == "/guilds/{guild_id}/messages/search"
         assert ("channel_id", str(TRIAL_FORUM_CHANNEL_ID)) in search_call.kwargs["params"]
+        assert ("offset", "25") in search_call.kwargs["params"]
 
     @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
     async def test_retries_discord_search_while_index_is_unavailable(

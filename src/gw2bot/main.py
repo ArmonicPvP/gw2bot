@@ -713,82 +713,88 @@ class Gw2Bot(discord.Client):
                 ("limit", "25"),
                 ("sort_by", "relevance"),
             ]
-            response: Any = None
-            for attempt in range(TRIAL_SEARCH_INDEX_RETRIES):
-                LOGGER.debug(
-                    "Discord indexed search checking Trial member %s (%s/%s; attempt %s/%s)",
-                    unresolved[key],
-                    position,
-                    total,
-                    attempt + 1,
-                    TRIAL_SEARCH_INDEX_RETRIES,
-                )
-                try:
-                    response = await request(route, params=params)
-                except discord.DiscordException:
-                    LOGGER.exception(
-                        "Discord message search failed for Trial member %s",
-                        unresolved[key],
-                    )
-                    return False
-                if not (
-                    isinstance(response, dict)
-                    and response.get("code") == 110000
-                ):
-                    break
-                retry_after = max(float(response.get("retry_after") or 1), 0.1)
-                LOGGER.debug(
-                    "Discord search index unavailable for %s; retrying in %.1f seconds",
-                    unresolved[key],
-                    retry_after,
-                )
-                if attempt + 1 < TRIAL_SEARCH_INDEX_RETRIES:
-                    await asyncio.sleep(retry_after)
-            else:
-                LOGGER.warning("Discord message search index is still unavailable")
-                return False
-
-            if not isinstance(response, dict):
-                LOGGER.error("Discord message search returned an invalid response")
-                return False
-
-            raw_threads = {
-                thread_id: thread
-                for thread in response.get("threads", ())
-                if isinstance(thread, dict)
-                and (thread_id := as_int(thread.get("id"))) is not None
-            }
-            for message_group in response.get("messages", ()):
-                if not isinstance(message_group, list):
-                    continue
-                for message in message_group:
-                    if not isinstance(message, dict):
-                        continue
-                    if not contains_normalized_account_name(
-                        message.get("content", ""), key
-                    ):
-                        continue
-                    channel_id = as_int(message.get("channel_id"))
-                    if channel_id is None:
-                        continue
-                    thread = raw_threads.get(channel_id)
-                    if thread is None:
-                        continue
-                    if as_int(thread.get("parent_id")) != forum.id:
-                        continue
-                    if not raw_thread_has_accepted_tag(thread):
-                        continue
-                    owner_id = as_int(thread.get("owner_id"))
-                    if owner_id is None:
-                        continue
-                    username = unresolved[key]
-                    await record_matches({key}, owner_id, None)
+            offset = 0
+            while True:
+                page_params = [*params, ("offset", str(offset))]
+                response: Any = None
+                for attempt in range(TRIAL_SEARCH_INDEX_RETRIES):
                     LOGGER.debug(
-                        "Discord indexed search resolved %s from forum thread %s",
-                        username,
-                        thread.get("id"),
+                        "Discord indexed search checking Trial member %s (%s/%s; attempt %s/%s)",
+                        unresolved[key],
+                        position,
+                        total,
+                        attempt + 1,
+                        TRIAL_SEARCH_INDEX_RETRIES,
                     )
-                    return True
+                    try:
+                        response = await request(route, params=page_params)
+                    except discord.DiscordException:
+                        LOGGER.exception(
+                            "Discord message search failed for Trial member %s",
+                            unresolved[key],
+                        )
+                        return False
+                    if not (
+                        isinstance(response, dict)
+                        and response.get("code") == 110000
+                    ):
+                        break
+                    retry_after = max(float(response.get("retry_after") or 1), 0.1)
+                    LOGGER.debug(
+                        "Discord search index unavailable for %s; retrying in %.1f seconds",
+                        unresolved[key],
+                        retry_after,
+                    )
+                    if attempt + 1 < TRIAL_SEARCH_INDEX_RETRIES:
+                        await asyncio.sleep(retry_after)
+                else:
+                    LOGGER.warning("Discord message search index is still unavailable")
+                    return False
+
+                if not isinstance(response, dict):
+                    LOGGER.error("Discord message search returned an invalid response")
+                    return False
+
+                raw_threads = {
+                    thread_id: thread
+                    for thread in response.get("threads", ())
+                    if isinstance(thread, dict)
+                    and (thread_id := as_int(thread.get("id"))) is not None
+                }
+                for message_group in response.get("messages", ()):
+                    if not isinstance(message_group, list):
+                        continue
+                    for message in message_group:
+                        if not isinstance(message, dict):
+                            continue
+                        if not contains_normalized_account_name(
+                            message.get("content", ""), key
+                        ):
+                            continue
+                        channel_id = as_int(message.get("channel_id"))
+                        if channel_id is None:
+                            continue
+                        thread = raw_threads.get(channel_id)
+                        if thread is None:
+                            continue
+                        if as_int(thread.get("parent_id")) != forum.id:
+                            continue
+                        if not raw_thread_has_accepted_tag(thread):
+                            continue
+                        owner_id = as_int(thread.get("owner_id"))
+                        if owner_id is None:
+                            continue
+                        username = unresolved[key]
+                        await record_matches({key}, owner_id, None)
+                        LOGGER.debug(
+                            "Discord indexed search resolved %s from forum thread %s",
+                            username,
+                            thread.get("id"),
+                        )
+                        return True
+                offset += 25
+                if offset >= int(response.get("total_results") or 0):
+                    break
             LOGGER.debug(
                 "Discord indexed search found no Accepted match for %s",
                 unresolved[key],
