@@ -80,7 +80,7 @@ def get_trial_member_discord_status(member: Any) -> str | None:
     return None
 
 
-def log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
+def _log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
     LOGGER.error(
         message + " (type=%s status=%s code=%s)",
         *args,
@@ -542,7 +542,7 @@ class Gw2Bot(discord.Client):
         try:
             forum = await self.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
         except discord.DiscordException as error:
-            log_discord_failure("Could not access the Trial application forum", error)
+            _log_discord_failure("Could not access the Trial application forum", error)
             return entries
         if not hasattr(forum, "archived_threads") or not hasattr(forum, "guild"):
             LOGGER.error(
@@ -618,7 +618,7 @@ class Gw2Bot(discord.Client):
                         owner_id,
                     )
                 except discord.DiscordException as error:
-                    log_discord_failure(
+                    _log_discord_failure(
                         "Could not resolve Trial application creator %s",
                         error,
                         owner_id,
@@ -691,7 +691,7 @@ class Gw2Bot(discord.Client):
                         if len(matches) == len(unresolved) and owner_status is not None:
                             break
                 except discord.DiscordException as error:
-                    log_discord_failure(
+                    _log_discord_failure(
                         "Could not inspect Trial application forum thread %s",
                         error,
                         thread_id,
@@ -745,7 +745,7 @@ class Gw2Bot(discord.Client):
                     try:
                         response = await request(route, params=page_params)
                     except discord.DiscordException as error:
-                        log_discord_failure(
+                        _log_discord_failure(
                             "Discord message search failed for Trial member %s",
                             error,
                             unresolved[key],
@@ -822,7 +822,7 @@ class Gw2Bot(discord.Client):
         try:
             active_threads = await forum.guild.active_threads()
         except discord.DiscordException as error:
-            log_discord_failure(
+            _log_discord_failure(
                 "Could not inspect active Trial application threads",
                 error,
             )
@@ -848,7 +848,7 @@ class Gw2Bot(discord.Client):
                     archived_count,
                 )
             except discord.DiscordException as error:
-                log_discord_failure(
+                _log_discord_failure(
                     "Could not inspect archived Trial application threads",
                     error,
                 )
