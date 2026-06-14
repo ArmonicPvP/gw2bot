@@ -100,6 +100,21 @@ class TestCommand:
             assert secret not in redacted
         assert redacted.count("[REDACTED]") == 4
 
+    def test_strips_complete_url_query_strings_with_unknown_parameters(self) -> None:
+        message = (
+            "request failed: https://example.test/log?since=42&opaque=mystery-secret "
+            "and HTTP://OTHER.TEST/path?custom=another-secret"
+        )
+
+        redacted = redact_log_text(message)
+
+        assert redacted == (
+            "request failed: https://example.test/log?[REDACTED] "
+            "and HTTP://OTHER.TEST/path?[REDACTED]"
+        )
+        assert "mystery-secret" not in redacted
+        assert "another-secret" not in redacted
+
     def test_redacting_formatter_sanitizes_exception_tracebacks(self) -> None:
         secret = "configured-secret"
         try:

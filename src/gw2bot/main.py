@@ -35,6 +35,9 @@ SUNBORNE_ROLE_ID = 1317140660188352584
 TRIAL_ACCEPTED_TAG = "Accepted"
 TRIAL_SEARCH_INDEX_RETRIES = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+LOG_URL_QUERY_PATTERN = re.compile(
+    r"(?i)\b(https?://[^\s?\"'<>]+)\?[^\s\"'<>]*"
+)
 LOG_SECRET_PATTERNS = (
     re.compile(
         r"(?i)([?&](?:access_token|api[_-]?key|discord_token|gw2_api_key|"
@@ -89,6 +92,7 @@ def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
 
 
 def redact_log_text(message: str, secrets: tuple[str, ...] = ()) -> str:
+    message = LOG_URL_QUERY_PATTERN.sub(r"\1?[REDACTED]", message)
     for secret in sorted(
         (secret for secret in secrets if secret),
         key=len,
