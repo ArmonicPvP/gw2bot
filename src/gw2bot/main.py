@@ -18,6 +18,7 @@ from gw2bot.config import Config, ConfigurationError
 from gw2bot.feast_stock import FeastAlert, get_due_low_stock_alerts
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
+    DISCORD_MESSAGE_LIMIT,
     GuildMemberCache,
     TrialMemberReportEntry,
     format_overdue_trial_report,
@@ -44,6 +45,9 @@ LOGGER = logging.getLogger(__name__)
 RAFFLE_DRAW_ROLE_ID = 1317124663847157880
 RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
 RAFFLE_TICKETS_PAGE_SIZE = 10
+RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
+RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
+RAFFLE_BULK_MODAL_MAX_LENGTH = 4_000
 RAFFLE_CONTRIBUTION_CHANNEL_ID = 856343628984746014
 RAFFLE_CONTRIBUTION_REPORT_HOURS = 6
 TRIAL_FORUM_CHANNEL_ID = 1317206104727621693
@@ -86,6 +90,80 @@ def user_has_role(user: Any, required_role_id: int) -> bool:
 
 def format_addticket_audit(discord_user_id: int, username: str) -> str:
     return f"<@{discord_user_id}> added 1 raffle ticket to {username}."
+
+
+def parse_squad_attendance_usernames(value: str) -> list[str]:
+    lines = value.splitlines()
+    usernames: list[str] = []
+    skipped_lines = 0
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        account_name = line.partition(",")[0].strip()
+        if account_name.startswith(":"):
+            account_name = account_name[1:].strip()
+        if not account_name:
+            skipped_lines += 1
+            continue
+        usernames.append(account_name)
+    LOGGER.debug(
+        "Parsed squad attendance text; characters=%s lines=%s usernames=%s "
+        "skipped_lines=%s",
+        len(value),
+        len(lines),
+        len(usernames),
+        skipped_lines,
+    )
+    return usernames
+
+
+def _format_bulk_username_sample(label: str, usernames: list[str]) -> str:
+    displayed = [
+        (
+            username
+            if len(username) <= RAFFLE_BULK_SUMMARY_NAME_LENGTH
+            else username[: RAFFLE_BULK_SUMMARY_NAME_LENGTH - 3] + "..."
+        )
+        for username in usernames[:RAFFLE_BULK_SUMMARY_SAMPLE_SIZE]
+    ]
+    remaining = len(usernames) - len(displayed)
+    suffix = f" (+{remaining} more)" if remaining else ""
+    return f"{label}: " + ", ".join(f"**{name}**" for name in displayed) + suffix
+
+
+def format_bulk_addtickets_summary(
+    added_usernames: list[str],
+    invalid_count: int,
+    duplicate_usernames: list[str],
+    failed_usernames: list[str],
+    audit_failures: int,
+) -> str:
+    summary = [
+        f"Added one raffle ticket to {len(added_usernames)} guild "
+        f"{'member' if len(added_usernames) == 1 else 'members'}."
+    ]
+    if added_usernames:
+        summary.append(_format_bulk_username_sample("Added", added_usernames))
+    if invalid_count:
+        summary.append(f"Not in the configured guild: {invalid_count}")
+    if duplicate_usernames:
+        summary.append(
+            _format_bulk_username_sample(
+                "Duplicate selections skipped",
+                duplicate_usernames,
+            )
+        )
+    if failed_usernames:
+        summary.append(
+            _format_bulk_username_sample("Could not add", failed_usernames)
+        )
+    if audit_failures:
+        summary.append(
+            f"{audit_failures} audit "
+            f"{'delivery' if audit_failures == 1 else 'deliveries'} failed."
+        )
+    return "\n".join(summary)[:DISCORD_MESSAGE_LIMIT]
 
 
 def format_removetickets_audit(
@@ -153,14 +231,18 @@ def raffle_total_table_rows(totals: list[RaffleTotal]) -> list[RaffleTicketTable
 
 def order_raffle_totals(totals: list[RaffleTotal]) -> list[RaffleTotal]:
     ordered = sorted(
-        totals,
+        (total for total in totals if total.raffle_tickets > 0),
         key=lambda total: (
             -total.raffle_tickets,
             total.username.casefold(),
             total.username,
         ),
     )
-    LOGGER.debug("Ordered raffle totals for display; players=%s", len(ordered))
+    LOGGER.debug(
+        "Ordered raffle totals for display; records=%s active_players=%s",
+        len(totals),
+        len(ordered),
+    )
     return ordered
 
 
@@ -230,9 +312,61 @@ def raffle_ticket_list_embed(
     description = format_raffle_ticket_blocks(raffle_total_table_rows(page_totals))
     embed = discord.Embed(
         title="Raffle Tickets",
-        description=description or "No players have raffle ticket records.",
+        description=description or "No players currently have raffle tickets.",
     )
     embed.set_footer(text=f"Page {page + 1} of {page_count}")
+    return embed
+
+
+def raffle_tier_summary_embed(
+    totals: list[RaffleTotal],
+    reward_tiers: tuple[RaffleRewardTier, ...] = RAFFLE_REWARD_TIERS,
+) -> discord.Embed:
+    purchased_tickets = sum(total.gold_raffle_tickets for total in totals)
+    current_tier = next(
+        (
+            tier
+            for tier in reversed(reward_tiers)
+            if tier.threshold <= purchased_tickets
+        ),
+        None,
+    )
+    next_tier = next(
+        (
+            tier
+            for tier in reward_tiers
+            if tier.threshold > purchased_tickets
+        ),
+        None,
+    )
+    embed = discord.Embed(title="Raffle Tier Summary")
+    embed.add_field(
+        name="Current Tier",
+        value=(
+            current_tier.name
+            if current_tier is not None
+            else ("No tier reached" if reward_tiers else "No tiers configured")
+        ),
+    )
+    embed.add_field(
+        name="Total Tickets Purchased",
+        value=str(purchased_tickets),
+    )
+    embed.add_field(
+        name="Tickets Until Next Tier",
+        value=(
+            str(next_tier.threshold - purchased_tickets)
+            if next_tier is not None
+            else ("0 (highest tier reached)" if reward_tiers else "N/A")
+        ),
+    )
+    LOGGER.debug(
+        "Rendered raffle tier summary; purchased_tickets=%s "
+        "current_tier_reached=%s next_tier_exists=%s",
+        purchased_tickets,
+        current_tier is not None,
+        next_tier is not None,
+    )
     return embed
 
 
@@ -461,6 +595,7 @@ class RaffleTicketsListView(discord.ui.View):
     def __init__(self, totals: list[RaffleTotal]):
         super().__init__(timeout=180)
         self._totals = order_raffle_totals(totals)
+        self._summary_embed = raffle_tier_summary_embed(totals)
         self._page = 0
         self._previous = RaffleTicketsPageButton(-1)
         self._next = RaffleTicketsPageButton(1)
@@ -485,7 +620,10 @@ class RaffleTicketsListView(discord.ui.View):
         )
         self._sync_buttons()
         await interaction.response.edit_message(
-            embed=raffle_ticket_list_embed(self._totals, self._page),
+            embeds=[
+                self._summary_embed,
+                raffle_ticket_list_embed(self._totals, self._page),
+            ],
             view=self,
         )
 
@@ -568,6 +706,15 @@ def _log_discord_failure(message: str, error: discord.DiscordException, *args: o
     )
 
 
+def _discord_failure_reason(error: discord.DiscordException) -> str:
+    code = getattr(error, "code", None)
+    if code == 50001:
+        return "missing_access"
+    if code == 50013:
+        return "missing_permissions"
+    return "discord_error"
+
+
 def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
     if isinstance(error, aiohttp.ClientResponseError):
         status = f"HTTP {error.status}" if error.status else type(error).__name__
@@ -617,6 +764,108 @@ class RaffleCommands(app_commands.Group):
         )
         self._bot = bot
 
+    async def guild_member_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not user_has_role(interaction.user, RAFFLE_ADDTICKET_ROLE_ID):
+            LOGGER.debug(
+                "Skipped raffle guild member autocomplete; authorized=false"
+            )
+            return []
+        try:
+            usernames = await self._bot.search_guild_members(current, limit=25)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            LOGGER.error("Could not refresh the guild member cache for autocomplete")
+            return []
+        LOGGER.debug(
+            "Returning raffle guild member autocomplete choices; choices=%s",
+            len(usernames),
+        )
+        return [
+            app_commands.Choice(name=username, value=username)
+            for username in usernames
+        ]
+
+    async def _add_tickets_for_usernames(
+        self,
+        interaction: discord.Interaction,
+        requested_usernames: list[str],
+    ) -> None:
+        LOGGER.debug(
+            "Bulk manual raffle ticket processing started; requested=%s",
+            len(requested_usernames),
+        )
+        canonical_usernames: list[str] = []
+        invalid_usernames: list[str] = []
+        duplicate_usernames: list[str] = []
+        seen_usernames: set[str] = set()
+        try:
+            for username in requested_usernames:
+                canonical_username = await self._bot.resolve_guild_member(username)
+                if canonical_username is None:
+                    invalid_usernames.append(username)
+                    continue
+                username_key = canonical_username.casefold()
+                if username_key in seen_usernames:
+                    duplicate_usernames.append(canonical_username)
+                    continue
+                seen_usernames.add(username_key)
+                canonical_usernames.append(canonical_username)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            LOGGER.error("Could not refresh the guild member cache")
+            await interaction.followup.send(
+                "Could not verify guild membership. No tickets were added. "
+                "Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        added_usernames: list[str] = []
+        failed_usernames: list[str] = []
+        audit_failures = 0
+        for canonical_username in canonical_usernames:
+            try:
+                self._bot.add_manual_raffle_ticket(canonical_username)
+            except ValueError:
+                failed_usernames.append(canonical_username)
+                LOGGER.debug("Bulk manual raffle ticket addition skipped; added=false")
+                continue
+
+            added_usernames.append(canonical_username)
+            audit_message = format_addticket_audit(
+                interaction.user.id,
+                canonical_username,
+            )
+            LOGGER.info("%s", audit_message)
+            audit_sent = await self._bot.send_notification(audit_message)
+            if not audit_sent:
+                audit_failures += 1
+            LOGGER.debug("Bulk manual raffle ticket audit delivered=%s", audit_sent)
+
+        LOGGER.debug(
+            "Bulk manual raffle ticket processing completed; requested=%s valid=%s "
+            "added=%s invalid=%s duplicates=%s add_failures=%s audit_failures=%s",
+            len(requested_usernames),
+            len(canonical_usernames),
+            len(added_usernames),
+            len(invalid_usernames),
+            len(duplicate_usernames),
+            len(failed_usernames),
+            audit_failures,
+        )
+        await interaction.followup.send(
+            format_bulk_addtickets_summary(
+                added_usernames,
+                len(invalid_usernames),
+                duplicate_usernames,
+                failed_usernames,
+                audit_failures,
+            ),
+            ephemeral=True,
+        )
+
     @app_commands.command(name="draw", description="Draw a weighted raffle winner")
     async def draw(self, interaction: discord.Interaction) -> None:
         LOGGER.debug(
@@ -662,6 +911,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",
     )
+    @app_commands.autocomplete(username=guild_member_autocomplete)
     async def addticket(
         self,
         interaction: discord.Interaction,
@@ -714,6 +964,97 @@ class RaffleCommands(app_commands.Group):
             + ("" if audit_sent else " The audit log could not be delivered."),
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="addtickets",
+        description="Add one raffle ticket to up to ten guild members",
+    )
+    @app_commands.describe(
+        username1="First Guild Wars 2 account name",
+        username2="Second Guild Wars 2 account name",
+        username3="Third Guild Wars 2 account name",
+        username4="Fourth Guild Wars 2 account name",
+        username5="Fifth Guild Wars 2 account name",
+        username6="Sixth Guild Wars 2 account name",
+        username7="Seventh Guild Wars 2 account name",
+        username8="Eighth Guild Wars 2 account name",
+        username9="Ninth Guild Wars 2 account name",
+        username10="Tenth Guild Wars 2 account name",
+    )
+    @app_commands.autocomplete(
+        username1=guild_member_autocomplete,
+        username2=guild_member_autocomplete,
+        username3=guild_member_autocomplete,
+        username4=guild_member_autocomplete,
+        username5=guild_member_autocomplete,
+        username6=guild_member_autocomplete,
+        username7=guild_member_autocomplete,
+        username8=guild_member_autocomplete,
+        username9=guild_member_autocomplete,
+        username10=guild_member_autocomplete,
+    )
+    async def addtickets(
+        self,
+        interaction: discord.Interaction,
+        username1: str | None = None,
+        username2: str | None = None,
+        username3: str | None = None,
+        username4: str | None = None,
+        username5: str | None = None,
+        username6: str | None = None,
+        username7: str | None = None,
+        username8: str | None = None,
+        username9: str | None = None,
+        username10: str | None = None,
+    ) -> None:
+        requested_usernames = [
+            username
+            for username in (
+                username1,
+                username2,
+                username3,
+                username4,
+                username5,
+                username6,
+                username7,
+                username8,
+                username9,
+                username10,
+            )
+            if username is not None and username.strip()
+        ]
+        LOGGER.debug(
+            "Bulk manual raffle ticket command invoked; requested=%s",
+            len(requested_usernames),
+        )
+        if not await self._bot.authorize_raffle_command(
+            interaction,
+            RAFFLE_ADDTICKET_ROLE_ID,
+        ):
+            return
+        if not requested_usernames:
+            LOGGER.debug("Bulk manual raffle ticket command rejected; requested=0")
+            await interaction.response.send_message(
+                "Select at least one guild member.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self._add_tickets_for_usernames(interaction, requested_usernames)
+
+    @app_commands.command(
+        name="bulkaddtickets",
+        description="Paste squad attendance to add raffle tickets",
+    )
+    async def bulkaddtickets(self, interaction: discord.Interaction) -> None:
+        LOGGER.debug("Bulk attendance raffle ticket command invoked")
+        if not await self._bot.authorize_raffle_command(
+            interaction,
+            RAFFLE_ADDTICKET_ROLE_ID,
+        ):
+            return
+        await interaction.response.send_modal(RaffleBulkAddTicketsModal(self))
 
     @app_commands.command(
         name="removetickets",
@@ -843,17 +1184,70 @@ class RaffleCommands(app_commands.Group):
     )
     async def list_tickets(self, interaction: discord.Interaction) -> None:
         totals = self._bot.get_raffle_totals()
-        LOGGER.debug("Raffle list command invoked; players=%s", len(totals))
+        active_totals = [
+            total for total in totals if total.raffle_tickets > 0
+        ]
+        LOGGER.debug(
+            "Raffle list command invoked; records=%s active_players=%s",
+            len(totals),
+            len(active_totals),
+        )
         view = (
-            RaffleTicketsListView(totals)
-            if len(totals) > RAFFLE_TICKETS_PAGE_SIZE
+            RaffleTicketsListView(active_totals)
+            if len(active_totals) > RAFFLE_TICKETS_PAGE_SIZE
             else None
         )
-        embed = raffle_ticket_list_embed(totals, 0)
+        embeds = [
+            raffle_tier_summary_embed(active_totals),
+            raffle_ticket_list_embed(active_totals, 0),
+        ]
         if view is None:
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embeds=embeds)
         else:
-            await interaction.response.send_message(embed=embed, view=view)
+            await interaction.response.send_message(embeds=embeds, view=view)
+
+
+class RaffleBulkAddTicketsModal(discord.ui.Modal):
+    def __init__(self, commands: RaffleCommands):
+        super().__init__(title="Bulk Add Raffle Tickets")
+        self._commands = commands
+        self.attendance = discord.ui.TextInput(
+            label="Squad attendance",
+            style=discord.TextStyle.paragraph,
+            placeholder=":Username.1234, Character Name",
+            min_length=1,
+            max_length=RAFFLE_BULK_MODAL_MAX_LENGTH,
+        )
+        self.add_item(self.attendance)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        LOGGER.debug(
+            "Bulk attendance raffle ticket modal submitted; characters=%s",
+            len(self.attendance.value),
+        )
+        if not await self._commands._bot.authorize_raffle_command(
+            interaction,
+            RAFFLE_ADDTICKET_ROLE_ID,
+        ):
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        requested_usernames = parse_squad_attendance_usernames(
+            self.attendance.value
+        )
+        if not requested_usernames:
+            LOGGER.debug(
+                "Bulk attendance raffle ticket modal rejected; usernames=0"
+            )
+            await interaction.followup.send(
+                "No GW2 account names were found in the pasted attendance text.",
+                ephemeral=True,
+            )
+            return
+        await self._commands._add_tickets_for_usernames(
+            interaction,
+            requested_usernames,
+        )
 
 
 class Gw2Bot(discord.Client):
@@ -892,6 +1286,7 @@ class Gw2Bot(discord.Client):
             self._config.gw2_guild_id,
             self._config.guild_member_cache_seconds,
         )
+        self._guild_members.start_background_refresh()
         await self._sync_commands()
         LOGGER.debug("Starting background poll tasks")
         self._poll_tasks = [
@@ -918,6 +1313,8 @@ class Gw2Bot(discord.Client):
         for task in self._poll_tasks:
             task.cancel()
         await asyncio.gather(*self._poll_tasks, return_exceptions=True)
+        if self._guild_members is not None:
+            await self._guild_members.close()
         if self._session is not None:
             await self._session.close()
         self._raffle_store.close()
@@ -1075,6 +1472,18 @@ class Gw2Bot(discord.Client):
         )
         LOGGER.debug("Guild member resolution completed; matched=%s", resolved is not None)
         return resolved
+
+    async def search_guild_members(
+        self,
+        query: str,
+        *,
+        limit: int = 25,
+    ) -> list[str]:
+        if self._guild_members is None:
+            raise RuntimeError("Guild member cache was not initialized")
+        results = await self._guild_members.search(query, limit=limit)
+        LOGGER.debug("Guild member search completed; results=%s", len(results))
+        return results
 
     def add_manual_raffle_ticket(
         self,
@@ -1846,8 +2255,14 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Sending Discord notification; characters=%s", len(message))
         try:
             await self._send_notification(message)
-        except discord.DiscordException:
-            LOGGER.exception("Could not send Discord notification")
+        except discord.DiscordException as exc:
+            _log_discord_failure(
+                "Could not send Discord notification; reason=%s channel_id=%s "
+                "required_permissions=view_channel,send_messages",
+                exc,
+                _discord_failure_reason(exc),
+                self._config.discord_notification_channel_id,
+            )
             return False
         LOGGER.debug("Discord notification sent")
         return True
