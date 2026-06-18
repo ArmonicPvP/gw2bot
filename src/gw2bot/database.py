@@ -107,6 +107,7 @@ class GuildLeaveRecord(Base):
 
     event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String, nullable=False)
+    kicked_by: Mapped[str | None] = mapped_column(String, nullable=True)
     event_time: Mapped[str] = mapped_column(String, nullable=False)
     notification_sent: Mapped[bool] = mapped_column(
         Boolean,
@@ -234,6 +235,19 @@ def initialize_database(engine: Engine) -> set[str]:
                 "UPDATE raffle_deposits SET audit_notification_sent = 1"
             )
             added_columns.add("audit_notification_sent")
+
+        guild_leave_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                GuildLeaveRecord.__tablename__
+            )
+        }
+        if "kicked_by" not in guild_leave_columns:
+            operations.add_column(
+                GuildLeaveRecord.__tablename__,
+                Column("kicked_by", String, nullable=True),
+            )
+            added_columns.add("kicked_by")
 
         run_columns = {
             column["name"]

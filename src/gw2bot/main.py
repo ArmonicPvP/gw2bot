@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import aiohttp
 import discord
@@ -42,6 +42,16 @@ from gw2bot.raffle import (
 
 LOGGER = logging.getLogger(__name__)
 
+
+class TopicEditableChannel(Protocol):
+    async def edit(
+        self,
+        *,
+        topic: str,
+        reason: str | None = None,
+    ) -> Any: ...
+
+
 RAFFLE_DRAW_ROLE_ID = 1317124663847157880
 RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
 RAFFLE_TICKETS_PAGE_SIZE = 10
@@ -50,10 +60,14 @@ RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
 RAFFLE_BULK_MODAL_MAX_LENGTH = 4_000
 RAFFLE_CONTRIBUTION_CHANNEL_ID = 856343628984746014
 RAFFLE_CONTRIBUTION_REPORT_HOURS = 6
+GW2_GUILD_MEMBER_LIMIT = 500
+GW2_GUILD_INVITED_RANK = "invited"
+GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS = 60
 TRIAL_FORUM_CHANNEL_ID = 1317206104727621693
 TRIAL_ROLE_ID = 1450164501696741597
 SUNBORNE_ROLE_ID = 1317140660188352584
 TRIAL_ACCEPTED_TAG = "Accepted"
+TRIAL_IN_REVIEW_TAG_ID = 1317349421821726790
 TRIAL_SEARCH_INDEX_RETRIES = 3
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 LOG_URL_QUERY_PATTERN = re.compile(
@@ -405,6 +419,8 @@ def format_raffle_milestone_preview(
 def format_automated_message_diagnostics(
     contributions: list[RaffleContribution],
     purchased_tickets: int,
+    member_count: int | None = None,
+    pending_invite_count: int | None = None,
 ) -> list[str]:
     messages = [
         (
@@ -417,6 +433,17 @@ def format_automated_message_diagnostics(
         messages.append(
             "No raffle contributions are currently recorded for the next "
             "six-hour report, so it would not send a message yet."
+        )
+
+    if member_count is None or pending_invite_count is None:
+        guild_member_count_preview = (
+            "The guild member count has not been retrieved yet, so the "
+            "channel description is not set."
+        )
+    else:
+        guild_member_count_preview = format_guild_member_count_topic(
+            member_count,
+            pending_invite_count,
         )
 
     messages.extend(
@@ -463,6 +490,10 @@ def format_automated_message_diagnostics(
             (
                 "**Overdue Trial member report (test)**\n"
                 + format_overdue_trial_report(["DiagnosticUser.1234"])[0]
+            ),
+            (
+                "**Guild member count channel description (current)**\n"
+                + guild_member_count_preview
             ),
             (
                 "**Polling status notifications (test)**\n"
@@ -713,6 +744,78 @@ def _discord_failure_reason(error: discord.DiscordException) -> str:
     if code == 50013:
         return "missing_permissions"
     return "discord_error"
+
+
+def _discord_failure_signature(error: discord.DiscordException) -> str:
+    # Sanitized identity (no raw response body) used to deduplicate repeated
+    # failure logs; mirrors the fields emitted by _log_discord_failure.
+    return (
+        f"{type(error).__name__}:"
+        f"{getattr(error, 'status', 'unknown')}:"
+        f"{getattr(error, 'code', 'unknown')}"
+    )
+
+
+def _safe_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _thread_applied_tag_ids(thread: object) -> list[int]:
+    tag_ids: list[int] = []
+    for tag in getattr(thread, "applied_tags", ()):
+        tag_id = _safe_int(getattr(tag, "id", None))
+        if tag_id is not None and tag_id not in tag_ids:
+            tag_ids.append(tag_id)
+    for value in getattr(thread, "_applied_tags", ()):
+        tag_id = _safe_int(value)
+        if tag_id is not None and tag_id not in tag_ids:
+            tag_ids.append(tag_id)
+    return tag_ids
+
+
+def _forum_tags_for_ids(
+    forum: object,
+    tag_ids: set[int],
+) -> dict[int, discord.ForumTag]:
+    tags: dict[int, discord.ForumTag] = {}
+    get_tag = getattr(forum, "get_tag", None)
+    if callable(get_tag):
+        for tag_id in tag_ids:
+            tag = get_tag(tag_id)
+            if tag is not None:
+                tags[tag_id] = cast(discord.ForumTag, tag)
+
+    for tag in getattr(forum, "available_tags", ()):
+        tag_id = _safe_int(getattr(tag, "id", None))
+        if tag_id in tag_ids and tag_id not in tags:
+            tags[tag_id] = cast(discord.ForumTag, tag)
+    return tags
+
+
+def count_active_guild_members(
+    members: list[dict[str, Any]],
+) -> tuple[int, int]:
+    pending_invite_count = sum(
+        1
+        for member in members
+        if str(member.get("rank", "")).strip().casefold()
+        == GW2_GUILD_INVITED_RANK
+    )
+    return len(members) - pending_invite_count, pending_invite_count
+
+
+def format_guild_member_count_topic(
+    member_count: int,
+    pending_invite_count: int,
+) -> str:
+    return f"{member_count}/{GW2_GUILD_MEMBER_LIMIT} ({pending_invite_count} pending)"
 
 
 def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
@@ -1268,6 +1371,9 @@ class Gw2Bot(discord.Client):
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._api: Gw2ApiClient | None = None
         self._guild_members: GuildMemberCache | None = None
+        self._last_guild_member_count: int | None = None
+        self._last_pending_guild_invite_count: int | None = None
+        self._last_topic_update_failure: str | None = None
         self._ready_announced = False
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
@@ -1306,6 +1412,10 @@ class Gw2Bot(discord.Client):
                 self._poll_raffle_contributions(),
                 name="gw2-raffle-contribution-poller",
             ),
+            asyncio.create_task(
+                self._poll_guild_member_count_topic(),
+                name="gw2-guild-member-count-topic-poller",
+            ),
         ]
 
     async def close(self) -> None:
@@ -1330,7 +1440,8 @@ class Gw2Bot(discord.Client):
             "guild log polling every "
             f"{self._config.guild_log_poll_interval_seconds} seconds; "
             "overdue Trial member reporting daily at 17:00 UTC; "
-            "raffle contribution reporting every 6 hours UTC."
+            "raffle contribution reporting every 6 hours UTC; "
+            "guild member count topic updates every 60 seconds."
         )
         self._ready_announced = True
 
@@ -1370,6 +1481,139 @@ class Gw2Bot(discord.Client):
             return
         LOGGER.debug("Automated message diagnostics request completed")
 
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        await self._apply_trial_forum_in_review_tag(thread)
+
+    async def _apply_trial_forum_in_review_tag(
+        self,
+        thread: discord.Thread,
+    ) -> None:
+        thread_id = getattr(thread, "id", "unknown")
+        parent_id = getattr(thread, "parent_id", None)
+        LOGGER.debug(
+            "Discord thread created; thread_id=%s parent_id=%s",
+            thread_id,
+            parent_id,
+        )
+        if parent_id != TRIAL_FORUM_CHANNEL_ID:
+            LOGGER.debug(
+                "Ignoring created thread outside Trial application forum; "
+                "thread_id=%s",
+                thread_id,
+            )
+            return
+
+        applied_tag_ids = _thread_applied_tag_ids(thread)
+        if TRIAL_IN_REVIEW_TAG_ID in applied_tag_ids:
+            LOGGER.debug(
+                "Trial application forum thread %s already has In Review tag",
+                thread_id,
+            )
+            return
+
+        tag_ids_to_resolve = {*applied_tag_ids, TRIAL_IN_REVIEW_TAG_ID}
+        resolved_tags = await self._resolve_trial_forum_tags(
+            thread,
+            tag_ids_to_resolve,
+        )
+        in_review_tag = resolved_tags.get(TRIAL_IN_REVIEW_TAG_ID)
+        if in_review_tag is None:
+            LOGGER.error(
+                "Could not apply In Review tag to Trial application forum "
+                "thread %s; tag_id=%s not found",
+                thread_id,
+                TRIAL_IN_REVIEW_TAG_ID,
+            )
+            return
+
+        edit_tags = [
+            resolved_tags[tag_id]
+            for tag_id in applied_tag_ids
+            if tag_id in resolved_tags
+        ]
+        unresolved_existing_tags = len(applied_tag_ids) - len(edit_tags)
+        if unresolved_existing_tags:
+            LOGGER.warning(
+                "Could not apply In Review tag to Trial application forum "
+                "thread %s; unresolved_existing_tags=%s",
+                thread_id,
+                unresolved_existing_tags,
+            )
+            return
+        if len(edit_tags) >= 5:
+            LOGGER.warning(
+                "Could not apply In Review tag to Trial application forum "
+                "thread %s; existing_tags=%s tag_limit=5",
+                thread_id,
+                len(edit_tags),
+            )
+            return
+
+        LOGGER.debug(
+            "Applying In Review tag to Trial application forum thread %s; "
+            "existing_tags=%s",
+            thread_id,
+            len(edit_tags),
+        )
+        try:
+            await thread.edit(
+                applied_tags=[*edit_tags, in_review_tag],
+                reason="Automatically apply In Review tag",
+            )
+        except discord.DiscordException as error:
+            _log_discord_failure(
+                "Could not apply In Review tag to Trial application forum thread %s",
+                error,
+                thread_id,
+            )
+            return
+        LOGGER.debug(
+            "Applied In Review tag to Trial application forum thread %s; "
+            "tag_count=%s",
+            thread_id,
+            len(edit_tags) + 1,
+        )
+
+    async def _resolve_trial_forum_tags(
+        self,
+        thread: discord.Thread,
+        tag_ids: set[int],
+    ) -> dict[int, discord.ForumTag]:
+        parent = getattr(thread, "parent", None)
+        tags = _forum_tags_for_ids(parent, tag_ids)
+        missing_tag_ids = tag_ids - set(tags)
+        if not missing_tag_ids:
+            LOGGER.debug(
+                "Resolved %s Trial application forum tags from thread parent cache",
+                len(tags),
+            )
+            return tags
+
+        LOGGER.debug(
+            "Trial application forum tag metadata missing from cache; "
+            "missing_tags=%s",
+            len(missing_tag_ids),
+        )
+        try:
+            forum = await self.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
+        except discord.DiscordException as error:
+            _log_discord_failure(
+                "Could not fetch Trial application forum while resolving %s tag IDs",
+                error,
+                len(missing_tag_ids),
+            )
+            return tags
+
+        fetched_tags = _forum_tags_for_ids(forum, missing_tag_ids)
+        tags.update(fetched_tags)
+        LOGGER.debug(
+            "Resolved %s Trial application forum tags from fetched forum; "
+            "unresolved_tags=%s",
+            len(fetched_tags),
+            len(tag_ids - set(tags)),
+        )
+        return tags
+
     async def _send_automated_message_diagnostics(
         self,
         channel: Any,
@@ -1384,6 +1628,8 @@ class Gw2Bot(discord.Client):
         messages = format_automated_message_diagnostics(
             contributions,
             purchased_tickets,
+            self._last_guild_member_count,
+            self._last_pending_guild_invite_count,
         )
         LOGGER.debug(
             "Prepared automated message diagnostics; messages=%s contributors=%s",
@@ -1695,6 +1941,98 @@ class Gw2Bot(discord.Client):
         for message in messages:
             if not await self._try_send_notification(message):
                 return False
+        return True
+
+    async def _poll_guild_member_count_topic(self) -> None:
+        await self.wait_until_ready()
+        LOGGER.debug("Guild Member Count poller started")
+        if self._api is None:
+            raise RuntimeError("GW2 API client was not initialized")
+        while not self.is_closed():
+            LOGGER.debug("Starting Guild Member Count poll")
+            try:
+                updated = await self._update_guild_member_count_topic()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                await self._handle_poll_error("Guild Member Count", exc)
+            else:
+                if updated:
+                    await self._handle_poll_success("Guild Member Count")
+                LOGGER.debug(
+                    "Guild Member Count poll completed; topic_updated=%s",
+                    updated,
+                )
+
+            await asyncio.sleep(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
+
+    async def _update_guild_member_count_topic(self) -> bool:
+        if self._api is None:
+            raise RuntimeError("GW2 API client was not initialized")
+        members = await self._api.get_guild_members(self._config.gw2_guild_id)
+        member_count, pending_invite_count = count_active_guild_members(members)
+        self._last_guild_member_count = member_count
+        self._last_pending_guild_invite_count = pending_invite_count
+        topic = format_guild_member_count_topic(member_count, pending_invite_count)
+        LOGGER.debug(
+            "Fetched guild member count; records=%s members=%s "
+            "pending_invites=%s topic_characters=%s",
+            len(members),
+            member_count,
+            pending_invite_count,
+            len(topic),
+        )
+        return await self._try_update_logging_channel_topic(topic)
+
+    async def _try_update_logging_channel_topic(self, topic: str) -> bool:
+        LOGGER.debug(
+            "Updating logging channel description; characters=%s",
+            len(topic),
+        )
+        try:
+            channel = await self._get_notification_channel()
+            current_topic = getattr(channel, "topic", None)
+            if current_topic == topic:
+                LOGGER.debug("Logging channel description already current")
+                if self._last_topic_update_failure is not None:
+                    self._last_topic_update_failure = None
+                    LOGGER.info("Logging channel description update recovered")
+                return True
+            edit = getattr(channel, "edit", None)
+            if not callable(edit):
+                if self._last_topic_update_failure != "not_editable":
+                    self._last_topic_update_failure = "not_editable"
+                    LOGGER.error(
+                        "Could not update logging channel description; "
+                        "channel_id=%s supports_topic=false",
+                        self._config.discord_notification_channel_id,
+                    )
+                return False
+            editable_channel = cast(TopicEditableChannel, channel)
+            updated_channel = await editable_channel.edit(
+                topic=topic,
+                reason="Update GW2 guild member count",
+            )
+        except discord.DiscordException as exc:
+            signature = _discord_failure_signature(exc)
+            if self._last_topic_update_failure != signature:
+                self._last_topic_update_failure = signature
+                _log_discord_failure(
+                    "Could not update logging channel description; reason=%s "
+                    "channel_id=%s "
+                    "required_permissions=view_channel,manage_channels",
+                    exc,
+                    _discord_failure_reason(exc),
+                    self._config.discord_notification_channel_id,
+                )
+            return False
+        if updated_channel is not None:
+            self._notification_channel = updated_channel
+        if self._last_topic_update_failure is not None:
+            self._last_topic_update_failure = None
+            LOGGER.info("Logging channel description update recovered")
+        LOGGER.debug(
+            "Updated logging channel description; characters=%s",
+            len(topic),
+        )
         return True
 
     async def _poll_raffle_contributions(self) -> None:
@@ -2284,6 +2622,10 @@ class Gw2Bot(discord.Client):
         return True
 
     async def _send_notification(self, message: str) -> None:
+        channel = await self._get_notification_channel()
+        await channel.send(message)
+
+    async def _get_notification_channel(self) -> Any:
         if self._notification_channel is None:
             LOGGER.debug(
                 "Fetching Discord notification channel %s",
@@ -2302,7 +2644,7 @@ class Gw2Bot(discord.Client):
                 )
             self._notification_channel = channel
             LOGGER.debug("Cached Discord notification channel")
-        await self._notification_channel.send(message)
+        return self._notification_channel
 
 
 def main() -> None:

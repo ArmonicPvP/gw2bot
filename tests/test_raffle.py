@@ -60,6 +60,20 @@ def guild_leave(
     }
 
 
+def guild_kick(
+    event_id: int,
+    username: str = "Kicked.1234",
+    kicked_by: str = "Officer.5678",
+) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "time": "2026-06-07T06:26:17.000Z",
+        "type": "kick",
+        "user": username,
+        "kicked_by": kicked_by,
+    }
+
+
 def guild_join(
     event_id: int,
     username: str = "Username.1234",
@@ -118,15 +132,12 @@ class TestRaffle:
         assert leave is not None
         assert leave.message == "Username.1234 has left the guild."
         assert parse_guild_leave({**guild_leave(105), "type": "joined"}) is None
-        assert (
-            parse_guild_leave(
-                {
-                    **guild_leave(106),
-                    "kicked_by": "Officer.5678",
-                }
-            )
-            is None
-        )
+
+    def test_parses_guild_kick_with_exact_message(self) -> None:
+        leave = parse_guild_leave(guild_kick(106))
+
+        assert leave is not None
+        assert leave.message == "Officer.5678 kicked Kicked.1234 from the guild."
 
     def test_parses_guild_join_with_exact_message(self) -> None:
         join = parse_guild_join(guild_join(104))
@@ -150,6 +161,26 @@ class TestRaffle:
 
             reopened = RaffleStore(database_path, "guild-id")
             reopened.process_events([guild_leave(101)])
+            pending = reopened.get_pending_leave_notifications()
+            assert len(pending) == 1
+            reopened.mark_leave_notification_sent(101)
+            assert reopened.get_pending_leave_notifications() == []
+            reopened.close()
+
+    def test_persists_kick_notification_and_prevents_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([guild_kick(101)])
+
+            assert [
+                leave.message for leave in store.get_pending_leave_notifications()
+            ] == ["Officer.5678 kicked Kicked.1234 from the guild."]
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            reopened.process_events([guild_kick(101)])
             pending = reopened.get_pending_leave_notifications()
             assert len(pending) == 1
             reopened.mark_leave_notification_sent(101)
@@ -905,6 +936,43 @@ class TestRaffle:
 
             assert store.get_pending_notifications() == []
             assert store.get_pending_deposit_audit_notifications() == []
+            store.close()
+
+    def test_migrates_existing_leave_events_without_kicker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            legacy_leaves = Table(
+                "guild_leave_events",
+                metadata,
+                Column("event_id", Integer, primary_key=True),
+                Column("username", String, nullable=False),
+                Column("event_time", String, nullable=False),
+                Column("notification_sent", Boolean, nullable=False),
+            )
+            metadata.create_all(engine)
+            with engine.begin() as connection:
+                connection.execute(
+                    legacy_leaves.insert().values(
+                        event_id=101,
+                        username="Existing.1234",
+                        event_time="2026-06-07T06:26:17.000Z",
+                        notification_sent=False,
+                    )
+                )
+            engine.dispose()
+
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(101)
+            store.process_events([guild_kick(102)])
+
+            assert [
+                leave.message for leave in store.get_pending_leave_notifications()
+            ] == [
+                "Existing.1234 has left the guild.",
+                "Officer.5678 kicked Kicked.1234 from the guild.",
+            ]
             store.close()
 
     def test_one_time_migration_caps_existing_free_tickets_at_one(

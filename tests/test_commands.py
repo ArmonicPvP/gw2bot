@@ -15,11 +15,13 @@ from discord import app_commands
 from gw2bot.config import Config
 from gw2bot.guild_members import TrialMemberReportEntry
 from gw2bot.main import (
+    GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS,
     RAFFLE_ADDTICKET_ROLE_ID,
     RAFFLE_CONTRIBUTION_CHANNEL_ID,
     RAFFLE_DRAW_ROLE_ID,
     SUNBORNE_ROLE_ID,
     TRIAL_FORUM_CHANNEL_ID,
+    TRIAL_IN_REVIEW_TAG_ID,
     TRIAL_ROLE_ID,
     Gw2Bot,
     RaffleAccountLinkModal,
@@ -29,9 +31,11 @@ from gw2bot.main import (
     RaffleCommands,
     RaffleTicketsListView,
     configure_logging,
+    count_active_guild_members,
     format_addticket_audit,
     format_automated_message_diagnostics,
     format_bulk_addtickets_summary,
+    format_guild_member_count_topic,
     format_removetickets_audit,
     format_raffle_milestone_preview,
     format_raffle_result,
@@ -65,6 +69,30 @@ class AddTicketsCallback(Protocol):
         username9: str | None = None,
         username10: str | None = None,
     ) -> None: ...
+
+
+class TrialForumTaggingBot(SimpleNamespace):
+    async def _resolve_trial_forum_tags(
+        self,
+        thread: discord.Thread,
+        tag_ids: set[int],
+    ) -> dict[int, discord.ForumTag]:
+        return await Gw2Bot._resolve_trial_forum_tags(
+            cast(Gw2Bot, self),
+            thread,
+            tag_ids,
+        )
+
+
+class GuildMemberCountTopicBot(SimpleNamespace):
+    async def _try_update_logging_channel_topic(self, topic: str) -> bool:
+        return await Gw2Bot._try_update_logging_channel_topic(
+            cast(Gw2Bot, self),
+            topic,
+        )
+
+    async def _get_notification_channel(self) -> Any:
+        return await Gw2Bot._get_notification_channel(cast(Gw2Bot, self))
 
 
 class TestCommand:
@@ -1307,6 +1335,153 @@ class TestBotIntent:
         raffle_store.assert_called_once()
 
 
+class TestTrialForumTagging:
+    async def test_applies_in_review_tag_to_new_trial_forum_post(self) -> None:
+        existing_tag = SimpleNamespace(id=101)
+        in_review_tag = SimpleNamespace(id=TRIAL_IN_REVIEW_TAG_ID)
+        forum = SimpleNamespace(available_tags=[existing_tag, in_review_tag])
+        thread = SimpleNamespace(
+            id=202,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            parent=forum,
+            applied_tags=[existing_tag],
+            _applied_tags=[existing_tag.id],
+            edit=AsyncMock(),
+        )
+        bot = TrialForumTaggingBot()
+
+        await Gw2Bot._apply_trial_forum_in_review_tag(
+            cast(Gw2Bot, bot),
+            cast(discord.Thread, thread),
+        )
+
+        thread.edit.assert_awaited_once_with(
+            applied_tags=[existing_tag, in_review_tag],
+            reason="Automatically apply In Review tag",
+        )
+
+    async def test_fetches_forum_tag_when_thread_parent_cache_is_missing(
+        self,
+    ) -> None:
+        in_review_tag = SimpleNamespace(id=TRIAL_IN_REVIEW_TAG_ID)
+        forum = SimpleNamespace(available_tags=[in_review_tag])
+        thread = SimpleNamespace(
+            id=202,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            parent=None,
+            applied_tags=[],
+            _applied_tags=[],
+            edit=AsyncMock(),
+        )
+        bot = TrialForumTaggingBot(fetch_channel=AsyncMock(return_value=forum))
+
+        await Gw2Bot._apply_trial_forum_in_review_tag(
+            cast(Gw2Bot, bot),
+            cast(discord.Thread, thread),
+        )
+
+        bot.fetch_channel.assert_awaited_once_with(TRIAL_FORUM_CHANNEL_ID)
+        thread.edit.assert_awaited_once_with(
+            applied_tags=[in_review_tag],
+            reason="Automatically apply In Review tag",
+        )
+
+    async def test_skips_threads_outside_trial_forum(self) -> None:
+        thread = SimpleNamespace(
+            id=202,
+            parent_id=999,
+            parent=None,
+            applied_tags=[],
+            _applied_tags=[],
+            edit=AsyncMock(),
+        )
+        bot = SimpleNamespace()
+
+        await Gw2Bot._apply_trial_forum_in_review_tag(
+            cast(Gw2Bot, bot),
+            cast(discord.Thread, thread),
+        )
+
+        thread.edit.assert_not_awaited()
+
+    async def test_skips_thread_that_already_has_in_review_tag(self) -> None:
+        in_review_tag = SimpleNamespace(id=TRIAL_IN_REVIEW_TAG_ID)
+        thread = SimpleNamespace(
+            id=202,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            parent=None,
+            applied_tags=[in_review_tag],
+            _applied_tags=[TRIAL_IN_REVIEW_TAG_ID],
+            edit=AsyncMock(),
+        )
+        bot = SimpleNamespace()
+
+        await Gw2Bot._apply_trial_forum_in_review_tag(
+            cast(Gw2Bot, bot),
+            cast(discord.Thread, thread),
+        )
+
+        thread.edit.assert_not_awaited()
+
+    async def test_missing_in_review_tag_is_logged_without_editing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        forum = SimpleNamespace(available_tags=[])
+        thread = SimpleNamespace(
+            id=202,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            parent=forum,
+            applied_tags=[],
+            _applied_tags=[],
+            edit=AsyncMock(),
+        )
+        bot = TrialForumTaggingBot(fetch_channel=AsyncMock(return_value=forum))
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            await Gw2Bot._apply_trial_forum_in_review_tag(
+                cast(Gw2Bot, bot),
+                cast(discord.Thread, thread),
+            )
+
+        thread.edit.assert_not_awaited()
+        assert "tag_id=1317349421821726790 not found" in caplog.text
+
+    async def test_tagging_failure_logging_omits_raw_exception_body(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "raw-discord-tagging-secret"
+
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50013
+
+            def __str__(self) -> str:
+                return secret
+
+        in_review_tag = SimpleNamespace(id=TRIAL_IN_REVIEW_TAG_ID)
+        forum = SimpleNamespace(available_tags=[in_review_tag])
+        thread = SimpleNamespace(
+            id=202,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            parent=forum,
+            applied_tags=[],
+            _applied_tags=[],
+            edit=AsyncMock(side_effect=DiscordFailure()),
+        )
+        bot = TrialForumTaggingBot()
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            await Gw2Bot._apply_trial_forum_in_review_tag(
+                cast(Gw2Bot, bot),
+                cast(discord.Thread, thread),
+            )
+
+        assert secret not in caplog.text
+        assert "type=DiscordFailure status=403 code=50013" in caplog.text
+
+
 class TestAutomatedMessageDiagnostics:
     def test_formats_all_non_command_automated_message_previews(self) -> None:
         messages = format_automated_message_diagnostics(
@@ -1327,8 +1502,26 @@ class TestAutomatedMessageDiagnostics:
         ) in output
         assert "Guild Storage is low on **Diagnostic Feast**: 5 left" in output
         assert "Trial members past the 14-day mark" in output
+        assert (
+            "The guild member count has not been retrieved yet, so the "
+            "channel description is not set."
+        ) in output
         assert "Guild Storage polling failed: API unavailable" in output
         assert "Guild Storage polling recovered." in output
+
+    def test_includes_current_guild_member_count_description(self) -> None:
+        messages = format_automated_message_diagnostics(
+            [],
+            purchased_tickets=0,
+            member_count=493,
+            pending_invite_count=5,
+        )
+        output = "\n".join(messages)
+
+        assert (
+            "**Guild member count channel description (current)**\n"
+            "493/500 (5 pending)"
+        ) in output
 
     def test_highest_tier_preview_notes_that_it_is_already_reached(self) -> None:
         assert format_raffle_milestone_preview(200) == (
@@ -1464,6 +1657,8 @@ class TestAutomatedMessageDiagnostics:
                     )
                 ]
             ),
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
         )
 
         await Gw2Bot._send_automated_message_diagnostics(
@@ -1506,6 +1701,8 @@ class TestAutomatedMessageDiagnostics:
                 return_value=[RaffleContribution(secret, 1, 0)]
             ),
             get_raffle_totals=MagicMock(return_value=[]),
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
         )
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
@@ -1517,13 +1714,13 @@ class TestAutomatedMessageDiagnostics:
 
         assert secret not in caplog.text
         assert (
-            "Prepared automated message diagnostics; messages=8 contributors=1"
+            "Prepared automated message diagnostics; messages=9 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 9
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 9
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 10
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 10
         assert (
-            "Automated message diagnostics completed; attempted=9 delivered=9 "
+            "Automated message diagnostics completed; attempted=10 delivered=10 "
             "failed=0"
             in caplog.text
         )
@@ -1545,6 +1742,7 @@ class TestAutomatedMessageDiagnostics:
                     None,
                     None,
                     None,
+                    None,
                 ]
             )
         )
@@ -1553,6 +1751,8 @@ class TestAutomatedMessageDiagnostics:
                 return_value=[RaffleContribution("Buyer.1234", 1, 0)]
             ),
             get_raffle_totals=MagicMock(return_value=[]),
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
         )
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
@@ -1562,7 +1762,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 9
+        assert channel.send.await_count == 10
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -1570,7 +1770,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=9 delivered=8 "
+            "Automated message diagnostics completed; attempted=10 delivered=9 "
             "failed=1"
             in caplog.text
         )
@@ -1601,12 +1801,277 @@ class TestStartupStatus:
                 "GW2 bot connected to Discord. Storage polling every 300 seconds; "
                 "guild log polling every 60 seconds; overdue Trial member reporting "
                 "daily at 17:00 UTC; raffle contribution reporting every 6 hours "
-                "UTC." in message
+                "UTC; guild member count topic updates every 60 seconds." in message
                 for message in caplog.messages
             )
             == 1
         )
         assert bot._ready_announced
+
+
+class TestGuildMemberCountTopic:
+    def test_formats_guild_member_count_topic(self) -> None:
+        assert format_guild_member_count_topic(493, 5) == "493/500 (5 pending)"
+
+    def test_counts_invited_guild_records_as_pending(self) -> None:
+        assert count_active_guild_members(
+            [
+                {"name": "One.1234", "rank": "Member"},
+                {"name": "Two.5678", "rank": " invited "},
+                {"name": "Three.9012", "rank": "Invited"},
+            ]
+        ) == (1, 2)
+
+    async def test_updates_logging_channel_description_with_member_count(self) -> None:
+        updated_channel = SimpleNamespace(topic="2/500 (1 pending)")
+        channel = SimpleNamespace(
+            id=9012,
+            guild=SimpleNamespace(id=5678),
+            topic="old",
+            edit=AsyncMock(return_value=updated_channel),
+        )
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {"name": "One.1234", "rank": "Member"},
+                    {"name": "Two.5678", "rank": "Officer"},
+                    {"name": "Pending.9012", "rank": "invited"},
+                ]
+            )
+        )
+        bot = GuildMemberCountTopicBot(
+            _api=api,
+            _config=SimpleNamespace(
+                gw2_guild_id="guild-id",
+                discord_notification_channel_id=9012,
+                discord_command_guild_id=5678,
+            ),
+            _notification_channel=channel,
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
+            _last_topic_update_failure=None,
+        )
+
+        updated = await Gw2Bot._update_guild_member_count_topic(
+            cast(Gw2Bot, bot)
+        )
+
+        assert updated
+        assert bot._last_guild_member_count == 2
+        assert bot._last_pending_guild_invite_count == 1
+        api.get_guild_members.assert_awaited_once_with("guild-id")
+        channel.edit.assert_awaited_once_with(
+            topic="2/500 (1 pending)",
+            reason="Update GW2 guild member count",
+        )
+        assert bot._notification_channel is updated_channel
+
+    async def test_skips_logging_channel_update_when_description_is_current(
+        self,
+    ) -> None:
+        channel = SimpleNamespace(
+            id=9012,
+            guild=SimpleNamespace(id=5678),
+            topic="3/500 (1 pending)",
+            edit=AsyncMock(),
+        )
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {"name": "One.1234", "rank": "Member"},
+                    {"name": "Two.5678", "rank": "Member"},
+                    {"name": "Three.9012", "rank": "Officer"},
+                    {"name": "Pending.1234", "rank": "invited"},
+                ]
+            )
+        )
+        bot = GuildMemberCountTopicBot(
+            _api=api,
+            _config=SimpleNamespace(
+                gw2_guild_id="guild-id",
+                discord_notification_channel_id=9012,
+                discord_command_guild_id=5678,
+            ),
+            _notification_channel=channel,
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
+            _last_topic_update_failure=None,
+        )
+
+        updated = await Gw2Bot._update_guild_member_count_topic(
+            cast(Gw2Bot, bot)
+        )
+
+        assert updated
+        assert bot._last_guild_member_count == 3
+        assert bot._last_pending_guild_invite_count == 1
+        channel.edit.assert_not_awaited()
+
+    async def test_channel_update_failure_logging_omits_raw_exception_body(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "raw-topic-update-secret"
+
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50013
+
+            def __str__(self) -> str:
+                return secret
+
+        channel = SimpleNamespace(
+            id=9012,
+            guild=SimpleNamespace(id=5678),
+            topic="old",
+            edit=AsyncMock(side_effect=DiscordFailure()),
+        )
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {"name": "One.1234", "rank": "Member"},
+                    {"name": "Pending.1234", "rank": "invited"},
+                ]
+            )
+        )
+        bot = GuildMemberCountTopicBot(
+            _api=api,
+            _config=SimpleNamespace(
+                gw2_guild_id="guild-id",
+                discord_notification_channel_id=9012,
+                discord_command_guild_id=5678,
+            ),
+            _notification_channel=channel,
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
+            _last_topic_update_failure=None,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            updated = await Gw2Bot._update_guild_member_count_topic(
+                cast(Gw2Bot, bot)
+            )
+
+        assert not updated
+        assert bot._last_guild_member_count == 1
+        assert bot._last_pending_guild_invite_count == 1
+        assert secret not in caplog.text
+        assert "type=DiscordFailure status=403 code=50013" in caplog.text
+
+    async def test_repeated_topic_update_failures_log_once(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50013
+
+        channel = SimpleNamespace(
+            id=9012,
+            guild=SimpleNamespace(id=5678),
+            topic="old",
+            edit=AsyncMock(side_effect=DiscordFailure()),
+        )
+        bot = GuildMemberCountTopicBot(
+            _config=SimpleNamespace(
+                discord_notification_channel_id=9012,
+                discord_command_guild_id=5678,
+            ),
+            _notification_channel=channel,
+            _last_topic_update_failure=None,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            assert not await Gw2Bot._try_update_logging_channel_topic(
+                cast(Gw2Bot, bot), "1/500 (0 pending)"
+            )
+            assert not await Gw2Bot._try_update_logging_channel_topic(
+                cast(Gw2Bot, bot), "1/500 (0 pending)"
+            )
+
+        assert channel.edit.await_count == 2
+        assert (
+            caplog.text.count("Could not update logging channel description") == 1
+        )
+
+    async def test_topic_update_recovery_is_logged_after_failure(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50013
+
+        updated_channel = SimpleNamespace(topic="1/500 (0 pending)")
+        channel = SimpleNamespace(
+            id=9012,
+            guild=SimpleNamespace(id=5678),
+            topic="old",
+            edit=AsyncMock(side_effect=[DiscordFailure(), updated_channel]),
+        )
+        bot = GuildMemberCountTopicBot(
+            _config=SimpleNamespace(
+                discord_notification_channel_id=9012,
+                discord_command_guild_id=5678,
+            ),
+            _notification_channel=channel,
+            _last_topic_update_failure=None,
+        )
+
+        assert not await Gw2Bot._try_update_logging_channel_topic(
+            cast(Gw2Bot, bot), "1/500 (0 pending)"
+        )
+        assert bot._last_topic_update_failure is not None
+
+        with caplog.at_level(logging.INFO, logger="gw2bot.main"):
+            assert await Gw2Bot._try_update_logging_channel_topic(
+                cast(Gw2Bot, bot), "1/500 (0 pending)"
+            )
+
+        assert bot._last_topic_update_failure is None
+        assert "Logging channel description update recovered" in caplog.text
+
+    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_poller_updates_topic_every_minute(self, sleep: AsyncMock) -> None:
+        bot = SimpleNamespace(
+            wait_until_ready=AsyncMock(),
+            is_closed=MagicMock(side_effect=[False, True]),
+            _api=object(),
+            _update_guild_member_count_topic=AsyncMock(return_value=True),
+            _handle_poll_error=AsyncMock(),
+            _handle_poll_success=AsyncMock(),
+        )
+
+        await Gw2Bot._poll_guild_member_count_topic(cast(Gw2Bot, bot))
+
+        bot._update_guild_member_count_topic.assert_awaited_once()
+        bot._handle_poll_success.assert_awaited_once_with("Guild Member Count")
+        bot._handle_poll_error.assert_not_awaited()
+        sleep.assert_awaited_once_with(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
+
+    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    async def test_poller_reports_member_count_api_failure(
+        self,
+        sleep: AsyncMock,
+    ) -> None:
+        error = aiohttp.ClientError("GW2 unavailable")
+        bot = SimpleNamespace(
+            wait_until_ready=AsyncMock(),
+            is_closed=MagicMock(side_effect=[False, True]),
+            _api=object(),
+            _update_guild_member_count_topic=AsyncMock(side_effect=error),
+            _handle_poll_error=AsyncMock(),
+            _handle_poll_success=AsyncMock(),
+        )
+
+        await Gw2Bot._poll_guild_member_count_topic(cast(Gw2Bot, bot))
+
+        bot._handle_poll_error.assert_awaited_once_with(
+            "Guild Member Count",
+            error,
+        )
+        bot._handle_poll_success.assert_not_awaited()
+        sleep.assert_awaited_once_with(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
 
 
 class TestGuildLogRefresh:
