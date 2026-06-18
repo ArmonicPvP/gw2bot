@@ -55,7 +55,8 @@ code to correct the channel configuration:
   can view the channel.
 - Error code `50013` (`missing_permissions`): grant the bot `View Channel` and
   `Send Messages` in the notification channel, checking category and
-  channel-specific permission overrides.
+  channel-specific permission overrides. Grant `Manage Channels` there as well
+  so it can update the channel description with the current guild member count.
 
 Failed raffle-deposit audit messages remain pending and are retried during each
 guild-log poll after permissions are corrected.
@@ -64,7 +65,8 @@ Enable the privileged `Message Content Intent` for the bot in the Discord
 Developer Portal so it can respond to the notification-channel `diag` message.
 The bot also needs `View Channel` and `Read Message History` permissions for
 forum channel `1317206104727621693` so it can link Trial applications to
-Discord members.
+Discord members. Grant `Manage Threads` in that forum channel so the bot can
+automatically tag new posts as `In Review`.
 
 ## Feast Stock Alerts
 
@@ -283,6 +285,9 @@ Username.1234 has left the guild.
 Guild membership messages, raffle deposit audit messages, raffle command audit
 messages, stock alerts, and
 polling-status messages are posted in `DISCORD_NOTIFICATION_CHANNEL_ID`.
+Every minute, the bot updates that channel's description to the current GW2
+guild member count as `x/500 (y pending)`, excluding `invited` records from
+`x` and reporting them in `y`.
 Raffle-deposit notifications are also posted in the raffle contribution
 channel. Join, leave, and deposit delivery state is persisted so each message
 is posted once per destination, including across restarts. Startup status and

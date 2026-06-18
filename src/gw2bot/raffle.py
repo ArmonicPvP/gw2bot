@@ -130,9 +130,12 @@ class GuildLeave:
     event_id: int
     username: str
     event_time: str
+    kicked_by: str | None = None
 
     @property
     def message(self) -> str:
+        if self.kicked_by is not None:
+            return f"{self.kicked_by} kicked {self.username} from the guild."
         return f"{self.username} has left the guild."
 
 
@@ -295,6 +298,7 @@ class RaffleStore:
                         GuildLeaveRecord(
                             event_id=leave.event_id,
                             username=leave.username,
+                            kicked_by=leave.kicked_by,
                             event_time=leave.event_time,
                         )
                     )
@@ -823,6 +827,7 @@ def _to_guild_leave(record: GuildLeaveRecord) -> GuildLeave:
         event_id=record.event_id,
         username=record.username,
         event_time=record.event_time,
+        kicked_by=record.kicked_by,
     )
 
 
@@ -902,19 +907,21 @@ def parse_gold_deposit(event: dict[str, Any]) -> RaffleDeposit | None:
 def parse_guild_leave(event: dict[str, Any]) -> GuildLeave | None:
     if not event.get("user"):
         return None
-    # GW2 reports a voluntary departure as a self-kick.
-    if (
-        event.get("type") == "kick"
-        and event.get("kicked_by")
-        and event["kicked_by"] != event["user"]
-    ):
-        return None
     if event.get("type") not in {"kick", "left"}:
         return None
+    username = str(event["user"])
+    kicked_by_raw = event.get("kicked_by")
+    # GW2 reports a voluntary departure as a self-kick.
+    kicked_by = (
+        str(kicked_by_raw)
+        if kicked_by_raw and str(kicked_by_raw) != username
+        else None
+    )
     return GuildLeave(
         event_id=int(event["id"]),
-        username=str(event["user"]),
+        username=username,
         event_time=str(event.get("time", "")),
+        kicked_by=kicked_by,
     )
 
 
