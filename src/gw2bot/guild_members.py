@@ -14,6 +14,7 @@ TRIAL_RANK = "Trial"
 TRIAL_PERIOD = timedelta(days=14)
 TRIAL_REPORT_HOUR_UTC = 17
 DISCORD_MESSAGE_LIMIT = 2_000
+BACKGROUND_REFRESH_RETRY_SECONDS = 30
 TRIAL_REPORT_STATUS_ORDER = {
     "Sunborne": 0,
     "Trial": 1,
@@ -46,7 +47,9 @@ class GuildMemberCache:
         self._members: dict[str, str] = {}
         self._member_ranks: dict[str, str] = {}
         self._expires_at = 0.0
+        self._next_background_refresh_at = 0.0
         self._lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task[None] | None = None
 
     async def resolve(
         self,
@@ -78,6 +81,85 @@ class GuildMemberCache:
         )
         return results
 
+    async def search(self, query: str, *, limit: int = 25) -> list[str]:
+        started_at = time.perf_counter()
+        query_chars = len(query.strip())
+        cache_expired = self._clock() >= self._expires_at
+        LOGGER.debug(
+            "Guild member cache search started; query_chars=%s limit=%s "
+            "cached_members=%s cache_expired=%s",
+            query_chars,
+            limit,
+            len(self._members),
+            cache_expired,
+        )
+        refresh_started = self.start_background_refresh()
+        query_key = query.strip().casefold()
+        matches = [
+            username
+            for username in self._members.values()
+            if query_key in username.casefold()
+        ]
+        matches.sort(
+            key=lambda username: (
+                not username.casefold().startswith(query_key),
+                username.casefold(),
+                username,
+            )
+        )
+        results = matches[:max(0, limit)]
+        LOGGER.debug(
+            "Guild member cache search completed; query_chars=%s matches=%s "
+            "returned=%s background_refresh_started=%s elapsed_ms=%.3f",
+            query_chars,
+            len(matches),
+            len(results),
+            refresh_started,
+            (time.perf_counter() - started_at) * 1_000,
+        )
+        return results
+
+    def start_background_refresh(self) -> bool:
+        now = self._clock()
+        if now < self._expires_at:
+            LOGGER.debug("Guild member cache background refresh not needed")
+            return False
+        if now < self._next_background_refresh_at:
+            LOGGER.debug("Guild member cache background refresh retry delayed")
+            return False
+        if self._refresh_task is not None and not self._refresh_task.done():
+            LOGGER.debug("Guild member cache background refresh already running")
+            return False
+        self._refresh_task = asyncio.create_task(
+            self._refresh_in_background(),
+            name="gw2-guild-member-cache-refresh",
+        )
+        LOGGER.debug("Started guild member cache background refresh")
+        return True
+
+    async def close(self) -> None:
+        task = self._refresh_task
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._refresh_task = None
+        LOGGER.debug("Stopped guild member cache background refresh")
+
+    async def _refresh_in_background(self) -> None:
+        try:
+            await self._refresh_if_expired()
+        except Exception as exc:
+            self._next_background_refresh_at = (
+                self._clock() + BACKGROUND_REFRESH_RETRY_SECONDS
+            )
+            LOGGER.error(
+                "Guild member cache background refresh failed; error_type=%s",
+                type(exc).__name__,
+            )
+        finally:
+            self._refresh_task = None
+
     async def _refresh_if_expired(self, *, force: bool = False) -> None:
         if not force and self._clock() < self._expires_at:
             LOGGER.debug("Reusing guild member cache")
@@ -100,6 +182,7 @@ class GuildMemberCache:
                 if member.get("name")
             }
             self._expires_at = self._clock() + self._ttl_seconds
+            self._next_background_refresh_at = 0.0
             LOGGER.debug(
                 "Guild member cache refreshed; members=%s ttl_seconds=%s",
                 len(self._members),

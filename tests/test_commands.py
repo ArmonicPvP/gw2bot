@@ -4,7 +4,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import aiohttp
@@ -23,6 +23,7 @@ from gw2bot.main import (
     TRIAL_ROLE_ID,
     Gw2Bot,
     RaffleAccountLinkModal,
+    RaffleBulkAddTicketsModal,
     RaffleContributionReportView,
     RedactingFormatter,
     RaffleCommands,
@@ -30,6 +31,7 @@ from gw2bot.main import (
     configure_logging,
     format_addticket_audit,
     format_automated_message_diagnostics,
+    format_bulk_addtickets_summary,
     format_removetickets_audit,
     format_raffle_milestone_preview,
     format_raffle_result,
@@ -37,12 +39,32 @@ from gw2bot.main import (
     raffle_contribution_report_end,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
+    raffle_tier_summary_embed,
     main as run_main,
+    parse_squad_attendance_usernames,
     redact_log_text,
     seconds_until_raffle_contribution_report,
     user_has_role,
 )
 from gw2bot.raffle import RaffleContribution, RaffleTotal
+
+
+class AddTicketsCallback(Protocol):
+    async def __call__(
+        self,
+        group: RaffleCommands,
+        interaction: discord.Interaction,
+        username1: str | None = None,
+        username2: str | None = None,
+        username3: str | None = None,
+        username4: str | None = None,
+        username5: str | None = None,
+        username6: str | None = None,
+        username7: str | None = None,
+        username8: str | None = None,
+        username9: str | None = None,
+        username10: str | None = None,
+    ) -> None: ...
 
 
 class TestCommand:
@@ -55,6 +77,8 @@ class TestCommand:
         assert set(commands) == {
             "draw",
             "addticket",
+            "addtickets",
+            "bulkaddtickets",
             "removetickets",
             "tickets",
             "list",
@@ -64,6 +88,17 @@ class TestCommand:
         addticket = commands["addticket"]
         assert isinstance(addticket, app_commands.Command)
         assert [parameter.name for parameter in addticket.parameters] == ["username"]
+        assert addticket.parameters[0].autocomplete
+        addtickets = commands["addtickets"]
+        assert isinstance(addtickets, app_commands.Command)
+        assert [parameter.name for parameter in addtickets.parameters] == [
+            f"username{index}" for index in range(1, 11)
+        ]
+        assert all(parameter.autocomplete for parameter in addtickets.parameters)
+        assert not any(parameter.required for parameter in addtickets.parameters)
+        bulkaddtickets = commands["bulkaddtickets"]
+        assert isinstance(bulkaddtickets, app_commands.Command)
+        assert not bulkaddtickets.parameters
         tickets = commands["tickets"]
         assert isinstance(tickets, app_commands.Command)
         assert [parameter.name for parameter in tickets.parameters] == ["username"]
@@ -224,6 +259,363 @@ class TestCommand:
         )
 
 
+class TestRaffleGuildMemberAutocomplete:
+    async def test_returns_matching_guild_members_for_authorized_user(self) -> None:
+        bot = SimpleNamespace(
+            search_guild_members=AsyncMock(
+                return_value=["Member One.1234", "Member Two.5678"]
+            )
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                roles=[SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID)]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.guild_member_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "member",
+        )
+
+        bot.search_guild_members.assert_awaited_once_with("member", limit=25)
+        assert [(choice.name, choice.value) for choice in choices] == [
+            ("Member One.1234", "Member One.1234"),
+            ("Member Two.5678", "Member Two.5678"),
+        ]
+
+    async def test_does_not_expose_guild_members_to_unauthorized_user(self) -> None:
+        bot = SimpleNamespace(search_guild_members=AsyncMock())
+        interaction = SimpleNamespace(user=SimpleNamespace(roles=[]))
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.guild_member_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "member",
+        )
+
+        assert choices == []
+        bot.search_guild_members.assert_not_awaited()
+
+    async def test_failure_logging_omits_secret_bearing_exception(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "autocomplete-failure-secret"
+        bot = SimpleNamespace(
+            search_guild_members=AsyncMock(
+                side_effect=aiohttp.ClientError(
+                    f"request failed with access_token={secret}"
+                )
+            )
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                roles=[SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID)]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            choices = await group.guild_member_autocomplete(
+                interaction,  # type: ignore[arg-type]
+                "member",
+            )
+
+        assert choices == []
+        assert secret not in caplog.text
+        assert "Could not refresh the guild member cache for autocomplete" in caplog.text
+
+
+class TestAddRaffleTicketsCommand:
+    def test_parses_squad_attendance_account_names(self) -> None:
+        attendance = (
+            ":Shadowgopher.8015, Merys Braun\n"
+            ":PsycoPrinny.6781, Ivalera Vandimion\n"
+            "\n"
+            ":Runts.9704, Maldorfic"
+        )
+
+        assert parse_squad_attendance_usernames(attendance) == [
+            "Shadowgopher.8015",
+            "PsycoPrinny.6781",
+            "Runts.9704",
+        ]
+
+    def test_attendance_parser_logging_omits_pasted_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "attendance-content-secret.1234"
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            parse_squad_attendance_usernames(
+                f":{secret}, Character Name\n:, Missing Account"
+            )
+
+        assert secret not in caplog.text
+        assert (
+            "Parsed squad attendance text; characters="
+            in caplog.text
+        )
+        assert "usernames=1 skipped_lines=1" in caplog.text
+
+    async def test_bulk_attendance_command_opens_paragraph_modal(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_modal=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command
+            for command in group.commands
+            if command.name == "bulkaddtickets"
+        )
+
+        await command.callback(group, interaction)  # type: ignore[arg-type]
+
+        bot.authorize_raffle_command.assert_awaited_once_with(
+            interaction,
+            RAFFLE_ADDTICKET_ROLE_ID,
+        )
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, RaffleBulkAddTicketsModal)
+        assert modal.attendance.style is discord.TextStyle.paragraph
+        assert modal.attendance.max_length == 4_000
+        assert modal.attendance.placeholder == ":Username.1234, Character Name"
+
+    async def test_bulk_attendance_modal_adds_parsed_unique_members(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(
+                side_effect=[
+                    "Shadowgopher.8015",
+                    "PsycoPrinny.6781",
+                    "Shadowgopher.8015",
+                ]
+            ),
+            add_manual_raffle_ticket=MagicMock(),
+            send_notification=AsyncMock(return_value=True),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        modal = RaffleBulkAddTicketsModal(group)
+        modal.attendance._value = (
+            ":Shadowgopher.8015, Merys Braun\n"
+            ":PsycoPrinny.6781, Ivalera Vandimion\n"
+            ":shadowgopher.8015, Another Character"
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await modal.on_submit(interaction)  # type: ignore[arg-type]
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        assert bot.resolve_guild_member.await_count == 3
+        assert bot.add_manual_raffle_ticket.call_args_list == [
+            call("Shadowgopher.8015"),
+            call("PsycoPrinny.6781"),
+        ]
+        assert bot.send_notification.await_count == 2
+        message = interaction.followup.send.await_args.args[0]
+        assert "Added one raffle ticket to 2 guild members." in message
+        assert "Duplicate selections skipped: **Shadowgopher.8015**" in message
+
+    async def test_bulk_attendance_modal_rechecks_authorization(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=False),
+            resolve_guild_member=AsyncMock(),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        modal = RaffleBulkAddTicketsModal(group)
+        modal.attendance._value = ":Member.1234, Character Name"
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await modal.on_submit(interaction)  # type: ignore[arg-type]
+
+        bot.authorize_raffle_command.assert_awaited_once_with(
+            interaction,
+            RAFFLE_ADDTICKET_ROLE_ID,
+        )
+        interaction.response.defer.assert_not_awaited()
+        bot.resolve_guild_member.assert_not_awaited()
+
+    async def test_bulk_attendance_modal_rejects_empty_parsed_input(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        modal = RaffleBulkAddTicketsModal(group)
+        modal.attendance._value = "\n:, Missing Account\n"
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await modal.on_submit(interaction)  # type: ignore[arg-type]
+
+        bot.resolve_guild_member.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once_with(
+            "No GW2 account names were found in the pasted attendance text.",
+            ephemeral=True,
+        )
+
+    async def test_adds_valid_unique_members_and_reports_all_other_results(
+        self,
+    ) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(
+                side_effect=[
+                    "Alpha.1234",
+                    "Alpha.1234",
+                    None,
+                    "Existing.5678",
+                    "Beta.9012",
+                ]
+            ),
+            add_manual_raffle_ticket=MagicMock(
+                side_effect=[
+                    raffle_total("Alpha.1234", free=1),
+                    ValueError(
+                        "Existing.5678 already has the maximum of 1 manual raffle ticket"
+                    ),
+                    raffle_total("Beta.9012", free=1),
+                ]
+            ),
+            send_notification=AsyncMock(side_effect=[True, False]),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addtickets"
+        )
+        assert isinstance(command, app_commands.Command)
+        callback = cast(AddTicketsCallback, command.callback)
+
+        await callback(
+            group,
+            cast(discord.Interaction, interaction),
+            "alpha.1234",
+            "ALPHA.1234",
+            "outside.3456",
+            "existing.5678",
+            "beta.9012",
+        )
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        assert bot.resolve_guild_member.await_count == 5
+        assert bot.add_manual_raffle_ticket.call_args_list == [
+            call("Alpha.1234"),
+            call("Existing.5678"),
+            call("Beta.9012"),
+        ]
+        assert bot.send_notification.await_args_list == [
+            call("<@1234> added 1 raffle ticket to Alpha.1234."),
+            call("<@1234> added 1 raffle ticket to Beta.9012."),
+        ]
+        message = interaction.followup.send.await_args.args[0]
+        assert "Added one raffle ticket to 2 guild members." in message
+        assert "Added: **Alpha.1234**, **Beta.9012**" in message
+        assert "Not in the configured guild: 1" in message
+        assert "Duplicate selections skipped: **Alpha.1234**" in message
+        assert "Could not add: **Existing.5678**" in message
+        assert "1 audit delivery failed." in message
+        assert interaction.followup.send.await_args.kwargs["ephemeral"]
+
+    def test_bulk_summary_is_bounded_for_long_values(self) -> None:
+        long_name = "x" * 5_000
+
+        message = format_bulk_addtickets_summary(
+            [long_name] * 100,
+            100,
+            [long_name] * 100,
+            [long_name] * 100,
+            100,
+        )
+
+        assert len(message) <= 2_000
+        assert long_name not in message
+        assert "(+90 more)" in message
+
+    async def test_cache_failure_adds_no_tickets_and_omits_exception_secret(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "bulk-member-cache-secret"
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(
+                side_effect=aiohttp.ClientError(
+                    f"request failed with access_token={secret}"
+                )
+            ),
+            add_manual_raffle_ticket=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addtickets"
+        )
+        assert isinstance(command, app_commands.Command)
+        callback = cast(AddTicketsCallback, command.callback)
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            await callback(
+                group,
+                cast(discord.Interaction, interaction),
+                "member.1234",
+            )
+
+        bot.add_manual_raffle_ticket.assert_not_called()
+        assert secret not in caplog.text
+        interaction.followup.send.assert_awaited_once_with(
+            "Could not verify guild membership. No tickets were added. "
+            "Try again later.",
+            ephemeral=True,
+        )
+
+    async def test_requires_at_least_one_selection(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addtickets"
+        )
+        assert isinstance(command, app_commands.Command)
+        callback = cast(AddTicketsCallback, command.callback)
+
+        await callback(
+            group,
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "Select at least one guild member.",
+            ephemeral=True,
+        )
+
+
 class TestRaffleTicketsCommand:
     async def test_prompts_unlinked_user_for_gw2_account(self) -> None:
         bot = SimpleNamespace(
@@ -381,14 +773,21 @@ class TestRaffleTicketsCommand:
         )
 
         bot.get_raffle_totals.return_value = [
-            raffle_total(f"Member {index:02d}.1234") for index in range(10)
+            raffle_total(f"Member {index:02d}.1234", purchased=1)
+            for index in range(10)
         ]
         await tickets_list.callback(group, interaction)  # type: ignore[arg-type]
         assert "view" not in interaction.response.send_message.await_args.kwargs
+        embeds = interaction.response.send_message.await_args.kwargs["embeds"]
+        assert [embed.title for embed in embeds] == [
+            "Raffle Tier Summary",
+            "Raffle Tickets",
+        ]
 
         interaction.response.send_message.reset_mock()
         bot.get_raffle_totals.return_value = [
-            raffle_total(f"Member {index:02d}.1234") for index in range(11)
+            raffle_total(f"Member {index:02d}.1234", purchased=1)
+            for index in range(11)
         ]
         await tickets_list.callback(group, interaction)  # type: ignore[arg-type]
         view = interaction.response.send_message.await_args.kwargs["view"]
@@ -397,9 +796,10 @@ class TestRaffleTicketsCommand:
 
     async def test_list_paginates_ten_players_at_a_time(self) -> None:
         totals = [
-            raffle_total(f"Member {index:02d}.1234", purchased=index)
+            raffle_total(f"Member {index:02d}.1234", purchased=index + 1)
             for index in range(11)
         ]
+        totals.append(raffle_total("Former Participant.9999"))
         first_embed = raffle_ticket_list_embed(totals, 0)
         view = RaffleTicketsListView(totals)
         interaction = SimpleNamespace(
@@ -409,25 +809,59 @@ class TestRaffleTicketsCommand:
         assert "Member 10.1234" in (first_embed.description or "")
         assert "Member 01.1234" in (first_embed.description or "")
         assert "Member 00.1234" not in (first_embed.description or "")
+        assert "Former Participant.9999" not in (first_embed.description or "")
         assert (
-            "**Member 10.1234**\nPurchased: 10\nFree: 0\nTotal: 10"
+            "**Member 10.1234**\nPurchased: 11\nFree: 0\nTotal: 11"
             in (first_embed.description or "")
         )
         assert (
-            "**Member 01.1234**\nPurchased: 1\nFree: 0\nTotal: 1"
+            "**Member 01.1234**\nPurchased: 2\nFree: 0\nTotal: 2"
             in (first_embed.description or "")
         )
         assert "```" not in (first_embed.description or "")
 
         await view.change_page(interaction, 1)  # type: ignore[arg-type]
 
-        second_embed = interaction.response.edit_message.await_args.kwargs["embed"]
+        page_embeds = interaction.response.edit_message.await_args.kwargs["embeds"]
+        assert page_embeds[0].title == "Raffle Tier Summary"
+        second_embed = page_embeds[1]
         assert "Member 00.1234" in (second_embed.description or "")
         assert "Member 01.1234" not in (second_embed.description or "")
         assert (
             second_embed.description
-            == "**Member 00.1234**\nPurchased: 0\nFree: 0\nTotal: 0"
+            == "**Member 00.1234**\nPurchased: 1\nFree: 0\nTotal: 1"
         )
+
+    async def test_list_omits_retained_zero_ticket_records(self) -> None:
+        bot = SimpleNamespace(
+            get_raffle_totals=MagicMock(
+                return_value=[
+                    raffle_total(f"Former Member {index:02d}.1234")
+                    for index in range(15)
+                ]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        tickets_list = next(
+            command for command in group.commands if command.name == "list"
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await tickets_list.callback(group, interaction)  # type: ignore[arg-type]
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "view" not in kwargs
+        assert (
+            kwargs["embeds"][1].description
+            == "No players currently have raffle tickets."
+        )
+        assert [field.value for field in kwargs["embeds"][0].fields] == [
+            "No tier reached",
+            "0",
+            "50",
+        ]
 
     def test_list_orders_total_descending_then_username_case_insensitively(
         self,
@@ -467,9 +901,70 @@ class TestRaffleTicketsCommand:
             )
 
         assert secret not in caplog.text
-        assert "Ordered raffle totals for display; players=1" in caplog.text
+        assert (
+            "Ordered raffle totals for display; records=1 active_players=1"
+            in caplog.text
+        )
         assert (
             "Rendering raffle ticket list page; page=1 page_count=1 players=1"
+            in caplog.text
+        )
+
+    def test_tier_summary_uses_purchased_tickets_and_reports_next_tier(
+        self,
+    ) -> None:
+        embed = raffle_tier_summary_embed(
+            [
+                raffle_total("Buyer A.1234", purchased=50, free=10),
+                raffle_total("Buyer B.5678", purchased=25, free=10),
+            ]
+        )
+
+        assert [field.name for field in embed.fields] == [
+            "Current Tier",
+            "Total Tickets Purchased",
+            "Tickets Until Next Tier",
+        ]
+        assert [field.value for field in embed.fields] == [
+            "Tier 1",
+            "75",
+            "25",
+        ]
+
+    def test_tier_summary_handles_no_reached_tier_and_highest_tier(self) -> None:
+        below_first = raffle_tier_summary_embed(
+            [raffle_total("Member.1234", purchased=49, free=100)]
+        )
+        highest = raffle_tier_summary_embed(
+            [raffle_total("Member.1234", purchased=200)]
+        )
+
+        assert [field.value for field in below_first.fields] == [
+            "No tier reached",
+            "49",
+            "1",
+        ]
+        assert [field.value for field in highest.fields] == [
+            "Tier 4",
+            "200",
+            "0 (highest tier reached)",
+        ]
+
+    def test_tier_summary_logging_omits_account_names(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "tier-summary-account-secret"
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
+            raffle_tier_summary_embed(
+                [raffle_total(f"{secret}.1234", purchased=75)]
+            )
+
+        assert secret not in caplog.text
+        assert (
+            "Rendered raffle tier summary; purchased_tickets=75 "
+            "current_tier_reached=True next_tier_exists=True"
             in caplog.text
         )
 
@@ -1277,6 +1772,60 @@ class TestFeastNotification:
             )
 
         assert sent
+
+
+class TestDiscordNotificationDelivery:
+    async def test_forbidden_logs_actionable_permission_diagnostics(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _send_notification=AsyncMock(side_effect=_forbidden_error(50013)),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            sent = await Gw2Bot._try_send_notification(
+                cast(Gw2Bot, bot),
+                "purchase message",
+            )
+
+        assert not sent
+        assert (
+            "Could not send Discord notification; reason=missing_permissions "
+            "channel_id=9012 required_permissions=view_channel,send_messages "
+            "(type=Forbidden status=403 code=50013)"
+            in caplog.text
+        )
+
+    async def test_failure_logging_omits_raw_discord_exception_body(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "discord-raw-response-secret"
+
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50001
+
+            def __str__(self) -> str:
+                return secret
+
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _send_notification=AsyncMock(side_effect=DiscordFailure()),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.main"):
+            sent = await Gw2Bot._try_send_notification(
+                cast(Gw2Bot, bot),
+                "purchase message",
+            )
+
+        assert not sent
+        assert secret not in caplog.text
+        assert "reason=missing_access" in caplog.text
+        assert "type=DiscordFailure status=403 code=50001" in caplog.text
 
 
 class TestTrialMemberNotification:

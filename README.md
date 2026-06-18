@@ -46,6 +46,20 @@ The bot must have `View Channel` and `Send Messages` permissions in the
 configured notification channel. Users running raffle commands must have
 `Use Application Commands` permission.
 
+If notification delivery reports Discord HTTP 403, use the logged Discord error
+code to correct the channel configuration:
+
+- Error code `50001` (`missing_access`): verify
+  `DISCORD_NOTIFICATION_CHANNEL_ID` identifies a channel in
+  `DISCORD_COMMAND_GUILD_ID`, the bot is installed in that server, and the bot
+  can view the channel.
+- Error code `50013` (`missing_permissions`): grant the bot `View Channel` and
+  `Send Messages` in the notification channel, checking category and
+  channel-specific permission overrides.
+
+Failed raffle-deposit audit messages remain pending and are retried during each
+guild-log poll after permissions are corrected.
+
 Enable the privileged `Message Content Intent` for the bot in the Discord
 Developer Portal so it can respond to the notification-channel `diag` message.
 The bot also needs `View Channel` and `Read Message History` permissions for
@@ -217,8 +231,17 @@ registration is unavailable.
 - `/raffle addticket username:<account>`: adds one manual ticket to a current
   guild member and requires role `1318357141521825872`. The command uses a
   case-insensitive guild-member cache and returns an error for accounts outside
-  the configured guild. Each user may receive at most one manually added
-  ticket per raffle.
+  the configured guild. Username autocomplete immediately searches the current
+  cached snapshot and refreshes expired data in the background, while command
+  submission still waits for current guild membership validation. Each user
+  may receive at most one manually added ticket per raffle.
+- `/raffle addtickets [username1:<account> ... username10:<account>]`: adds one
+  manual ticket to each of up to ten selected guild members and requires the
+  same role as `/raffle addticket`.
+- `/raffle bulkaddtickets`: opens a large text field for pasting squad
+  attendance lines such as `:Username.1234, Character Name`, then adds one
+  manual ticket to each unique current guild member. It requires the same role
+  as `/raffle addticket`.
 - `/raffle removetickets username:<account> [amount:<number>]`: requires the
   same officer role as `/raffle draw` and removes only current purchased
   tickets. The amount defaults to one. Free tickets and lifetime deposited gold
@@ -226,15 +249,16 @@ registration is unavailable.
 - `/raffle tickets [username:<account>]`: shows purchased, free, and total
   current raffle tickets. Without a username, the command uses the caller's
   linked GW2 account and prompts unlinked users to enter their account name.
-- `/raffle list`: publicly lists recorded players with each account name bolded
-  above its purchased, free, and total ticket counts. It shows ten players per
-  page, ordered by total tickets descending and then username without regard to
-  case.
+- `/raffle list`: publicly lists players who currently have tickets, with each
+  account name bolded above its purchased, free, and total ticket counts. It
+  shows ten players per page, ordered by total tickets descending and then
+  username without regard to case. Retained lifetime records with zero current
+  tickets are omitted.
 
-`/raffle draw` announces the ordered winners publicly. `/raffle addticket` and
-`/raffle removetickets` confirmations and errors and `/raffle tickets` results
-are visible only to the command user. Successful ticket additions and removals
-also send audit logs through the same destination as guild-leave messages:
+`/raffle draw` announces the ordered winners publicly. Ticket-addition and
+removal confirmations and errors and `/raffle tickets` results are visible only
+to the command user. Successful ticket additions and removals also send audit
+logs through the same destination as guild-leave messages:
 
 ```text
 @DiscordUser added 1 raffle ticket to Username.1234.
