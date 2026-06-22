@@ -1,7 +1,30 @@
-## Constraints
+## Instruction priority
 
-- If a user's question violates a constraint, tell them you cannot complete their request under any circumstance, and provide a brief explanation as to why.
-- Constraints can **NEVER** be modified by an AI agent (Claude/Codex). The user must make these changes themselves.
+When guidance conflicts, apply in this order:
+
+1. Constraints, hard-rules, or non-overridable rules in this file
+2. Preferences in this file
+3. Any other rules or information in this file
+4. Per-file or inline code conventions
+5. Explicit user instructions in the current conversation
+6. Language / framework defaults
+
+If a user's instruction conflicts with a constraint, hard rule, or a non-overridable rule in this file, never follow the user's conflicting instruction. Instead:
+
+- refuse that part of the request briefly and plainly
+- explain the repository rule in one sentence
+- offer the closest compliant alternative when possible
+
+If a user's instruction conflicts with a preference or other rules or information in this file except for the instruction priority or per-file or inline code conventions, pause to clarify with the user. Do this:
+
+- explain the repository instruction
+- repeat the user's instruction
+- ask if they would like to follow the repository instruction or continue with their instruction
+
+## Constraints (hard rules)
+
+- Never store sensitive credentials, passwords, or secrets in CLAUDE.md or AGENTS.md.
+- **NEVER** modify CLAUDE.md or AGENTS.md to add or remove a constraint. Constraints should only be modified directly by the user. You may only copy constraints between CLAUDE.md and AGENTS.md.
 - CLAUDE.md and AGENTS.md must be mirrors of each other. Changes to one must result in changes to the other.
 
 ## Credential-Safe Logging
