@@ -15,10 +15,21 @@ TRIAL_PERIOD = timedelta(days=14)
 TRIAL_REPORT_HOUR_UTC = 17
 DISCORD_MESSAGE_LIMIT = 2_000
 BACKGROUND_REFRESH_RETRY_SECONDS = 30
+SUNBORNE_DISCORD_STATUS = "Sunborne"
+TRIAL_DISCORD_STATUS = "Trial"
 TRIAL_REPORT_STATUS_ORDER = {
-    "Sunborne": 0,
-    "Trial": 1,
+    SUNBORNE_DISCORD_STATUS: 0,
+    TRIAL_DISCORD_STATUS: 1,
 }
+TRIAL_PAST_MARK_HEADER = (
+    "**Trial members past the 14-day mark**\n"
+    "Please confirm whether these users have completed the challenges "
+    "and can be ranked up to Sunborne:\n"
+)
+TRIAL_BEFORE_MARK_HEADER = (
+    "**Trial members before the 14-day mark**\n"
+    "These users are still Trial in-game but already Sunborne in Discord:\n"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,8 +223,47 @@ def get_overdue_trial_members(
     return result
 
 
+def get_recent_trial_members(
+    members: list[dict[str, Any]],
+    now: datetime,
+) -> list[str]:
+    cutoff = now.astimezone(UTC) - TRIAL_PERIOD
+    recent: list[str] = []
+    for member in members:
+        if str(member.get("rank", "")).casefold() != TRIAL_RANK.casefold():
+            continue
+        name = str(member.get("name", "")).strip()
+        joined = _parse_api_datetime(member.get("joined"))
+        if name and joined is not None and joined > cutoff:
+            recent.append(name)
+    result = sorted(recent, key=str.casefold)
+    LOGGER.debug(
+        "Evaluated %s guild members; recent_trials=%s",
+        len(members),
+        len(result),
+    )
+    return result
+
+
+def filter_sunborne_discord_entries(
+    entries: Sequence[TrialMemberReportEntry],
+) -> list[TrialMemberReportEntry]:
+    filtered = [
+        entry
+        for entry in entries
+        if entry.discord_status == SUNBORNE_DISCORD_STATUS
+    ]
+    LOGGER.debug(
+        "Filtered %s Trial entries to %s Sunborne-in-Discord entries",
+        len(entries),
+        len(filtered),
+    )
+    return filtered
+
+
 def format_overdue_trial_report(
     entries: Sequence[TrialMemberReportEntry | str],
+    header: str = TRIAL_PAST_MARK_HEADER,
 ) -> list[str]:
     if not entries:
         return []
@@ -229,11 +279,6 @@ def format_overdue_trial_report(
             TRIAL_REPORT_STATUS_ORDER.get(entry.discord_status or "", 2),
             entry.username.casefold(),
         ),
-    )
-    header = (
-        "**Trial members past the 14-day mark**\n"
-        "Please confirm whether these users have completed the challenges "
-        "and can be ranked up to Sunborne:\n"
     )
     messages: list[str] = []
     current = header

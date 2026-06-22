@@ -98,19 +98,30 @@ triggers an immediate alert. Reminder times are persisted across restarts.
 
 ## Overdue Trial Member Report
 
-After connecting to Discord, the bot immediately checks `/v2/guild/:id/members`
-for accounts whose in-game guild rank is `Trial` and whose `joined` timestamp is
-at least 14 days old. If any are found, the configured notification channel
-receives a report like:
+After connecting to Discord, the bot checks `/v2/guild/:id/members` for accounts
+whose in-game guild rank is `Trial` and posts up to two reports to the configured
+notification channel:
+
+- **Trial members before the 14-day mark** — Trial accounts whose `joined`
+  timestamp is less than 14 days old, restricted to members who are still `Trial`
+  in-game but have already been given the Sunborne role in Discord (a premature
+  promotion). This report is omitted when no such member exists.
+- **Trial members past the 14-day mark** — Trial accounts whose `joined`
+  timestamp is at least 14 days old, awaiting confirmation that they can be ranked
+  up to Sunborne.
 
 ```text
+Trial members before the 14-day mark
+These users are still Trial in-game but already Sunborne in Discord:
+* EarlySunborne.1234 - @DiscordUser - Sunborne
+
 Trial members past the 14-day mark
 Please confirm whether these users have completed the challenges and can be ranked up to Sunborne:
 * Linked.1234 - @DiscordUser - Sunborne
 * Unresolved.5678
 ```
 
-For each overdue account, the bot first scans `Accepted` thread-title metadata
+For each reported account, the bot first scans `Accepted` thread-title metadata
 in forum channel `1317206104727621693` without reading message histories. It
 then uses Discord's indexed guild message search for bodies and comments only
 for account names that remain unresolved. If Discord's search endpoint is
@@ -125,9 +136,15 @@ Report entries are grouped with Sunborne first, Trial second, and unresolved
 roles last. Names are alphabetical within each group.
 
 The check runs once every day at 17:00 UTC and does not run immediately when
-the bot starts. Reports are split into multiple
-messages when necessary to stay within Discord's message-length limit. Nothing
-is posted when no Trial members are past the 14-day mark.
+the bot starts. Each report is split into multiple
+messages when necessary to stay within Discord's message-length limit. A report
+is omitted entirely when it has no members, and nothing is posted when neither
+report has any members.
+
+- `/check`: builds the same before- and past-14-day reports on demand and
+  returns them only to the invoker as ephemeral replies, without posting to the
+  notification channel. It requires Officer role `1317359168285573171`, and
+  replies "No Trial members to report." when neither report has any members.
 
 ## Raffle Deposits
 

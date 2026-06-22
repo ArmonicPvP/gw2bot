@@ -2440,8 +2440,24 @@ class TestDiscordNotificationDelivery:
         assert "type=DiscordFailure status=403 code=50001" in caplog.text
 
 
-class TestTrialMemberNotification:
-    async def test_posts_overdue_trial_report_to_notification_channel(self) -> None:
+def _trial_status_resolver(
+    status_by_user: dict[str, str | None],
+) -> AsyncMock:
+    async def resolve(usernames: list[str]) -> list[TrialMemberReportEntry]:
+        return [
+            TrialMemberReportEntry(
+                username,
+                discord_user_id=100,
+                discord_status=status_by_user.get(username),
+            )
+            for username in usernames
+        ]
+
+    return AsyncMock(side_effect=resolve)
+
+
+class TestTrialMemberReportMessages:
+    async def test_builds_before_and_past_mark_trial_reports(self) -> None:
         now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         api = SimpleNamespace(
             get_guild_members=AsyncMock(
@@ -2452,7 +2468,57 @@ class TestTrialMemberNotification:
                         "joined": (now - timedelta(days=14)).isoformat(),
                     },
                     {
-                        "name": "Recent.1234",
+                        "name": "EarlySunborne.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=1)).isoformat(),
+                    },
+                    {
+                        "name": "EarlyTrial.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=2)).isoformat(),
+                    },
+                ]
+            )
+        )
+        bot = SimpleNamespace(
+            _api=api,
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {
+                    "Overdue.1234": "Trial",
+                    "EarlySunborne.1234": "Sunborne",
+                    "EarlyTrial.1234": "Trial",
+                }
+            ),
+        )
+
+        before_mark, past_mark = await Gw2Bot._build_trial_report_messages(
+            cast(Gw2Bot, bot),
+            now,
+        )
+
+        api.get_guild_members.assert_awaited_once_with("guild-id")
+        assert "Trial members before the 14-day mark" in before_mark
+        assert "EarlySunborne.1234" in before_mark
+        assert "EarlyTrial.1234" not in before_mark
+        assert "Overdue.1234" not in before_mark
+        assert "Trial members past the 14-day mark" in past_mark
+        assert "Overdue.1234" in past_mark
+        assert "ranked up to Sunborne" in past_mark
+        assert "EarlySunborne.1234" not in past_mark
+
+    async def test_builds_only_past_mark_when_no_early_sunborne_members(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {
+                        "name": "Overdue.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=14)).isoformat(),
+                    },
+                    {
+                        "name": "EarlyTrial.1234",
                         "rank": "Trial",
                         "joined": (now - timedelta(days=1)).isoformat(),
                     },
@@ -2462,62 +2528,153 @@ class TestTrialMemberNotification:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            _resolve_trial_member_discord_statuses=AsyncMock(
-                return_value=["Overdue.1234"]
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {"Overdue.1234": "Trial", "EarlyTrial.1234": "Trial"}
+            ),
+        )
+
+        messages = await Gw2Bot._build_trial_report_messages(cast(Gw2Bot, bot), now)
+
+        assert len(messages) == 1
+        assert "Trial members past the 14-day mark" in messages[0]
+        assert "Overdue.1234" in messages[0]
+
+    async def test_builds_no_messages_when_no_trials(self) -> None:
+        bot = SimpleNamespace(
+            _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _resolve_trial_member_discord_statuses=_trial_status_resolver({}),
+        )
+
+        messages = await Gw2Bot._build_trial_report_messages(
+            cast(Gw2Bot, bot),
+            datetime(2026, 6, 7, tzinfo=UTC),
+        )
+
+        assert messages == []
+
+
+class TestTrialMemberNotification:
+    async def test_posts_each_built_message_to_notification_channel(self) -> None:
+        bot = SimpleNamespace(
+            _build_trial_report_messages=AsyncMock(
+                return_value=["before mark", "past mark"]
             ),
             _try_send_notification=AsyncMock(return_value=True),
         )
 
-        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), now)
+        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), None)
 
         assert delivered
-        api.get_guild_members.assert_awaited_once_with("guild-id")
-        message = bot._try_send_notification.await_args.args[0]
-        assert "Overdue.1234" in message
-        assert "Recent.1234" not in message
-        assert "ranked up to Sunborne" in message
+        assert bot._try_send_notification.await_args_list == [
+            call("before mark"),
+            call("past mark"),
+        ]
 
     async def test_does_not_post_when_no_trials_are_overdue(self) -> None:
         bot = SimpleNamespace(
-            _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            _resolve_trial_member_discord_statuses=AsyncMock(return_value=[]),
+            _build_trial_report_messages=AsyncMock(return_value=[]),
             _try_send_notification=AsyncMock(return_value=True),
         )
 
-        delivered = await Gw2Bot._check_overdue_trials(
-            cast(Gw2Bot, bot),
-            datetime(2026, 6, 7, tzinfo=UTC),
-        )
+        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), None)
 
         assert delivered
         bot._try_send_notification.assert_not_awaited()
 
     async def test_reports_failed_delivery_to_poller(self) -> None:
-        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         bot = SimpleNamespace(
-            _api=SimpleNamespace(
-                get_guild_members=AsyncMock(
-                    return_value=[
-                        {
-                            "name": "Overdue.1234",
-                            "rank": "Trial",
-                            "joined": (now - timedelta(days=14)).isoformat(),
-                        }
-                    ]
-                )
-            ),
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            _resolve_trial_member_discord_statuses=AsyncMock(
-                return_value=["Overdue.1234"]
-            ),
+            _build_trial_report_messages=AsyncMock(return_value=["past mark"]),
             _try_send_notification=AsyncMock(return_value=False),
         )
 
-        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), now)
+        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), None)
 
         assert not delivered
 
+
+class TestCheckCommand:
+    async def test_command_is_named_check_and_delegates_to_handler(self) -> None:
+        bot = SimpleNamespace(_handle_check_command=AsyncMock())
+        interaction = SimpleNamespace()
+
+        command = Gw2Bot._create_check_command(cast(Gw2Bot, bot))
+
+        assert command.name == "check"
+        assert command.guild_only
+        await command.callback(interaction)  # type: ignore[arg-type]
+        bot._handle_check_command.assert_awaited_once_with(interaction)
+
+    async def test_rejects_users_without_officer_role(self) -> None:
+        bot = SimpleNamespace(_build_trial_report_messages=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1, roles=[]),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        bot._build_trial_report_messages.assert_not_awaited()
+        message = interaction.response.send_message.await_args.args[0]
+        assert "required role" in message
+        assert interaction.response.send_message.await_args.kwargs == {
+            "ephemeral": True
+        }
+
+    async def test_sends_report_messages_ephemerally_to_officer(self) -> None:
+        bot = SimpleNamespace(
+            _build_trial_report_messages=AsyncMock(
+                return_value=["before mark", "past mark"]
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        assert interaction.followup.send.await_args_list == [
+            call("before mark", ephemeral=True),
+            call("past mark", ephemeral=True),
+        ]
+
+    async def test_reports_when_no_members_to_report(self) -> None:
+        bot = SimpleNamespace(
+            _build_trial_report_messages=AsyncMock(return_value=[]),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.followup.send.assert_awaited_once_with(
+            "No Trial members to report.",
+            ephemeral=True,
+        )
+
+
+class TestTrialMemberStatusResolution:
     async def test_resolves_statuses_from_cached_forum_message_authors(self) -> None:
         sunborne_author = SimpleNamespace(
             id=101,

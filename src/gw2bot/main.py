@@ -19,10 +19,13 @@ from gw2bot.feast_stock import FeastAlert, get_due_low_stock_alerts
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
+    TRIAL_BEFORE_MARK_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
+    filter_sunborne_discord_entries,
     format_overdue_trial_report,
     get_overdue_trial_members,
+    get_recent_trial_members,
     seconds_until_trial_report,
 )
 from gw2bot.raffle import (
@@ -1417,6 +1420,7 @@ class Gw2Bot(discord.Client):
         self._ready_announced = False
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
+        self.tree.add_command(self._create_check_command())
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")
@@ -1984,23 +1988,87 @@ class Gw2Bot(discord.Client):
                     delivered,
                 )
 
-    async def _check_overdue_trials(self, now: datetime | None = None) -> bool:
+    async def _build_trial_report_messages(
+        self,
+        now: datetime | None = None,
+    ) -> list[str]:
         if self._api is None:
             raise RuntimeError("GW2 API client was not initialized")
+        now = now or datetime.now(UTC)
         members = await self._api.get_guild_members(self._config.gw2_guild_id)
-        overdue = get_overdue_trial_members(members, now or datetime.now(UTC))
+        overdue = get_overdue_trial_members(members, now)
+        recent = get_recent_trial_members(members, now)
         LOGGER.debug(
-            "Found %s overdue Trial members from %s guild members",
+            "Found %s overdue and %s recent Trial members from %s guild members",
             len(overdue),
+            len(recent),
             len(members),
         )
-        entries = await self._resolve_trial_member_discord_statuses(overdue)
-        messages = format_overdue_trial_report(entries)
-        LOGGER.debug("Formatted overdue Trial report into %s messages", len(messages))
+        recent_entries = await self._resolve_trial_member_discord_statuses(recent)
+        before_mark_entries = filter_sunborne_discord_entries(recent_entries)
+        overdue_entries = await self._resolve_trial_member_discord_statuses(overdue)
+        messages = format_overdue_trial_report(
+            before_mark_entries,
+            header=TRIAL_BEFORE_MARK_HEADER,
+        ) + format_overdue_trial_report(overdue_entries)
+        LOGGER.debug("Formatted Trial report into %s messages", len(messages))
+        return messages
+
+    async def _check_overdue_trials(self, now: datetime | None = None) -> bool:
+        messages = await self._build_trial_report_messages(now)
         for message in messages:
             if not await self._try_send_notification(message):
                 return False
         return True
+
+    def _create_check_command(self) -> app_commands.Command[Any, ..., None]:
+        @app_commands.command(
+            name="check",
+            description="Privately post the Trial member report on demand",
+        )
+        @app_commands.guild_only()
+        async def check(interaction: discord.Interaction) -> None:
+            await self._handle_check_command(interaction)
+
+        return check
+
+    async def _handle_check_command(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        LOGGER.debug(
+            "Trial member check command invoked by Discord user %s",
+            getattr(getattr(interaction, "user", None), "id", "unknown"),
+        )
+        if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+            LOGGER.warning(
+                "Rejected Trial member check command from Discord user %s; "
+                "required role %s",
+                getattr(getattr(interaction, "user", None), "id", "unknown"),
+                RAFFLE_OFFICER_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role for this command.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        messages = await self._build_trial_report_messages()
+        if not messages:
+            LOGGER.debug("Trial member check command found no members to report")
+            await interaction.followup.send(
+                "No Trial members to report.",
+                ephemeral=True,
+            )
+            return
+
+        LOGGER.debug(
+            "Trial member check command delivering %s messages privately",
+            len(messages),
+        )
+        for message in messages:
+            await interaction.followup.send(message, ephemeral=True)
 
     async def _poll_guild_member_count_topic(self) -> None:
         await self.wait_until_ready()
