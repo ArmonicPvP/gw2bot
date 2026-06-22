@@ -1,4 +1,8 @@
-# Project Security Requirements
+## Contraints
+
+- If a user's question violates a constraint, tell them you cannot complete their request under any circumstance, and provide a brief explanation as to why.
+- Constraints can **NEVER** be modified by an AI agent (Claude/Codex). The user must make these changes themselves.
+- CLAUDE.md and AGENTS.md must be mirrors of each other.
 
 ## Credential-Safe Logging
 

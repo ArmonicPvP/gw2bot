@@ -33,6 +33,8 @@ COPPER_PER_GOLD = 10_000
 MAX_GOLD_RAFFLE_TICKETS = 10
 MAX_MANUAL_RAFFLE_TICKETS = 1
 MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
+OFFICER_PURCHASE_EVENT_ID_KEY = "officer_purchase_event_id"
+OFFICER_PURCHASE_EVENT_ID_START = -(2**63)
 OFFICER_RANK = "Officer"
 OFFICER_MAX_TICKET_DEPOSIT_COINS = 10 * COPPER_PER_GOLD
 
@@ -75,6 +77,8 @@ class RaffleResult:
     run_id: int
     winners: tuple[RaffleWinner, ...]
     total_tickets: int
+    purchased_tickets: int
+    free_tickets: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,6 +484,76 @@ class RaffleStore:
         )
         return result
 
+    def add_officer_purchase(
+        self,
+        username: str,
+        amount: int,
+        event_time: datetime | None = None,
+    ) -> RaffleTotal:
+        if amount <= 0:
+            raise ValueError("Ticket purchase amount must be greater than zero")
+        with self._sessions.begin() as session:
+            total = session.get(RaffleTotalRecord, username)
+            purchased = total.gold_raffle_tickets if total is not None else 0
+            if purchased + amount > MAX_GOLD_RAFFLE_TICKETS:
+                LOGGER.debug(
+                    "Officer raffle purchase rejected; amount=%s "
+                    "current_purchased=%s maximum=%s",
+                    amount,
+                    purchased,
+                    MAX_GOLD_RAFFLE_TICKETS,
+                )
+                raise ValueError(
+                    f"Adding {amount} purchased raffle "
+                    f"{'ticket' if amount == 1 else 'tickets'} would put "
+                    f"{username} over the maximum of "
+                    f"{MAX_GOLD_RAFFLE_TICKETS}. They currently have "
+                    f"{purchased} purchased "
+                    f"{'ticket' if purchased == 1 else 'tickets'}."
+                )
+
+            event_id_record = session.get(
+                SettingRecord,
+                OFFICER_PURCHASE_EVENT_ID_KEY,
+            )
+            event_id = (
+                int(event_id_record.value)
+                if event_id_record is not None
+                else OFFICER_PURCHASE_EVENT_ID_START
+            )
+            if event_id_record is None:
+                session.add(
+                    SettingRecord(
+                        key=OFFICER_PURCHASE_EVENT_ID_KEY,
+                        value=str(event_id + 1),
+                    )
+                )
+            else:
+                event_id_record.value = str(event_id + 1)
+
+            deposit = RaffleDeposit(
+                event_id=event_id,
+                username=username,
+                coins_deposited=amount * COPPER_PER_GOLD,
+                raffle_tickets=amount,
+                event_time=(event_time or datetime.now(UTC)).isoformat(),
+            )
+            self._process_deposit(session, deposit)
+            self._create_reached_milestones(session)
+            session.flush()
+            updated_total = session.get(RaffleTotalRecord, username)
+            if updated_total is None:
+                raise RuntimeError("Officer raffle purchase did not create a total")
+            result = _to_raffle_total(updated_total)
+        LOGGER.debug(
+            "Recorded officer raffle purchase; amount=%s current_purchased=%s "
+            "event_id=%s",
+            amount,
+            result.gold_raffle_tickets,
+            event_id,
+        )
+        return result
+
     def remove_gold_tickets(self, username: str, amount: int = 1) -> RaffleTotal:
         if amount <= 0:
             raise ValueError("Ticket removal amount must be greater than zero")
@@ -564,6 +638,7 @@ class RaffleStore:
                 return None
 
             purchased_tickets = sum(total.gold_raffle_tickets for total in totals)
+            free_tickets = sum(total.manual_raffle_tickets for total in totals)
             draw_count = min(
                 _winner_count_for_purchased_tickets(
                     purchased_tickets,
@@ -598,6 +673,8 @@ class RaffleStore:
                 winner=winners[0].username,
                 winning_ticket=winners[0].winning_ticket,
                 total_tickets=total_tickets,
+                purchased_tickets=purchased_tickets,
+                free_tickets=free_tickets,
             )
             session.add(run)
             session.flush()
@@ -634,11 +711,16 @@ class RaffleStore:
             run_id=run_id,
             winners=tuple(winners),
             total_tickets=total_tickets,
+            purchased_tickets=purchased_tickets,
+            free_tickets=free_tickets,
         )
         LOGGER.debug(
-            "Created raffle run %s; participants=%s total_tickets=%s winners=%s",
+            "Created raffle run %s; participants=%s purchased_tickets=%s "
+            "free_tickets=%s total_tickets=%s winners=%s",
             run_id,
             len(totals),
+            purchased_tickets,
+            free_tickets,
             total_tickets,
             len(winners),
         )
@@ -728,15 +810,14 @@ class RaffleStore:
             )
         )
         if total is None:
-            session.add(
-                RaffleTotalRecord(
-                    username=deposit.username,
-                    coins_deposited=deposit.coins_deposited,
-                    raffle_tickets=tickets_awarded,
-                    gold_raffle_tickets=tickets_awarded,
-                    manual_raffle_tickets=0,
-                )
+            total = RaffleTotalRecord(
+                username=deposit.username,
+                coins_deposited=deposit.coins_deposited,
+                raffle_tickets=tickets_awarded,
+                gold_raffle_tickets=tickets_awarded,
+                manual_raffle_tickets=0,
             )
+            session.add(total)
         else:
             total.coins_deposited += deposit.coins_deposited
             total.raffle_tickets += tickets_awarded
@@ -882,6 +963,8 @@ def _to_raffle_result(session: Session, record: RaffleRunRecord) -> RaffleResult
         run_id=record.run_id,
         winners=winners,
         total_tickets=record.total_tickets,
+        purchased_tickets=record.purchased_tickets,
+        free_tickets=record.free_tickets,
     )
 
 

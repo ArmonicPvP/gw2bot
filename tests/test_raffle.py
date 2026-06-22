@@ -1,6 +1,6 @@
 import logging
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import (
@@ -477,6 +477,96 @@ class TestRaffle:
             assert reset_total.gold_raffle_tickets == 2
             store.close()
 
+    def test_officer_purchase_records_a_complete_deposit_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                reward_tiers=(RaffleRewardTier(2, "Officer Tier"),),
+            )
+            event_time = datetime(2026, 6, 21, 12, tzinfo=UTC)
+
+            total = store.add_officer_purchase(
+                "Member.1234",
+                3,
+                event_time=event_time,
+            )
+
+            assert total.coins_deposited == 30_000
+            assert total.gold_raffle_tickets == 3
+            assert total.manual_raffle_tickets == 0
+            assert total.raffle_tickets == 3
+            assert [
+                deposit.message for deposit in store.get_pending_notifications()
+            ] == [
+                "Member.1234 deposited 3 gold and purchased 3 raffle tickets"
+            ]
+            assert [
+                deposit.message
+                for deposit in store.get_pending_deposit_audit_notifications()
+            ] == [
+                "Member.1234 deposited 3 gold and purchased 3 raffle tickets"
+            ]
+            assert [
+                (
+                    contribution.username,
+                    contribution.purchased_tickets,
+                    contribution.event_tickets,
+                )
+                for contribution in store.get_contributions(
+                    event_time,
+                    event_time + timedelta(hours=1),
+                )
+            ] == [("Member.1234", 3, 0)]
+            assert [
+                milestone.message for milestone in store.get_pending_milestones()
+            ] == [
+                "2 total tickets have been purchased for this raffle. "
+                "Officer Tier rewards have been reached!"
+            ]
+            store.close()
+
+    def test_officer_purchase_over_cap_fails_without_partial_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.add_officer_purchase("Member.1234", 8)
+
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "Adding 3 purchased raffle tickets would put Member.1234 "
+                    "over the maximum of 10"
+                ),
+            ):
+                store.add_officer_purchase("Member.1234", 3)
+
+            total = store.get_total("Member.1234")
+            assert total.coins_deposited == 80_000
+            assert total.gold_raffle_tickets == 8
+            assert total.raffle_tickets == 8
+            assert len(store.get_pending_notifications()) == 1
+            with pytest.raises(ValueError, match="greater than zero"):
+                store.add_officer_purchase("Member.1234", 0)
+            store.close()
+
+    def test_officer_purchase_logging_omits_username_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "secret-officer-account.1234"
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            with caplog.at_level(logging.DEBUG, logger="gw2bot.raffle"):
+                store.add_officer_purchase(secret, 10)
+                with pytest.raises(ValueError):
+                    store.add_officer_purchase(secret, 1)
+
+            assert secret not in caplog.text
+            assert "Recorded officer raffle purchase; amount=10" in caplog.text
+            assert "Officer raffle purchase rejected; amount=1" in caplog.text
+            store.close()
+
     def test_officer_deposits_over_ten_gold_do_not_fire_purchase_event(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -790,6 +880,8 @@ class TestRaffle:
                 winner.tickets_before_draw for winner in result.winners
             ] == [16, 15]
             assert result.total_tickets == 16
+            assert result.purchased_tickets == 15
+            assert result.free_tickets == 1
             for total in store.get_totals():
                 assert total.raffle_tickets == 0
                 assert total.gold_raffle_tickets == 0
@@ -806,8 +898,13 @@ class TestRaffle:
             winners = Table("raffle_run_winners", metadata, autoload_with=engine)
             with engine.connect() as connection:
                 assert connection.execute(
-                    select(runs.c.winner, runs.c.total_tickets)
-                ).one() == ("User B.2222", 16)
+                    select(
+                        runs.c.winner,
+                        runs.c.total_tickets,
+                        runs.c.purchased_tickets,
+                        runs.c.free_tickets,
+                    )
+                ).one() == ("User B.2222", 16, 15, 1)
                 assert (
                     connection.execute(
                         select(func.count()).select_from(entries)
@@ -1133,6 +1230,8 @@ class TestRaffle:
 
             assert result is not None
             assert result.total_tickets == 10
+            assert result.purchased_tickets == 10
+            assert result.free_tickets == 0
             assert [
                 (
                     winner.username,

@@ -54,6 +54,7 @@ class TopicEditableChannel(Protocol):
 
 RAFFLE_DRAW_ROLE_ID = 1317124663847157880
 RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
+RAFFLE_OFFICER_ROLE_ID = 1317359168285573171
 RAFFLE_TICKETS_PAGE_SIZE = 10
 RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
 RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
@@ -200,8 +201,8 @@ def format_raffle_result(result: RaffleResult) -> str:
     return (
         f"Raffle winners:\n{winners}\n"
         f"Selected {len(result.winners)} winners from "
-        f"{result.total_tickets} tickets. "
-        "One winning ticket was removed from the pool after each draw. "
+        f"{result.purchased_tickets} purchased tickets and "
+        f"{result.free_tickets} free tickets. "
         "All current raffle tickets have been reset."
     )
 
@@ -872,7 +873,10 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(interaction.user, RAFFLE_ADDTICKET_ROLE_ID):
+        if not (
+            user_has_role(interaction.user, RAFFLE_ADDTICKET_ROLE_ID)
+            or user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID)
+        ):
             LOGGER.debug(
                 "Skipped raffle guild member autocomplete; authorized=false"
             )
@@ -1009,24 +1013,33 @@ class RaffleCommands(app_commands.Group):
 
     @app_commands.command(
         name="addticket",
-        description="Add one raffle ticket to a guild member",
+        description="Add a raffle ticket or record an Officer ticket purchase",
     )
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",
+        amount="Purchased tickets to add; Officers only",
     )
     @app_commands.autocomplete(username=guild_member_autocomplete)
     async def addticket(
         self,
         interaction: discord.Interaction,
         username: str,
+        amount: int | None = None,
     ) -> None:
         LOGGER.debug(
-            "Manual raffle ticket command invoked by Discord user %s",
+            "Raffle ticket addition invoked by Discord user %s; "
+            "purchase_amount_supplied=%s",
             getattr(getattr(interaction, "user", None), "id", "unknown"),
+            amount is not None,
+        )
+        required_role_id = (
+            RAFFLE_OFFICER_ROLE_ID
+            if amount is not None
+            else RAFFLE_ADDTICKET_ROLE_ID
         )
         if not await self._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_ADDTICKET_ROLE_ID,
+            required_role_id,
         ):
             return
 
@@ -1045,6 +1058,33 @@ class RaffleCommands(app_commands.Group):
             LOGGER.debug("Manual raffle ticket rejected; guild member was not found")
             await interaction.followup.send(
                 f"`{username}` is not a member of the configured guild.",
+                ephemeral=True,
+            )
+            return
+
+        if amount is not None:
+            try:
+                total = await self._bot.add_officer_raffle_purchase(
+                    canonical_username,
+                    amount,
+                )
+            except ValueError as exc:
+                LOGGER.debug("Officer raffle purchase rejected; added=false")
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            LOGGER.debug(
+                "Officer raffle purchase command completed; amount=%s "
+                "current_purchased=%s current_total=%s",
+                amount,
+                total.gold_raffle_tickets,
+                total.raffle_tickets,
+            )
+            await interaction.followup.send(
+                f"Recorded **{amount} gold** deposited by "
+                f"**{canonical_username}** and added {amount} purchased raffle "
+                f"{'ticket' if amount == 1 else 'tickets'}. They now have "
+                f"{total.gold_raffle_tickets} purchased and "
+                f"{total.raffle_tickets} total current tickets.",
                 ephemeral=True,
             )
             return
@@ -1736,6 +1776,25 @@ class Gw2Bot(discord.Client):
         username: str,
     ) -> RaffleTotal:
         return self._raffle_store.add_manual_ticket(username)
+
+    async def add_officer_raffle_purchase(
+        self,
+        username: str,
+        amount: int,
+    ) -> RaffleTotal:
+        total = self._raffle_store.add_officer_purchase(username, amount)
+        LOGGER.debug(
+            "Delivering officer raffle purchase notifications; amount=%s",
+            amount,
+        )
+        await self._send_pending_raffle_notifications()
+        await self._send_pending_deposit_audit_notifications()
+        await self._send_pending_raffle_milestones()
+        LOGGER.debug(
+            "Officer raffle purchase notification attempts completed; amount=%s",
+            amount,
+        )
+        return total
 
     def remove_gold_raffle_tickets(
         self,
