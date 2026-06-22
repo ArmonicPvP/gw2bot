@@ -19,10 +19,13 @@ from gw2bot.feast_stock import FeastAlert, get_due_low_stock_alerts
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
+    TRIAL_BEFORE_MARK_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
+    filter_sunborne_discord_entries,
     format_overdue_trial_report,
     get_overdue_trial_members,
+    get_recent_trial_members,
     seconds_until_trial_report,
 )
 from gw2bot.raffle import (
@@ -54,6 +57,7 @@ class TopicEditableChannel(Protocol):
 
 RAFFLE_DRAW_ROLE_ID = 1317124663847157880
 RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
+RAFFLE_OFFICER_ROLE_ID = 1317359168285573171
 RAFFLE_TICKETS_PAGE_SIZE = 10
 RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
 RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
@@ -200,8 +204,8 @@ def format_raffle_result(result: RaffleResult) -> str:
     return (
         f"Raffle winners:\n{winners}\n"
         f"Selected {len(result.winners)} winners from "
-        f"{result.total_tickets} tickets. "
-        "One winning ticket was removed from the pool after each draw. "
+        f"{result.purchased_tickets} purchased tickets and "
+        f"{result.free_tickets} free tickets. "
         "All current raffle tickets have been reset."
     )
 
@@ -872,7 +876,10 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(interaction.user, RAFFLE_ADDTICKET_ROLE_ID):
+        if not (
+            user_has_role(interaction.user, RAFFLE_ADDTICKET_ROLE_ID)
+            or user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID)
+        ):
             LOGGER.debug(
                 "Skipped raffle guild member autocomplete; authorized=false"
             )
@@ -1009,24 +1016,33 @@ class RaffleCommands(app_commands.Group):
 
     @app_commands.command(
         name="addticket",
-        description="Add one raffle ticket to a guild member",
+        description="Add a raffle ticket or record an Officer ticket purchase",
     )
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",
+        amount="Purchased tickets to add; Officers only",
     )
     @app_commands.autocomplete(username=guild_member_autocomplete)
     async def addticket(
         self,
         interaction: discord.Interaction,
         username: str,
+        amount: int | None = None,
     ) -> None:
         LOGGER.debug(
-            "Manual raffle ticket command invoked by Discord user %s",
+            "Raffle ticket addition invoked by Discord user %s; "
+            "purchase_amount_supplied=%s",
             getattr(getattr(interaction, "user", None), "id", "unknown"),
+            amount is not None,
+        )
+        required_role_id = (
+            RAFFLE_OFFICER_ROLE_ID
+            if amount is not None
+            else RAFFLE_ADDTICKET_ROLE_ID
         )
         if not await self._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_ADDTICKET_ROLE_ID,
+            required_role_id,
         ):
             return
 
@@ -1045,6 +1061,33 @@ class RaffleCommands(app_commands.Group):
             LOGGER.debug("Manual raffle ticket rejected; guild member was not found")
             await interaction.followup.send(
                 f"`{username}` is not a member of the configured guild.",
+                ephemeral=True,
+            )
+            return
+
+        if amount is not None:
+            try:
+                total = await self._bot.add_officer_raffle_purchase(
+                    canonical_username,
+                    amount,
+                )
+            except ValueError as exc:
+                LOGGER.debug("Officer raffle purchase rejected; added=false")
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            LOGGER.debug(
+                "Officer raffle purchase command completed; amount=%s "
+                "current_purchased=%s current_total=%s",
+                amount,
+                total.gold_raffle_tickets,
+                total.raffle_tickets,
+            )
+            await interaction.followup.send(
+                f"Recorded **{amount} gold** deposited by "
+                f"**{canonical_username}** and added {amount} purchased raffle "
+                f"{'ticket' if amount == 1 else 'tickets'}. They now have "
+                f"{total.gold_raffle_tickets} purchased and "
+                f"{total.raffle_tickets} total current tickets.",
                 ephemeral=True,
             )
             return
@@ -1377,6 +1420,7 @@ class Gw2Bot(discord.Client):
         self._ready_announced = False
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
+        self.tree.add_command(self._create_check_command())
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")
@@ -1737,6 +1781,25 @@ class Gw2Bot(discord.Client):
     ) -> RaffleTotal:
         return self._raffle_store.add_manual_ticket(username)
 
+    async def add_officer_raffle_purchase(
+        self,
+        username: str,
+        amount: int,
+    ) -> RaffleTotal:
+        total = self._raffle_store.add_officer_purchase(username, amount)
+        LOGGER.debug(
+            "Delivering officer raffle purchase notifications; amount=%s",
+            amount,
+        )
+        await self._send_pending_raffle_notifications()
+        await self._send_pending_deposit_audit_notifications()
+        await self._send_pending_raffle_milestones()
+        LOGGER.debug(
+            "Officer raffle purchase notification attempts completed; amount=%s",
+            amount,
+        )
+        return total
+
     def remove_gold_raffle_tickets(
         self,
         username: str,
@@ -1925,23 +1988,87 @@ class Gw2Bot(discord.Client):
                     delivered,
                 )
 
-    async def _check_overdue_trials(self, now: datetime | None = None) -> bool:
+    async def _build_trial_report_messages(
+        self,
+        now: datetime | None = None,
+    ) -> list[str]:
         if self._api is None:
             raise RuntimeError("GW2 API client was not initialized")
+        now = now or datetime.now(UTC)
         members = await self._api.get_guild_members(self._config.gw2_guild_id)
-        overdue = get_overdue_trial_members(members, now or datetime.now(UTC))
+        overdue = get_overdue_trial_members(members, now)
+        recent = get_recent_trial_members(members, now)
         LOGGER.debug(
-            "Found %s overdue Trial members from %s guild members",
+            "Found %s overdue and %s recent Trial members from %s guild members",
             len(overdue),
+            len(recent),
             len(members),
         )
-        entries = await self._resolve_trial_member_discord_statuses(overdue)
-        messages = format_overdue_trial_report(entries)
-        LOGGER.debug("Formatted overdue Trial report into %s messages", len(messages))
+        recent_entries = await self._resolve_trial_member_discord_statuses(recent)
+        before_mark_entries = filter_sunborne_discord_entries(recent_entries)
+        overdue_entries = await self._resolve_trial_member_discord_statuses(overdue)
+        messages = format_overdue_trial_report(
+            before_mark_entries,
+            header=TRIAL_BEFORE_MARK_HEADER,
+        ) + format_overdue_trial_report(overdue_entries)
+        LOGGER.debug("Formatted Trial report into %s messages", len(messages))
+        return messages
+
+    async def _check_overdue_trials(self, now: datetime | None = None) -> bool:
+        messages = await self._build_trial_report_messages(now)
         for message in messages:
             if not await self._try_send_notification(message):
                 return False
         return True
+
+    def _create_check_command(self) -> app_commands.Command[Any, ..., None]:
+        @app_commands.command(
+            name="check",
+            description="Privately post the Trial member report on demand",
+        )
+        @app_commands.guild_only()
+        async def check(interaction: discord.Interaction) -> None:
+            await self._handle_check_command(interaction)
+
+        return check
+
+    async def _handle_check_command(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        LOGGER.debug(
+            "Trial member check command invoked by Discord user %s",
+            getattr(getattr(interaction, "user", None), "id", "unknown"),
+        )
+        if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+            LOGGER.warning(
+                "Rejected Trial member check command from Discord user %s; "
+                "required role %s",
+                getattr(getattr(interaction, "user", None), "id", "unknown"),
+                RAFFLE_OFFICER_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role for this command.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        messages = await self._build_trial_report_messages()
+        if not messages:
+            LOGGER.debug("Trial member check command found no members to report")
+            await interaction.followup.send(
+                "No Trial members to report.",
+                ephemeral=True,
+            )
+            return
+
+        LOGGER.debug(
+            "Trial member check command delivering %s messages privately",
+            len(messages),
+        )
+        for message in messages:
+            await interaction.followup.send(message, ephemeral=True)
 
     async def _poll_guild_member_count_topic(self) -> None:
         await self.wait_until_ready()

@@ -148,6 +148,16 @@ class RaffleRunRecord(Base):
     winner: Mapped[str] = mapped_column(String, nullable=False)
     winning_ticket: Mapped[int] = mapped_column(Integer, nullable=False)
     total_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
+    purchased_tickets: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    free_tickets: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
     announcement_sent: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -258,6 +268,36 @@ def initialize_database(engine: Engine) -> set[str]:
                 RaffleRunRecord.__tablename__
             )
         }
+        if "purchased_tickets" not in run_columns:
+            operations.add_column(
+                RaffleRunRecord.__tablename__,
+                Column(
+                    "purchased_tickets",
+                    Integer,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            connection.exec_driver_sql(
+                "UPDATE raffle_runs SET purchased_tickets = total_tickets"
+            )
+            added_columns.add("purchased_tickets")
+        if "free_tickets" not in run_columns:
+            operations.add_column(
+                RaffleRunRecord.__tablename__,
+                Column(
+                    "free_tickets",
+                    Integer,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            connection.exec_driver_sql(
+                "UPDATE raffle_runs SET free_tickets = "
+                "CASE WHEN total_tickets >= purchased_tickets "
+                "THEN total_tickets - purchased_tickets ELSE 0 END"
+            )
+            added_columns.add("free_tickets")
         if "announcement_sent" not in run_columns:
             # Legacy runs predate delivery tracking and cannot be recovered.
             operations.add_column(

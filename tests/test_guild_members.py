@@ -7,10 +7,13 @@ import pytest
 
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
+    TRIAL_BEFORE_MARK_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
+    filter_sunborne_discord_entries,
     format_overdue_trial_report,
     get_overdue_trial_members,
+    get_recent_trial_members,
     seconds_until_trial_report,
 )
 
@@ -233,6 +236,56 @@ class TestTrialMemberReport:
         ]
 
         assert get_overdue_trial_members(members, now) == ["Exactly.1234", "Older.1234"]
+
+    def test_finds_trial_members_before_fourteen_days(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        members = [
+            {
+                "name": "Exactly.1234",
+                "rank": "Trial",
+                "joined": (now - timedelta(days=14)).isoformat(),
+            },
+            {
+                "name": "Recent.1234",
+                "rank": "trial",
+                "joined": (now - timedelta(days=13, hours=23)).isoformat(),
+            },
+            {
+                "name": "Newest.1234",
+                "rank": "Trial",
+                "joined": (now - timedelta(hours=1)).isoformat(),
+            },
+            {
+                "name": "Sunborne.1234",
+                "rank": "Sunborne",
+                "joined": (now - timedelta(days=1)).isoformat(),
+            },
+            {"name": "MissingJoin.1234", "rank": "Trial"},
+            {"name": "BadJoin.1234", "rank": "Trial", "joined": "not-a-date"},
+        ]
+
+        assert get_recent_trial_members(members, now) == ["Newest.1234", "Recent.1234"]
+
+    def test_filters_entries_to_sunborne_discord_status(self) -> None:
+        entries = [
+            TrialMemberReportEntry("EarlySunborne.1234", 1, "Sunborne"),
+            TrialMemberReportEntry("StillTrial.1234", 2, "Trial"),
+            TrialMemberReportEntry("Unresolved.1234"),
+        ]
+
+        assert filter_sunborne_discord_entries(entries) == [
+            TrialMemberReportEntry("EarlySunborne.1234", 1, "Sunborne"),
+        ]
+
+    def test_formats_before_mark_report_with_custom_header(self) -> None:
+        messages = format_overdue_trial_report(
+            [TrialMemberReportEntry("EarlySunborne.1234", 1, "Sunborne")],
+            header=TRIAL_BEFORE_MARK_HEADER,
+        )
+
+        assert messages[0].startswith("**Trial members before the 14-day mark**")
+        assert "EarlySunborne.1234 - <@1> - Sunborne" in messages[0]
+        assert "ranked up to Sunborne" not in messages[0]
 
     def test_formats_contextual_reports_within_discord_limit(self) -> None:
         usernames = [f"Long Trial Username {index:03d}.1234" for index in range(150)]

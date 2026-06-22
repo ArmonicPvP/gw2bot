@@ -19,6 +19,7 @@ from gw2bot.main import (
     RAFFLE_ADDTICKET_ROLE_ID,
     RAFFLE_CONTRIBUTION_CHANNEL_ID,
     RAFFLE_DRAW_ROLE_ID,
+    RAFFLE_OFFICER_ROLE_ID,
     SUNBORNE_ROLE_ID,
     TRIAL_FORUM_CHANNEL_ID,
     TRIAL_IN_REVIEW_TAG_ID,
@@ -115,8 +116,12 @@ class TestCommand:
         assert "win" not in commands
         addticket = commands["addticket"]
         assert isinstance(addticket, app_commands.Command)
-        assert [parameter.name for parameter in addticket.parameters] == ["username"]
+        assert [parameter.name for parameter in addticket.parameters] == [
+            "username",
+            "amount",
+        ]
         assert addticket.parameters[0].autocomplete
+        assert not addticket.parameters[1].required
         addtickets = commands["addtickets"]
         assert isinstance(addtickets, app_commands.Command)
         assert [parameter.name for parameter in addtickets.parameters] == [
@@ -140,11 +145,15 @@ class TestCommand:
     def test_checks_required_raffle_roles(self) -> None:
         draw_user = SimpleNamespace(roles=[SimpleNamespace(id=RAFFLE_DRAW_ROLE_ID)])
         add_user = SimpleNamespace(roles=[SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID)])
+        officer_user = SimpleNamespace(
+            roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)]
+        )
         no_roles_user = SimpleNamespace()
 
         assert user_has_role(draw_user, RAFFLE_DRAW_ROLE_ID)
         assert not user_has_role(draw_user, RAFFLE_ADDTICKET_ROLE_ID)
         assert user_has_role(add_user, RAFFLE_ADDTICKET_ROLE_ID)
+        assert user_has_role(officer_user, RAFFLE_OFFICER_ROLE_ID)
         assert not user_has_role(no_roles_user, RAFFLE_DRAW_ROLE_ID)
 
     def test_formats_addticket_audit_with_discord_mention(self) -> None:
@@ -325,6 +334,24 @@ class TestRaffleGuildMemberAutocomplete:
         assert choices == []
         bot.search_guild_members.assert_not_awaited()
 
+    async def test_returns_matching_guild_members_for_officer(self) -> None:
+        bot = SimpleNamespace(
+            search_guild_members=AsyncMock(return_value=["Member.1234"])
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.guild_member_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "member",
+        )
+
+        assert [choice.value for choice in choices] == ["Member.1234"]
+
     async def test_failure_logging_omits_secret_bearing_exception(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -356,6 +383,119 @@ class TestRaffleGuildMemberAutocomplete:
 
 
 class TestAddRaffleTicketsCommand:
+    async def test_addticket_without_amount_adds_one_manual_ticket(self) -> None:
+        total = raffle_total("Member.1234", free=1)
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value=total.username),
+            add_manual_raffle_ticket=MagicMock(return_value=total),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addticket"
+        )
+
+        await command.callback(group, interaction, "member.1234")  # type: ignore[arg-type]
+
+        bot.authorize_raffle_command.assert_awaited_once_with(
+            interaction,
+            RAFFLE_ADDTICKET_ROLE_ID,
+        )
+        bot.add_manual_raffle_ticket.assert_called_once_with("Member.1234")
+        assert "Added one raffle ticket" in interaction.followup.send.await_args.args[0]
+
+    async def test_officer_amount_records_purchased_ticket_event(self) -> None:
+        total = raffle_total("Member.1234", purchased=4, free=1)
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value=total.username),
+            add_officer_raffle_purchase=AsyncMock(return_value=total),
+            add_manual_raffle_ticket=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addticket"
+        )
+
+        await command.callback(group, interaction, "member.1234", 4)  # type: ignore[arg-type]
+
+        bot.authorize_raffle_command.assert_awaited_once_with(
+            interaction,
+            RAFFLE_OFFICER_ROLE_ID,
+        )
+        bot.add_officer_raffle_purchase.assert_awaited_once_with(
+            "Member.1234",
+            4,
+        )
+        bot.add_manual_raffle_ticket.assert_not_called()
+        interaction.followup.send.assert_awaited_once_with(
+            "Recorded **4 gold** deposited by **Member.1234** and added "
+            "4 purchased raffle tickets. They now have 4 purchased and "
+            "5 total current tickets.",
+            ephemeral=True,
+        )
+
+    async def test_amount_requires_officer_role(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=False),
+            resolve_guild_member=AsyncMock(),
+            add_officer_raffle_purchase=AsyncMock(),
+        )
+        interaction = SimpleNamespace()
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addticket"
+        )
+
+        await command.callback(group, interaction, "member.1234", 2)  # type: ignore[arg-type]
+
+        bot.authorize_raffle_command.assert_awaited_once_with(
+            interaction,
+            RAFFLE_OFFICER_ROLE_ID,
+        )
+        bot.resolve_guild_member.assert_not_awaited()
+        bot.add_officer_raffle_purchase.assert_not_awaited()
+
+    async def test_rejects_officer_purchase_over_cap(self) -> None:
+        bot = SimpleNamespace(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value="Member.1234"),
+            add_officer_raffle_purchase=AsyncMock(
+                side_effect=ValueError(
+                    "Adding 3 purchased raffle tickets would put Member.1234 "
+                    "over the maximum of 10. They currently have 8 purchased "
+                    "tickets."
+                )
+            ),
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addticket"
+        )
+
+        await command.callback(group, interaction, "member.1234", 3)  # type: ignore[arg-type]
+
+        interaction.followup.send.assert_awaited_once_with(
+            "Adding 3 purchased raffle tickets would put Member.1234 over "
+            "the maximum of 10. They currently have 8 purchased tickets.",
+            ephemeral=True,
+        )
+
     def test_parses_squad_attendance_account_names(self) -> None:
         attendance = (
             ":Shadowgopher.8015, Merys Braun\n"
@@ -1026,6 +1166,8 @@ class TestRaffleDrawCommand:
                             SimpleNamespace(username="Winner B.5678"),
                         ),
                         total_tickets=10,
+                        purchased_tickets=8,
+                        free_tickets=2,
                     ),
                 )[1]
             ),
@@ -1049,8 +1191,7 @@ class TestRaffleDrawCommand:
             "Raffle winners:\n"
             "1. **Winner A.1234**\n"
             "2. **Winner B.5678**\n"
-            "Selected 2 winners from 10 tickets. "
-            "One winning ticket was removed from the pool after each draw. "
+            "Selected 2 winners from 8 purchased tickets and 2 free tickets. "
             "All current raffle tickets have been reset."
         )
         bot.mark_raffle_announcement_sent.assert_called_once_with(7)
@@ -1062,6 +1203,8 @@ class TestRaffleDrawCommand:
             run_id=7,
             winners=(SimpleNamespace(username="Winner.1234"),),
             total_tickets=10,
+            purchased_tickets=9,
+            free_tickets=1,
         )
         bot = SimpleNamespace(
             authorize_raffle_command=AsyncMock(return_value=True),
@@ -1095,6 +1238,8 @@ class TestRaffleDrawCommand:
                     run_id=7,
                     winners=(SimpleNamespace(username="Winner.1234"),),
                     total_tickets=10,
+                    purchased_tickets=10,
+                    free_tickets=0,
                 )
             ),
             mark_raffle_announcement_sent=MagicMock(),
@@ -1123,6 +1268,8 @@ class TestRaffleDrawCommand:
                 SimpleNamespace(username="Repeat.1234"),
             ),
             total_tickets=20,
+            purchased_tickets=17,
+            free_tickets=3,
         )
 
         message = format_raffle_result(result)  # type: ignore[arg-type]
@@ -2293,8 +2440,24 @@ class TestDiscordNotificationDelivery:
         assert "type=DiscordFailure status=403 code=50001" in caplog.text
 
 
-class TestTrialMemberNotification:
-    async def test_posts_overdue_trial_report_to_notification_channel(self) -> None:
+def _trial_status_resolver(
+    status_by_user: dict[str, str | None],
+) -> AsyncMock:
+    async def resolve(usernames: list[str]) -> list[TrialMemberReportEntry]:
+        return [
+            TrialMemberReportEntry(
+                username,
+                discord_user_id=100,
+                discord_status=status_by_user.get(username),
+            )
+            for username in usernames
+        ]
+
+    return AsyncMock(side_effect=resolve)
+
+
+class TestTrialMemberReportMessages:
+    async def test_builds_before_and_past_mark_trial_reports(self) -> None:
         now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         api = SimpleNamespace(
             get_guild_members=AsyncMock(
@@ -2305,7 +2468,57 @@ class TestTrialMemberNotification:
                         "joined": (now - timedelta(days=14)).isoformat(),
                     },
                     {
-                        "name": "Recent.1234",
+                        "name": "EarlySunborne.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=1)).isoformat(),
+                    },
+                    {
+                        "name": "EarlyTrial.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=2)).isoformat(),
+                    },
+                ]
+            )
+        )
+        bot = SimpleNamespace(
+            _api=api,
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {
+                    "Overdue.1234": "Trial",
+                    "EarlySunborne.1234": "Sunborne",
+                    "EarlyTrial.1234": "Trial",
+                }
+            ),
+        )
+
+        before_mark, past_mark = await Gw2Bot._build_trial_report_messages(
+            cast(Gw2Bot, bot),
+            now,
+        )
+
+        api.get_guild_members.assert_awaited_once_with("guild-id")
+        assert "Trial members before the 14-day mark" in before_mark
+        assert "EarlySunborne.1234" in before_mark
+        assert "EarlyTrial.1234" not in before_mark
+        assert "Overdue.1234" not in before_mark
+        assert "Trial members past the 14-day mark" in past_mark
+        assert "Overdue.1234" in past_mark
+        assert "ranked up to Sunborne" in past_mark
+        assert "EarlySunborne.1234" not in past_mark
+
+    async def test_builds_only_past_mark_when_no_early_sunborne_members(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {
+                        "name": "Overdue.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=14)).isoformat(),
+                    },
+                    {
+                        "name": "EarlyTrial.1234",
                         "rank": "Trial",
                         "joined": (now - timedelta(days=1)).isoformat(),
                     },
@@ -2315,62 +2528,153 @@ class TestTrialMemberNotification:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            _resolve_trial_member_discord_statuses=AsyncMock(
-                return_value=["Overdue.1234"]
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {"Overdue.1234": "Trial", "EarlyTrial.1234": "Trial"}
+            ),
+        )
+
+        messages = await Gw2Bot._build_trial_report_messages(cast(Gw2Bot, bot), now)
+
+        assert len(messages) == 1
+        assert "Trial members past the 14-day mark" in messages[0]
+        assert "Overdue.1234" in messages[0]
+
+    async def test_builds_no_messages_when_no_trials(self) -> None:
+        bot = SimpleNamespace(
+            _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _resolve_trial_member_discord_statuses=_trial_status_resolver({}),
+        )
+
+        messages = await Gw2Bot._build_trial_report_messages(
+            cast(Gw2Bot, bot),
+            datetime(2026, 6, 7, tzinfo=UTC),
+        )
+
+        assert messages == []
+
+
+class TestTrialMemberNotification:
+    async def test_posts_each_built_message_to_notification_channel(self) -> None:
+        bot = SimpleNamespace(
+            _build_trial_report_messages=AsyncMock(
+                return_value=["before mark", "past mark"]
             ),
             _try_send_notification=AsyncMock(return_value=True),
         )
 
-        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), now)
+        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), None)
 
         assert delivered
-        api.get_guild_members.assert_awaited_once_with("guild-id")
-        message = bot._try_send_notification.await_args.args[0]
-        assert "Overdue.1234" in message
-        assert "Recent.1234" not in message
-        assert "ranked up to Sunborne" in message
+        assert bot._try_send_notification.await_args_list == [
+            call("before mark"),
+            call("past mark"),
+        ]
 
     async def test_does_not_post_when_no_trials_are_overdue(self) -> None:
         bot = SimpleNamespace(
-            _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            _resolve_trial_member_discord_statuses=AsyncMock(return_value=[]),
+            _build_trial_report_messages=AsyncMock(return_value=[]),
             _try_send_notification=AsyncMock(return_value=True),
         )
 
-        delivered = await Gw2Bot._check_overdue_trials(
-            cast(Gw2Bot, bot),
-            datetime(2026, 6, 7, tzinfo=UTC),
-        )
+        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), None)
 
         assert delivered
         bot._try_send_notification.assert_not_awaited()
 
     async def test_reports_failed_delivery_to_poller(self) -> None:
-        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         bot = SimpleNamespace(
-            _api=SimpleNamespace(
-                get_guild_members=AsyncMock(
-                    return_value=[
-                        {
-                            "name": "Overdue.1234",
-                            "rank": "Trial",
-                            "joined": (now - timedelta(days=14)).isoformat(),
-                        }
-                    ]
-                )
-            ),
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            _resolve_trial_member_discord_statuses=AsyncMock(
-                return_value=["Overdue.1234"]
-            ),
+            _build_trial_report_messages=AsyncMock(return_value=["past mark"]),
             _try_send_notification=AsyncMock(return_value=False),
         )
 
-        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), now)
+        delivered = await Gw2Bot._check_overdue_trials(cast(Gw2Bot, bot), None)
 
         assert not delivered
 
+
+class TestCheckCommand:
+    async def test_command_is_named_check_and_delegates_to_handler(self) -> None:
+        bot = SimpleNamespace(_handle_check_command=AsyncMock())
+        interaction = SimpleNamespace()
+
+        command = Gw2Bot._create_check_command(cast(Gw2Bot, bot))
+
+        assert command.name == "check"
+        assert command.guild_only
+        await command.callback(interaction)  # type: ignore[arg-type]
+        bot._handle_check_command.assert_awaited_once_with(interaction)
+
+    async def test_rejects_users_without_officer_role(self) -> None:
+        bot = SimpleNamespace(_build_trial_report_messages=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1, roles=[]),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        bot._build_trial_report_messages.assert_not_awaited()
+        message = interaction.response.send_message.await_args.args[0]
+        assert "required role" in message
+        assert interaction.response.send_message.await_args.kwargs == {
+            "ephemeral": True
+        }
+
+    async def test_sends_report_messages_ephemerally_to_officer(self) -> None:
+        bot = SimpleNamespace(
+            _build_trial_report_messages=AsyncMock(
+                return_value=["before mark", "past mark"]
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        assert interaction.followup.send.await_args_list == [
+            call("before mark", ephemeral=True),
+            call("past mark", ephemeral=True),
+        ]
+
+    async def test_reports_when_no_members_to_report(self) -> None:
+        bot = SimpleNamespace(
+            _build_trial_report_messages=AsyncMock(return_value=[]),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.followup.send.assert_awaited_once_with(
+            "No Trial members to report.",
+            ephemeral=True,
+        )
+
+
+class TestTrialMemberStatusResolution:
     async def test_resolves_statuses_from_cached_forum_message_authors(self) -> None:
         sunborne_author = SimpleNamespace(
             id=101,
@@ -3080,6 +3384,29 @@ class TestRaffleContributionNotification:
             "purchase message"
         )
         store.mark_notification_sent.assert_called_once_with(101)
+
+    async def test_officer_purchase_attempts_all_purchase_deliveries(self) -> None:
+        total = raffle_total("Member.1234", purchased=3)
+        store = MagicMock()
+        store.add_officer_purchase.return_value = total
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _send_pending_raffle_notifications=AsyncMock(),
+            _send_pending_deposit_audit_notifications=AsyncMock(),
+            _send_pending_raffle_milestones=AsyncMock(),
+        )
+
+        result = await Gw2Bot.add_officer_raffle_purchase(
+            cast(Gw2Bot, bot),
+            "Member.1234",
+            3,
+        )
+
+        assert result == total
+        store.add_officer_purchase.assert_called_once_with("Member.1234", 3)
+        bot._send_pending_raffle_notifications.assert_awaited_once()
+        bot._send_pending_deposit_audit_notifications.assert_awaited_once()
+        bot._send_pending_raffle_milestones.assert_awaited_once()
 
     async def test_sends_pending_deposit_audits_to_notification_channel(self) -> None:
         deposit = SimpleNamespace(event_id=101, message="purchase message")
