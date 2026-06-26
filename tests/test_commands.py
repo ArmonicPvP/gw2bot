@@ -13,7 +13,7 @@ import pytest
 from discord import app_commands
 
 from gw2bot.config import Config
-from gw2bot.guild_members import TrialMemberReportEntry
+from gw2bot.guild_members import TrialMemberReportEntry, TRIAL_WARNING_MARK_HEADER
 from gw2bot.main import (
     GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS,
     RAFFLE_ADDTICKET_ROLE_ID,
@@ -40,6 +40,7 @@ from gw2bot.main import (
     format_removetickets_audit,
     format_raffle_milestone_preview,
     format_raffle_result,
+    format_track_audit,
     raffle_contribution_report_embed,
     raffle_contribution_report_end,
     raffle_ticket_embed,
@@ -1644,11 +1645,19 @@ class TestAutomatedMessageDiagnostics:
         assert "DiagnosticUser.1234 has joined the guild." in output
         assert "DiagnosticUser.1234 has left the guild." in output
         assert (
+            "Officer.5678 invited DiagnosticUser.1234 to the guild." in output
+        )
+        assert (
+            "Officer.5678 changed DiagnosticUser.1234's guild rank "
+            "from Trial to Sunborne." in output
+        )
+        assert (
             "150 total tickets have been purchased for this raffle. "
             "Tier 3 rewards have been reached!"
         ) in output
         assert "Guild Storage is low on **Diagnostic Feast**: 5 left" in output
         assert "Trial members past the 14-day mark" in output
+        assert "Trial members past the 7-day warning mark (to be kicked)" in output
         assert (
             "The guild member count has not been retrieved yet, so the "
             "channel description is not set."
@@ -1861,13 +1870,13 @@ class TestAutomatedMessageDiagnostics:
 
         assert secret not in caplog.text
         assert (
-            "Prepared automated message diagnostics; messages=9 contributors=1"
+            "Prepared automated message diagnostics; messages=12 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 10
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 10
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 13
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 13
         assert (
-            "Automated message diagnostics completed; attempted=10 delivered=10 "
+            "Automated message diagnostics completed; attempted=13 delivered=13 "
             "failed=0"
             in caplog.text
         )
@@ -1882,6 +1891,9 @@ class TestAutomatedMessageDiagnostics:
                 side_effect=[
                     None,
                     RuntimeError(secret),
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -1909,7 +1921,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 10
+        assert channel.send.await_count == 13
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -1917,7 +1929,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=10 delivered=9 "
+            "Automated message diagnostics completed; attempted=13 delivered=12 "
             "failed=1"
             in caplog.text
         )
@@ -2289,6 +2301,8 @@ class TestGuildLogRefresh:
             _send_pending_raffle_milestones=AsyncMock(),
             _send_pending_join_notifications=AsyncMock(),
             _send_pending_leave_notifications=AsyncMock(),
+            _send_pending_invite_notifications=AsyncMock(),
+            _send_pending_rank_change_notifications=AsyncMock(),
             _handle_poll_error=AsyncMock(),
             _handle_poll_success=AsyncMock(),
             _config=SimpleNamespace(guild_log_poll_interval_seconds=60),
@@ -2298,6 +2312,8 @@ class TestGuildLogRefresh:
 
         bot._send_pending_raffle_notifications.assert_awaited_once()
         bot._send_pending_deposit_audit_notifications.assert_awaited_once()
+        bot._send_pending_invite_notifications.assert_awaited_once()
+        bot._send_pending_rank_change_notifications.assert_awaited_once()
         bot._handle_poll_success.assert_awaited_once_with("Guild Log")
         sleep.assert_awaited_once_with(60)
 
@@ -2483,6 +2499,8 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            get_tracked_trial_members=MagicMock(return_value=set()),
+            untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
                 {
                     "Overdue.1234": "Trial",
@@ -2528,6 +2546,8 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            get_tracked_trial_members=MagicMock(return_value=set()),
+            untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
                 {"Overdue.1234": "Trial", "EarlyTrial.1234": "Trial"}
             ),
@@ -2543,6 +2563,8 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            get_tracked_trial_members=MagicMock(return_value=set()),
+            untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver({}),
         )
 
@@ -2552,6 +2574,49 @@ class TestTrialMemberReportMessages:
         )
 
         assert messages == []
+
+    async def test_moves_tracked_members_to_warning_report(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {
+                        "name": "Overdue.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=20)).isoformat(),
+                    },
+                    {
+                        "name": "Tracked.5678",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=20)).isoformat(),
+                    },
+                ]
+            )
+        )
+        untrack = MagicMock()
+        bot = SimpleNamespace(
+            _api=api,
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            get_tracked_trial_members=MagicMock(
+                return_value={"tracked.5678", "Gone.9012"}
+            ),
+            untrack_trial_member=untrack,
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {"Overdue.1234": "Trial", "Tracked.5678": "Trial"}
+            ),
+        )
+
+        past_mark, warning = await Gw2Bot._build_trial_report_messages(
+            cast(Gw2Bot, bot),
+            now,
+        )
+
+        assert "Trial members past the 14-day mark" in past_mark
+        assert "Overdue.1234" in past_mark
+        assert "Tracked.5678" not in past_mark
+        assert "Trial members past the 7-day warning mark (to be kicked)" in warning
+        assert "Tracked.5678" in warning
+        untrack.assert_called_once_with("Gone.9012")
 
 
 class TestTrialMemberNotification:
@@ -2672,6 +2737,230 @@ class TestCheckCommand:
             "No Trial members to report.",
             ephemeral=True,
         )
+
+
+class TestTrackCommand:
+    def test_format_track_audit_uses_mention_and_verb(self) -> None:
+        assert (
+            format_track_audit("Username.1234", 42, tracked=True)
+            == "Username.1234 warning tracked by <@42>"
+        )
+        assert (
+            format_track_audit("Username.1234", 42, tracked=False)
+            == "Username.1234 warning untracked by <@42>"
+        )
+
+    async def test_command_is_named_track_and_delegates_to_handler(self) -> None:
+        async def _autocomplete(
+            interaction: discord.Interaction,
+            current: str,
+        ) -> list[app_commands.Choice[str]]:
+            return []
+
+        bot = SimpleNamespace(
+            _handle_track_command=AsyncMock(),
+            _track_member_autocomplete=_autocomplete,
+        )
+        interaction = SimpleNamespace()
+
+        command = Gw2Bot._create_track_command(cast(Gw2Bot, bot))
+
+        assert command.name == "track"
+        assert command.guild_only
+        await command.callback(interaction, "Username.1234")  # type: ignore[arg-type]
+        bot._handle_track_command.assert_awaited_once_with(
+            interaction,
+            "Username.1234",
+        )
+
+    async def test_rejects_users_without_officer_role(self) -> None:
+        bot = SimpleNamespace(
+            resolve_guild_member=AsyncMock(),
+            toggle_trial_member_tracking=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1, roles=[]),
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Username.1234",
+        )
+
+        bot.resolve_guild_member.assert_not_awaited()
+        bot.toggle_trial_member_tracking.assert_not_called()
+        message = interaction.response.send_message.await_args.args[0]
+        assert "required role" in message
+        assert interaction.response.send_message.await_args.kwargs == {
+            "ephemeral": True
+        }
+
+    async def test_rejects_non_guild_member(self) -> None:
+        bot = SimpleNamespace(
+            resolve_guild_member=AsyncMock(return_value=None),
+            toggle_trial_member_tracking=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Ghost.1234",
+        )
+
+        bot.toggle_trial_member_tracking.assert_not_called()
+        message = interaction.followup.send.await_args.args[0]
+        assert "is not a member of the configured guild" in message
+
+    async def test_tracks_member_and_posts_audit(self) -> None:
+        bot = SimpleNamespace(
+            resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            toggle_trial_member_tracking=MagicMock(return_value=True),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=99,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "username.1234",
+        )
+
+        bot.toggle_trial_member_tracking.assert_called_once_with(
+            "Username.1234",
+            99,
+        )
+        bot.send_notification.assert_awaited_once_with(
+            "Username.1234 warning tracked by <@99>"
+        )
+        reply = interaction.followup.send.await_args.args[0]
+        assert "Now tracking **Username.1234**" in reply
+        assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+
+    async def test_untracks_member_and_posts_audit(self) -> None:
+        bot = SimpleNamespace(
+            resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            toggle_trial_member_tracking=MagicMock(return_value=False),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=99,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Username.1234",
+        )
+
+        bot.send_notification.assert_awaited_once_with(
+            "Username.1234 warning untracked by <@99>"
+        )
+        reply = interaction.followup.send.await_args.args[0]
+        assert "Stopped tracking **Username.1234**" in reply
+
+    async def test_notes_when_audit_delivery_fails(self) -> None:
+        bot = SimpleNamespace(
+            resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            toggle_trial_member_tracking=MagicMock(return_value=True),
+            send_notification=AsyncMock(return_value=False),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=99,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Username.1234",
+        )
+
+        reply = interaction.followup.send.await_args.args[0]
+        assert "The audit log could not be delivered." in reply
+
+    async def test_reports_membership_lookup_failure(self) -> None:
+        bot = SimpleNamespace(
+            resolve_guild_member=AsyncMock(side_effect=aiohttp.ClientError()),
+            toggle_trial_member_tracking=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Username.1234",
+        )
+
+        bot.toggle_trial_member_tracking.assert_not_called()
+        message = interaction.followup.send.await_args.args[0]
+        assert "Could not verify guild membership" in message
+
+    async def test_autocomplete_requires_officer_role(self) -> None:
+        bot = SimpleNamespace(search_guild_members=AsyncMock())
+        interaction = SimpleNamespace(user=SimpleNamespace(id=1, roles=[]))
+
+        choices = await Gw2Bot._track_member_autocomplete(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "User",
+        )
+
+        assert choices == []
+        bot.search_guild_members.assert_not_awaited()
+
+    async def test_autocomplete_returns_officer_choices(self) -> None:
+        bot = SimpleNamespace(
+            search_guild_members=AsyncMock(return_value=["Username.1234"]),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+        )
+
+        choices = await Gw2Bot._track_member_autocomplete(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "User",
+        )
+
+        assert [(choice.name, choice.value) for choice in choices] == [
+            ("Username.1234", "Username.1234")
+        ]
 
 
 class TestTrialMemberStatusResolution:
@@ -3461,6 +3750,64 @@ class TestRaffleContributionNotification:
         await Gw2Bot._send_pending_join_notifications(cast(Gw2Bot, bot))
 
         store.mark_join_notification_sent.assert_not_called()
+
+    async def test_sends_pending_invite_messages_to_notification_channel(
+        self,
+    ) -> None:
+        invite = SimpleNamespace(event_id=101, message="invite message")
+        store = MagicMock()
+        store.get_pending_invite_notifications.return_value = [invite]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_invite_notifications(cast(Gw2Bot, bot))
+
+        bot._try_send_notification.assert_awaited_once_with("invite message")
+        store.mark_invite_notification_sent.assert_called_once_with(101)
+
+    async def test_retries_pending_invite_after_delivery_failure(self) -> None:
+        invite = SimpleNamespace(event_id=101, message="invite message")
+        store = MagicMock()
+        store.get_pending_invite_notifications.return_value = [invite]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=False),
+        )
+
+        await Gw2Bot._send_pending_invite_notifications(cast(Gw2Bot, bot))
+
+        store.mark_invite_notification_sent.assert_not_called()
+
+    async def test_sends_pending_rank_change_messages_to_notification_channel(
+        self,
+    ) -> None:
+        rank_change = SimpleNamespace(event_id=101, message="rank change message")
+        store = MagicMock()
+        store.get_pending_rank_change_notifications.return_value = [rank_change]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_rank_change_notifications(cast(Gw2Bot, bot))
+
+        bot._try_send_notification.assert_awaited_once_with("rank change message")
+        store.mark_rank_change_notification_sent.assert_called_once_with(101)
+
+    async def test_retries_pending_rank_change_after_delivery_failure(self) -> None:
+        rank_change = SimpleNamespace(event_id=101, message="rank change message")
+        store = MagicMock()
+        store.get_pending_rank_change_notifications.return_value = [rank_change]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_notification=AsyncMock(return_value=False),
+        )
+
+        await Gw2Bot._send_pending_rank_change_notifications(cast(Gw2Bot, bot))
+
+        store.mark_rank_change_notification_sent.assert_not_called()
 
     async def test_sends_pending_milestones_to_raffle_channel(self) -> None:
         milestone = SimpleNamespace(threshold=50, message="milestone message")

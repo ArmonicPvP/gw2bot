@@ -108,7 +108,15 @@ notification channel:
   promotion). This report is omitted when no such member exists.
 - **Trial members past the 14-day mark** — Trial accounts whose `joined`
   timestamp is at least 14 days old, awaiting confirmation that they can be ranked
-  up to Sunborne.
+  up to Sunborne. Accounts that an officer has marked with `/track` are excluded
+  here and appear in the 7-day warning report instead.
+- **Trial members past the 7-day warning mark (to be kicked)** — Trial accounts
+  past the 14-day mark that an officer has tracked with `/track`. These members
+  were warned and have roughly 7 days to reach Sunborne before being kicked. The
+  report is omitted when no tracked member is currently overdue. A tracked member
+  is automatically untracked once they are no longer an overdue Trial member (for
+  example after promotion to Sunborne or leaving the guild), so they drop off
+  both reports.
 
 ```text
 Trial members before the 14-day mark
@@ -143,10 +151,24 @@ messages when necessary to stay within Discord's message-length limit. A report
 is omitted entirely when it has no members, and nothing is posted when neither
 report has any members.
 
-- `/check`: builds the same before- and past-14-day reports on demand and
-  returns them only to the invoker as ephemeral replies, without posting to the
-  notification channel. It requires Officer role `1317359168285573171`, and
-  replies "No Trial members to report." when neither report has any members.
+- `/check`: builds the same before-, past-14-day, and 7-day warning reports on
+  demand and returns them only to the invoker as ephemeral replies, without
+  posting to the notification channel. It requires Officer role
+  `1317359168285573171`, and replies "No Trial members to report." when no report
+  has any members.
+- `/track username:<account>`: toggles 7-day warning tracking for a guild
+  member and requires Officer role `1317359168285573171`. Username autocomplete
+  and submission resolve against the case-insensitive guild-member cache and
+  reject accounts outside the configured guild. Running it for an untracked
+  member starts tracking them (moving them from the past-14-day report to the
+  7-day warning report); running it again untracks them. The ephemeral reply
+  confirms the new state to the invoker, and an audit message is posted to the
+  notification channel:
+
+  ```text
+  Username.1234 warning tracked by @DiscordUser
+  Username.1234 warning untracked by @DiscordUser
+  ```
 
 ## Raffle Deposits
 
@@ -307,6 +329,26 @@ where `user` and `kicked_by` are the same account, the bot posts:
 Username.1234 has left the guild.
 ```
 
+The poller also logs guild invitations and rank changes to the same channel. For
+every `invited` event the bot posts the inviter when the GW2 API reports one:
+
+```text
+Officer.5678 invited Username.1234 to the guild.
+Username.1234 was invited to the guild.
+```
+
+For every `rank_change` event the bot posts the account that changed the rank
+when the GW2 API reports one (an account that changes its own rank, or an
+unattributed change, is reported without an actor):
+
+```text
+Officer.5678 changed Username.1234's guild rank from Trial to Sunborne.
+Username.1234's guild rank changed from Trial to Sunborne.
+```
+
+Invite and rank-change delivery state is persisted like joins and leaves, so each
+message is posted once per event, including across restarts.
+
 Guild membership messages, raffle deposit audit messages, raffle command audit
 messages, stock alerts, and
 polling-status messages are posted in `DISCORD_NOTIFICATION_CHANNEL_ID`.
@@ -326,10 +368,10 @@ in `DISCORD_NOTIFICATION_CHANNEL_ID`, the bot posts read-only previews of:
 
 - the next six-hour raffle contribution report using contributions currently
   recorded in its active interval, including free tickets;
-- a gold-deposit ticket purchase, guild join, guild leave, and next reward-tier
-  message;
-- a low feast-stock alert, overdue Trial member report, and polling
-  failure/recovery messages.
+- a gold-deposit ticket purchase, guild join, guild leave, guild invite, guild
+  rank change, and next reward-tier message;
+- a low feast-stock alert, overdue Trial member report, Trial 7-day warning
+  report, and polling failure/recovery messages.
 
 If the raffle is already at the highest configured reward tier, the highest-tier
 message is shown with a note that it has already been reached. Running `diag`
