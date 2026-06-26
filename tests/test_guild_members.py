@@ -8,12 +8,14 @@ import pytest
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
     TRIAL_BEFORE_MARK_HEADER,
+    TRIAL_WARNING_MARK_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
     filter_sunborne_discord_entries,
     format_overdue_trial_report,
     get_overdue_trial_members,
     get_recent_trial_members,
+    partition_tracked_overdue_members,
     seconds_until_trial_report,
 )
 
@@ -354,6 +356,39 @@ class TestTrialMemberReport:
             "* apple.1234",
             "* zebra.1234",
         ]
+
+    def test_partitions_overdue_members_by_tracked_status(self) -> None:
+        untracked, tracked, stale = partition_tracked_overdue_members(
+            ["Overdue.1234", "Tracked.5678"],
+            {"tracked.5678", "Gone.9012"},
+        )
+
+        assert untracked == ["Overdue.1234"]
+        assert tracked == ["Tracked.5678"]
+        assert stale == {"Gone.9012"}
+
+    def test_partition_returns_canonical_overdue_and_stored_stale_names(
+        self,
+    ) -> None:
+        untracked, tracked, stale = partition_tracked_overdue_members(
+            ["Canonical.1234"],
+            {"CANONICAL.1234"},
+        )
+
+        assert untracked == []
+        assert tracked == ["Canonical.1234"]
+        assert stale == set()
+
+    def test_warning_report_uses_seven_day_header(self) -> None:
+        message = format_overdue_trial_report(
+            [TrialMemberReportEntry("Tracked.1234")],
+            header=TRIAL_WARNING_MARK_HEADER,
+        )[0]
+
+        assert message.startswith(
+            "**Trial members past the 7-day warning mark (to be kicked)**"
+        )
+        assert "* Tracked.1234" in message
 
     def test_schedules_next_report_for_1700_utc(self) -> None:
         assert (

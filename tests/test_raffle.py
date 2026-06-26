@@ -23,8 +23,10 @@ from gw2bot.raffle import (
     RaffleStore,
     format_gold,
     parse_gold_deposit,
+    parse_guild_invite,
     parse_guild_join,
     parse_guild_leave,
+    parse_guild_rank_change,
 )
 import pytest
 
@@ -83,6 +85,38 @@ def guild_join(
         "time": "2026-06-07T06:26:17.000Z",
         "type": "joined",
         "user": username,
+    }
+
+
+def guild_invite(
+    event_id: int,
+    username: str = "Invited.1234",
+    invited_by: str = "Officer.5678",
+) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "time": "2026-06-07T06:26:17.000Z",
+        "type": "invited",
+        "user": username,
+        "invited_by": invited_by,
+    }
+
+
+def guild_rank_change(
+    event_id: int,
+    username: str = "Member.1234",
+    old_rank: str = "Trial",
+    new_rank: str = "Sunborne",
+    changed_by: str = "Officer.5678",
+) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "time": "2026-06-07T06:26:17.000Z",
+        "type": "rank_change",
+        "user": username,
+        "old_rank": old_rank,
+        "new_rank": new_rank,
+        "changed_by": changed_by,
     }
 
 
@@ -146,6 +180,52 @@ class TestRaffle:
         assert join.message == "Username.1234 has joined the guild."
         assert parse_guild_join({**guild_join(105), "type": "invited"}) is None
         assert parse_guild_join({**guild_join(106), "user": ""}) is None
+
+    def test_parses_guild_invite_with_exact_message(self) -> None:
+        invite = parse_guild_invite(guild_invite(104))
+
+        assert invite is not None
+        assert invite.message == "Officer.5678 invited Invited.1234 to the guild."
+        assert parse_guild_invite({**guild_invite(105), "type": "joined"}) is None
+        assert parse_guild_invite({**guild_invite(106), "user": ""}) is None
+
+    def test_parses_guild_invite_without_inviter(self) -> None:
+        invite = parse_guild_invite({**guild_invite(104), "invited_by": ""})
+
+        assert invite is not None
+        assert invite.message == "Invited.1234 was invited to the guild."
+
+    def test_parses_guild_rank_change_with_exact_message(self) -> None:
+        rank_change = parse_guild_rank_change(guild_rank_change(104))
+
+        assert rank_change is not None
+        assert rank_change.message == (
+            "Officer.5678 changed Member.1234's guild rank from Trial to Sunborne."
+        )
+        assert (
+            parse_guild_rank_change({**guild_rank_change(105), "type": "joined"})
+            is None
+        )
+        assert (
+            parse_guild_rank_change({**guild_rank_change(106), "user": ""}) is None
+        )
+
+    def test_parses_self_or_unattributed_rank_change_without_actor(self) -> None:
+        unattributed = parse_guild_rank_change(
+            {**guild_rank_change(104), "changed_by": ""}
+        )
+        assert unattributed is not None
+        assert unattributed.message == (
+            "Member.1234's guild rank changed from Trial to Sunborne."
+        )
+
+        self_change = parse_guild_rank_change(
+            {**guild_rank_change(105), "changed_by": "Member.1234"}
+        )
+        assert self_change is not None
+        assert self_change.message == (
+            "Member.1234's guild rank changed from Trial to Sunborne."
+        )
 
     def test_persists_leave_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -240,6 +320,84 @@ class TestRaffle:
             reopened.mark_join_notification_sent(101)
             assert reopened.get_pending_join_notifications() == []
             reopened.close()
+
+    def test_persists_invite_notification_and_prevents_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([guild_invite(101)])
+
+            assert [
+                invite.message
+                for invite in store.get_pending_invite_notifications()
+            ] == ["Officer.5678 invited Invited.1234 to the guild."]
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            reopened.process_events([guild_invite(101)])
+            pending = reopened.get_pending_invite_notifications()
+            assert len(pending) == 1
+            reopened.mark_invite_notification_sent(101)
+            assert reopened.get_pending_invite_notifications() == []
+            reopened.close()
+
+    def test_persists_rank_change_notification_and_prevents_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([guild_rank_change(101)])
+
+            assert [
+                change.message
+                for change in store.get_pending_rank_change_notifications()
+            ] == [
+                "Officer.5678 changed Member.1234's guild rank "
+                "from Trial to Sunborne."
+            ]
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            reopened.process_events([guild_rank_change(101)])
+            pending = reopened.get_pending_rank_change_notifications()
+            assert len(pending) == 1
+            reopened.mark_rank_change_notification_sent(101)
+            assert reopened.get_pending_rank_change_notifications() == []
+            reopened.close()
+
+    def test_toggles_and_persists_tracked_trial_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+
+            assert store.get_tracked_trial_members() == set()
+            assert store.is_trial_member_tracked("Trialist.1234") is False
+            assert (
+                store.toggle_trial_member_tracking("Trialist.1234", 42) is True
+            )
+            assert store.is_trial_member_tracked("Trialist.1234") is True
+            assert store.get_tracked_trial_members() == {"Trialist.1234"}
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            assert reopened.get_tracked_trial_members() == {"Trialist.1234"}
+            assert (
+                reopened.toggle_trial_member_tracking("Trialist.1234", 42) is False
+            )
+            assert reopened.get_tracked_trial_members() == set()
+            reopened.close()
+
+    def test_untrack_trial_member_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.toggle_trial_member_tracking("Trialist.1234", 42)
+
+            store.untrack_trial_member("Trialist.1234")
+            store.untrack_trial_member("Trialist.1234")
+
+            assert store.get_tracked_trial_members() == set()
+            store.close()
 
     def test_processes_deposit_join_and_leave_before_advancing_cursor(
         self,

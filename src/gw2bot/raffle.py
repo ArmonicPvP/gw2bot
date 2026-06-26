@@ -12,8 +12,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.database import (
     FeastAlertRecord,
+    GuildInviteRecord,
     GuildJoinRecord,
     GuildLeaveRecord,
+    GuildRankChangeRecord,
     RaffleAccountLinkRecord,
     RaffleDepositRecord,
     RaffleManualTicketRecord,
@@ -23,6 +25,7 @@ from gw2bot.database import (
     RaffleRunWinnerRecord,
     RaffleTotalRecord,
     SettingRecord,
+    TrackedTrialMemberRecord,
     create_database_engine,
     initialize_database,
 )
@@ -154,6 +157,42 @@ class GuildJoin:
         return f"{self.username} has joined the guild."
 
 
+@dataclass(frozen=True, slots=True)
+class GuildInvite:
+    event_id: int
+    username: str
+    event_time: str
+    invited_by: str | None = None
+
+    @property
+    def message(self) -> str:
+        if self.invited_by is not None:
+            return f"{self.invited_by} invited {self.username} to the guild."
+        return f"{self.username} was invited to the guild."
+
+
+@dataclass(frozen=True, slots=True)
+class GuildRankChange:
+    event_id: int
+    username: str
+    old_rank: str
+    new_rank: str
+    event_time: str
+    changed_by: str | None = None
+
+    @property
+    def message(self) -> str:
+        if self.changed_by is not None and self.changed_by != self.username:
+            return (
+                f"{self.changed_by} changed {self.username}'s guild rank "
+                f"from {self.old_rank} to {self.new_rank}."
+            )
+        return (
+            f"{self.username}'s guild rank changed "
+            f"from {self.old_rank} to {self.new_rank}."
+        )
+
+
 class RaffleStore:
     def __init__(
         self,
@@ -245,6 +284,8 @@ class RaffleStore:
         officer_deposits_skipped = 0
         joins = 0
         leaves = 0
+        invites = 0
+        rank_changes = 0
         officer_keys = {
             username.casefold() for username in officer_usernames or set()
         }
@@ -308,6 +349,39 @@ class RaffleStore:
                     )
                     leaves += 1
 
+                invite = parse_guild_invite(event)
+                if (
+                    invite is not None
+                    and session.get(GuildInviteRecord, invite.event_id) is None
+                ):
+                    session.add(
+                        GuildInviteRecord(
+                            event_id=invite.event_id,
+                            username=invite.username,
+                            invited_by=invite.invited_by,
+                            event_time=invite.event_time,
+                        )
+                    )
+                    invites += 1
+
+                rank_change = parse_guild_rank_change(event)
+                if (
+                    rank_change is not None
+                    and session.get(GuildRankChangeRecord, rank_change.event_id)
+                    is None
+                ):
+                    session.add(
+                        GuildRankChangeRecord(
+                            event_id=rank_change.event_id,
+                            username=rank_change.username,
+                            old_rank=rank_change.old_rank,
+                            new_rank=rank_change.new_rank,
+                            changed_by=rank_change.changed_by,
+                            event_time=rank_change.event_time,
+                        )
+                    )
+                    rank_changes += 1
+
                 cursor = event_id
                 processed += 1
 
@@ -315,13 +389,16 @@ class RaffleStore:
             cursor_record.value = str(cursor)
         LOGGER.debug(
             "Processed guild log events; fetched=%s new=%s deposits=%s "
-            "officer_deposits_skipped=%s joins=%s leaves=%s cursor=%s",
+            "officer_deposits_skipped=%s joins=%s leaves=%s invites=%s "
+            "rank_changes=%s cursor=%s",
             len(events),
             processed,
             deposits,
             officer_deposits_skipped,
             joins,
             leaves,
+            invites,
+            rank_changes,
             cursor,
         )
 
@@ -382,6 +459,37 @@ class RaffleStore:
                 for record in session.scalars(statement).all()
             ]
             LOGGER.debug("Loaded %s pending guild-join notifications", len(results))
+            return results
+
+    def get_pending_invite_notifications(self) -> list[GuildInvite]:
+        statement = (
+            select(GuildInviteRecord)
+            .where(GuildInviteRecord.notification_sent.is_(False))
+            .order_by(GuildInviteRecord.event_id)
+        )
+        with self._sessions() as session:
+            results = [
+                _to_guild_invite(record)
+                for record in session.scalars(statement).all()
+            ]
+            LOGGER.debug("Loaded %s pending guild-invite notifications", len(results))
+            return results
+
+    def get_pending_rank_change_notifications(self) -> list[GuildRankChange]:
+        statement = (
+            select(GuildRankChangeRecord)
+            .where(GuildRankChangeRecord.notification_sent.is_(False))
+            .order_by(GuildRankChangeRecord.event_id)
+        )
+        with self._sessions() as session:
+            results = [
+                _to_guild_rank_change(record)
+                for record in session.scalars(statement).all()
+            ]
+            LOGGER.debug(
+                "Loaded %s pending guild-rank-change notifications",
+                len(results),
+            )
             return results
 
     def get_pending_milestones(self) -> list[RaffleMilestone]:
@@ -778,6 +886,71 @@ class RaffleStore:
                 record.notification_sent = True
                 LOGGER.debug("Marked guild-join event %s notification sent", event_id)
 
+    def mark_invite_notification_sent(self, event_id: int) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(GuildInviteRecord, event_id)
+            if record is not None:
+                record.notification_sent = True
+                LOGGER.debug("Marked guild-invite event %s notification sent", event_id)
+
+    def mark_rank_change_notification_sent(self, event_id: int) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(GuildRankChangeRecord, event_id)
+            if record is not None:
+                record.notification_sent = True
+                LOGGER.debug(
+                    "Marked guild-rank-change event %s notification sent",
+                    event_id,
+                )
+
+    def get_tracked_trial_members(self) -> set[str]:
+        with self._sessions() as session:
+            results = {
+                record.username
+                for record in session.scalars(
+                    select(TrackedTrialMemberRecord)
+                ).all()
+            }
+            LOGGER.debug("Loaded %s tracked Trial members", len(results))
+            return results
+
+    def is_trial_member_tracked(self, username: str) -> bool:
+        with self._sessions() as session:
+            return session.get(TrackedTrialMemberRecord, username) is not None
+
+    def toggle_trial_member_tracking(
+        self,
+        username: str,
+        tracked_by_discord_user_id: int | None = None,
+        event_time: datetime | None = None,
+    ) -> bool:
+        with self._sessions.begin() as session:
+            record = session.get(TrackedTrialMemberRecord, username)
+            if record is not None:
+                session.delete(record)
+                now_tracked = False
+            else:
+                session.add(
+                    TrackedTrialMemberRecord(
+                        username=username,
+                        tracked_by_discord_user_id=tracked_by_discord_user_id,
+                        tracked_at=(event_time or datetime.now(UTC)).isoformat(),
+                    )
+                )
+                now_tracked = True
+        LOGGER.debug(
+            "Toggled Trial member warning tracking; now_tracked=%s",
+            now_tracked,
+        )
+        return now_tracked
+
+    def untrack_trial_member(self, username: str) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(TrackedTrialMemberRecord, username)
+            if record is not None:
+                session.delete(record)
+                LOGGER.debug("Removed Trial member warning tracking")
+
     def mark_milestone_notification_sent(self, threshold: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(RaffleMilestoneRecord, threshold)
@@ -920,6 +1093,26 @@ def _to_guild_join(record: GuildJoinRecord) -> GuildJoin:
     )
 
 
+def _to_guild_invite(record: GuildInviteRecord) -> GuildInvite:
+    return GuildInvite(
+        event_id=record.event_id,
+        username=record.username,
+        event_time=record.event_time,
+        invited_by=record.invited_by,
+    )
+
+
+def _to_guild_rank_change(record: GuildRankChangeRecord) -> GuildRankChange:
+    return GuildRankChange(
+        event_id=record.event_id,
+        username=record.username,
+        old_rank=record.old_rank,
+        new_rank=record.new_rank,
+        event_time=record.event_time,
+        changed_by=record.changed_by,
+    )
+
+
 def _to_raffle_milestone(record: RaffleMilestoneRecord) -> RaffleMilestone:
     return RaffleMilestone(
         threshold=record.threshold,
@@ -1015,6 +1208,34 @@ def parse_guild_join(event: dict[str, Any]) -> GuildJoin | None:
         event_id=int(event["id"]),
         username=str(event["user"]),
         event_time=str(event.get("time", "")),
+    )
+
+
+def parse_guild_invite(event: dict[str, Any]) -> GuildInvite | None:
+    if event.get("type") != "invited" or not event.get("user"):
+        return None
+    invited_by_raw = event.get("invited_by")
+    invited_by = str(invited_by_raw) if invited_by_raw else None
+    return GuildInvite(
+        event_id=int(event["id"]),
+        username=str(event["user"]),
+        event_time=str(event.get("time", "")),
+        invited_by=invited_by,
+    )
+
+
+def parse_guild_rank_change(event: dict[str, Any]) -> GuildRankChange | None:
+    if event.get("type") != "rank_change" or not event.get("user"):
+        return None
+    changed_by_raw = event.get("changed_by")
+    changed_by = str(changed_by_raw) if changed_by_raw else None
+    return GuildRankChange(
+        event_id=int(event["id"]),
+        username=str(event["user"]),
+        old_rank=str(event.get("old_rank", "")),
+        new_rank=str(event.get("new_rank", "")),
+        event_time=str(event.get("time", "")),
+        changed_by=changed_by,
     )
 
 

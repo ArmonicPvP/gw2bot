@@ -20,18 +20,22 @@ from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
     TRIAL_BEFORE_MARK_HEADER,
+    TRIAL_WARNING_MARK_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
     filter_sunborne_discord_entries,
     format_overdue_trial_report,
     get_overdue_trial_members,
     get_recent_trial_members,
+    partition_tracked_overdue_members,
     seconds_until_trial_report,
 )
 from gw2bot.raffle import (
     RAFFLE_REWARD_TIERS,
+    GuildInvite,
     GuildJoin,
     GuildLeave,
+    GuildRankChange,
     OFFICER_RANK,
     RaffleContribution,
     RaffleDeposit,
@@ -108,6 +112,16 @@ def user_has_role(user: Any, required_role_id: int) -> bool:
 
 def format_addticket_audit(discord_user_id: int, username: str) -> str:
     return f"<@{discord_user_id}> added 1 raffle ticket to {username}."
+
+
+def format_track_audit(
+    username: str,
+    discord_user_id: int,
+    *,
+    tracked: bool,
+) -> str:
+    verb = "tracked" if tracked else "untracked"
+    return f"{username} warning {verb} by <@{discord_user_id}>"
 
 
 def parse_squad_attendance_usernames(value: str) -> list[str]:
@@ -479,6 +493,26 @@ def format_automated_message_diagnostics(
                 ).message
             ),
             (
+                "**Guild invite notification (test)**\n"
+                + GuildInvite(
+                    event_id=0,
+                    username="DiagnosticUser.1234",
+                    event_time="",
+                    invited_by="Officer.5678",
+                ).message
+            ),
+            (
+                "**Guild rank change notification (test)**\n"
+                + GuildRankChange(
+                    event_id=0,
+                    username="DiagnosticUser.1234",
+                    old_rank="Trial",
+                    new_rank="Sunborne",
+                    event_time="",
+                    changed_by="Officer.5678",
+                ).message
+            ),
+            (
                 "**Next raffle reward tier notification (test)**\n"
                 + format_raffle_milestone_preview(purchased_tickets)
             ),
@@ -494,6 +528,13 @@ def format_automated_message_diagnostics(
             (
                 "**Overdue Trial member report (test)**\n"
                 + format_overdue_trial_report(["DiagnosticUser.1234"])[0]
+            ),
+            (
+                "**Trial 7-day warning report (test)**\n"
+                + format_overdue_trial_report(
+                    ["DiagnosticUser.1234"],
+                    header=TRIAL_WARNING_MARK_HEADER,
+                )[0]
             ),
             (
                 "**Guild member count channel description (current)**\n"
@@ -1421,6 +1462,7 @@ class Gw2Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
         self.tree.add_command(self._create_check_command())
+        self.tree.add_command(self._create_track_command())
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")
@@ -1775,6 +1817,25 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Guild member search completed; results=%s", len(results))
         return results
 
+    def get_tracked_trial_members(self) -> set[str]:
+        return self._raffle_store.get_tracked_trial_members()
+
+    def is_trial_member_tracked(self, username: str) -> bool:
+        return self._raffle_store.is_trial_member_tracked(username)
+
+    def toggle_trial_member_tracking(
+        self,
+        username: str,
+        discord_user_id: int,
+    ) -> bool:
+        return self._raffle_store.toggle_trial_member_tracking(
+            username,
+            discord_user_id,
+        )
+
+    def untrack_trial_member(self, username: str) -> None:
+        self._raffle_store.untrack_trial_member(username)
+
     def add_manual_raffle_ticket(
         self,
         username: str,
@@ -1998,19 +2059,40 @@ class Gw2Bot(discord.Client):
         members = await self._api.get_guild_members(self._config.gw2_guild_id)
         overdue = get_overdue_trial_members(members, now)
         recent = get_recent_trial_members(members, now)
+        tracked = self.get_tracked_trial_members()
+        untracked_overdue, tracked_overdue, stale_tracked = (
+            partition_tracked_overdue_members(overdue, tracked)
+        )
+        for username in stale_tracked:
+            self.untrack_trial_member(username)
         LOGGER.debug(
-            "Found %s overdue and %s recent Trial members from %s guild members",
+            "Found %s overdue (%s tracked) and %s recent Trial members from %s "
+            "guild members; auto_untracked=%s",
             len(overdue),
+            len(tracked_overdue),
             len(recent),
             len(members),
+            len(stale_tracked),
         )
         recent_entries = await self._resolve_trial_member_discord_statuses(recent)
         before_mark_entries = filter_sunborne_discord_entries(recent_entries)
-        overdue_entries = await self._resolve_trial_member_discord_statuses(overdue)
-        messages = format_overdue_trial_report(
-            before_mark_entries,
-            header=TRIAL_BEFORE_MARK_HEADER,
-        ) + format_overdue_trial_report(overdue_entries)
+        overdue_entries = await self._resolve_trial_member_discord_statuses(
+            untracked_overdue
+        )
+        warning_entries = await self._resolve_trial_member_discord_statuses(
+            tracked_overdue
+        )
+        messages = (
+            format_overdue_trial_report(
+                before_mark_entries,
+                header=TRIAL_BEFORE_MARK_HEADER,
+            )
+            + format_overdue_trial_report(overdue_entries)
+            + format_overdue_trial_report(
+                warning_entries,
+                header=TRIAL_WARNING_MARK_HEADER,
+            )
+        )
         LOGGER.debug("Formatted Trial report into %s messages", len(messages))
         return messages
 
@@ -2069,6 +2151,118 @@ class Gw2Bot(discord.Client):
         )
         for message in messages:
             await interaction.followup.send(message, ephemeral=True)
+
+    def _create_track_command(self) -> app_commands.Command[Any, ..., None]:
+        @app_commands.command(
+            name="track",
+            description="Toggle a Trial member's 7-day warning tracking",
+        )
+        @app_commands.describe(
+            username="Guild Wars 2 account name, including the four digits",
+        )
+        @app_commands.guild_only()
+        async def track(
+            interaction: discord.Interaction,
+            username: str,
+        ) -> None:
+            await self._handle_track_command(interaction, username)
+
+        track.autocomplete("username")(self._track_member_autocomplete)
+        return track
+
+    async def _track_member_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+            LOGGER.debug("Skipped track guild member autocomplete; authorized=false")
+            return []
+        try:
+            usernames = await self.search_guild_members(current, limit=25)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            LOGGER.error("Could not refresh the guild member cache for autocomplete")
+            return []
+        LOGGER.debug(
+            "Returning track guild member autocomplete choices; choices=%s",
+            len(usernames),
+        )
+        return [
+            app_commands.Choice(name=username, value=username)
+            for username in usernames
+        ]
+
+    async def _handle_track_command(
+        self,
+        interaction: discord.Interaction,
+        username: str,
+    ) -> None:
+        LOGGER.debug(
+            "Trial member track command invoked by Discord user %s",
+            getattr(getattr(interaction, "user", None), "id", "unknown"),
+        )
+        if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+            LOGGER.warning(
+                "Rejected Trial member track command from Discord user %s; "
+                "required role %s",
+                getattr(getattr(interaction, "user", None), "id", "unknown"),
+                RAFFLE_OFFICER_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role for this command.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            canonical_username = await self.resolve_guild_member(username)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            LOGGER.error("Could not refresh the guild member cache")
+            await interaction.followup.send(
+                "Could not verify guild membership. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        if canonical_username is None:
+            LOGGER.debug("Trial member track rejected; guild member was not found")
+            await interaction.followup.send(
+                f"`{username}` is not a member of the configured guild.",
+                ephemeral=True,
+            )
+            return
+
+        now_tracked = self.toggle_trial_member_tracking(
+            canonical_username,
+            interaction.user.id,
+        )
+        audit_message = format_track_audit(
+            canonical_username,
+            interaction.user.id,
+            tracked=now_tracked,
+        )
+        LOGGER.info("%s", audit_message)
+        audit_sent = await self.send_notification(audit_message)
+        LOGGER.debug(
+            "Trial member track toggle completed; now_tracked=%s audit_delivered=%s",
+            now_tracked,
+            audit_sent,
+        )
+        if now_tracked:
+            reply = (
+                f"Now tracking **{canonical_username}** for the 7-day warning. "
+                "They will appear on the 7-day warning report and are removed "
+                "from the past-14-day report."
+            )
+        else:
+            reply = (
+                f"Stopped tracking **{canonical_username}**. They return to the "
+                "past-14-day report."
+            )
+        if not audit_sent:
+            reply += " The audit log could not be delivered."
+        await interaction.followup.send(reply, ephemeral=True)
 
     async def _poll_guild_member_count_topic(self) -> None:
         await self.wait_until_ready()
@@ -2640,6 +2834,8 @@ class Gw2Bot(discord.Client):
                 await self._send_pending_raffle_milestones()
                 await self._send_pending_join_notifications()
                 await self._send_pending_leave_notifications()
+                await self._send_pending_invite_notifications()
+                await self._send_pending_rank_change_notifications()
             except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError) as exc:
                 await self._handle_poll_error("Guild Log", exc)
             else:
@@ -2686,6 +2882,25 @@ class Gw2Bot(discord.Client):
         for join in pending:
             if await self._try_send_notification(join.message):
                 self._raffle_store.mark_join_notification_sent(join.event_id)
+
+    async def _send_pending_invite_notifications(self) -> None:
+        pending = self._raffle_store.get_pending_invite_notifications()
+        LOGGER.debug("Found %s pending guild-invite notifications", len(pending))
+        for invite in pending:
+            if await self._try_send_notification(invite.message):
+                self._raffle_store.mark_invite_notification_sent(invite.event_id)
+
+    async def _send_pending_rank_change_notifications(self) -> None:
+        pending = self._raffle_store.get_pending_rank_change_notifications()
+        LOGGER.debug(
+            "Found %s pending guild-rank-change notifications",
+            len(pending),
+        )
+        for rank_change in pending:
+            if await self._try_send_notification(rank_change.message):
+                self._raffle_store.mark_rank_change_notification_sent(
+                    rank_change.event_id
+                )
 
     async def _handle_poll_success(self, source: str) -> None:
         LOGGER.debug("%s poll reported success", source)

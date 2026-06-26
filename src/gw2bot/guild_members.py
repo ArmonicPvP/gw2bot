@@ -30,6 +30,10 @@ TRIAL_BEFORE_MARK_HEADER = (
     "**Trial members before the 14-day mark**\n"
     "These users are still Trial in-game but already Sunborne in Discord:\n"
 )
+TRIAL_WARNING_MARK_HEADER = (
+    "**Trial members past the 7-day warning mark (to be kicked)**\n"
+    "These users were warned and have not yet reached Sunborne:\n"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +249,45 @@ def get_recent_trial_members(
         len(result),
     )
     return result
+
+
+def partition_tracked_overdue_members(
+    overdue: list[str],
+    tracked: set[str],
+) -> tuple[list[str], list[str], set[str]]:
+    """Split overdue Trial members into untracked and tracked groups.
+
+    Returns ``(untracked_overdue, tracked_overdue, stale_tracked)``. Matching is
+    case-insensitive: ``untracked_overdue`` and ``tracked_overdue`` use the
+    canonical names from ``overdue``, while ``stale_tracked`` holds the stored
+    tracked names that are no longer overdue and should be auto-untracked.
+    """
+    tracked_by_key = {name.casefold(): name for name in tracked}
+    untracked_overdue: list[str] = []
+    tracked_overdue: list[str] = []
+    matched_keys: set[str] = set()
+    for name in overdue:
+        key = name.casefold()
+        if key in tracked_by_key:
+            tracked_overdue.append(name)
+            matched_keys.add(key)
+        else:
+            untracked_overdue.append(name)
+    stale_tracked = {
+        original
+        for key, original in tracked_by_key.items()
+        if key not in matched_keys
+    }
+    LOGGER.debug(
+        "Partitioned overdue Trial members; overdue=%s tracked=%s "
+        "untracked_overdue=%s tracked_overdue=%s stale_tracked=%s",
+        len(overdue),
+        len(tracked),
+        len(untracked_overdue),
+        len(tracked_overdue),
+        len(stale_tracked),
+    )
+    return untracked_overdue, tracked_overdue, stale_tracked
 
 
 def filter_sunborne_discord_entries(

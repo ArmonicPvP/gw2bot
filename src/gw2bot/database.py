@@ -129,6 +129,47 @@ class GuildJoinRecord(Base):
     )
 
 
+class GuildInviteRecord(Base):
+    __tablename__ = "guild_invite_events"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    invited_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class GuildRankChangeRecord(Base):
+    __tablename__ = "guild_rank_change_events"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    old_rank: Mapped[str] = mapped_column(String, nullable=False)
+    new_rank: Mapped[str] = mapped_column(String, nullable=False)
+    changed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class TrackedTrialMemberRecord(Base):
+    __tablename__ = "tracked_trial_members"
+
+    username: Mapped[str] = mapped_column(String, primary_key=True)
+    tracked_by_discord_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    tracked_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class FeastAlertRecord(Base):
     __tablename__ = "feast_alert_state"
 
