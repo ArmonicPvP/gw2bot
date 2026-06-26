@@ -133,7 +133,9 @@ cached Discord roles determine the status: Sunborne role `1317140660188352584`
 or Trial role `1450164501696741597`. A matched post always includes the creator
 mention; accounts without a matching post remain plain usernames.
 Report entries are grouped with Sunborne first, Trial second, and unresolved
-roles last. Names are alphabetical within each group.
+roles last. Names are sorted within each group by a case-sensitive order, so
+uppercase names come before lowercase ones (for example, `Zebra` before
+`apple`).
 
 The check runs once every day at 17:00 UTC and does not run immediately when
 the bot starts. Each report is split into multiple

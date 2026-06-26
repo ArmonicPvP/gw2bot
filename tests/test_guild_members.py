@@ -337,6 +337,24 @@ class TestTrialMemberReport:
             "* Zulu.1234",
         ]
 
+    def test_uppercase_names_sort_before_lowercase(self) -> None:
+        message = format_overdue_trial_report(
+            [
+                TrialMemberReportEntry("apple.1234"),
+                TrialMemberReportEntry("Zebra.1234"),
+                TrialMemberReportEntry("Apple.1234"),
+                TrialMemberReportEntry("zebra.1234"),
+            ]
+        )[0]
+
+        lines = [line for line in message.splitlines() if line.startswith("* ")]
+        assert lines == [
+            "* Apple.1234",
+            "* Zebra.1234",
+            "* apple.1234",
+            "* zebra.1234",
+        ]
+
     def test_schedules_next_report_for_1700_utc(self) -> None:
         assert (
             seconds_until_trial_report(datetime(2026, 6, 7, 16, 30, tzinfo=UTC))
