@@ -214,7 +214,8 @@ def get_overdue_trial_members(
         joined = _parse_api_datetime(member.get("joined"))
         if name and joined is not None and joined <= cutoff:
             overdue.append(name)
-    result = sorted(overdue, key=str.casefold)
+    # Case-sensitive sort: uppercase sorts before lowercase ("Z" before "a").
+    result = sorted(overdue)
     LOGGER.debug(
         "Evaluated %s guild members; overdue_trials=%s",
         len(members),
@@ -236,7 +237,8 @@ def get_recent_trial_members(
         joined = _parse_api_datetime(member.get("joined"))
         if name and joined is not None and joined > cutoff:
             recent.append(name)
-    result = sorted(recent, key=str.casefold)
+    # Case-sensitive sort: uppercase sorts before lowercase ("Z" before "a").
+    result = sorted(recent)
     LOGGER.debug(
         "Evaluated %s guild members; recent_trials=%s",
         len(members),
@@ -277,7 +279,8 @@ def format_overdue_trial_report(
         ),
         key=lambda entry: (
             TRIAL_REPORT_STATUS_ORDER.get(entry.discord_status or "", 2),
-            entry.username.casefold(),
+            # Case-sensitive: uppercase sorts before lowercase ("Z" before "a").
+            entry.username,
         ),
     )
     messages: list[str] = []
