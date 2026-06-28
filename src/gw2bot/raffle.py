@@ -26,6 +26,7 @@ from gw2bot.database import (
     RaffleTotalRecord,
     SettingRecord,
     TrackedTrialMemberRecord,
+    TrialForumPostRecord,
     create_database_engine,
     initialize_database,
 )
@@ -40,6 +41,7 @@ OFFICER_PURCHASE_EVENT_ID_KEY = "officer_purchase_event_id"
 OFFICER_PURCHASE_EVENT_ID_START = -(2**63)
 OFFICER_RANK = "Officer"
 OFFICER_MAX_TICKET_DEPOSIT_COINS = 10 * COPPER_PER_GOLD
+TRIAL_FORUM_INDEX_WATERMARK_KEY = "trial_forum_index_watermark"
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +157,14 @@ class GuildJoin:
     @property
     def message(self) -> str:
         return f"{self.username} has joined the guild."
+
+
+@dataclass(frozen=True, slots=True)
+class TrialForumPost:
+    thread_id: int
+    owner_id: int | None
+    normalized_content: str
+    last_activity: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -914,6 +924,23 @@ class RaffleStore:
             LOGGER.debug("Loaded %s tracked Trial members", len(results))
             return results
 
+    def get_tracked_trial_member_times(self) -> dict[str, datetime]:
+        with self._sessions() as session:
+            records = session.scalars(select(TrackedTrialMemberRecord)).all()
+            results: dict[str, datetime] = {}
+            for record in records:
+                try:
+                    tracked_at = datetime.fromisoformat(record.tracked_at)
+                except ValueError:
+                    # Treat an unparsable timestamp as just-tracked so the member
+                    # is not prematurely listed as overdue for kicking.
+                    tracked_at = datetime.now(UTC)
+                if tracked_at.tzinfo is None:
+                    tracked_at = tracked_at.replace(tzinfo=UTC)
+                results[record.username] = tracked_at.astimezone(UTC)
+            LOGGER.debug("Loaded %s tracked Trial member times", len(results))
+            return results
+
     def is_trial_member_tracked(self, username: str) -> bool:
         with self._sessions() as session:
             return session.get(TrackedTrialMemberRecord, username) is not None
@@ -950,6 +977,90 @@ class RaffleStore:
             if record is not None:
                 session.delete(record)
                 LOGGER.debug("Removed Trial member warning tracking")
+
+    def get_trial_forum_index(self) -> dict[int, TrialForumPost]:
+        with self._sessions() as session:
+            records = session.scalars(select(TrialForumPostRecord)).all()
+            results = {
+                record.thread_id: _to_trial_forum_post(record)
+                for record in records
+            }
+            LOGGER.debug("Loaded %s Trial forum index posts", len(results))
+            return results
+
+    def get_trial_forum_watermark(self) -> datetime | None:
+        with self._sessions() as session:
+            record = session.get(SettingRecord, TRIAL_FORUM_INDEX_WATERMARK_KEY)
+            if record is None:
+                return None
+            try:
+                parsed = datetime.fromisoformat(record.value)
+            except ValueError:
+                LOGGER.warning("Discarding unparsable Trial forum index watermark")
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+
+    def set_trial_forum_watermark(self, value: datetime) -> None:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        normalized = value.astimezone(UTC).isoformat()
+        with self._sessions.begin() as session:
+            record = session.get(SettingRecord, TRIAL_FORUM_INDEX_WATERMARK_KEY)
+            if record is None:
+                session.add(
+                    SettingRecord(
+                        key=TRIAL_FORUM_INDEX_WATERMARK_KEY,
+                        value=normalized,
+                    )
+                )
+            else:
+                record.value = normalized
+        LOGGER.debug("Updated Trial forum index watermark")
+
+    def upsert_trial_forum_posts(self, posts: list[TrialForumPost]) -> None:
+        if not posts:
+            return
+        with self._sessions.begin() as session:
+            for post in posts:
+                record = session.get(TrialForumPostRecord, post.thread_id)
+                indexed_at = datetime.now(UTC).isoformat()
+                if record is None:
+                    session.add(
+                        TrialForumPostRecord(
+                            thread_id=post.thread_id,
+                            owner_id=post.owner_id,
+                            normalized_content=post.normalized_content,
+                            last_activity=post.last_activity,
+                            indexed_at=indexed_at,
+                        )
+                    )
+                else:
+                    record.owner_id = post.owner_id
+                    record.normalized_content = post.normalized_content
+                    record.last_activity = post.last_activity
+                    record.indexed_at = indexed_at
+        LOGGER.debug("Upserted %s Trial forum index posts", len(posts))
+
+    def delete_trial_forum_posts(self, thread_ids: set[int]) -> None:
+        if not thread_ids:
+            return
+        with self._sessions.begin() as session:
+            session.execute(
+                delete(TrialForumPostRecord).where(
+                    TrialForumPostRecord.thread_id.in_(thread_ids)
+                )
+            )
+        LOGGER.debug("Deleted %s Trial forum index posts", len(thread_ids))
+
+    def clear_trial_forum_index(self) -> None:
+        with self._sessions.begin() as session:
+            session.execute(delete(TrialForumPostRecord))
+            watermark = session.get(SettingRecord, TRIAL_FORUM_INDEX_WATERMARK_KEY)
+            if watermark is not None:
+                session.delete(watermark)
+        LOGGER.debug("Cleared Trial forum index")
 
     def mark_milestone_notification_sent(self, threshold: int) -> None:
         with self._sessions.begin() as session:
@@ -1099,6 +1210,15 @@ def _to_guild_invite(record: GuildInviteRecord) -> GuildInvite:
         username=record.username,
         event_time=record.event_time,
         invited_by=record.invited_by,
+    )
+
+
+def _to_trial_forum_post(record: TrialForumPostRecord) -> TrialForumPost:
+    return TrialForumPost(
+        thread_id=record.thread_id,
+        owner_id=record.owner_id,
+        normalized_content=record.normalized_content,
+        last_activity=record.last_activity,
     )
 
 

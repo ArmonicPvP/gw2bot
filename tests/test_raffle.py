@@ -21,6 +21,7 @@ from gw2bot.raffle import (
     RaffleDrawTier,
     RaffleRewardTier,
     RaffleStore,
+    TrialForumPost,
     format_gold,
     parse_gold_deposit,
     parse_guild_invite,
@@ -388,6 +389,23 @@ class TestRaffle:
             assert reopened.get_tracked_trial_members() == set()
             reopened.close()
 
+    def test_tracked_trial_member_times_record_when_tracked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            tracked_at = datetime(2026, 6, 10, 17, tzinfo=UTC)
+
+            store.toggle_trial_member_tracking(
+                "Trialist.1234",
+                42,
+                event_time=tracked_at,
+            )
+
+            times = store.get_tracked_trial_member_times()
+            assert set(times) == {"Trialist.1234"}
+            assert times["Trialist.1234"] == tracked_at
+            assert times["Trialist.1234"].tzinfo is not None
+            store.close()
+
     def test_untrack_trial_member_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
@@ -397,6 +415,56 @@ class TestRaffle:
             store.untrack_trial_member("Trialist.1234")
 
             assert store.get_tracked_trial_members() == set()
+            store.close()
+
+    def test_trial_forum_index_round_trips_across_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+
+            assert store.get_trial_forum_index() == {}
+            assert store.get_trial_forum_watermark() is None
+
+            store.upsert_trial_forum_posts(
+                [
+                    TrialForumPost(1, 101, "first.1234", "2026-06-01T00:00:00+00:00"),
+                    TrialForumPost(2, 202, "second.5678", "2026-06-02T00:00:00+00:00"),
+                ]
+            )
+            watermark = datetime(2026, 6, 10, 17, tzinfo=UTC)
+            store.set_trial_forum_watermark(watermark)
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            index = reopened.get_trial_forum_index()
+            assert set(index) == {1, 2}
+            assert index[1].owner_id == 101
+            assert index[1].normalized_content == "first.1234"
+            assert reopened.get_trial_forum_watermark() == watermark
+
+            # Upsert overwrites, delete removes, clear wipes everything.
+            reopened.upsert_trial_forum_posts(
+                [TrialForumPost(1, 999, "updated.1234", "2026-06-03T00:00:00+00:00")]
+            )
+            assert reopened.get_trial_forum_index()[1].owner_id == 999
+            reopened.delete_trial_forum_posts({2})
+            assert set(reopened.get_trial_forum_index()) == {1}
+            reopened.clear_trial_forum_index()
+            assert reopened.get_trial_forum_index() == {}
+            assert reopened.get_trial_forum_watermark() is None
+            reopened.close()
+
+    def test_set_trial_forum_watermark_normalizes_to_utc(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            naive = datetime(2026, 6, 10, 17)
+
+            store.set_trial_forum_watermark(naive)
+
+            stored = store.get_trial_forum_watermark()
+            assert stored is not None
+            assert stored.tzinfo is not None
+            assert stored == naive.replace(tzinfo=UTC)
             store.close()
 
     def test_processes_deposit_join_and_leave_before_advancing_cursor(

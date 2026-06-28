@@ -170,6 +170,16 @@ class TrackedTrialMemberRecord(Base):
     tracked_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class TrialForumPostRecord(Base):
+    __tablename__ = "trial_forum_posts"
+
+    thread_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    normalized_content: Mapped[str] = mapped_column(String, nullable=False)
+    last_activity: Mapped[str] = mapped_column(String, nullable=False)
+    indexed_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class FeastAlertRecord(Base):
     __tablename__ = "feast_alert_state"
 
