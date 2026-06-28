@@ -12,6 +12,7 @@ LOGGER = logging.getLogger(__name__)
 
 TRIAL_RANK = "Trial"
 TRIAL_PERIOD = timedelta(days=14)
+TRIAL_WARNING_PERIOD = timedelta(days=7)
 TRIAL_REPORT_HOUR_UTC = 17
 DISCORD_MESSAGE_LIMIT = 2_000
 BACKGROUND_REFRESH_RETRY_SECONDS = 30
@@ -288,6 +289,37 @@ def partition_tracked_overdue_members(
         len(stale_tracked),
     )
     return untracked_overdue, tracked_overdue, stale_tracked
+
+
+def select_warned_overdue_members(
+    tracked_overdue: list[str],
+    tracked_times: dict[str, datetime],
+    now: datetime,
+    warning_period: timedelta = TRIAL_WARNING_PERIOD,
+) -> list[str]:
+    """Return tracked overdue members past their 7-day warning mark.
+
+    A member only qualifies once ``warning_period`` has elapsed since they were
+    tracked (``tracked_at + warning_period <= now``). Members still inside the
+    grace window are excluded so they appear on neither the past-14-day nor the
+    7-day warning report until the window closes. Matching is case-insensitive.
+    """
+    cutoff = now.astimezone(UTC) - warning_period
+    times_by_key = {
+        username.casefold(): tracked_at
+        for username, tracked_at in tracked_times.items()
+    }
+    warned: list[str] = []
+    for username in tracked_overdue:
+        tracked_at = times_by_key.get(username.casefold())
+        if tracked_at is not None and tracked_at.astimezone(UTC) <= cutoff:
+            warned.append(username)
+    LOGGER.debug(
+        "Selected %s warned members past the 7-day mark from %s tracked overdue",
+        len(warned),
+        len(tracked_overdue),
+    )
+    return warned
 
 
 def filter_sunborne_discord_entries(

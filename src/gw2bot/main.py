@@ -11,7 +11,6 @@ from typing import Any, Protocol, cast
 import aiohttp
 import discord
 from discord import app_commands
-from discord.http import Route
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config, ConfigurationError
@@ -29,6 +28,7 @@ from gw2bot.guild_members import (
     get_recent_trial_members,
     partition_tracked_overdue_members,
     seconds_until_trial_report,
+    select_warned_overdue_members,
 )
 from gw2bot.raffle import (
     RAFFLE_REWARD_TIERS,
@@ -44,6 +44,7 @@ from gw2bot.raffle import (
     RaffleRewardTier,
     RaffleStore,
     RaffleTotal,
+    TrialForumPost,
     parse_gold_deposit,
 )
 
@@ -74,9 +75,9 @@ GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS = 60
 TRIAL_FORUM_CHANNEL_ID = 1317206104727621693
 TRIAL_ROLE_ID = 1450164501696741597
 SUNBORNE_ROLE_ID = 1317140660188352584
-TRIAL_ACCEPTED_TAG = "Accepted"
+TRIAL_ACCEPTED_TAG_ID = 1317349209619562587
 TRIAL_IN_REVIEW_TAG_ID = 1317349421821726790
-TRIAL_SEARCH_INDEX_RETRIES = 3
+TRIAL_FORUM_INDEX_GRACE = timedelta(hours=1)
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 LOG_URL_QUERY_PATTERN = re.compile(
     r"(?i)\b(https?://[^\s?\"'<>]+)\?[^\s\"'<>]*"
@@ -770,6 +771,17 @@ def get_trial_member_discord_status(member: Any) -> str | None:
     if TRIAL_ROLE_ID in role_ids:
         return "Trial"
     return None
+
+
+def contains_normalized_account_name(value: object, key: str) -> bool:
+    normalized = str(value).strip().casefold()
+    return (
+        re.search(
+            rf"(?<![\w.]){re.escape(key)}(?![\w.])",
+            normalized,
+        )
+        is not None
+    )
 
 
 def _log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
@@ -1820,6 +1832,9 @@ class Gw2Bot(discord.Client):
     def get_tracked_trial_members(self) -> set[str]:
         return self._raffle_store.get_tracked_trial_members()
 
+    def get_tracked_trial_member_times(self) -> dict[str, datetime]:
+        return self._raffle_store.get_tracked_trial_member_times()
+
     def is_trial_member_tracked(self, username: str) -> bool:
         return self._raffle_store.is_trial_member_tracked(username)
 
@@ -2059,17 +2074,23 @@ class Gw2Bot(discord.Client):
         members = await self._api.get_guild_members(self._config.gw2_guild_id)
         overdue = get_overdue_trial_members(members, now)
         recent = get_recent_trial_members(members, now)
-        tracked = self.get_tracked_trial_members()
+        tracked_times = self.get_tracked_trial_member_times()
         untracked_overdue, tracked_overdue, stale_tracked = (
-            partition_tracked_overdue_members(overdue, tracked)
+            partition_tracked_overdue_members(overdue, set(tracked_times))
         )
         for username in stale_tracked:
             self.untrack_trial_member(username)
+        warned_overdue = select_warned_overdue_members(
+            tracked_overdue,
+            tracked_times,
+            now,
+        )
         LOGGER.debug(
-            "Found %s overdue (%s tracked) and %s recent Trial members from %s "
-            "guild members; auto_untracked=%s",
+            "Found %s overdue (%s tracked, %s past 7-day warning) and %s recent "
+            "Trial members from %s guild members; auto_untracked=%s",
             len(overdue),
             len(tracked_overdue),
+            len(warned_overdue),
             len(recent),
             len(members),
             len(stale_tracked),
@@ -2080,7 +2101,7 @@ class Gw2Bot(discord.Client):
             untracked_overdue
         )
         warning_entries = await self._resolve_trial_member_discord_statuses(
-            tracked_overdue
+            warned_overdue
         )
         messages = (
             format_overdue_trial_report(
@@ -2252,8 +2273,8 @@ class Gw2Bot(discord.Client):
         if now_tracked:
             reply = (
                 f"Now tracking **{canonical_username}** for the 7-day warning. "
-                "They will appear on the 7-day warning report and are removed "
-                "from the past-14-day report."
+                "They are removed from the past-14-day report and will appear on "
+                "the 7-day warning report once 7 days have passed."
             )
         else:
             reply = (
@@ -2481,59 +2502,25 @@ class Gw2Bot(discord.Client):
             )
             return entries
         forum = cast(discord.ForumChannel, forum)
-        accepted_tag_ids = {
-            tag.id
-            for tag in getattr(forum, "available_tags", ())
-            if str(getattr(tag, "name", "")).casefold()
-            == TRIAL_ACCEPTED_TAG.casefold()
-        }
+
+        await self._refresh_trial_forum_index(forum)
+        index = self._raffle_store.get_trial_forum_index()
         LOGGER.debug(
-            "Resolved %s Accepted forum tag IDs",
-            len(accepted_tag_ids),
+            "Matching %s unresolved Trial members against %s indexed forum posts",
+            len(unresolved),
+            len(index),
         )
 
         resolved: dict[str, TrialMemberReportEntry] = {}
         owner_statuses: dict[int, str | None] = {}
-        seen_thread_ids: set[int] = set()
 
-        def as_int(value: Any) -> int | None:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return None
-
-        def has_accepted_tag(thread: Any) -> bool:
-            return any(
-                str(getattr(tag, "name", "")).casefold()
-                == TRIAL_ACCEPTED_TAG.casefold()
-                for tag in getattr(thread, "applied_tags", ())
-            ) or bool(accepted_tag_ids & set(getattr(thread, "_applied_tags", ())))
-
-        def raw_thread_has_accepted_tag(thread: dict[str, Any]) -> bool:
-            applied_tag_ids = {
-                tag_id
-                for value in thread.get("applied_tags", ())
-                if (tag_id := as_int(value)) is not None
-            }
-            return bool(accepted_tag_ids & applied_tag_ids)
-
-        def contains_normalized_account_name(value: object, key: str) -> bool:
-            normalized = str(value).strip().casefold()
-            return (
-                re.search(
-                    rf"(?<![\w.]){re.escape(key)}(?![\w.])",
-                    normalized,
-                )
-                is not None
-            )
-
-        async def resolve_owner_status(owner_id: int, owner: Any) -> str | None:
+        async def resolve_owner_status(owner_id: int) -> str | None:
             if owner_id in owner_statuses:
                 return owner_statuses[owner_id]
 
-            status = get_trial_member_discord_status(owner)
+            status: str | None = None
             get_member = getattr(forum.guild, "get_member", None)
-            if status is None and callable(get_member):
+            if callable(get_member):
                 status = get_trial_member_discord_status(get_member(owner_id))
             if status is None:
                 LOGGER.debug(
@@ -2564,258 +2551,163 @@ class Gw2Bot(discord.Client):
             )
             return status
 
-        async def record_matches(
-            matches: set[str],
-            owner_id: int,
-            owner: Any,
-            owner_status: str | None = None,
-        ) -> None:
-            if owner_status is None:
-                owner_status = await resolve_owner_status(owner_id, owner)
-            for key in matches:
+        for post in sorted(index.values(), key=lambda entry: entry.thread_id):
+            if not unresolved:
+                break
+            if post.owner_id is None:
+                continue
+            matched_keys = [
+                key
+                for key in unresolved
+                if contains_normalized_account_name(post.normalized_content, key)
+            ]
+            if not matched_keys:
+                continue
+            owner_status = await resolve_owner_status(post.owner_id)
+            for key in matched_keys:
                 resolved[key] = TrialMemberReportEntry(
                     unresolved[key],
-                    discord_user_id=owner_id,
+                    discord_user_id=post.owner_id,
                     discord_status=owner_status,
                 )
                 del unresolved[key]
-
-        async def inspect_thread(thread: Any, *, inspect_history: bool) -> None:
-            thread_id = getattr(thread, "id", None)
-            if thread_id in seen_thread_ids:
-                return
-            if thread_id is not None:
-                seen_thread_ids.add(thread_id)
-            if getattr(thread, "parent_id", None) != getattr(forum, "id", None):
-                return
-            if not has_accepted_tag(thread):
-                return
-
-            owner_id = getattr(thread, "owner_id", None)
-            if owner_id is None:
-                return
-            owner = getattr(thread, "owner", None)
-            owner_status = get_trial_member_discord_status(owner)
-
-            thread_name = getattr(thread, "name", "")
-            matches = {
-                key
-                for key in unresolved
-                if contains_normalized_account_name(thread_name, key)
-            }
-            if inspect_history:
-                try:
-                    async for message in thread.history(limit=None, oldest_first=True):
-                        author = getattr(message, "author", None)
-                        if (
-                            owner_status is None
-                            and getattr(author, "id", None) == owner_id
-                        ):
-                            owner_status = get_trial_member_discord_status(author)
-                        content = getattr(message, "content", "")
-                        matches.update(
-                            key
-                            for key in unresolved
-                            if contains_normalized_account_name(content, key)
-                        )
-                        if len(matches) == len(unresolved) and owner_status is not None:
-                            break
-                except discord.DiscordException as error:
-                    _log_discord_failure(
-                        "Could not inspect Trial application forum thread %s",
-                        error,
-                        thread_id,
-                    )
-
-            if not matches:
-                if inspect_history:
-                    LOGGER.debug(
-                        "Accepted forum thread %s had no username matches",
-                        thread_id,
-                    )
-                return
-            await record_matches(matches, owner_id, owner, owner_status)
             LOGGER.debug(
-                "Accepted forum thread %s resolved %s usernames; remaining=%s",
-                thread_id,
-                len(matches),
+                "Trial forum index post %s resolved %s usernames; remaining=%s",
+                post.thread_id,
+                len(matched_keys),
                 len(unresolved),
             )
 
-        async def search_username(key: str, position: int, total: int) -> bool:
-            try:
-                request = self.http.request
-            except AttributeError:
-                return False
-
-            route = Route(
-                "GET",
-                "/guilds/{guild_id}/messages/search",
-                guild_id=forum.guild.id,
-            )
-            params = [
-                ("content", unresolved[key]),
-                ("channel_id", str(forum.id)),
-                ("limit", "25"),
-                ("sort_by", "relevance"),
-            ]
-            offset = 0
-            while True:
-                page_params = [*params, ("offset", str(offset))]
-                response: Any = None
-                for attempt in range(TRIAL_SEARCH_INDEX_RETRIES):
-                    LOGGER.debug(
-                        "Discord indexed search checking Trial member %s (%s/%s; attempt %s/%s)",
-                        unresolved[key],
-                        position,
-                        total,
-                        attempt + 1,
-                        TRIAL_SEARCH_INDEX_RETRIES,
-                    )
-                    try:
-                        response = await request(route, params=page_params)
-                    except discord.DiscordException as error:
-                        _log_discord_failure(
-                            "Discord message search failed for Trial member %s",
-                            error,
-                            unresolved[key],
-                        )
-                        return False
-                    if not (
-                        isinstance(response, dict)
-                        and response.get("code") == 110000
-                    ):
-                        break
-                    retry_after = max(float(response.get("retry_after") or 1), 0.1)
-                    LOGGER.debug(
-                        "Discord search index unavailable for %s; retrying in %.1f seconds",
-                        unresolved[key],
-                        retry_after,
-                    )
-                    if attempt + 1 < TRIAL_SEARCH_INDEX_RETRIES:
-                        await asyncio.sleep(retry_after)
-                else:
-                    LOGGER.warning("Discord message search index is still unavailable")
-                    return False
-
-                if not isinstance(response, dict):
-                    LOGGER.error("Discord message search returned an invalid response")
-                    return False
-
-                raw_threads = {
-                    thread_id: thread
-                    for thread in response.get("threads", ())
-                    if isinstance(thread, dict)
-                    and (thread_id := as_int(thread.get("id"))) is not None
-                }
-                for message_group in response.get("messages", ()):
-                    if not isinstance(message_group, list):
-                        continue
-                    for message in message_group:
-                        if not isinstance(message, dict):
-                            continue
-                        if not contains_normalized_account_name(
-                            message.get("content", ""), key
-                        ):
-                            continue
-                        channel_id = as_int(message.get("channel_id"))
-                        if channel_id is None:
-                            continue
-                        thread = raw_threads.get(channel_id)
-                        if thread is None:
-                            continue
-                        if as_int(thread.get("parent_id")) != forum.id:
-                            continue
-                        if not raw_thread_has_accepted_tag(thread):
-                            continue
-                        owner_id = as_int(thread.get("owner_id"))
-                        if owner_id is None:
-                            continue
-                        username = unresolved[key]
-                        await record_matches({key}, owner_id, None)
-                        LOGGER.debug(
-                            "Discord indexed search resolved %s from forum thread %s",
-                            username,
-                            thread.get("id"),
-                        )
-                        return True
-                offset += 25
-                if offset >= int(response.get("total_results") or 0):
-                    break
-            LOGGER.debug(
-                "Discord indexed search found no Accepted match for %s",
-                unresolved[key],
-            )
-            return True
-
-        forum_threads: list[Any] = []
-        try:
-            active_threads = await forum.guild.active_threads()
-        except discord.DiscordException as error:
-            _log_discord_failure(
-                "Could not inspect active Trial application threads",
-                error,
-            )
-            active_threads = []
-        LOGGER.debug("Inspecting metadata for %s active forum threads", len(active_threads))
-        forum_threads.extend(active_threads)
-        for thread in active_threads:
-            await inspect_thread(thread, inspect_history=False)
-            if not unresolved:
-                break
-
-        if unresolved:
-            try:
-                archived_count = 0
-                async for thread in forum.archived_threads(limit=None):
-                    archived_count += 1
-                    forum_threads.append(thread)
-                    await inspect_thread(thread, inspect_history=False)
-                    if not unresolved:
-                        break
-                LOGGER.debug(
-                    "Inspected metadata for %s archived forum threads",
-                    archived_count,
-                )
-            except discord.DiscordException as error:
-                _log_discord_failure(
-                    "Could not inspect archived Trial application threads",
-                    error,
-                )
-            except AttributeError:
-                LOGGER.error("Could not inspect archived Trial application threads")
-
-        if unresolved:
-            indexed_search_total = len(unresolved)
-            LOGGER.debug(
-                "Forum title scan left %s Trial members unresolved; "
-                "checking Discord indexed search without a per-member delay",
-                indexed_search_total,
-            )
-            search_available = True
-            for position, key in enumerate(list(unresolved), start=1):
-                if not await search_username(key, position, indexed_search_total):
-                    search_available = False
-                    break
-        else:
-            search_available = True
-
-        if not search_available and unresolved:
-            LOGGER.warning(
-                "Discord indexed search unavailable; falling back to forum history scan"
-            )
-            seen_thread_ids.clear()
-            for thread in forum_threads:
-                await inspect_thread(thread, inspect_history=True)
-                if not unresolved:
-                    break
-
         LOGGER.debug(
-            "Forum resolution completed; resolved=%s unresolved=%s",
+            "Forum index resolution completed; resolved=%s unresolved=%s",
             len(resolved),
             len(unresolved),
         )
         return [resolved.get(entry.username.casefold(), entry) for entry in entries]
+
+    async def _refresh_trial_forum_index(
+        self,
+        forum: discord.ForumChannel,
+    ) -> None:
+        cached = self._raffle_store.get_trial_forum_index()
+        watermark = self._raffle_store.get_trial_forum_watermark()
+        run_start = datetime.now(UTC)
+        threshold = (
+            watermark - TRIAL_FORUM_INDEX_GRACE if watermark is not None else None
+        )
+        cold_build = threshold is None
+
+        upserts: list[TrialForumPost] = []
+        deletions: set[int] = set()
+        enumerated = 0
+        indexed = 0
+        reused = 0
+        completed = True
+
+        def thread_last_activity(thread: Any) -> datetime:
+            candidates: list[datetime] = []
+            last_message_id = _safe_int(getattr(thread, "last_message_id", None))
+            if last_message_id:
+                candidates.append(discord.utils.snowflake_time(last_message_id))
+            for attribute in ("archive_timestamp", "created_at"):
+                value = getattr(thread, attribute, None)
+                if isinstance(value, datetime):
+                    candidates.append(value)
+            if not candidates:
+                return run_start
+            return max(candidate.astimezone(UTC) for candidate in candidates)
+
+        async def index_thread(thread: Any) -> None:
+            nonlocal indexed, reused, completed
+            thread_id = _safe_int(getattr(thread, "id", None))
+            if thread_id is None:
+                return
+            if getattr(thread, "parent_id", None) != getattr(forum, "id", None):
+                return
+            if TRIAL_ACCEPTED_TAG_ID not in _thread_applied_tag_ids(thread):
+                if thread_id in cached:
+                    deletions.add(thread_id)
+                return
+            last_activity = thread_last_activity(thread)
+            existing = cached.get(thread_id)
+            if (
+                existing is not None
+                and threshold is not None
+                and last_activity < threshold
+            ):
+                reused += 1
+                return
+            owner_id = _safe_int(getattr(thread, "owner_id", None))
+            content_parts = [str(getattr(thread, "name", ""))]
+            try:
+                async for message in thread.history(limit=None, oldest_first=True):
+                    content_parts.append(str(getattr(message, "content", "")))
+            except discord.DiscordException as error:
+                completed = False
+                _log_discord_failure(
+                    "Could not index Trial application forum thread %s",
+                    error,
+                    thread_id,
+                )
+                return
+            upserts.append(
+                TrialForumPost(
+                    thread_id=thread_id,
+                    owner_id=owner_id,
+                    normalized_content="\n".join(content_parts).casefold(),
+                    last_activity=last_activity.isoformat(),
+                )
+            )
+            indexed += 1
+
+        try:
+            active_threads = await forum.guild.active_threads()
+        except discord.DiscordException as error:
+            completed = False
+            _log_discord_failure(
+                "Could not enumerate active Trial application threads",
+                error,
+            )
+            active_threads = []
+        for thread in active_threads:
+            enumerated += 1
+            await index_thread(thread)
+
+        try:
+            async for thread in forum.archived_threads(limit=None):
+                if not cold_build and threshold is not None:
+                    archive_ts = getattr(thread, "archive_timestamp", None)
+                    if (
+                        isinstance(archive_ts, datetime)
+                        and archive_ts.astimezone(UTC) < threshold
+                    ):
+                        break
+                enumerated += 1
+                await index_thread(thread)
+        except discord.DiscordException as error:
+            completed = False
+            _log_discord_failure(
+                "Could not enumerate archived Trial application threads",
+                error,
+            )
+        except AttributeError:
+            completed = False
+            LOGGER.error("Could not enumerate archived Trial application threads")
+
+        self._raffle_store.upsert_trial_forum_posts(upserts)
+        self._raffle_store.delete_trial_forum_posts(deletions)
+        if completed:
+            self._raffle_store.set_trial_forum_watermark(run_start)
+        LOGGER.debug(
+            "Trial forum index refreshed; enumerated=%s indexed=%s reused=%s "
+            "deleted=%s cold_build=%s completed=%s",
+            enumerated,
+            indexed,
+            reused,
+            len(deletions),
+            cold_build,
+            completed,
+        )
 
     async def _poll_guild_log(self) -> None:
         await self.wait_until_ready()

@@ -111,10 +111,13 @@ notification channel:
   up to Sunborne. Accounts that an officer has marked with `/track` are excluded
   here and appear in the 7-day warning report instead.
 - **Trial members past the 7-day warning mark (to be kicked)** — Trial accounts
-  past the 14-day mark that an officer has tracked with `/track`. These members
-  were warned and have roughly 7 days to reach Sunborne before being kicked. The
-  report is omitted when no tracked member is currently overdue. A tracked member
-  is automatically untracked once they are no longer an overdue Trial member (for
+  past the 14-day mark that an officer tracked with `/track` at least 7 days ago.
+  The 7-day countdown starts from the moment `/track` is invoked, so a tracked
+  member only appears here once 7 days have elapsed since they were warned. During
+  that grace window they appear on neither report (they are removed from the
+  past-14-day report when tracked and not yet due for kicking). The report is
+  omitted when no tracked member is past the warning mark. A tracked member is
+  automatically untracked once they are no longer an overdue Trial member (for
   example after promotion to Sunborne or leaving the guild), so they drop off
   both reports.
 
@@ -129,20 +132,27 @@ Please confirm whether these users have completed the challenges and can be rank
 * Unresolved.5678
 ```
 
-For each reported account, the bot first scans `Accepted` thread-title metadata
-in forum channel `1317206104727621693` without reading message histories. It
-then uses Discord's indexed guild message search for bodies and comments only
-for account names that remain unresolved. If Discord's search endpoint is
-unavailable, it falls back to the full forum history scan. Indexed searches run
-without a per-member delay; when Discord returns rate-limit error code `110000`,
-the bot waits for the returned `retry_after` duration before retrying. When found,
-the post creator is linked using their Discord user ID. The creator's
-cached Discord roles determine the status: Sunborne role `1317140660188352584`
-or Trial role `1450164501696741597`. A matched post always includes the creator
-mention; accounts without a matching post remain plain usernames.
-Report entries are grouped with Sunborne first, Trial second, and unresolved
-roles last. Names are sorted within each group by a case-sensitive order, so
-uppercase names come before lowercase ones (for example, `Zebra` before
+To match each reported account to its application, the bot maintains a
+persistent index of the `Accepted` posts in forum channel
+`1317206104727621693` (Accepted forum tag `1317349209619562587`), stored in the
+same SQLite database as the raffle data. On the first run the bot reads every
+Accepted post's title and message bodies once and stores their normalized text
+and post author. On later runs it only re-reads posts whose most recent activity
+is newer than the last successful run minus a one-hour grace window; unchanged
+posts are served from the index, and posts that lost the Accepted tag are dropped
+from it. Account names are then matched locally against the cached post text, so
+the report no longer issues a Discord message search per member (which previously
+caused heavy `429` rate limiting).
+
+When a post matches, its creator is linked using their Discord user ID, and the
+creator's current Discord roles determine the status: Sunborne role
+`1317140660188352584` or Trial role `1450164501696741597`. Role lookups are
+resolved live each run (cached guild roles, then a member fetch), so a status
+reflects the member's current rank rather than the indexed snapshot. A matched
+post always includes the creator mention; accounts without a matching post remain
+plain usernames. Report entries are grouped with Sunborne first, Trial second,
+and unresolved roles last. Names are sorted within each group by a case-sensitive
+order, so uppercase names come before lowercase ones (for example, `Zebra` before
 `apple`).
 
 The check runs once every day at 17:00 UTC and does not run immediately when

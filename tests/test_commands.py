@@ -21,6 +21,7 @@ from gw2bot.main import (
     RAFFLE_DRAW_ROLE_ID,
     RAFFLE_OFFICER_ROLE_ID,
     SUNBORNE_ROLE_ID,
+    TRIAL_ACCEPTED_TAG_ID,
     TRIAL_FORUM_CHANNEL_ID,
     TRIAL_IN_REVIEW_TAG_ID,
     TRIAL_ROLE_ID,
@@ -52,7 +53,7 @@ from gw2bot.main import (
     seconds_until_raffle_contribution_report,
     user_has_role,
 )
-from gw2bot.raffle import RaffleContribution, RaffleTotal
+from gw2bot.raffle import RaffleContribution, RaffleStore, RaffleTotal, TrialForumPost
 
 
 class AddTicketsCallback(Protocol):
@@ -2499,7 +2500,7 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            get_tracked_trial_members=MagicMock(return_value=set()),
+            get_tracked_trial_member_times=MagicMock(return_value={}),
             untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
                 {
@@ -2546,7 +2547,7 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            get_tracked_trial_members=MagicMock(return_value=set()),
+            get_tracked_trial_member_times=MagicMock(return_value={}),
             untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
                 {"Overdue.1234": "Trial", "EarlyTrial.1234": "Trial"}
@@ -2563,7 +2564,7 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            get_tracked_trial_members=MagicMock(return_value=set()),
+            get_tracked_trial_member_times=MagicMock(return_value={}),
             untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver({}),
         )
@@ -2597,8 +2598,13 @@ class TestTrialMemberReportMessages:
         bot = SimpleNamespace(
             _api=api,
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
-            get_tracked_trial_members=MagicMock(
-                return_value={"tracked.5678", "Gone.9012"}
+            get_tracked_trial_member_times=MagicMock(
+                return_value={
+                    # Tracked more than 7 days ago -> past the warning mark.
+                    "tracked.5678": now - timedelta(days=8),
+                    # No longer overdue -> auto-untracked.
+                    "Gone.9012": now - timedelta(days=8),
+                }
             ),
             untrack_trial_member=untrack,
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
@@ -2617,6 +2623,40 @@ class TestTrialMemberReportMessages:
         assert "Trial members past the 7-day warning mark (to be kicked)" in warning
         assert "Tracked.5678" in warning
         untrack.assert_called_once_with("Gone.9012")
+
+    async def test_tracked_member_in_grace_window_appears_on_no_report(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {
+                        "name": "Tracked.5678",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=20)).isoformat(),
+                    },
+                ]
+            )
+        )
+        untrack = MagicMock()
+        bot = SimpleNamespace(
+            _api=api,
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            get_tracked_trial_member_times=MagicMock(
+                # Tracked only 2 days ago -> still inside the 7-day grace window.
+                return_value={"Tracked.5678": now - timedelta(days=2)}
+            ),
+            untrack_trial_member=untrack,
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {"Tracked.5678": "Trial"}
+            ),
+        )
+
+        messages = await Gw2Bot._build_trial_report_messages(cast(Gw2Bot, bot), now)
+
+        # Removed from the 14-day report when tracked, and not yet on the 7-day
+        # warning report while still inside the grace window.
+        assert messages == []
+        untrack.assert_not_called()
 
 
 class TestTrialMemberNotification:
@@ -2964,82 +3004,42 @@ class TestTrackCommand:
 
 
 class TestTrialMemberStatusResolution:
-    async def test_resolves_statuses_from_cached_forum_message_authors(self) -> None:
-        sunborne_author = SimpleNamespace(
-            id=101,
-            roles=[SimpleNamespace(id=SUNBORNE_ROLE_ID)],
-        )
-        trial_author = SimpleNamespace(
-            id=202,
-            roles=[SimpleNamespace(id=TRIAL_ROLE_ID)],
-        )
-        no_role_author = SimpleNamespace(id=303, roles=[])
-        reviewer = SimpleNamespace(id=999, roles=[])
-
-        def messages(*items: tuple[str, Any]) -> Any:
-            async def iterate() -> Any:
-                for content, author in items:
-                    yield SimpleNamespace(content=content, author=author)
-
-            return iterate()
-
-        active_thread = SimpleNamespace(
-            id=1,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=101,
-            owner=None,
-            applied_tags=[SimpleNamespace(name="Accepted")],
-            name="Application",
-            history=lambda **_: messages(
-                ("GW2 account is title.1234", sunborne_author)
+    async def test_matches_indexed_posts_and_resolves_live_status(self) -> None:
+        index = {
+            1: TrialForumPost(1, 101, "application\ngw2 account is title.1234", "t"),
+            2: TrialForumPost(
+                2,
+                202,
+                "application\nmy account is body.2345\nreviewer comment.3456",
+                "t",
             ),
-        )
-        archived_thread = SimpleNamespace(
-            id=2,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=202,
-            owner=None,
-            applied_tags=[SimpleNamespace(name="accepted")],
-            name="Application",
-            history=lambda **_: messages(
-                ("My account is BODY.2345", trial_author),
-                ("Reviewer confirmed comment.3456", reviewer),
-            ),
-        )
-        third_thread = SimpleNamespace(
-            id=3,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=303,
-            owner=None,
-            applied_tags=[SimpleNamespace(name="Accepted")],
-            name="NoRole.4567",
-            history=lambda **_: messages(("No extra content", no_role_author)),
-        )
+            3: TrialForumPost(3, 303, "norole.4567 application", "t"),
+        }
+        members = {
+            101: SimpleNamespace(roles=[SimpleNamespace(id=SUNBORNE_ROLE_ID)]),
+            202: SimpleNamespace(roles=[SimpleNamespace(id=TRIAL_ROLE_ID)]),
+            303: None,
+        }
         guild = SimpleNamespace(
-            active_threads=AsyncMock(return_value=[active_thread]),
-            fetch_member=AsyncMock(),
+            get_member=MagicMock(side_effect=lambda owner_id: members.get(owner_id)),
+            fetch_member=AsyncMock(return_value=SimpleNamespace(roles=[])),
         )
-
-        async def archived_threads(**_: Any) -> Any:
-            yield archived_thread
-            yield third_thread
-
         forum = SimpleNamespace(
             id=TRIAL_FORUM_CHANNEL_ID,
             guild=guild,
-            archived_threads=archived_threads,
+            archived_threads=None,
         )
-        bot = SimpleNamespace(fetch_channel=AsyncMock(return_value=forum))
+        bot = SimpleNamespace(
+            fetch_channel=AsyncMock(return_value=forum),
+            _refresh_trial_forum_index=AsyncMock(),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value=index)
+            ),
+        )
 
         entries = await Gw2Bot._resolve_trial_member_discord_statuses(
             cast(Gw2Bot, bot),
-            [
-                "Title.1234",
-                "Body.2345",
-                "Comment.3456",
-                "NoRole.4567",
-                "Missing.5678",
-            ],
+            ["Title.1234", "Body.2345", "Comment.3456", "NoRole.4567", "Missing.5678"],
         )
 
         assert entries == [
@@ -3049,287 +3049,87 @@ class TestTrialMemberStatusResolution:
             TrialMemberReportEntry("NoRole.4567", 303),
             TrialMemberReportEntry("Missing.5678"),
         ]
-        bot.fetch_channel.assert_awaited_once_with(TRIAL_FORUM_CHANNEL_ID)
+        bot._refresh_trial_forum_index.assert_awaited_once_with(forum)
         guild.fetch_member.assert_awaited_once_with(303)
 
-    async def test_paginates_discord_indexed_search_without_reading_thread_history(
-        self,
-    ) -> None:
-        history = MagicMock()
+    async def test_resolves_status_via_fetch_member_when_not_cached(self) -> None:
+        index = {1: TrialForumPost(1, 777, "matched.1234", "t")}
         guild = SimpleNamespace(
-            id=123,
-            active_threads=AsyncMock(return_value=[]),
-            get_member=MagicMock(
-                return_value=SimpleNamespace(
-                    roles=[SimpleNamespace(id=SUNBORNE_ROLE_ID)]
-                )
+            get_member=MagicMock(return_value=None),
+            fetch_member=AsyncMock(
+                return_value=SimpleNamespace(roles=[SimpleNamespace(id=TRIAL_ROLE_ID)])
             ),
-            fetch_member=AsyncMock(),
         )
-
-        async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
-
         forum = SimpleNamespace(
             id=TRIAL_FORUM_CHANNEL_ID,
             guild=guild,
-            available_tags=[SimpleNamespace(id=42, name="Accepted")],
-            archived_threads=archived_threads,
-        )
-        search = AsyncMock(
-            side_effect=[
-                {"total_results": 26, "messages": [], "threads": []},
-                {
-                    "total_results": 26,
-                    "messages": [
-                        [
-                            {
-                                "content": "GW2 account is Indexed.1234",
-                                "channel_id": "900",
-                            }
-                        ]
-                    ],
-                    "threads": [
-                        {
-                            "id": "900",
-                            "parent_id": str(TRIAL_FORUM_CHANNEL_ID),
-                            "owner_id": "777",
-                            "applied_tags": ["42"],
-                        }
-                    ],
-                },
-            ]
+            archived_threads=None,
         )
         bot = SimpleNamespace(
             fetch_channel=AsyncMock(return_value=forum),
-            http=SimpleNamespace(request=search),
+            _refresh_trial_forum_index=AsyncMock(),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value=index)
+            ),
         )
 
         entries = await Gw2Bot._resolve_trial_member_discord_statuses(
             cast(Gw2Bot, bot),
-            ["Indexed.1234"],
+            ["Matched.1234"],
         )
 
-        assert entries == [TrialMemberReportEntry("Indexed.1234", 777, "Sunborne")]
-        history.assert_not_called()
-        guild.fetch_member.assert_not_awaited()
-        assert search.await_count == 2
-        search_call = search.await_args_list[1]
-        assert search_call is not None
-        route = search_call.args[0]
-        assert route.path == "/guilds/{guild_id}/messages/search"
-        assert ("channel_id", str(TRIAL_FORUM_CHANNEL_ID)) in search_call.kwargs["params"]
-        assert ("offset", "25") in search_call.kwargs["params"]
+        assert entries == [TrialMemberReportEntry("Matched.1234", 777, "Trial")]
+        guild.fetch_member.assert_awaited_once_with(777)
 
-    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retries_discord_search_while_index_is_unavailable(
-        self,
-        sleep: AsyncMock,
-    ) -> None:
+    async def test_preserves_matched_user_id_when_creator_left_guild(self) -> None:
+        index = {1: TrialForumPost(1, 777, "former.1234", "t")}
         guild = SimpleNamespace(
-            id=123,
-            active_threads=AsyncMock(return_value=[]),
+            get_member=MagicMock(return_value=None),
+            fetch_member=AsyncMock(side_effect=_not_found_error()),
+        )
+        forum = SimpleNamespace(
+            id=TRIAL_FORUM_CHANNEL_ID,
+            guild=guild,
+            archived_threads=None,
+        )
+        bot = SimpleNamespace(
+            fetch_channel=AsyncMock(return_value=forum),
+            _refresh_trial_forum_index=AsyncMock(),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value=index)
+            ),
+        )
+
+        entries = await Gw2Bot._resolve_trial_member_discord_statuses(
+            cast(Gw2Bot, bot),
+            ["Former.1234"],
+        )
+
+        assert entries == [TrialMemberReportEntry("Former.1234", 777)]
+
+    async def test_requires_exact_normalized_account_name_match(self) -> None:
+        index = {
+            1: TrialForumPost(
+                1, 777, "otheruser.1234 application\notheruser.1234", "t"
+            )
+        }
+        guild = SimpleNamespace(
             get_member=MagicMock(
                 return_value=SimpleNamespace(roles=[SimpleNamespace(id=TRIAL_ROLE_ID)])
             ),
             fetch_member=AsyncMock(),
         )
-
-        async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
-
         forum = SimpleNamespace(
             id=TRIAL_FORUM_CHANNEL_ID,
             guild=guild,
-            available_tags=[SimpleNamespace(id=42, name="Accepted")],
-            archived_threads=archived_threads,
-        )
-        search = AsyncMock(
-            side_effect=[
-                {"code": 110000, "retry_after": 0.25},
-                {
-                    "total_results": 1,
-                    "messages": [[{"content": "Retry.1234", "channel_id": "900"}]],
-                    "threads": [
-                        {
-                            "id": "900",
-                            "parent_id": str(TRIAL_FORUM_CHANNEL_ID),
-                            "owner_id": "777",
-                            "applied_tags": ["42"],
-                        }
-                    ],
-                },
-            ]
+            archived_threads=None,
         )
         bot = SimpleNamespace(
             fetch_channel=AsyncMock(return_value=forum),
-            http=SimpleNamespace(request=search),
-        )
-
-        entries = await Gw2Bot._resolve_trial_member_discord_statuses(
-            cast(Gw2Bot, bot),
-            ["Retry.1234"],
-        )
-
-        assert entries == [TrialMemberReportEntry("Retry.1234", 777, "Trial")]
-        assert search.await_count == 2
-        sleep.assert_awaited_once_with(0.25)
-
-    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
-    async def test_indexed_search_checks_members_without_per_member_delay(
-        self,
-        sleep: AsyncMock,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        guild = SimpleNamespace(
-            id=123,
-            active_threads=AsyncMock(return_value=[]),
-        )
-
-        async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
-
-        forum = SimpleNamespace(
-            id=TRIAL_FORUM_CHANNEL_ID,
-            guild=guild,
-            available_tags=[SimpleNamespace(id=42, name="Accepted")],
-            archived_threads=archived_threads,
-        )
-        search = AsyncMock(
-            return_value={
-                "total_results": 0,
-                "messages": [],
-                "threads": [],
-            }
-        )
-        bot = SimpleNamespace(
-            fetch_channel=AsyncMock(return_value=forum),
-            http=SimpleNamespace(request=search),
-        )
-
-        with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
-            entries = await Gw2Bot._resolve_trial_member_discord_statuses(
-                cast(Gw2Bot, bot),
-                ["One.1234", "Two.1234", "Three.1234", "Four.1234"],
-            )
-
-        assert entries == [
-            TrialMemberReportEntry("One.1234"),
-            TrialMemberReportEntry("Two.1234"),
-            TrialMemberReportEntry("Three.1234"),
-            TrialMemberReportEntry("Four.1234"),
-        ]
-        assert search.await_count == 4
-        sleep.assert_not_awaited()
-        assert (
-            "checking Discord indexed search without a per-member delay"
-            in caplog.text
-        )
-        assert "Trial member One.1234 (1/4; attempt 1/3)" in caplog.text
-        assert "Trial member Four.1234 (4/4; attempt 1/3)" in caplog.text
-
-    async def test_indexed_search_uses_title_only_fallback_without_history(
-        self,
-    ) -> None:
-        history = MagicMock()
-        owner = SimpleNamespace(
-            id=777,
-            roles=[SimpleNamespace(id=TRIAL_ROLE_ID)],
-        )
-        accepted_thread = SimpleNamespace(
-            id=900,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=777,
-            owner=owner,
-            applied_tags=[SimpleNamespace(name="Accepted")],
-            name="TitleOnly.1234 application",
-            history=history,
-        )
-        guild = SimpleNamespace(
-            id=123,
-            active_threads=AsyncMock(return_value=[accepted_thread]),
-            fetch_member=AsyncMock(),
-        )
-
-        async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
-
-        forum = SimpleNamespace(
-            id=TRIAL_FORUM_CHANNEL_ID,
-            guild=guild,
-            available_tags=[SimpleNamespace(id=42, name="Accepted")],
-            archived_threads=archived_threads,
-        )
-        search = AsyncMock(
-            return_value={
-                "total_results": 1,
-                "messages": [[{"content": "TitleOnly.1234", "channel_id": "901"}]],
-                "threads": [
-                    {
-                        "id": "901",
-                        "parent_id": str(TRIAL_FORUM_CHANNEL_ID),
-                        "owner_id": "888",
-                        "applied_tags": ["99"],
-                    }
-                ],
-            }
-        )
-        bot = SimpleNamespace(
-            fetch_channel=AsyncMock(return_value=forum),
-            http=SimpleNamespace(request=search),
-        )
-
-        entries = await Gw2Bot._resolve_trial_member_discord_statuses(
-            cast(Gw2Bot, bot),
-            ["TitleOnly.1234"],
-        )
-
-        assert entries == [TrialMemberReportEntry("TitleOnly.1234", 777, "Trial")]
-        history.assert_not_called()
-        guild.fetch_member.assert_not_awaited()
-        search.assert_not_awaited()
-
-    async def test_requires_exact_normalized_account_name_match(self) -> None:
-        owner = SimpleNamespace(id=777, roles=[SimpleNamespace(id=TRIAL_ROLE_ID)])
-
-        async def messages() -> Any:
-            yield SimpleNamespace(content="  OTHERUSER.1234  ", author=owner)
-
-        accepted_thread = SimpleNamespace(
-            id=900,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=777,
-            owner=owner,
-            applied_tags=[SimpleNamespace(name="Accepted")],
-            name="OtherUser.1234 application",
-            history=lambda **_: messages(),
-        )
-        guild = SimpleNamespace(
-            id=123,
-            active_threads=AsyncMock(return_value=[accepted_thread]),
-            fetch_member=AsyncMock(),
-        )
-
-        async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
-
-        forum = SimpleNamespace(
-            id=TRIAL_FORUM_CHANNEL_ID,
-            guild=guild,
-            available_tags=[SimpleNamespace(id=42, name="Accepted")],
-            archived_threads=archived_threads,
-        )
-        search = AsyncMock(
-            return_value={"total_results": 0, "messages": [], "threads": []}
-        )
-        bot = SimpleNamespace(
-            fetch_channel=AsyncMock(return_value=forum),
-            http=SimpleNamespace(request=search),
+            _refresh_trial_forum_index=AsyncMock(),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value=index)
+            ),
         )
 
         entries = await Gw2Bot._resolve_trial_member_discord_statuses(
@@ -3342,144 +3142,190 @@ class TestTrialMemberStatusResolution:
             TrialMemberReportEntry("OtherUser.1234", 777, "Trial"),
         ]
 
-    async def test_skips_forum_posts_without_accepted_tag(self) -> None:
-        async def empty_messages() -> Any:
-            if False:
-                yield None
-
-        trial_owner = SimpleNamespace(
-            id=777,
-            roles=[SimpleNamespace(id=TRIAL_ROLE_ID)],
+    async def test_skips_indexed_post_without_owner(self) -> None:
+        index = {1: TrialForumPost(1, None, "ownerless.1234", "t")}
+        guild = SimpleNamespace(
+            get_member=MagicMock(return_value=None),
+            fetch_member=AsyncMock(),
         )
-        rejected_history = MagicMock()
-        rejected_thread = SimpleNamespace(
-            id=1,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=1,
-            owner=trial_owner,
-            applied_tags=[SimpleNamespace(name="Rejected")],
-            name="Rejected.1234 application",
-            history=rejected_history,
-        )
-        accepted_thread = SimpleNamespace(
-            id=777,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=777,
-            owner=trial_owner,
-            applied_tags=[],
-            _applied_tags=[42],
-            name="Accepted.1234 application",
-            history=lambda **_: empty_messages(),
-        )
-        guild = SimpleNamespace(active_threads=AsyncMock(return_value=[]))
-
-        async def archived_threads(**_: Any) -> Any:
-            yield rejected_thread
-            yield accepted_thread
-
         forum = SimpleNamespace(
             id=TRIAL_FORUM_CHANNEL_ID,
             guild=guild,
-            available_tags=[SimpleNamespace(id=42, name="Accepted")],
-            archived_threads=archived_threads,
+            archived_threads=None,
         )
-        bot = SimpleNamespace(fetch_channel=AsyncMock(return_value=forum))
-
-        entries = await Gw2Bot._resolve_trial_member_discord_statuses(
-            cast(Gw2Bot, bot),
-            ["Rejected.1234", "Accepted.1234"],
-        )
-
-        assert entries == [
-            TrialMemberReportEntry("Rejected.1234"),
-            TrialMemberReportEntry("Accepted.1234", 777, "Trial"),
-        ]
-        rejected_history.assert_not_called()
-
-    async def test_resolves_role_after_accepted_post_match_only(self) -> None:
-        async def messages() -> Any:
-            yield SimpleNamespace(
-                content="Matched.1234",
-                author=SimpleNamespace(id=999, roles=[]),
-            )
-
-        accepted_thread = SimpleNamespace(
-            id=1,
-            parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=777,
-            owner=None,
-            applied_tags=[SimpleNamespace(name="Accepted")],
-            name="Application",
-            history=lambda **_: messages(),
-        )
-        guild = SimpleNamespace(
-            active_threads=AsyncMock(return_value=[accepted_thread]),
-            get_member=MagicMock(return_value=None),
-            fetch_member=AsyncMock(
-                return_value=SimpleNamespace(roles=[SimpleNamespace(id=TRIAL_ROLE_ID)])
+        bot = SimpleNamespace(
+            fetch_channel=AsyncMock(return_value=forum),
+            _refresh_trial_forum_index=AsyncMock(),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value=index)
             ),
         )
 
-        async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
-
-        forum = SimpleNamespace(
-            id=TRIAL_FORUM_CHANNEL_ID,
-            guild=guild,
-            available_tags=[],
-            archived_threads=archived_threads,
-        )
-        bot = SimpleNamespace(fetch_channel=AsyncMock(return_value=forum))
-
         entries = await Gw2Bot._resolve_trial_member_discord_statuses(
             cast(Gw2Bot, bot),
-            ["Matched.1234"],
+            ["Ownerless.1234"],
         )
 
-        assert entries == [TrialMemberReportEntry("Matched.1234", 777, "Trial")]
-        guild.fetch_member.assert_awaited_once_with(777)
+        assert entries == [TrialMemberReportEntry("Ownerless.1234")]
+        guild.fetch_member.assert_not_awaited()
 
-    async def test_preserves_matched_user_id_when_creator_left_guild(self) -> None:
-        async def messages() -> Any:
-            yield SimpleNamespace(
-                content="Former.1234",
-                author=SimpleNamespace(id=999, roles=[]),
-            )
+    async def test_cold_build_indexes_accepted_threads(self) -> None:
+        def history(*contents: str) -> Any:
+            async def iterate() -> Any:
+                for content in contents:
+                    yield SimpleNamespace(content=content)
 
-        accepted_thread = SimpleNamespace(
+            return lambda **_: iterate()
+
+        accepted_active = SimpleNamespace(
             id=1,
             parent_id=TRIAL_FORUM_CHANNEL_ID,
-            owner_id=777,
-            owner=None,
-            applied_tags=[SimpleNamespace(name="Accepted")],
-            name="Application",
-            history=lambda **_: messages(),
+            owner_id=101,
+            applied_tags=[SimpleNamespace(id=TRIAL_ACCEPTED_TAG_ID)],
+            name="Active.1234 application",
+            last_message_id=None,
+            archive_timestamp=datetime(2026, 6, 1, tzinfo=UTC),
+            created_at=datetime(2026, 6, 1, tzinfo=UTC),
+            history=history("My account is Body.5678"),
+        )
+        accepted_archived = SimpleNamespace(
+            id=2,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            owner_id=202,
+            applied_tags=[SimpleNamespace(id=TRIAL_ACCEPTED_TAG_ID)],
+            name="Archived.2345 application",
+            last_message_id=None,
+            archive_timestamp=datetime(2026, 6, 2, tzinfo=UTC),
+            created_at=datetime(2026, 6, 2, tzinfo=UTC),
+            history=history("Welcome"),
+        )
+        rejected = SimpleNamespace(
+            id=3,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            owner_id=303,
+            applied_tags=[SimpleNamespace(id=999)],
+            name="Rejected.3456 application",
+            last_message_id=None,
+            archive_timestamp=datetime(2026, 6, 3, tzinfo=UTC),
+            created_at=datetime(2026, 6, 3, tzinfo=UTC),
+            history=MagicMock(),
         )
         guild = SimpleNamespace(
-            active_threads=AsyncMock(return_value=[accepted_thread]),
-            get_member=MagicMock(return_value=None),
-            fetch_member=AsyncMock(side_effect=_not_found_error()),
+            active_threads=AsyncMock(return_value=[accepted_active]),
         )
 
         async def archived_threads(**_: Any) -> Any:
-            if False:
-                yield None
+            yield accepted_archived
+            yield rejected
 
         forum = SimpleNamespace(
             id=TRIAL_FORUM_CHANNEL_ID,
             guild=guild,
-            available_tags=[],
             archived_threads=archived_threads,
         )
-        bot = SimpleNamespace(fetch_channel=AsyncMock(return_value=forum))
 
-        entries = await Gw2Bot._resolve_trial_member_discord_statuses(
-            cast(Gw2Bot, bot),
-            ["Former.1234"],
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            bot = SimpleNamespace(_raffle_store=store)
 
-        assert entries == [TrialMemberReportEntry("Former.1234", 777)]
+            await Gw2Bot._refresh_trial_forum_index(
+                cast(Gw2Bot, bot),
+                cast(discord.ForumChannel, forum),
+            )
+
+            index = store.get_trial_forum_index()
+            assert set(index) == {1, 2}
+            assert index[1].owner_id == 101
+            assert "body.5678" in index[1].normalized_content
+            assert "active.1234 application" in index[1].normalized_content
+            assert index[2].owner_id == 202
+            assert store.get_trial_forum_watermark() is not None
+            rejected.history.assert_not_called()
+            store.close()
+
+    async def test_incremental_refresh_skips_unmodified_and_purges_unaccepted(
+        self,
+    ) -> None:
+        def history(*contents: str) -> Any:
+            async def iterate() -> Any:
+                for content in contents:
+                    yield SimpleNamespace(content=content)
+
+            return lambda **_: iterate()
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.upsert_trial_forum_posts(
+                [
+                    TrialForumPost(1, 101, "unchanged.1234 application", "t"),
+                    TrialForumPost(2, 202, "dropped.5678 application", "t"),
+                ]
+            )
+            watermark = datetime(2026, 6, 10, tzinfo=UTC)
+            store.set_trial_forum_watermark(watermark)
+
+            unchanged_history = MagicMock()
+            unchanged = SimpleNamespace(
+                id=1,
+                parent_id=TRIAL_FORUM_CHANNEL_ID,
+                owner_id=101,
+                applied_tags=[SimpleNamespace(id=TRIAL_ACCEPTED_TAG_ID)],
+                name="Unchanged.1234 application",
+                last_message_id=None,
+                archive_timestamp=watermark - timedelta(days=5),
+                created_at=watermark - timedelta(days=5),
+                history=unchanged_history,
+            )
+            unaccepted = SimpleNamespace(
+                id=2,
+                parent_id=TRIAL_FORUM_CHANNEL_ID,
+                owner_id=202,
+                applied_tags=[SimpleNamespace(id=999)],
+                name="Dropped.5678 application",
+                last_message_id=None,
+                archive_timestamp=watermark,
+                created_at=watermark,
+                history=MagicMock(),
+            )
+            new_thread = SimpleNamespace(
+                id=3,
+                parent_id=TRIAL_FORUM_CHANNEL_ID,
+                owner_id=303,
+                applied_tags=[SimpleNamespace(id=TRIAL_ACCEPTED_TAG_ID)],
+                name="New.9012 application",
+                last_message_id=None,
+                archive_timestamp=watermark,
+                created_at=watermark,
+                history=history("Fresh application"),
+            )
+            guild = SimpleNamespace(
+                active_threads=AsyncMock(
+                    return_value=[unchanged, unaccepted, new_thread]
+                ),
+            )
+
+            async def archived_threads(**_: Any) -> Any:
+                if False:
+                    yield None
+
+            forum = SimpleNamespace(
+                id=TRIAL_FORUM_CHANNEL_ID,
+                guild=guild,
+                archived_threads=archived_threads,
+            )
+            bot = SimpleNamespace(_raffle_store=store)
+
+            await Gw2Bot._refresh_trial_forum_index(
+                cast(Gw2Bot, bot),
+                cast(discord.ForumChannel, forum),
+            )
+
+            index = store.get_trial_forum_index()
+            assert set(index) == {1, 3}
+            unchanged_history.assert_not_called()
+            assert index[1].normalized_content == "unchanged.1234 application"
+            assert index[3].owner_id == 303
+            store.close()
 
     @patch("gw2bot.main.seconds_until_trial_report", return_value=123)
     @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)

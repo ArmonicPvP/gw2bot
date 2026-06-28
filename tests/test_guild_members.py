@@ -17,6 +17,7 @@ from gw2bot.guild_members import (
     get_recent_trial_members,
     partition_tracked_overdue_members,
     seconds_until_trial_report,
+    select_warned_overdue_members,
 )
 
 
@@ -378,6 +379,23 @@ class TestTrialMemberReport:
         assert untracked == []
         assert tracked == ["Canonical.1234"]
         assert stale == set()
+
+    def test_selects_only_members_past_the_seven_day_warning_mark(self) -> None:
+        now = datetime(2026, 6, 10, 17, 0, tzinfo=UTC)
+        tracked_times = {
+            "Warned.1234": now - timedelta(days=7),
+            "Grace.5678": now - timedelta(days=6, hours=23),
+            "CASEFOLD.9012": now - timedelta(days=10),
+            "Untimed.3456": now,
+        }
+
+        warned = select_warned_overdue_members(
+            ["Warned.1234", "Grace.5678", "casefold.9012", "NoTime.7890"],
+            tracked_times,
+            now,
+        )
+
+        assert warned == ["Warned.1234", "casefold.9012"]
 
     def test_warning_report_uses_seven_day_header(self) -> None:
         message = format_overdue_trial_report(
