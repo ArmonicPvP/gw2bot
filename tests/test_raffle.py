@@ -775,6 +775,41 @@ class TestRaffle:
                 store.add_officer_purchase("Member.1234", 0)
             store.close()
 
+    def test_lifetime_contributions_persist_across_draw(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    gold_deposit(101, username="Alpha.1234", coins=30_000),
+                    gold_deposit(102, username="Beta.1234", coins=10_000),
+                ]
+            )
+            store.add_manual_ticket("Alpha.1234")
+
+            # A draw wipes current ticket counters but not the event history.
+            assert store.run_raffle(randbelow=lambda total: 0) is not None
+            assert store.get_total("Alpha.1234").raffle_tickets == 0
+
+            assert [
+                (
+                    contribution.username,
+                    contribution.purchased_tickets,
+                    contribution.event_tickets,
+                )
+                for contribution in store.get_lifetime_contributions()
+            ] == [
+                ("Alpha.1234", 3, 1),
+                ("Beta.1234", 1, 0),
+            ]
+            store.close()
+
+    def test_lifetime_contributions_empty_without_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            assert store.get_lifetime_contributions() == []
+            store.close()
+
     def test_officer_purchase_logging_omits_username_content(
         self,
         caplog: pytest.LogCaptureFixture,

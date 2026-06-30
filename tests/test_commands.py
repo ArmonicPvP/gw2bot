@@ -31,6 +31,7 @@ from gw2bot.main import (
     RaffleContributionReportView,
     RedactingFormatter,
     RaffleCommands,
+    RaffleTicketTableView,
     RaffleTicketsListView,
     configure_logging,
     count_active_guild_members,
@@ -113,6 +114,7 @@ class TestCommand:
             "removetickets",
             "tickets",
             "list",
+            "leaderboard",
         }
         assert "tickets-list" not in commands
         assert "win" not in commands
@@ -963,6 +965,57 @@ class TestRaffleTicketsCommand:
         view = interaction.response.send_message.await_args.kwargs["view"]
         assert isinstance(view, RaffleTicketsListView)
         assert len(view.children) == 2
+
+    async def test_leaderboard_lists_split_and_paginates(self) -> None:
+        bot = SimpleNamespace(
+            get_lifetime_raffle_contributions=MagicMock(return_value=[])
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        leaderboard = next(
+            command for command in group.commands if command.name == "leaderboard"
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        bot.get_lifetime_raffle_contributions.return_value = [
+            RaffleContribution("Member.1234", 3, 1)
+        ]
+        await leaderboard.callback(group, interaction)  # type: ignore[arg-type]
+        assert "view" not in interaction.response.send_message.await_args.kwargs
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        assert embed.title == "Lifetime raffle tickets"
+        assert (
+            embed.description
+            == "**Member.1234**\nPurchased: 3\nFree: 1\nTotal: 4"
+        )
+
+        interaction.response.send_message.reset_mock()
+        bot.get_lifetime_raffle_contributions.return_value = [
+            RaffleContribution(f"Member {index:02d}.1234", index + 1, 0)
+            for index in range(11)
+        ]
+        await leaderboard.callback(group, interaction)  # type: ignore[arg-type]
+        view = interaction.response.send_message.await_args.kwargs["view"]
+        assert isinstance(view, RaffleTicketTableView)
+
+    async def test_leaderboard_reports_when_no_history(self) -> None:
+        bot = SimpleNamespace(
+            get_lifetime_raffle_contributions=MagicMock(return_value=[])
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        leaderboard = next(
+            command for command in group.commands if command.name == "leaderboard"
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await leaderboard.callback(group, interaction)  # type: ignore[arg-type]
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "No lifetime raffle tickets have been recorded yet."
+        )
 
     async def test_list_paginates_ten_players_at_a_time(self) -> None:
         totals = [

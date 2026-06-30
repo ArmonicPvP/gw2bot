@@ -734,6 +734,41 @@ class RaffleStore:
             )
         ]
 
+    def get_lifetime_contributions(self) -> list[RaffleContribution]:
+        contributions: dict[str, list[int]] = {}
+        with self._sessions() as session:
+            deposits = session.scalars(
+                select(RaffleDepositRecord).where(
+                    RaffleDepositRecord.raffle_tickets > 0
+                )
+            ).all()
+            manual_tickets = session.scalars(select(RaffleManualTicketRecord)).all()
+
+        for deposit in deposits:
+            counts = contributions.setdefault(deposit.username, [0, 0])
+            counts[0] += deposit.raffle_tickets
+        for ticket in manual_tickets:
+            counts = contributions.setdefault(ticket.username, [0, 0])
+            counts[1] += 1
+
+        results = [
+            RaffleContribution(
+                username=username,
+                purchased_tickets=counts[0],
+                event_tickets=counts[1],
+            )
+            for username, counts in sorted(
+                contributions.items(),
+                key=lambda item: (
+                    -(item[1][0] + item[1][1]),
+                    item[0].casefold(),
+                    item[0],
+                ),
+            )
+        ]
+        LOGGER.debug("Loaded %s lifetime raffle contributors", len(results))
+        return results
+
     def run_raffle(
         self,
         randbelow: Callable[[int], int] = secrets.randbelow,
