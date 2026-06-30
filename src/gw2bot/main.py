@@ -1405,6 +1405,34 @@ class RaffleCommands(app_commands.Group):
         else:
             await interaction.response.send_message(embeds=embeds, view=view)
 
+    @app_commands.command(
+        name="leaderboard",
+        description="List every user's lifetime earned and purchased tickets",
+    )
+    async def leaderboard(self, interaction: discord.Interaction) -> None:
+        contributions = self._bot.get_lifetime_raffle_contributions()
+        LOGGER.debug(
+            "Raffle leaderboard command invoked; contributors=%s",
+            len(contributions),
+        )
+        if not contributions:
+            await interaction.response.send_message(
+                "No lifetime raffle tickets have been recorded yet."
+            )
+            return
+        rows = raffle_contribution_table_rows(contributions)
+        title = "Lifetime raffle tickets"
+        view = (
+            RaffleTicketTableView(rows, title)
+            if len(rows) > RAFFLE_TICKETS_PAGE_SIZE
+            else None
+        )
+        embed = raffle_ticket_table_embed(rows, title, 0)
+        if view is None:
+            await interaction.response.send_message(embed=embed)
+        else:
+            await interaction.response.send_message(embed=embed, view=view)
+
 
 class RaffleBulkAddTicketsModal(discord.ui.Modal):
     def __init__(self, commands: RaffleCommands):
@@ -1895,6 +1923,9 @@ class Gw2Bot(discord.Client):
         end: datetime,
     ) -> list[RaffleContribution]:
         return self._raffle_store.get_contributions(start, end)
+
+    def get_lifetime_raffle_contributions(self) -> list[RaffleContribution]:
+        return self._raffle_store.get_lifetime_contributions()
 
     def get_linked_raffle_username(self, discord_user_id: int) -> str | None:
         return self._raffle_store.get_linked_username(discord_user_id)

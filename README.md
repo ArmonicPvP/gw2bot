@@ -313,6 +313,13 @@ registration is unavailable.
   shows ten players per page, ordered by total tickets descending and then
   username without regard to case. Retained lifetime records with zero current
   tickets are omitted.
+- `/raffle leaderboard`: publicly lists every player's lifetime earned and
+  purchased tickets across all raffles, using the same bolded `Purchased`,
+  `Free`, and `Total` layout as `/raffle list`. Totals are summed from the
+  persisted gold-deposit and free-ticket history, so they are unaffected by the
+  ticket reset performed each `/raffle draw`. Players are ordered by total
+  tickets descending and then username without regard to case, with page buttons
+  when more than ten players have history.
 
 `/raffle draw` announces the ordered winners publicly. Ticket-addition and
 removal confirmations and errors and `/raffle tickets` results are visible only
