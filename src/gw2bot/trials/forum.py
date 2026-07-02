@@ -15,7 +15,7 @@ from gw2bot.discord_utils import (
 from gw2bot.raffle import TrialForumPost
 
 if TYPE_CHECKING:
-    from gw2bot.main import Gw2Bot
+    from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
 

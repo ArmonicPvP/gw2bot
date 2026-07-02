@@ -473,5 +473,10 @@ the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets before merging
 ## Extending Notifications
 
 Add GW2 API methods in `src/gw2bot/gw2_api.py` and notification decisions in
-`src/gw2bot/main.py`. Secrets are read only from environment variables and are
+the matching feature module: `src/gw2bot/guild_log.py` for guild-log events,
+`src/gw2bot/guild_storage.py` for feast stock alerts, `src/gw2bot/raffle/` for
+raffle reports and commands, `src/gw2bot/trials/` for Trial member tracking,
+and `src/gw2bot/notifications.py` for delivery to the notification channel.
+`src/gw2bot/bot.py` wires the pollers together and `src/gw2bot/main.py` is the
+entrypoint. Secrets are read only from environment variables and are
 excluded from both Git and the Docker build context.

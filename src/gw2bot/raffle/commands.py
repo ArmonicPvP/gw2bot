@@ -30,7 +30,7 @@ from gw2bot.raffle.views import (
 )
 
 if TYPE_CHECKING:
-    from gw2bot.main import Gw2Bot
+    from gw2bot.bot import Gw2Bot
 from gw2bot.raffle.roles import (
     RAFFLE_ADDTICKET_ROLE_ID as RAFFLE_ADDTICKET_ROLE_ID,
     RAFFLE_DRAW_ROLE_ID as RAFFLE_DRAW_ROLE_ID,

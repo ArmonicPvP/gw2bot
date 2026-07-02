@@ -22,7 +22,7 @@ from gw2bot.raffle.models import RaffleContribution, RaffleTotal
 from gw2bot.raffle.roles import RAFFLE_ADDTICKET_ROLE_ID
 
 if TYPE_CHECKING:
-    from gw2bot.main import Gw2Bot
+    from gw2bot.bot import Gw2Bot
     from gw2bot.raffle.commands import RaffleCommands
 
 LOGGER = logging.getLogger(__name__)

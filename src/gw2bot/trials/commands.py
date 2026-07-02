@@ -13,7 +13,7 @@ from gw2bot.raffle.roles import RAFFLE_OFFICER_ROLE_ID
 from gw2bot.trials.reports import format_track_audit
 
 if TYPE_CHECKING:
-    from gw2bot.main import Gw2Bot
+    from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
 

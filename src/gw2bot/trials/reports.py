@@ -25,7 +25,7 @@ from gw2bot.guild_members import (
 from gw2bot.trials.forum import TRIAL_FORUM_CHANNEL_ID
 
 if TYPE_CHECKING:
-    from gw2bot.main import Gw2Bot
+    from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
 
