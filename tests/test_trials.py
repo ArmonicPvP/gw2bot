@@ -13,7 +13,7 @@ from discord import app_commands
 
 from factories import not_found_error
 from gw2bot.guild_members import TrialMemberReportEntry
-from gw2bot.main import Gw2Bot
+from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleStore, TrialForumPost
 from gw2bot.raffle.roles import RAFFLE_OFFICER_ROLE_ID
 from gw2bot.trials.forum import (

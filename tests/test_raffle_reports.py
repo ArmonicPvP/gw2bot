@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import discord
 import pytest
 
-from gw2bot.main import Gw2Bot
+from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleContribution
 from gw2bot.raffle.formatting import raffle_contribution_report_embed
 from gw2bot.raffle.reports import (
@@ -395,9 +395,9 @@ class TestRaffleContributionNotification:
         channel.send.assert_awaited_once_with(embed=embed, view=view)
         bot._get_raffle_contribution_channel.assert_awaited_once_with()
 
-    @patch("gw2bot.main.raffle_contribution_report_end")
-    @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
-    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gw2bot.raffle.reports.raffle_contribution_report_end")
+    @patch("gw2bot.raffle.reports.seconds_until_raffle_contribution_report", return_value=123)
+    @patch("gw2bot.raffle.reports.asyncio.sleep", new_callable=AsyncMock)
     async def test_poller_refreshes_guild_log_at_scheduled_boundary(
         self,
         sleep: AsyncMock,
@@ -425,9 +425,9 @@ class TestRaffleContributionNotification:
         bot._poll_status.record_success.assert_called_once_with("Raffle Contributions")
         bot._poll_status.record_error.assert_not_called()
 
-    @patch("gw2bot.main.raffle_contribution_report_end")
-    @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
-    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gw2bot.raffle.reports.raffle_contribution_report_end")
+    @patch("gw2bot.raffle.reports.seconds_until_raffle_contribution_report", return_value=123)
+    @patch("gw2bot.raffle.reports.asyncio.sleep", new_callable=AsyncMock)
     async def test_poller_posts_persisted_report_after_refresh_timeout(
         self,
         sleep: AsyncMock,
@@ -468,9 +468,9 @@ class TestRaffleContributionNotification:
             in caplog.text
         )
 
-    @patch("gw2bot.main.raffle_contribution_report_end")
-    @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
-    @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gw2bot.raffle.reports.raffle_contribution_report_end")
+    @patch("gw2bot.raffle.reports.seconds_until_raffle_contribution_report", return_value=123)
+    @patch("gw2bot.raffle.reports.asyncio.sleep", new_callable=AsyncMock)
     async def test_poller_reports_actual_contribution_delivery_timeout(
         self,
         sleep: AsyncMock,
