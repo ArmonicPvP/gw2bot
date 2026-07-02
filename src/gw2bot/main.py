@@ -15,6 +15,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config, ConfigurationError
 from gw2bot.feast_stock import FeastAlert, get_due_low_stock_alerts
+from gw2bot.logging_setup import (
+    RedactingFormatter as RedactingFormatter,
+    configure_logging as configure_logging,
+    redact_log_text,
+)
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
@@ -78,30 +83,6 @@ SUNBORNE_ROLE_ID = 1317140660188352584
 TRIAL_ACCEPTED_TAG_ID = 1317349209619562587
 TRIAL_IN_REVIEW_TAG_ID = 1317349421821726790
 TRIAL_FORUM_INDEX_GRACE = timedelta(hours=1)
-LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-LOG_URL_QUERY_PATTERN = re.compile(
-    r"(?i)\b(https?://[^\s?\"'<>]+)\?[^\s\"'<>]*"
-)
-LOG_SECRET_PATTERNS = (
-    re.compile(
-        r"(?i)([?&](?:access_token|api[_-]?key|discord_token|gw2_api_key|"
-        r"subtoken|token)=)[^&\s]+"
-    ),
-    re.compile(
-        r"""(?ix)
-        (
-            ["']?
-            (?:authorization|access_token|api[_-]?key|discord_token|
-               gw2_api_key|subtoken|token)
-            ["']?
-            \s*[:=]\s*
-            ["']?
-            (?:(?:bearer|bot)\s+)?
-        )
-        [^"',}\s&]+
-        """
-    ),
-)
 
 
 def user_has_role(user: Any, required_role_id: int) -> bool:
@@ -879,35 +860,6 @@ def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
         message = str(error) or type(error).__name__
 
     return redact_log_text(message, secrets)
-
-
-def redact_log_text(message: str, secrets: tuple[str, ...] = ()) -> str:
-    message = LOG_URL_QUERY_PATTERN.sub(r"\1?[REDACTED]", message)
-    for secret in sorted(
-        (secret for secret in secrets if secret),
-        key=len,
-        reverse=True,
-    ):
-        message = message.replace(secret, "[REDACTED]")
-    for pattern in LOG_SECRET_PATTERNS:
-        message = pattern.sub(r"\1[REDACTED]", message)
-    return message
-
-
-class RedactingFormatter(logging.Formatter):
-    def __init__(self, fmt: str, secrets: tuple[str, ...] = ()):
-        super().__init__(fmt)
-        self._secrets = secrets
-
-    def format(self, record: logging.LogRecord) -> str:
-        return redact_log_text(super().format(record), self._secrets)
-
-
-def configure_logging(debug: bool, secrets: tuple[str, ...] = ()) -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(RedactingFormatter(LOG_FORMAT, secrets))
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
-    logging.getLogger("gw2bot").setLevel(logging.DEBUG if debug else logging.INFO)
 
 
 class RaffleCommands(app_commands.Group):
