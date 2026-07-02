@@ -541,11 +541,6 @@ def format_automated_message_diagnostics(
                 "**Guild member count channel description (current)**\n"
                 + guild_member_count_preview
             ),
-            (
-                "**Polling status notifications (test)**\n"
-                "Guild Storage polling failed: API unavailable\n"
-                "Guild Storage polling recovered."
-            ),
         )
     )
     return messages
@@ -2826,16 +2821,16 @@ class Gw2Bot(discord.Client):
                 )
 
     async def _handle_poll_success(self, source: str) -> None:
+        # Poll status is operational noise (timeouts, transient API errors), so
+        # it stays in the console and is never posted to the logging channel.
         LOGGER.debug("%s poll reported success", source)
         if source in self._last_errors:
-            if source == "Guild Log":
-                LOGGER.info("%s polling recovered.", source)
-                del self._last_errors[source]
-                return
-            if await self._try_send_notification(f"{source} polling recovered."):
-                del self._last_errors[source]
+            LOGGER.info("%s polling recovered.", source)
+            del self._last_errors[source]
 
     async def _handle_poll_error(self, source: str, error: Exception) -> None:
+        # Poll failures (including timeouts) are console-only diagnostics; they
+        # are deliberately kept out of the logging channel.
         config = getattr(self, "_config", None)
         message = format_poll_error(
             error,
@@ -2845,14 +2840,7 @@ class Gw2Bot(discord.Client):
             ),
         )
         LOGGER.warning("%s polling failed: %s", source, message)
-        if source == "Guild Log":
-            self._last_errors[source] = message
-            return
-        if message != self._last_errors.get(source):
-            if await self._try_send_notification(
-                f"{source} polling failed: {message}"
-            ):
-                self._last_errors[source] = message
+        self._last_errors[source] = message
 
     async def _try_send_notification(self, message: str) -> bool:
         LOGGER.debug("Sending Discord notification; characters=%s", len(message))

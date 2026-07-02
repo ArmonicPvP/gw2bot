@@ -1716,8 +1716,8 @@ class TestAutomatedMessageDiagnostics:
             "The guild member count has not been retrieved yet, so the "
             "channel description is not set."
         ) in output
-        assert "Guild Storage polling failed: API unavailable" in output
-        assert "Guild Storage polling recovered." in output
+        assert "polling failed" not in output
+        assert "polling recovered" not in output
 
     def test_includes_current_guild_member_count_description(self) -> None:
         messages = format_automated_message_diagnostics(
@@ -1924,13 +1924,13 @@ class TestAutomatedMessageDiagnostics:
 
         assert secret not in caplog.text
         assert (
-            "Prepared automated message diagnostics; messages=12 contributors=1"
+            "Prepared automated message diagnostics; messages=11 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 13
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 13
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 12
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 12
         assert (
-            "Automated message diagnostics completed; attempted=13 delivered=13 "
+            "Automated message diagnostics completed; attempted=12 delivered=12 "
             "failed=0"
             in caplog.text
         )
@@ -1945,7 +1945,6 @@ class TestAutomatedMessageDiagnostics:
                 side_effect=[
                     None,
                     RuntimeError(secret),
-                    None,
                     None,
                     None,
                     None,
@@ -1975,7 +1974,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 13
+        assert channel.send.await_count == 12
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -1983,7 +1982,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=13 delivered=12 "
+            "Automated message diagnostics completed; attempted=12 delivered=11 "
             "failed=1"
             in caplog.text
         )
@@ -3946,10 +3945,17 @@ class TestRaffleContributionNotification:
             )
 
         assert secret not in caplog.text
-        bot._try_send_notification.assert_awaited_once_with(
+        bot._try_send_notification.assert_not_awaited()
+        assert (
             "Raffle Contributions polling failed: "
             "request failed with access_token=[REDACTED]"
+            in caplog.text
         )
+        assert bot._last_errors == {
+            "Raffle Contributions": (
+                "request failed with access_token=[REDACTED]"
+            )
+        }
 
 
 class TestPollStatusNotification:
@@ -4009,35 +4015,40 @@ class TestPollStatusNotification:
             in caplog.text
         )
 
-    async def test_retries_same_poll_error_after_delivery_failure(self) -> None:
+    async def test_poll_error_is_console_only_for_all_sources(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         bot = SimpleNamespace(
+            _config=SimpleNamespace(gw2_api_key="", discord_token=""),
             _last_errors={},
-            _try_send_notification=AsyncMock(side_effect=[False, True]),
+            _try_send_notification=AsyncMock(),
         )
         error = TimeoutError("API unavailable")
 
-        await Gw2Bot._handle_poll_error(cast(Gw2Bot, bot), "Guild Storage", error)
-        await Gw2Bot._handle_poll_error(cast(Gw2Bot, bot), "Guild Storage", error)
+        with caplog.at_level(logging.WARNING, logger="gw2bot.main"):
+            await Gw2Bot._handle_poll_error(
+                cast(Gw2Bot, bot), "Guild Storage", error
+            )
 
-        assert (
-            bot._try_send_notification.await_args_list
-            == [call("Guild Storage polling failed: API unavailable")] * 2
-        )
+        bot._try_send_notification.assert_not_awaited()
+        assert "Guild Storage polling failed: API unavailable" in caplog.text
         assert bot._last_errors == {"Guild Storage": "API unavailable"}
 
-    async def test_retries_recovery_notification_after_delivery_failure(self) -> None:
+    async def test_poll_recovery_is_console_only_for_all_sources(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         bot = SimpleNamespace(
             _last_errors={"Guild Storage": "API unavailable"},
-            _try_send_notification=AsyncMock(side_effect=[False, True]),
+            _try_send_notification=AsyncMock(),
         )
 
-        await Gw2Bot._handle_poll_success(cast(Gw2Bot, bot), "Guild Storage")
-        await Gw2Bot._handle_poll_success(cast(Gw2Bot, bot), "Guild Storage")
+        with caplog.at_level(logging.INFO, logger="gw2bot.main"):
+            await Gw2Bot._handle_poll_success(cast(Gw2Bot, bot), "Guild Storage")
 
-        assert (
-            bot._try_send_notification.await_args_list
-            == [call("Guild Storage polling recovered.")] * 2
-        )
+        bot._try_send_notification.assert_not_awaited()
+        assert "Guild Storage polling recovered." in caplog.text
         assert bot._last_errors == {}
 
     async def test_guild_log_recovery_is_console_only(
