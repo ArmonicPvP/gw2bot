@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 import aiohttp
 import discord
@@ -14,12 +14,23 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config, ConfigurationError
+from gw2bot.discord_utils import (
+    TopicEditableChannel,
+    discord_failure_reason,
+    discord_failure_signature,
+    forum_tags_for_ids,
+    log_discord_failure,
+    safe_int,
+    thread_applied_tag_ids,
+    user_has_role as user_has_role,
+)
 from gw2bot.feast_stock import FeastAlert, get_due_low_stock_alerts
 from gw2bot.logging_setup import (
     RedactingFormatter as RedactingFormatter,
     configure_logging as configure_logging,
-    redact_log_text,
+    redact_log_text as redact_log_text,
 )
+from gw2bot.poll_status import PollStatusTracker
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
@@ -56,15 +67,6 @@ from gw2bot.raffle import (
 LOGGER = logging.getLogger(__name__)
 
 
-class TopicEditableChannel(Protocol):
-    async def edit(
-        self,
-        *,
-        topic: str,
-        reason: str | None = None,
-    ) -> Any: ...
-
-
 RAFFLE_DRAW_ROLE_ID = 1317124663847157880
 RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
 RAFFLE_OFFICER_ROLE_ID = 1317359168285573171
@@ -83,13 +85,6 @@ SUNBORNE_ROLE_ID = 1317140660188352584
 TRIAL_ACCEPTED_TAG_ID = 1317349209619562587
 TRIAL_IN_REVIEW_TAG_ID = 1317349421821726790
 TRIAL_FORUM_INDEX_GRACE = timedelta(hours=1)
-
-
-def user_has_role(user: Any, required_role_id: int) -> bool:
-    return any(
-        role.id == required_role_id
-        for role in getattr(user, "roles", ())
-    )
 
 
 def format_addticket_audit(discord_user_id: int, username: str) -> str:
@@ -760,78 +755,6 @@ def contains_normalized_account_name(value: object, key: str) -> bool:
     )
 
 
-def _log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
-    LOGGER.error(
-        message + " (type=%s status=%s code=%s)",
-        *args,
-        type(error).__name__,
-        getattr(error, "status", "unknown"),
-        getattr(error, "code", "unknown"),
-    )
-
-
-def _discord_failure_reason(error: discord.DiscordException) -> str:
-    code = getattr(error, "code", None)
-    if code == 50001:
-        return "missing_access"
-    if code == 50013:
-        return "missing_permissions"
-    return "discord_error"
-
-
-def _discord_failure_signature(error: discord.DiscordException) -> str:
-    # Sanitized identity (no raw response body) used to deduplicate repeated
-    # failure logs; mirrors the fields emitted by _log_discord_failure.
-    return (
-        f"{type(error).__name__}:"
-        f"{getattr(error, 'status', 'unknown')}:"
-        f"{getattr(error, 'code', 'unknown')}"
-    )
-
-
-def _safe_int(value: object) -> int | None:
-    if isinstance(value, int):
-        return value
-    if not isinstance(value, str):
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def _thread_applied_tag_ids(thread: object) -> list[int]:
-    tag_ids: list[int] = []
-    for tag in getattr(thread, "applied_tags", ()):
-        tag_id = _safe_int(getattr(tag, "id", None))
-        if tag_id is not None and tag_id not in tag_ids:
-            tag_ids.append(tag_id)
-    for value in getattr(thread, "_applied_tags", ()):
-        tag_id = _safe_int(value)
-        if tag_id is not None and tag_id not in tag_ids:
-            tag_ids.append(tag_id)
-    return tag_ids
-
-
-def _forum_tags_for_ids(
-    forum: object,
-    tag_ids: set[int],
-) -> dict[int, discord.ForumTag]:
-    tags: dict[int, discord.ForumTag] = {}
-    get_tag = getattr(forum, "get_tag", None)
-    if callable(get_tag):
-        for tag_id in tag_ids:
-            tag = get_tag(tag_id)
-            if tag is not None:
-                tags[tag_id] = cast(discord.ForumTag, tag)
-
-    for tag in getattr(forum, "available_tags", ()):
-        tag_id = _safe_int(getattr(tag, "id", None))
-        if tag_id in tag_ids and tag_id not in tags:
-            tags[tag_id] = cast(discord.ForumTag, tag)
-    return tags
-
-
 def count_active_guild_members(
     members: list[dict[str, Any]],
 ) -> tuple[int, int]:
@@ -849,17 +772,6 @@ def format_guild_member_count_topic(
     pending_invite_count: int,
 ) -> str:
     return f"{member_count}/{GW2_GUILD_MEMBER_LIMIT} ({pending_invite_count} pending)"
-
-
-def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
-    if isinstance(error, aiohttp.ClientResponseError):
-        status = f"HTTP {error.status}" if error.status else type(error).__name__
-        detail = error.message.strip()
-        message = f"{status}: {detail}" if detail else status
-    else:
-        message = str(error) or type(error).__name__
-
-    return redact_log_text(message, secrets)
 
 
 class RaffleCommands(app_commands.Group):
@@ -1438,7 +1350,9 @@ class Gw2Bot(discord.Client):
         self._notification_channel: Any | None = None
         self._raffle_contribution_channel: Any | None = None
         self._feast_notification_user: Any | None = None
-        self._last_errors: dict[str, str] = {}
+        self._poll_status = PollStatusTracker(
+            (config.gw2_api_key, config.discord_token)
+        )
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._api: Gw2ApiClient | None = None
         self._guild_members: GuildMemberCache | None = None
@@ -1576,7 +1490,7 @@ class Gw2Bot(discord.Client):
             )
             return
 
-        applied_tag_ids = _thread_applied_tag_ids(thread)
+        applied_tag_ids = thread_applied_tag_ids(thread)
         if TRIAL_IN_REVIEW_TAG_ID in applied_tag_ids:
             LOGGER.debug(
                 "Trial application forum thread %s already has In Review tag",
@@ -1634,7 +1548,7 @@ class Gw2Bot(discord.Client):
                 reason="Automatically apply In Review tag",
             )
         except discord.DiscordException as error:
-            _log_discord_failure(
+            log_discord_failure(
                 "Could not apply In Review tag to Trial application forum thread %s",
                 error,
                 thread_id,
@@ -1653,7 +1567,7 @@ class Gw2Bot(discord.Client):
         tag_ids: set[int],
     ) -> dict[int, discord.ForumTag]:
         parent = getattr(thread, "parent", None)
-        tags = _forum_tags_for_ids(parent, tag_ids)
+        tags = forum_tags_for_ids(parent, tag_ids)
         missing_tag_ids = tag_ids - set(tags)
         if not missing_tag_ids:
             LOGGER.debug(
@@ -1670,14 +1584,14 @@ class Gw2Bot(discord.Client):
         try:
             forum = await self.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
         except discord.DiscordException as error:
-            _log_discord_failure(
+            log_discord_failure(
                 "Could not fetch Trial application forum while resolving %s tag IDs",
                 error,
                 len(missing_tag_ids),
             )
             return tags
 
-        fetched_tags = _forum_tags_for_ids(forum, missing_tag_ids)
+        fetched_tags = forum_tags_for_ids(forum, missing_tag_ids)
         tags.update(fetched_tags)
         LOGGER.debug(
             "Resolved %s Trial application forum tags from fetched forum; "
@@ -1968,9 +1882,9 @@ class Gw2Bot(discord.Client):
                 storage = await self._api.get_guild_storage(self._config.gw2_guild_id)
                 await self._handle_storage(storage)
             except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError) as exc:
-                await self._handle_poll_error("Guild Storage", exc)
+                self._poll_status.record_error("Guild Storage", exc)
             else:
-                await self._handle_poll_success("Guild Storage")
+                self._poll_status.record_success("Guild Storage")
                 LOGGER.debug("Guild Storage poll completed successfully")
 
             await asyncio.sleep(self._config.poll_interval_seconds)
@@ -2034,9 +1948,9 @@ class Gw2Bot(discord.Client):
             try:
                 delivered = await self._check_overdue_trials()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                await self._handle_poll_error("Trial Members", exc)
+                self._poll_status.record_error("Trial Members", exc)
             else:
-                await self._handle_poll_success("Trial Members")
+                self._poll_status.record_success("Trial Members")
                 LOGGER.debug(
                     "Trial Members poll completed; delivered=%s",
                     delivered,
@@ -2273,10 +2187,10 @@ class Gw2Bot(discord.Client):
             try:
                 updated = await self._update_guild_member_count_topic()
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                await self._handle_poll_error("Guild Member Count", exc)
+                self._poll_status.record_error("Guild Member Count", exc)
             else:
                 if updated:
-                    await self._handle_poll_success("Guild Member Count")
+                    self._poll_status.record_success("Guild Member Count")
                 LOGGER.debug(
                     "Guild Member Count poll completed; topic_updated=%s",
                     updated,
@@ -2332,15 +2246,15 @@ class Gw2Bot(discord.Client):
                 reason="Update GW2 guild member count",
             )
         except discord.DiscordException as exc:
-            signature = _discord_failure_signature(exc)
+            signature = discord_failure_signature(exc)
             if self._last_topic_update_failure != signature:
                 self._last_topic_update_failure = signature
-                _log_discord_failure(
+                log_discord_failure(
                     "Could not update logging channel description; reason=%s "
                     "channel_id=%s "
                     "required_permissions=view_channel,manage_channels",
                     exc,
-                    _discord_failure_reason(exc),
+                    discord_failure_reason(exc),
                     self._config.discord_notification_channel_id,
                 )
             return False
@@ -2384,9 +2298,9 @@ class Gw2Bot(discord.Client):
                 discord.DiscordException,
                 SQLAlchemyError,
             ) as exc:
-                await self._handle_poll_error("Raffle Contributions", exc)
+                self._poll_status.record_error("Raffle Contributions", exc)
             else:
-                await self._handle_poll_success("Raffle Contributions")
+                self._poll_status.record_success("Raffle Contributions")
                 LOGGER.debug(
                     "Raffle Contributions poll completed successfully; "
                     "guild_log_refreshed=%s",
@@ -2471,7 +2385,7 @@ class Gw2Bot(discord.Client):
         try:
             forum = await self.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
         except discord.DiscordException as error:
-            _log_discord_failure("Could not access the Trial application forum", error)
+            log_discord_failure("Could not access the Trial application forum", error)
             return entries
         if not hasattr(forum, "archived_threads") or not hasattr(forum, "guild"):
             LOGGER.error(
@@ -2513,7 +2427,7 @@ class Gw2Bot(discord.Client):
                         owner_id,
                     )
                 except discord.DiscordException as error:
-                    _log_discord_failure(
+                    log_discord_failure(
                         "Could not resolve Trial application creator %s",
                         error,
                         owner_id,
@@ -2584,7 +2498,7 @@ class Gw2Bot(discord.Client):
 
         def thread_last_activity(thread: Any) -> datetime:
             candidates: list[datetime] = []
-            last_message_id = _safe_int(getattr(thread, "last_message_id", None))
+            last_message_id = safe_int(getattr(thread, "last_message_id", None))
             if last_message_id:
                 candidates.append(discord.utils.snowflake_time(last_message_id))
             for attribute in ("archive_timestamp", "created_at"):
@@ -2597,12 +2511,12 @@ class Gw2Bot(discord.Client):
 
         async def index_thread(thread: Any) -> None:
             nonlocal indexed, reused, completed
-            thread_id = _safe_int(getattr(thread, "id", None))
+            thread_id = safe_int(getattr(thread, "id", None))
             if thread_id is None:
                 return
             if getattr(thread, "parent_id", None) != getattr(forum, "id", None):
                 return
-            if TRIAL_ACCEPTED_TAG_ID not in _thread_applied_tag_ids(thread):
+            if TRIAL_ACCEPTED_TAG_ID not in thread_applied_tag_ids(thread):
                 if thread_id in cached:
                     deletions.add(thread_id)
                 return
@@ -2615,14 +2529,14 @@ class Gw2Bot(discord.Client):
             ):
                 reused += 1
                 return
-            owner_id = _safe_int(getattr(thread, "owner_id", None))
+            owner_id = safe_int(getattr(thread, "owner_id", None))
             content_parts = [str(getattr(thread, "name", ""))]
             try:
                 async for message in thread.history(limit=None, oldest_first=True):
                     content_parts.append(str(getattr(message, "content", "")))
             except discord.DiscordException as error:
                 completed = False
-                _log_discord_failure(
+                log_discord_failure(
                     "Could not index Trial application forum thread %s",
                     error,
                     thread_id,
@@ -2642,7 +2556,7 @@ class Gw2Bot(discord.Client):
             active_threads = await forum.guild.active_threads()
         except discord.DiscordException as error:
             completed = False
-            _log_discord_failure(
+            log_discord_failure(
                 "Could not enumerate active Trial application threads",
                 error,
             )
@@ -2664,7 +2578,7 @@ class Gw2Bot(discord.Client):
                 await index_thread(thread)
         except discord.DiscordException as error:
             completed = False
-            _log_discord_failure(
+            log_discord_failure(
                 "Could not enumerate archived Trial application threads",
                 error,
             )
@@ -2707,9 +2621,9 @@ class Gw2Bot(discord.Client):
                 await self._send_pending_invite_notifications()
                 await self._send_pending_rank_change_notifications()
             except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError) as exc:
-                await self._handle_poll_error("Guild Log", exc)
+                self._poll_status.record_error("Guild Log", exc)
             else:
-                await self._handle_poll_success("Guild Log")
+                self._poll_status.record_success("Guild Log")
                 LOGGER.debug("Guild Log poll completed successfully")
 
             await asyncio.sleep(self._config.guild_log_poll_interval_seconds)
@@ -2772,38 +2686,16 @@ class Gw2Bot(discord.Client):
                     rank_change.event_id
                 )
 
-    async def _handle_poll_success(self, source: str) -> None:
-        # Poll status is operational noise (timeouts, transient API errors), so
-        # it stays in the console and is never posted to the logging channel.
-        LOGGER.debug("%s poll reported success", source)
-        if source in self._last_errors:
-            LOGGER.info("%s polling recovered.", source)
-            del self._last_errors[source]
-
-    async def _handle_poll_error(self, source: str, error: Exception) -> None:
-        # Poll failures (including timeouts) are console-only diagnostics; they
-        # are deliberately kept out of the logging channel.
-        config = getattr(self, "_config", None)
-        message = format_poll_error(
-            error,
-            (
-                getattr(config, "gw2_api_key", ""),
-                getattr(config, "discord_token", ""),
-            ),
-        )
-        LOGGER.warning("%s polling failed: %s", source, message)
-        self._last_errors[source] = message
-
     async def _try_send_notification(self, message: str) -> bool:
         LOGGER.debug("Sending Discord notification; characters=%s", len(message))
         try:
             await self._send_notification(message)
         except discord.DiscordException as exc:
-            _log_discord_failure(
+            log_discord_failure(
                 "Could not send Discord notification; reason=%s channel_id=%s "
                 "required_permissions=view_channel,send_messages",
                 exc,
-                _discord_failure_reason(exc),
+                discord_failure_reason(exc),
                 self._config.discord_notification_channel_id,
             )
             return False

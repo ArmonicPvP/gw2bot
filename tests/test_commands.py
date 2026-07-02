@@ -2169,15 +2169,17 @@ class TestGuildMemberCountTopic:
             is_closed=MagicMock(side_effect=[False, True]),
             _api=object(),
             _update_guild_member_count_topic=AsyncMock(return_value=True),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_guild_member_count_topic(cast(Gw2Bot, bot))
 
         bot._update_guild_member_count_topic.assert_awaited_once()
-        bot._handle_poll_success.assert_awaited_once_with("Guild Member Count")
-        bot._handle_poll_error.assert_not_awaited()
+        bot._poll_status.record_success.assert_called_once_with("Guild Member Count")
+        bot._poll_status.record_error.assert_not_called()
         sleep.assert_awaited_once_with(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
 
     @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
@@ -2191,17 +2193,19 @@ class TestGuildMemberCountTopic:
             is_closed=MagicMock(side_effect=[False, True]),
             _api=object(),
             _update_guild_member_count_topic=AsyncMock(side_effect=error),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_guild_member_count_topic(cast(Gw2Bot, bot))
 
-        bot._handle_poll_error.assert_awaited_once_with(
+        bot._poll_status.record_error.assert_called_once_with(
             "Guild Member Count",
             error,
         )
-        bot._handle_poll_success.assert_not_awaited()
+        bot._poll_status.record_success.assert_not_called()
         sleep.assert_awaited_once_with(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
 
 
@@ -2275,8 +2279,10 @@ class TestGuildLogRefresh:
             _send_pending_leave_notifications=AsyncMock(),
             _send_pending_invite_notifications=AsyncMock(),
             _send_pending_rank_change_notifications=AsyncMock(),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
             _config=SimpleNamespace(guild_log_poll_interval_seconds=60),
         )
 
@@ -2286,7 +2292,7 @@ class TestGuildLogRefresh:
         bot._send_pending_deposit_audit_notifications.assert_awaited_once()
         bot._send_pending_invite_notifications.assert_awaited_once()
         bot._send_pending_rank_change_notifications.assert_awaited_once()
-        bot._handle_poll_success.assert_awaited_once_with("Guild Log")
+        bot._poll_status.record_success.assert_called_once_with("Guild Log")
         sleep.assert_awaited_once_with(60)
 
 class TestFeastNotification:
@@ -3309,15 +3315,17 @@ class TestTrialMemberStatusResolution:
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
             _check_overdue_trials=AsyncMock(return_value=True),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_overdue_trials(bot)  # type: ignore[arg-type]
 
         bot.wait_until_ready.assert_awaited_once()
         bot._check_overdue_trials.assert_awaited_once()
-        bot._handle_poll_success.assert_awaited_once_with("Trial Members")
+        bot._poll_status.record_success.assert_called_once_with("Trial Members")
         seconds_until_report.assert_called_once()
         sleep.assert_awaited_once_with(123)
 
@@ -3332,8 +3340,10 @@ class TestTrialMemberStatusResolution:
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, True]),
             _check_overdue_trials=AsyncMock(return_value=False),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_overdue_trials(bot)  # type: ignore[arg-type]
@@ -3341,7 +3351,7 @@ class TestTrialMemberStatusResolution:
         seconds_until_report.assert_called_once()
         sleep.assert_awaited_once_with(123)
         bot._check_overdue_trials.assert_not_awaited()
-        bot._handle_poll_success.assert_not_awaited()
+        bot._poll_status.record_success.assert_not_called()
 
     @patch("gw2bot.main.seconds_until_trial_report", side_effect=[123, 456])
     @patch("gw2bot.main.asyncio.sleep", new_callable=AsyncMock)
@@ -3355,8 +3365,10 @@ class TestTrialMemberStatusResolution:
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, False, True]),
             _check_overdue_trials=AsyncMock(side_effect=error),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_overdue_trials(bot)  # type: ignore[arg-type]
@@ -3364,8 +3376,8 @@ class TestTrialMemberStatusResolution:
         assert seconds_until_report.call_count == 2
         assert sleep.await_args_list == [call(123), call(456)]
         bot._check_overdue_trials.assert_awaited_once()
-        bot._handle_poll_error.assert_awaited_once_with("Trial Members", error)
-        bot._handle_poll_success.assert_not_awaited()
+        bot._poll_status.record_error.assert_called_once_with("Trial Members", error)
+        bot._poll_status.record_success.assert_not_called()
 
 
 class TestRaffleContributionNotification:
@@ -3759,8 +3771,10 @@ class TestRaffleContributionNotification:
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(),
             _send_raffle_contribution_report=AsyncMock(),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_raffle_contributions(bot)  # type: ignore[arg-type]
@@ -3768,8 +3782,8 @@ class TestRaffleContributionNotification:
         sleep.assert_awaited_once_with(123)
         bot.refresh_guild_log.assert_awaited_once()
         bot._send_raffle_contribution_report.assert_awaited_once_with(boundary)
-        bot._handle_poll_success.assert_awaited_once_with("Raffle Contributions")
-        bot._handle_poll_error.assert_not_awaited()
+        bot._poll_status.record_success.assert_called_once_with("Raffle Contributions")
+        bot._poll_status.record_error.assert_not_called()
 
     @patch("gw2bot.main.raffle_contribution_report_end")
     @patch("gw2bot.main.seconds_until_raffle_contribution_report", return_value=123)
@@ -3788,8 +3802,10 @@ class TestRaffleContributionNotification:
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(side_effect=TimeoutError("secret-timeout")),
             _send_raffle_contribution_report=AsyncMock(),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot.main"):
@@ -3798,8 +3814,8 @@ class TestRaffleContributionNotification:
         sleep.assert_awaited_once_with(123)
         bot.refresh_guild_log.assert_awaited_once()
         bot._send_raffle_contribution_report.assert_awaited_once_with(boundary)
-        bot._handle_poll_success.assert_awaited_once_with("Raffle Contributions")
-        bot._handle_poll_error.assert_not_awaited()
+        bot._poll_status.record_success.assert_called_once_with("Raffle Contributions")
+        bot._poll_status.record_error.assert_not_called()
         assert "secret-timeout" not in caplog.text
         assert (
             "Raffle Contributions guild-log refresh failed; posting persisted "
@@ -3829,163 +3845,20 @@ class TestRaffleContributionNotification:
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(),
             _send_raffle_contribution_report=AsyncMock(side_effect=error),
-            _handle_poll_error=AsyncMock(),
-            _handle_poll_success=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
         )
 
         await Gw2Bot._poll_raffle_contributions(bot)  # type: ignore[arg-type]
 
         sleep.assert_awaited_once_with(123)
-        bot._handle_poll_error.assert_awaited_once_with(
+        bot._poll_status.record_error.assert_called_once_with(
             "Raffle Contributions",
             error,
         )
-        bot._handle_poll_success.assert_not_awaited()
-
-    async def test_report_failure_does_not_log_credentials(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        secret = "raffle-report-secret"
-        bot = SimpleNamespace(
-            _config=SimpleNamespace(
-                gw2_api_key=secret,
-                discord_token="discord-secret",
-            ),
-            _last_errors={},
-            _try_send_notification=AsyncMock(return_value=True),
-        )
-
-        with caplog.at_level(logging.WARNING, logger="gw2bot.main"):
-            await Gw2Bot._handle_poll_error(
-                cast(Gw2Bot, bot),
-                "Raffle Contributions",
-                aiohttp.ClientError(f"request failed with access_token={secret}"),
-            )
-
-        assert secret not in caplog.text
-        bot._try_send_notification.assert_not_awaited()
-        assert (
-            "Raffle Contributions polling failed: "
-            "request failed with access_token=[REDACTED]"
-            in caplog.text
-        )
-        assert bot._last_errors == {
-            "Raffle Contributions": (
-                "request failed with access_token=[REDACTED]"
-            )
-        }
-
-
-class TestPollStatusNotification:
-    async def test_bad_gateway_does_not_leak_api_key(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        api_key = "secret-api-key"
-        bot = SimpleNamespace(
-            _config=SimpleNamespace(
-                gw2_api_key=api_key,
-                discord_token="secret-discord-token",
-            ),
-            _last_errors={},
-            _try_send_notification=AsyncMock(return_value=True),
-        )
-        error = aiohttp.ClientResponseError(
-            SimpleNamespace(
-                real_url=f"https://example.test/log?access_token={api_key}"
-            ),  # type: ignore[arg-type]
-            (),
-            status=502,
-            message="Bad Gateway",
-        )
-
-        with caplog.at_level(logging.WARNING, logger="gw2bot.main"):
-            await Gw2Bot._handle_poll_error(cast(Gw2Bot, bot), "Guild Log", error)
-
-        bot._try_send_notification.assert_not_awaited()
-        assert bot._last_errors == {"Guild Log": "HTTP 502: Bad Gateway"}
-        assert api_key not in caplog.text
-
-    async def test_redacts_configured_credentials_from_poll_error(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        api_key = "secret-api-key"
-        bot = SimpleNamespace(
-            _config=SimpleNamespace(
-                gw2_api_key=api_key,
-                discord_token="secret-discord-token",
-            ),
-            _last_errors={},
-            _try_send_notification=AsyncMock(return_value=True),
-        )
-
-        with caplog.at_level(logging.WARNING, logger="gw2bot.main"):
-            await Gw2Bot._handle_poll_error(
-                cast(Gw2Bot, bot),
-                "Guild Log",
-                TimeoutError(f"Request failed with Bearer {api_key}"),
-            )
-
-        bot._try_send_notification.assert_not_awaited()
-        assert (
-            "Guild Log polling failed: Request failed with Bearer [REDACTED]"
-            in caplog.text
-        )
-
-    async def test_poll_error_is_console_only_for_all_sources(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        bot = SimpleNamespace(
-            _config=SimpleNamespace(gw2_api_key="", discord_token=""),
-            _last_errors={},
-            _try_send_notification=AsyncMock(),
-        )
-        error = TimeoutError("API unavailable")
-
-        with caplog.at_level(logging.WARNING, logger="gw2bot.main"):
-            await Gw2Bot._handle_poll_error(
-                cast(Gw2Bot, bot), "Guild Storage", error
-            )
-
-        bot._try_send_notification.assert_not_awaited()
-        assert "Guild Storage polling failed: API unavailable" in caplog.text
-        assert bot._last_errors == {"Guild Storage": "API unavailable"}
-
-    async def test_poll_recovery_is_console_only_for_all_sources(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        bot = SimpleNamespace(
-            _last_errors={"Guild Storage": "API unavailable"},
-            _try_send_notification=AsyncMock(),
-        )
-
-        with caplog.at_level(logging.INFO, logger="gw2bot.main"):
-            await Gw2Bot._handle_poll_success(cast(Gw2Bot, bot), "Guild Storage")
-
-        bot._try_send_notification.assert_not_awaited()
-        assert "Guild Storage polling recovered." in caplog.text
-        assert bot._last_errors == {}
-
-    async def test_guild_log_recovery_is_console_only(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        bot = SimpleNamespace(
-            _last_errors={"Guild Log": "API unavailable"},
-            _try_send_notification=AsyncMock(),
-        )
-
-        with caplog.at_level(logging.INFO, logger="gw2bot.main"):
-            await Gw2Bot._handle_poll_success(cast(Gw2Bot, bot), "Guild Log")
-
-        bot._try_send_notification.assert_not_awaited()
-        assert "Guild Log polling recovered." in caplog.text
-        assert bot._last_errors == {}
-
+        bot._poll_status.record_success.assert_not_called()
 
 def _forbidden_error(code: int) -> discord.Forbidden:
     response = SimpleNamespace(status=403, reason="Forbidden")
