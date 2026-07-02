@@ -1,3 +1,9 @@
+from types import SimpleNamespace
+
+import discord
+
+from gw2bot.raffle import RaffleTotal
+
 """Shared builders for fake GW2 guild-log events used across test modules."""
 
 
@@ -88,3 +94,33 @@ def guild_rank_change(
         "new_rank": new_rank,
         "changed_by": changed_by,
     }
+
+def forbidden_error(code: int) -> discord.Forbidden:
+    response = SimpleNamespace(status=403, reason="Forbidden")
+    return discord.Forbidden(
+        response,  # type: ignore[arg-type]
+        {"code": code, "message": "Missing Access"},
+    )
+
+
+def not_found_error() -> discord.NotFound:
+    response = SimpleNamespace(status=404, reason="Not Found")
+    return discord.NotFound(
+        response,  # type: ignore[arg-type]
+        {"code": 10007, "message": "Unknown Member"},
+    )
+
+
+def raffle_total(
+    username: str,
+    *,
+    purchased: int = 0,
+    free: int = 0,
+) -> RaffleTotal:
+    return RaffleTotal(
+        username=username,
+        coins_deposited=purchased * 10_000,
+        raffle_tickets=purchased + free,
+        gold_raffle_tickets=purchased,
+        manual_raffle_tickets=free,
+    )

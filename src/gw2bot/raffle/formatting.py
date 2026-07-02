@@ -1,0 +1,336 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+import discord
+
+from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
+from gw2bot.raffle.models import (
+    RAFFLE_REWARD_TIERS,
+    RaffleContribution,
+    RaffleMilestone,
+    RaffleResult,
+    RaffleRewardTier,
+    RaffleTotal,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+RAFFLE_TICKETS_PAGE_SIZE = 10
+RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
+RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
+
+
+def format_addticket_audit(discord_user_id: int, username: str) -> str:
+    return f"<@{discord_user_id}> added 1 raffle ticket to {username}."
+
+
+def parse_squad_attendance_usernames(value: str) -> list[str]:
+    lines = value.splitlines()
+    usernames: list[str] = []
+    skipped_lines = 0
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        account_name = line.partition(",")[0].strip()
+        if account_name.startswith(":"):
+            account_name = account_name[1:].strip()
+        if not account_name:
+            skipped_lines += 1
+            continue
+        usernames.append(account_name)
+    LOGGER.debug(
+        "Parsed squad attendance text; characters=%s lines=%s usernames=%s "
+        "skipped_lines=%s",
+        len(value),
+        len(lines),
+        len(usernames),
+        skipped_lines,
+    )
+    return usernames
+
+
+def _format_bulk_username_sample(label: str, usernames: list[str]) -> str:
+    displayed = [
+        (
+            username
+            if len(username) <= RAFFLE_BULK_SUMMARY_NAME_LENGTH
+            else username[: RAFFLE_BULK_SUMMARY_NAME_LENGTH - 3] + "..."
+        )
+        for username in usernames[:RAFFLE_BULK_SUMMARY_SAMPLE_SIZE]
+    ]
+    remaining = len(usernames) - len(displayed)
+    suffix = f" (+{remaining} more)" if remaining else ""
+    return f"{label}: " + ", ".join(f"**{name}**" for name in displayed) + suffix
+
+
+def format_bulk_addtickets_summary(
+    added_usernames: list[str],
+    invalid_count: int,
+    duplicate_usernames: list[str],
+    failed_usernames: list[str],
+    audit_failures: int,
+) -> str:
+    summary = [
+        f"Added one raffle ticket to {len(added_usernames)} guild "
+        f"{'member' if len(added_usernames) == 1 else 'members'}."
+    ]
+    if added_usernames:
+        summary.append(_format_bulk_username_sample("Added", added_usernames))
+    if invalid_count:
+        summary.append(f"Not in the configured guild: {invalid_count}")
+    if duplicate_usernames:
+        summary.append(
+            _format_bulk_username_sample(
+                "Duplicate selections skipped",
+                duplicate_usernames,
+            )
+        )
+    if failed_usernames:
+        summary.append(
+            _format_bulk_username_sample("Could not add", failed_usernames)
+        )
+    if audit_failures:
+        summary.append(
+            f"{audit_failures} audit "
+            f"{'delivery' if audit_failures == 1 else 'deliveries'} failed."
+        )
+    return "\n".join(summary)[:DISCORD_MESSAGE_LIMIT]
+
+
+def format_removetickets_audit(
+    discord_user_id: int,
+    username: str,
+    amount: int,
+) -> str:
+    noun = "ticket" if amount == 1 else "tickets"
+    return (
+        f"<@{discord_user_id}> removed {amount} purchased raffle {noun} "
+        f"from {username}."
+    )
+
+
+def format_raffle_result(result: RaffleResult) -> str:
+    winners = "\n".join(
+        f"{position}. **{winner.username}**"
+        for position, winner in enumerate(result.winners, start=1)
+    )
+    return (
+        f"Raffle winners:\n{winners}\n"
+        f"Selected {len(result.winners)} winners from "
+        f"{result.purchased_tickets} purchased tickets and "
+        f"{result.free_tickets} free tickets. "
+        "All current raffle tickets have been reset."
+    )
+
+
+def raffle_ticket_embed(total: RaffleTotal) -> discord.Embed:
+    embed = discord.Embed(title=f"Raffle Tickets: {total.username}")
+    embed.add_field(
+        name="Purchased Tickets",
+        value=str(total.gold_raffle_tickets),
+    )
+    embed.add_field(
+        name="Free Tickets",
+        value=str(total.manual_raffle_tickets),
+    )
+    embed.add_field(
+        name="Total Tickets",
+        value=str(total.raffle_tickets),
+    )
+    return embed
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleTicketTableRow:
+    name: str
+    purchased: int
+    free: int
+    total: int
+
+
+def raffle_total_table_rows(totals: list[RaffleTotal]) -> list[RaffleTicketTableRow]:
+    return [
+        RaffleTicketTableRow(
+            name=total.username,
+            purchased=total.gold_raffle_tickets,
+            free=total.manual_raffle_tickets,
+            total=total.raffle_tickets,
+        )
+        for total in totals
+    ]
+
+
+def order_raffle_totals(totals: list[RaffleTotal]) -> list[RaffleTotal]:
+    ordered = sorted(
+        (total for total in totals if total.raffle_tickets > 0),
+        key=lambda total: (
+            -total.raffle_tickets,
+            total.username.casefold(),
+            total.username,
+        ),
+    )
+    LOGGER.debug(
+        "Ordered raffle totals for display; records=%s active_players=%s",
+        len(totals),
+        len(ordered),
+    )
+    return ordered
+
+
+def raffle_contribution_table_rows(
+    contributions: list[RaffleContribution],
+) -> list[RaffleTicketTableRow]:
+    return [
+        RaffleTicketTableRow(
+            name=contribution.username,
+            purchased=contribution.purchased_tickets,
+            free=contribution.event_tickets,
+            total=contribution.purchased_tickets + contribution.event_tickets,
+        )
+        for contribution in contributions
+    ]
+
+
+def format_raffle_ticket_blocks(rows: list[RaffleTicketTableRow]) -> str:
+    return "\n\n".join(
+        f"**{row.name}**\n"
+        f"Purchased: {row.purchased}\n"
+        f"Free: {row.free}\n"
+        f"Total: {row.total}"
+        for row in rows
+    )
+
+
+def raffle_ticket_table_embed(
+    rows: list[RaffleTicketTableRow],
+    title: str,
+    page: int,
+) -> discord.Embed:
+    page_count = max(
+        1,
+        (len(rows) + RAFFLE_TICKETS_PAGE_SIZE - 1) // RAFFLE_TICKETS_PAGE_SIZE,
+    )
+    page = max(0, min(page, page_count - 1))
+    first = page * RAFFLE_TICKETS_PAGE_SIZE
+    page_rows = rows[first : first + RAFFLE_TICKETS_PAGE_SIZE]
+    embed = discord.Embed(
+        title=title,
+        description=format_raffle_ticket_blocks(page_rows),
+    )
+    embed.set_footer(text=f"Page {page + 1} of {page_count}")
+    return embed
+
+
+def raffle_ticket_list_embed(
+    totals: list[RaffleTotal],
+    page: int,
+) -> discord.Embed:
+    ordered_totals = order_raffle_totals(totals)
+    page_count = max(
+        1,
+        (len(ordered_totals) + RAFFLE_TICKETS_PAGE_SIZE - 1)
+        // RAFFLE_TICKETS_PAGE_SIZE,
+    )
+    page = max(0, min(page, page_count - 1))
+    first = page * RAFFLE_TICKETS_PAGE_SIZE
+    page_totals = ordered_totals[first : first + RAFFLE_TICKETS_PAGE_SIZE]
+    LOGGER.debug(
+        "Rendering raffle ticket list page; page=%s page_count=%s players=%s",
+        page + 1,
+        page_count,
+        len(page_totals),
+    )
+    description = format_raffle_ticket_blocks(raffle_total_table_rows(page_totals))
+    embed = discord.Embed(
+        title="Raffle Tickets",
+        description=description or "No players currently have raffle tickets.",
+    )
+    embed.set_footer(text=f"Page {page + 1} of {page_count}")
+    return embed
+
+
+def raffle_tier_summary_embed(
+    totals: list[RaffleTotal],
+    reward_tiers: tuple[RaffleRewardTier, ...] = RAFFLE_REWARD_TIERS,
+) -> discord.Embed:
+    purchased_tickets = sum(total.gold_raffle_tickets for total in totals)
+    current_tier = next(
+        (
+            tier
+            for tier in reversed(reward_tiers)
+            if tier.threshold <= purchased_tickets
+        ),
+        None,
+    )
+    next_tier = next(
+        (
+            tier
+            for tier in reward_tiers
+            if tier.threshold > purchased_tickets
+        ),
+        None,
+    )
+    embed = discord.Embed(title="Raffle Tier Summary")
+    embed.add_field(
+        name="Current Tier",
+        value=(
+            current_tier.name
+            if current_tier is not None
+            else ("No tier reached" if reward_tiers else "No tiers configured")
+        ),
+    )
+    embed.add_field(
+        name="Total Tickets Purchased",
+        value=str(purchased_tickets),
+    )
+    embed.add_field(
+        name="Tickets Until Next Tier",
+        value=(
+            str(next_tier.threshold - purchased_tickets)
+            if next_tier is not None
+            else ("0 (highest tier reached)" if reward_tiers else "N/A")
+        ),
+    )
+    LOGGER.debug(
+        "Rendered raffle tier summary; purchased_tickets=%s "
+        "current_tier_reached=%s next_tier_exists=%s",
+        purchased_tickets,
+        current_tier is not None,
+        next_tier is not None,
+    )
+    return embed
+
+
+def raffle_contribution_report_embed(
+    contributions: list[RaffleContribution],
+    page: int,
+) -> discord.Embed:
+    return raffle_ticket_table_embed(
+        raffle_contribution_table_rows(contributions),
+        "Raffle contributions from the last 6 hours",
+        page,
+    )
+
+
+def format_raffle_milestone_preview(
+    purchased_tickets: int,
+    reward_tiers: tuple[RaffleRewardTier, ...] = RAFFLE_REWARD_TIERS,
+) -> str:
+    if not reward_tiers:
+        return "No raffle reward tiers are configured."
+
+    next_tier = next(
+        (
+            tier
+            for tier in reward_tiers
+            if tier.threshold > purchased_tickets
+        ),
+        reward_tiers[-1],
+    )
+    message = RaffleMilestone(next_tier.threshold, next_tier.name).message
+    if purchased_tickets >= reward_tiers[-1].threshold:
+        message += " This raffle is already at the highest configured tier."
+    return message
