@@ -20,7 +20,6 @@ from gw2bot.raffle.models import (
     RaffleRunSummary,
     RaffleTotal,
     RaffleWinner,
-    format_gold,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -138,18 +137,28 @@ def _format_winner_line(position: int, winner: RaffleWinner) -> str:
     return line
 
 
-def format_raffle_result(result: RaffleResult) -> str:
+def raffle_result_embed(result: RaffleResult) -> discord.Embed:
     winners = "\n".join(
         _format_winner_line(position, winner)
         for position, winner in enumerate(result.winners, start=1)
     )
-    return (
-        f"Raffle winners:\n{winners}\n"
-        f"Selected {len(result.winners)} winners from "
-        f"{result.purchased_tickets} purchased tickets and "
-        f"{result.free_tickets} free tickets. "
-        "All current raffle tickets have been reset."
+    embed = discord.Embed(
+        title="Raffle Winners",
+        description=(
+            f"{winners}\n"
+            f"Selected {len(result.winners)} winners from "
+            f"{result.purchased_tickets} purchased tickets and "
+            f"{result.free_tickets} free tickets. "
+            "All current raffle tickets have been reset."
+        ),
     )
+    embed.set_footer(
+        text=(
+            f"Run ID: {result.run_id} — anyone can verify this draw "
+            "with /raffle audit."
+        )
+    )
+    return embed
 
 
 def _format_ticket_range(first_ticket: int, last_ticket: int) -> str:
@@ -336,17 +345,9 @@ def raffle_audit_embeds(audit: RaffleAudit) -> list[discord.Embed]:
 
 
 def raffle_deposit_embed(deposit: RaffleDeposit) -> discord.Embed:
-    embed = discord.Embed(title="Raffle Tickets Purchased")
-    embed.add_field(name="Member", value=deposit.username)
-    embed.add_field(
-        name="Gold Deposited",
-        value=format_gold(deposit.coins_deposited),
-    )
-    embed.add_field(
-        name="Tickets Purchased",
-        value=str(deposit.raffle_tickets),
-    )
-    return embed
+    # The contribution channel shows the classic deposit sentence inside an
+    # embed so it stands out; the audit log keeps the plain-text message.
+    return discord.Embed(description=deposit.message)
 
 
 def raffle_ticket_embed(total: RaffleTotal) -> discord.Embed:

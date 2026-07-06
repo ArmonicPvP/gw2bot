@@ -148,12 +148,11 @@ class TestRaffleContributionNotification:
         await Gw2Bot._send_pending_raffle_notifications(cast(Gw2Bot, bot))
 
         embed = bot._try_send_raffle_contribution_embed.await_args.args[0]
-        assert embed.title == "Raffle Tickets Purchased"
-        assert [(field.name, field.value) for field in embed.fields] == [
-            ("Member", "Member.1234"),
-            ("Gold Deposited", "3"),
-            ("Tickets Purchased", "3"),
-        ]
+        assert embed.title is None
+        assert embed.description == (
+            "Member.1234 deposited 3 gold and purchased 3 raffle tickets"
+        )
+        assert not embed.fields
         store.mark_notification_sent.assert_called_once_with(101)
 
     async def test_officer_purchase_attempts_all_purchase_deliveries(self) -> None:
