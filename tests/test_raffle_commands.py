@@ -7,8 +7,16 @@ import aiohttp
 import discord
 import pytest
 from discord import app_commands
+from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.raffle import RaffleContribution, RaffleWinner
+from gw2bot.raffle import (
+    RaffleAudit,
+    RaffleAuditDraw,
+    RaffleAuditRange,
+    RaffleContribution,
+    RaffleRunSummary,
+    RaffleWinner,
+)
 from gw2bot.raffle.commands import (
     GUILD_ROSTER_ROLE_ID,
     RAFFLE_ADDTICKET_ROLE_ID,
@@ -17,11 +25,16 @@ from gw2bot.raffle.commands import (
     RaffleCommands,
 )
 from gw2bot.raffle.formatting import (
+    RAFFLE_AUDIT_EMBED_FIELD_LIMIT,
+    RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
+    RAFFLE_AUDIT_VERIFY_FOOTER,
     format_addticket_audit,
     format_bulk_addtickets_summary,
     format_raffle_result,
     format_removetickets_audit,
+    format_unknown_raffle_run_message,
     parse_squad_attendance_usernames,
+    raffle_audit_embeds,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
     raffle_tier_summary_embed,
@@ -64,6 +77,7 @@ class TestRaffleCommandGroup:
         assert group.guild_only
         assert set(commands) == {
             "draw",
+            "audit",
             "addticket",
             "addtickets",
             "bulkaddtickets",
@@ -74,6 +88,11 @@ class TestRaffleCommandGroup:
         }
         assert "tickets-list" not in commands
         assert "win" not in commands
+        audit = commands["audit"]
+        assert isinstance(audit, app_commands.Command)
+        assert [parameter.name for parameter in audit.parameters] == ["run_id"]
+        assert audit.parameters[0].required
+        assert audit.parameters[0].autocomplete
         addticket = commands["addticket"]
         assert isinstance(addticket, app_commands.Command)
         assert [parameter.name for parameter in addticket.parameters] == [
@@ -1365,4 +1384,330 @@ class TestRemoveRaffleTicketsCommand:
         interaction.followup.send.assert_awaited_once_with(
             "Could not verify guild membership. Try again later.",
             ephemeral=True,
+        )
+
+
+def two_draw_audit() -> RaffleAudit:
+    initial_ranges = (
+        RaffleAuditRange("Alice.1111", 10, 1, 10),
+        RaffleAuditRange("Bob.2222", 6, 11, 16),
+    )
+    second_ranges = (
+        RaffleAuditRange("Alice.1111", 10, 1, 10),
+        RaffleAuditRange("Bob.2222", 5, 11, 15),
+    )
+    return RaffleAudit(
+        run_id=7,
+        run_time="2026-06-07 12:00:00",
+        total_tickets=16,
+        purchased_tickets=15,
+        free_tickets=1,
+        entrants=initial_ranges,
+        draws=(
+            RaffleAuditDraw(
+                draw_position=1,
+                username="Bob.2222",
+                winning_ticket=11,
+                tickets_before_draw=16,
+                tickets_held=6,
+                ranges=initial_ranges,
+            ),
+            RaffleAuditDraw(
+                draw_position=2,
+                username="Bob.2222",
+                winning_ticket=11,
+                tickets_before_draw=15,
+                tickets_held=5,
+                ranges=second_ranges,
+            ),
+        ),
+    )
+
+
+def legacy_audit() -> RaffleAudit:
+    return RaffleAudit(
+        run_id=1,
+        run_time="2026-01-01 00:00:00",
+        total_tickets=10,
+        purchased_tickets=10,
+        free_tickets=0,
+        entrants=(),
+        draws=(
+            RaffleAuditDraw(
+                draw_position=1,
+                username="Winner.1234",
+                winning_ticket=4,
+                tickets_before_draw=10,
+                tickets_held=None,
+                ranges=(),
+            ),
+        ),
+    )
+
+
+class TestRaffleAuditCommand:
+    async def test_sends_public_audit_embed_without_role_gate(self) -> None:
+        # The bot namespace omits authorize_raffle_command on purpose: the
+        # audit command must be usable by every member, so gating would fail
+        # this test with an AttributeError.
+        bot = SimpleNamespace(get_raffle_audit=MagicMock(return_value=two_draw_audit()))
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "audit"
+        )
+
+        await command.callback(group, interaction, 7)  # type: ignore[arg-type]
+
+        bot.get_raffle_audit.assert_called_once_with(7)
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "ephemeral" not in kwargs
+        embed = kwargs["embed"]
+        assert embed.title == "Raffle Run #7 Audit"
+        assert "Drawn at 2026-06-07 12:00:00 UTC." in (embed.description or "")
+        assert [field.name for field in embed.fields] == [
+            "Ticket Ranges (2 entrants)",
+            "Ticket Pool",
+            "Draws",
+        ]
+        fields = {field.name: field.value for field in embed.fields}
+        assert fields["Ticket Ranges (2 entrants)"] == (
+            "**Alice.1111** — #1–#10 (10 tickets)\n"
+            "**Bob.2222** — #11–#16 (6 tickets)"
+        )
+        assert fields["Ticket Pool"] == "Total tickets: 16\nPurchased: 15\nFree: 1"
+        assert fields["Draws"] == (
+            "Draw 1: ticket #11 of 16 — **Bob.2222** "
+            "(held #11–#16, 37.5% chance)\n"
+            "Draw 2: ticket #11 of 15 — **Bob.2222** "
+            "(held #11–#15, 33.3% chance)"
+        )
+        assert embed.footer.text == RAFFLE_AUDIT_VERIFY_FOOTER
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_reports_unknown_run_and_lists_valid_ids(self) -> None:
+        bot = SimpleNamespace(
+            get_raffle_audit=MagicMock(return_value=None),
+            get_raffle_run_summaries=MagicMock(
+                return_value=[
+                    RaffleRunSummary(3, "2026-06-21 12:00:00"),
+                    RaffleRunSummary(2, "2026-06-14 12:00:00"),
+                    RaffleRunSummary(1, "2026-06-07 12:00:00"),
+                ]
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "audit"
+        )
+
+        await command.callback(group, interaction, 99)  # type: ignore[arg-type]
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "Raffle run 99 was not found. Valid run ids: 3, 2, 1.",
+            ephemeral=True,
+        )
+        interaction.followup.send.assert_not_awaited()
+
+
+class TestRaffleRunAutocomplete:
+    async def test_filters_run_ids_by_typed_prefix(self) -> None:
+        bot = SimpleNamespace(
+            get_raffle_run_summaries=MagicMock(
+                return_value=[
+                    RaffleRunSummary(12, "2026-06-28 12:00:00"),
+                    RaffleRunSummary(11, "2026-06-21 12:00:00"),
+                    RaffleRunSummary(2, "2026-06-14 12:00:00"),
+                    RaffleRunSummary(1, "2026-06-07 12:00:00"),
+                ]
+            )
+        )
+        interaction = SimpleNamespace(user=SimpleNamespace(id=1234))
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.raffle_run_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "1",
+        )
+
+        assert [(choice.name, choice.value) for choice in choices] == [
+            ("Run 12 — 2026-06-28 12:00:00", 12),
+            ("Run 11 — 2026-06-21 12:00:00", 11),
+            ("Run 1 — 2026-06-07 12:00:00", 1),
+        ]
+
+    async def test_lists_newest_runs_first_without_typed_text(self) -> None:
+        bot = SimpleNamespace(
+            get_raffle_run_summaries=MagicMock(
+                return_value=[
+                    RaffleRunSummary(run_id, "2026-06-07 12:00:00")
+                    for run_id in range(30, 0, -1)
+                ]
+            )
+        )
+        interaction = SimpleNamespace(user=SimpleNamespace(id=1234))
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.raffle_run_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "",
+        )
+
+        assert len(choices) == 25
+        assert [choice.value for choice in choices][:3] == [30, 29, 28]
+
+    async def test_failure_logging_omits_secret_bearing_exception(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "run-autocomplete-secret"
+        bot = SimpleNamespace(
+            get_raffle_run_summaries=MagicMock(
+                side_effect=SQLAlchemyError(
+                    f"query failed with access_token={secret}"
+                )
+            )
+        )
+        interaction = SimpleNamespace(user=SimpleNamespace(id=1234))
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            choices = await group.raffle_run_autocomplete(
+                interaction,  # type: ignore[arg-type]
+                "1",
+            )
+
+        assert choices == []
+        assert secret not in caplog.text
+        assert "Could not load raffle runs for autocomplete" in caplog.text
+
+
+class TestRaffleAuditFormatting:
+    def test_legacy_run_embed_notes_missing_snapshot(self) -> None:
+        embeds = raffle_audit_embeds(legacy_audit())
+
+        assert len(embeds) == 1
+        embed = embeds[0]
+        assert (
+            "The full entrant snapshot isn't available for this run"
+            in (embed.description or "")
+        )
+        assert [field.name for field in embed.fields] == ["Ticket Pool", "Draw"]
+        fields = {field.name: field.value for field in embed.fields}
+        assert fields["Draw"] == "Draw 1: ticket #4 of 10 — **Winner.1234**"
+        assert fields["Ticket Pool"] == (
+            "Total tickets: 10\nPurchased: 10\nFree: 0"
+        )
+        assert embed.footer.text == RAFFLE_AUDIT_VERIFY_FOOTER
+
+    def test_single_ticket_range_renders_one_number(self) -> None:
+        entrants = (RaffleAuditRange("Solo.1234", 1, 1, 1),)
+        audit = RaffleAudit(
+            run_id=2,
+            run_time="2026-06-07 12:00:00",
+            total_tickets=1,
+            purchased_tickets=1,
+            free_tickets=0,
+            entrants=entrants,
+            draws=(
+                RaffleAuditDraw(
+                    draw_position=1,
+                    username="Solo.1234",
+                    winning_ticket=1,
+                    tickets_before_draw=1,
+                    tickets_held=1,
+                    ranges=entrants,
+                ),
+            ),
+        )
+
+        embeds = raffle_audit_embeds(audit)
+
+        fields = {field.name: field.value for field in embeds[0].fields}
+        assert fields["Ticket Ranges (1 entrant)"] == (
+            "**Solo.1234** — #1 (1 ticket)"
+        )
+        assert fields["Draw"] == (
+            "Draw 1: ticket #1 of 1 — **Solo.1234** (held #1, 100.0% chance)"
+        )
+
+    def test_splits_long_entrant_list_across_fields_and_embeds(self) -> None:
+        entrants = tuple(
+            RaffleAuditRange(f"Member {index:03d}.1234", 1, index + 1, index + 1)
+            for index in range(400)
+        )
+        audit = RaffleAudit(
+            run_id=9,
+            run_time="2026-06-07 12:00:00",
+            total_tickets=400,
+            purchased_tickets=400,
+            free_tickets=0,
+            entrants=entrants,
+            draws=(
+                RaffleAuditDraw(
+                    draw_position=1,
+                    username="Member 000.1234",
+                    winning_ticket=1,
+                    tickets_before_draw=400,
+                    tickets_held=1,
+                    ranges=entrants,
+                ),
+            ),
+        )
+
+        embeds = raffle_audit_embeds(audit)
+
+        assert len(embeds) > 1
+        for embed in embeds:
+            assert len(embed.fields) <= RAFFLE_AUDIT_EMBED_FIELD_LIMIT
+            characters = (
+                len(embed.title or "")
+                + len(embed.description or "")
+                + len(embed.footer.text or "")
+            )
+            for field in embed.fields:
+                assert field.value is not None
+                assert len(field.value) <= RAFFLE_AUDIT_FIELD_CHAR_LIMIT
+                characters += len(field.name or "") + len(field.value)
+            assert characters <= 6_000
+        combined = "\n".join(
+            field.value or "" for embed in embeds for field in embed.fields
+        )
+        assert all(entrant.username in combined for entrant in entrants)
+        assert [field.name for field in embeds[0].fields][-2:] == [
+            "Ticket Pool",
+            "Draw",
+        ]
+        assert all(
+            field.name is not None and field.name.startswith("Ticket Ranges")
+            for embed in embeds[1:]
+            for field in embed.fields
+        )
+
+    def test_unknown_run_message_truncates_long_id_lists(self) -> None:
+        summaries = [
+            RaffleRunSummary(run_id, "2026-06-07 12:00:00")
+            for run_id in range(20, 0, -1)
+        ]
+
+        message = format_unknown_raffle_run_message(42, summaries)
+
+        assert message == (
+            "Raffle run 42 was not found. Valid run ids: 20, 19, 18, 17, 16, "
+            "15, 14, 13, 12, 11, 10, 9, 8, 7, 6 (+5 more)."
+        )
+
+    def test_unknown_run_message_when_no_runs_recorded(self) -> None:
+        assert format_unknown_raffle_run_message(1, []) == (
+            "Raffle run 1 was not found. "
+            "No raffle draws have been recorded yet."
         )

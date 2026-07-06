@@ -9,11 +9,15 @@ import discord
 from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
 from gw2bot.raffle.models import (
     RAFFLE_REWARD_TIERS,
+    RaffleAudit,
+    RaffleAuditDraw,
+    RaffleAuditRange,
     RaffleContribution,
     RaffleDeposit,
     RaffleMilestone,
     RaffleResult,
     RaffleRewardTier,
+    RaffleRunSummary,
     RaffleTotal,
     RaffleWinner,
     format_gold,
@@ -24,6 +28,16 @@ LOGGER = logging.getLogger(__name__)
 RAFFLE_TICKETS_PAGE_SIZE = 10
 RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
 RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
+# Discord caps embed field values at 1,024 characters, embeds at 25 fields,
+# and the combined embed content at 6,000 characters.
+RAFFLE_AUDIT_FIELD_CHAR_LIMIT = 1_024
+RAFFLE_AUDIT_EMBED_FIELD_LIMIT = 25
+RAFFLE_AUDIT_EMBED_CHAR_LIMIT = 5_900
+RAFFLE_AUDIT_RUN_ID_SAMPLE_SIZE = 15
+RAFFLE_AUDIT_VERIFY_FOOTER = (
+    "Verify: find each drawn ticket number in the ranges above. "
+    "Ranges are alphabetical by username."
+)
 
 
 def format_addticket_audit(discord_user_id: int, username: str) -> str:
@@ -136,6 +150,189 @@ def format_raffle_result(result: RaffleResult) -> str:
         f"{result.free_tickets} free tickets. "
         "All current raffle tickets have been reset."
     )
+
+
+def _format_ticket_range(first_ticket: int, last_ticket: int) -> str:
+    if first_ticket == last_ticket:
+        return f"#{first_ticket}"
+    return f"#{first_ticket}–#{last_ticket}"
+
+
+def _format_audit_entrant_line(entrant: RaffleAuditRange) -> str:
+    noun = "ticket" if entrant.tickets == 1 else "tickets"
+    return (
+        f"**{entrant.username}** — "
+        f"{_format_ticket_range(entrant.first_ticket, entrant.last_ticket)} "
+        f"({entrant.tickets} {noun})"
+    )
+
+
+def _format_audit_draw_line(draw: RaffleAuditDraw) -> str:
+    line = (
+        f"Draw {draw.draw_position}: ticket #{draw.winning_ticket} of "
+        f"{draw.tickets_before_draw} — **{draw.username}**"
+    )
+    details: list[str] = []
+    winner_range = next(
+        (
+            entrant_range
+            for entrant_range in draw.ranges
+            if entrant_range.username == draw.username
+        ),
+        None,
+    )
+    if winner_range is not None:
+        details.append(
+            "held "
+            + _format_ticket_range(
+                winner_range.first_ticket,
+                winner_range.last_ticket,
+            )
+        )
+    chance = draw.win_chance
+    if chance is not None:
+        details.append(f"{chance:.1%} chance")
+    if details:
+        line += f" ({', '.join(details)})"
+    return line
+
+
+def _chunk_field_lines(lines: list[str], limit: int) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        line = line[:limit]
+        if not current:
+            current = line
+        elif len(current) + 1 + len(line) <= limit:
+            current += "\n" + line
+        else:
+            chunks.append(current)
+            current = line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def format_unknown_raffle_run_message(
+    run_id: int,
+    summaries: list[RaffleRunSummary],
+) -> str:
+    if not summaries:
+        return (
+            f"Raffle run {run_id} was not found. "
+            "No raffle draws have been recorded yet."
+        )
+    shown = ", ".join(
+        str(summary.run_id)
+        for summary in summaries[:RAFFLE_AUDIT_RUN_ID_SAMPLE_SIZE]
+    )
+    remaining = len(summaries) - RAFFLE_AUDIT_RUN_ID_SAMPLE_SIZE
+    message = f"Raffle run {run_id} was not found. Valid run ids: {shown}"
+    if remaining > 0:
+        message += f" (+{remaining} more)"
+    return message + "."
+
+
+def raffle_audit_embeds(audit: RaffleAudit) -> list[discord.Embed]:
+    title = f"Raffle Run #{audit.run_id} Audit"
+    description_lines = [f"Drawn at {audit.run_time} UTC."]
+    if audit.has_entrant_snapshot:
+        description_lines.append(
+            "Every entrant's tickets were laid out in one numbered line, "
+            "alphabetical by username, and a random ticket number picked "
+            "each winner."
+        )
+        if len(audit.draws) > 1:
+            description_lines.append(
+                "After each draw one ticket was removed from that winner "
+                "and the line was renumbered, so each draw shows the "
+                "winner's range at that moment."
+            )
+    else:
+        description_lines.append(
+            "The full entrant snapshot isn't available for this run because "
+            "it was drawn before entrant snapshots were added. Showing the "
+            "recorded results only."
+        )
+    description = "\n".join(description_lines)
+
+    pool_name = "Ticket Pool"
+    pool_value = (
+        f"Total tickets: {audit.total_tickets}\n"
+        f"Purchased: {audit.purchased_tickets}\n"
+        f"Free: {audit.free_tickets}"
+    )
+    draw_label = "Draw" if len(audit.draws) == 1 else "Draws"
+    draw_fields = [
+        (draw_label if index == 0 else f"{draw_label} (continued)", chunk)
+        for index, chunk in enumerate(
+            _chunk_field_lines(
+                [_format_audit_draw_line(draw) for draw in audit.draws],
+                RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
+            )
+        )
+    ]
+    entrant_noun = "entrant" if len(audit.entrants) == 1 else "entrants"
+    entrant_label = f"Ticket Ranges ({len(audit.entrants)} {entrant_noun})"
+    entrant_fields = [
+        (entrant_label if index == 0 else "Ticket Ranges (continued)", chunk)
+        for index, chunk in enumerate(
+            _chunk_field_lines(
+                [
+                    _format_audit_entrant_line(entrant)
+                    for entrant in audit.entrants
+                ],
+                RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
+            )
+        )
+    ]
+
+    first = discord.Embed(title=title, description=description)
+    first.set_footer(text=RAFFLE_AUDIT_VERIFY_FOOTER)
+    fixed_characters = (
+        len(title)
+        + len(description)
+        + len(RAFFLE_AUDIT_VERIFY_FOOTER)
+        + len(pool_name)
+        + len(pool_value)
+        + sum(len(name) + len(value) for name, value in draw_fields)
+    )
+    remaining_fields = (
+        RAFFLE_AUDIT_EMBED_FIELD_LIMIT - 1 - len(draw_fields)
+    )
+    remaining_characters = RAFFLE_AUDIT_EMBED_CHAR_LIMIT - fixed_characters
+
+    embeds = [first]
+    current = first
+    overflow_title = f"{title} — Ticket Ranges (continued)"
+    for name, value in entrant_fields:
+        cost = len(name) + len(value)
+        if remaining_fields < 1 or remaining_characters < cost:
+            current = discord.Embed(title=overflow_title)
+            embeds.append(current)
+            remaining_fields = RAFFLE_AUDIT_EMBED_FIELD_LIMIT
+            remaining_characters = (
+                RAFFLE_AUDIT_EMBED_CHAR_LIMIT - len(overflow_title)
+            )
+        current.add_field(name=name, value=value, inline=False)
+        remaining_fields -= 1
+        remaining_characters -= cost
+
+    first.add_field(name=pool_name, value=pool_value, inline=False)
+    for name, value in draw_fields:
+        first.add_field(name=name, value=value, inline=False)
+
+    LOGGER.debug(
+        "Rendered raffle audit embeds; entrants=%s draws=%s "
+        "entrant_fields=%s embeds=%s snapshot_available=%s",
+        len(audit.entrants),
+        len(audit.draws),
+        len(entrant_fields),
+        len(embeds),
+        audit.has_entrant_snapshot,
+    )
+    return embeds
 
 
 def raffle_deposit_embed(deposit: RaffleDeposit) -> discord.Embed:

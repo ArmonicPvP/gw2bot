@@ -16,7 +16,9 @@ from gw2bot.raffle.formatting import (
     format_bulk_addtickets_summary,
     format_removetickets_audit,
     format_raffle_result,
+    format_unknown_raffle_run_message,
     order_raffle_ticket_rows,
+    raffle_audit_embeds,
     raffle_contribution_table_rows,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
@@ -73,6 +75,35 @@ class RaffleCommands(app_commands.Group):
         return [
             app_commands.Choice(name=username, value=username)
             for username in usernames
+        ]
+
+    async def raffle_run_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[int]]:
+        try:
+            summaries = self._bot.get_raffle_run_summaries()
+        except SQLAlchemyError:
+            LOGGER.error("Could not load raffle runs for autocomplete")
+            return []
+        text = current.strip()
+        matches = [
+            summary
+            for summary in summaries
+            if not text or str(summary.run_id).startswith(text)
+        ][:25]
+        LOGGER.debug(
+            "Returning raffle run autocomplete choices; runs=%s choices=%s",
+            len(summaries),
+            len(matches),
+        )
+        return [
+            app_commands.Choice(
+                name=f"Run {summary.run_id} — {summary.run_time}",
+                value=summary.run_id,
+            )
+            for summary in matches
         ]
 
     async def _add_tickets_for_usernames(
@@ -190,6 +221,44 @@ class RaffleCommands(app_commands.Group):
         await interaction.followup.send(format_raffle_result(result))
         self._bot.mark_raffle_announcement_sent(result.run_id)
         LOGGER.debug("Raffle draw command announced run %s", result.run_id)
+
+    @app_commands.command(
+        name="audit",
+        description="Show everything needed to verify a past raffle draw",
+    )
+    @app_commands.describe(run_id="Raffle run id to audit")
+    @app_commands.autocomplete(run_id=raffle_run_autocomplete)
+    async def audit(
+        self,
+        interaction: discord.Interaction,
+        run_id: int,
+    ) -> None:
+        LOGGER.debug(
+            "Raffle audit command invoked by Discord user %s for run %s",
+            getattr(getattr(interaction, "user", None), "id", "unknown"),
+            run_id,
+        )
+        audit = self._bot.get_raffle_audit(run_id)
+        if audit is None:
+            LOGGER.debug("Raffle audit command found no run %s", run_id)
+            await interaction.response.send_message(
+                format_unknown_raffle_run_message(
+                    run_id,
+                    self._bot.get_raffle_run_summaries(),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        embeds = raffle_audit_embeds(audit)
+        await interaction.response.send_message(embed=embeds[0])
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed)
+        LOGGER.debug(
+            "Raffle audit command completed; run_id=%s embeds=%s",
+            run_id,
+            len(embeds),
+        )
 
     @app_commands.command(
         name="addticket",
