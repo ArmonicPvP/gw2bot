@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import discord
@@ -9,10 +10,12 @@ from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
 from gw2bot.raffle.models import (
     RAFFLE_REWARD_TIERS,
     RaffleContribution,
+    RaffleDeposit,
     RaffleMilestone,
     RaffleResult,
     RaffleRewardTier,
     RaffleTotal,
+    format_gold,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -126,6 +129,20 @@ def format_raffle_result(result: RaffleResult) -> str:
     )
 
 
+def raffle_deposit_embed(deposit: RaffleDeposit) -> discord.Embed:
+    embed = discord.Embed(title="Raffle Tickets Purchased")
+    embed.add_field(name="Member", value=deposit.username)
+    embed.add_field(
+        name="Gold Deposited",
+        value=format_gold(deposit.coins_deposited),
+    )
+    embed.add_field(
+        name="Tickets Purchased",
+        value=str(deposit.raffle_tickets),
+    )
+    return embed
+
+
 def raffle_ticket_embed(total: RaffleTotal) -> discord.Embed:
     embed = discord.Embed(title=f"Raffle Tickets: {total.username}")
     embed.add_field(
@@ -192,6 +209,37 @@ def raffle_contribution_table_rows(
         )
         for contribution in contributions
     ]
+
+
+RAFFLE_TICKET_ROW_SORT_KEYS: dict[
+    str,
+    Callable[[RaffleTicketTableRow], int],
+] = {
+    "purchased": lambda row: row.purchased,
+    "free": lambda row: row.free,
+    "total": lambda row: row.total,
+}
+
+
+def order_raffle_ticket_rows(
+    rows: list[RaffleTicketTableRow],
+    sort_key: str,
+) -> list[RaffleTicketTableRow]:
+    sort_value = RAFFLE_TICKET_ROW_SORT_KEYS[sort_key]
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            -sort_value(row),
+            row.name.casefold(),
+            row.name,
+        ),
+    )
+    LOGGER.debug(
+        "Ordered raffle ticket rows; rows=%s sort_key=%s",
+        len(ordered),
+        sort_key,
+    )
+    return ordered
 
 
 def format_raffle_ticket_blocks(rows: list[RaffleTicketTableRow]) -> str:

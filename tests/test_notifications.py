@@ -22,10 +22,8 @@ class TestAutomatedMessageDiagnostics:
         )
         output = "\n".join(messages)
 
-        assert (
-            "DiagnosticUser.1234 deposited 3 gold and purchased 3 raffle tickets"
-            in output
-        )
+        # The gold donation preview is delivered separately as an embed.
+        assert "deposited 3 gold" not in output
         assert "DiagnosticUser.1234 has joined the guild." in output
         assert "DiagnosticUser.1234 has left the guild." in output
         assert (
@@ -226,6 +224,18 @@ class TestAutomatedMessageDiagnostics:
             report_embed.description
             == "**Free Only.1234**\nPurchased: 0\nFree: 1\nTotal: 1"
         )
+        assert "**Gold donation purchase notification (test)**" in output
+        deposit_embed = next(
+            call_.kwargs["embed"]
+            for call_ in channel.send.await_args_list
+            if call_.args and "embed" in call_.kwargs
+        )
+        assert deposit_embed.title == "Raffle Tickets Purchased"
+        assert [(field.name, field.value) for field in deposit_embed.fields] == [
+            ("Member", "DiagnosticUser.1234"),
+            ("Gold Deposited", "3"),
+            ("Tickets Purchased", "3"),
+        ]
         assert (
             "100 total tickets have been purchased for this raffle. "
             "Tier 2 rewards have been reached!"
@@ -254,7 +264,7 @@ class TestAutomatedMessageDiagnostics:
 
         assert secret not in caplog.text
         assert (
-            "Prepared automated message diagnostics; messages=11 contributors=1"
+            "Prepared automated message diagnostics; messages=10 contributors=1"
             in caplog.text
         )
         assert caplog.text.count("Attempting automated diagnostic delivery") == 12

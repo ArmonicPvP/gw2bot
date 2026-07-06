@@ -161,3 +161,23 @@ async def try_send_raffle_contribution_message(bot: Gw2Bot, message: str) -> boo
         return False
     LOGGER.debug("Raffle contribution message delivery succeeded")
     return True
+
+
+async def try_send_raffle_contribution_embed(
+    bot: Gw2Bot,
+    embed: discord.Embed,
+) -> bool:
+    LOGGER.debug(
+        "Attempting raffle contribution embed delivery; fields=%s",
+        len(embed.fields),
+    )
+    try:
+        await bot._send_raffle_contribution_embed(embed, None)
+    except discord.DiscordException as exc:
+        LOGGER.error(
+            "Could not send raffle contribution embed; error_type=%s",
+            type(exc).__name__,
+        )
+        return False
+    LOGGER.debug("Raffle contribution embed delivery succeeded")
+    return True
