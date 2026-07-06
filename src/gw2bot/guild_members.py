@@ -35,6 +35,11 @@ TRIAL_WARNING_MARK_HEADER = (
     "**Trial members past the 7-day warning mark (to be kicked)**\n"
     "These users were warned and have not yet reached Sunborne:\n"
 )
+TRIAL_WARNING_PENDING_HEADER = (
+    "**Trial members within the 7-day warning window**\n"
+    "These users were warned and have this much time left before "
+    "they can be kicked:\n"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +47,7 @@ class TrialMemberReportEntry:
     username: str
     discord_user_id: int | None = None
     discord_status: str | None = None
+    warning_deadline: datetime | None = None
 
 
 class GuildMemberApi(Protocol):
@@ -322,6 +328,40 @@ def select_warned_overdue_members(
     return warned
 
 
+def select_pending_warning_members(
+    tracked_overdue: list[str],
+    tracked_times: dict[str, datetime],
+    now: datetime,
+    warning_period: timedelta = TRIAL_WARNING_PERIOD,
+) -> dict[str, datetime]:
+    """Return tracked overdue members still inside the warning window.
+
+    Maps each member to the moment their warning period ends
+    (``tracked_at + warning_period``). Members already past the mark are
+    excluded; they belong on the 7-day warning report instead. Matching is
+    case-insensitive.
+    """
+    now_utc = now.astimezone(UTC)
+    times_by_key = {
+        username.casefold(): tracked_at
+        for username, tracked_at in tracked_times.items()
+    }
+    pending: dict[str, datetime] = {}
+    for username in tracked_overdue:
+        tracked_at = times_by_key.get(username.casefold())
+        if tracked_at is None:
+            continue
+        deadline = tracked_at.astimezone(UTC) + warning_period
+        if deadline > now_utc:
+            pending[username] = deadline
+    LOGGER.debug(
+        "Selected %s members inside the warning window from %s tracked overdue",
+        len(pending),
+        len(tracked_overdue),
+    )
+    return pending
+
+
 def filter_sunborne_discord_entries(
     entries: Sequence[TrialMemberReportEntry],
 ) -> list[TrialMemberReportEntry]:
@@ -366,6 +406,8 @@ def format_overdue_trial_report(
             line += f" - <@{entry.discord_user_id}>"
             if entry.discord_status is not None:
                 line += f" - {entry.discord_status}"
+        if entry.warning_deadline is not None:
+            line += f" - kick <t:{int(entry.warning_deadline.timestamp())}:R>"
         line += "\n"
         if len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
             messages.append(current.rstrip())
