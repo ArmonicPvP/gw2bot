@@ -8,7 +8,7 @@ import discord
 import pytest
 from discord import app_commands
 
-from gw2bot.raffle import RaffleContribution
+from gw2bot.raffle import RaffleContribution, RaffleWinner
 from gw2bot.raffle.commands import (
     GUILD_ROSTER_ROLE_ID,
     RAFFLE_ADDTICKET_ROLE_ID,
@@ -1097,8 +1097,8 @@ class TestRaffleDrawCommand:
                     SimpleNamespace(
                         run_id=7,
                         winners=(
-                            SimpleNamespace(username="Winner A.1234"),
-                            SimpleNamespace(username="Winner B.5678"),
+                            RaffleWinner("Winner A.1234", 1, 10, tickets_held=6),
+                            RaffleWinner("Winner B.5678", 8, 9, tickets_held=4),
                         ),
                         total_tickets=10,
                         purchased_tickets=8,
@@ -1124,8 +1124,8 @@ class TestRaffleDrawCommand:
         interaction.response.send_message.assert_not_awaited()
         interaction.followup.send.assert_awaited_once_with(
             "Raffle winners:\n"
-            "1. **Winner A.1234**\n"
-            "2. **Winner B.5678**\n"
+            "1. **Winner A.1234** (60.0% chance)\n"
+            "2. **Winner B.5678** (44.4% chance)\n"
             "Selected 2 winners from 8 purchased tickets and 2 free tickets. "
             "All current raffle tickets have been reset."
         )
@@ -1136,7 +1136,7 @@ class TestRaffleDrawCommand:
     ) -> None:
         pending = SimpleNamespace(
             run_id=7,
-            winners=(SimpleNamespace(username="Winner.1234"),),
+            winners=(RaffleWinner("Winner.1234", 1, 10, tickets_held=9),),
             total_tickets=10,
             purchased_tickets=9,
             free_tickets=1,
@@ -1171,7 +1171,7 @@ class TestRaffleDrawCommand:
             run_raffle=MagicMock(
                 return_value=SimpleNamespace(
                     run_id=7,
-                    winners=(SimpleNamespace(username="Winner.1234"),),
+                    winners=(RaffleWinner("Winner.1234", 1, 10, tickets_held=10),),
                     total_tickets=10,
                     purchased_tickets=10,
                     free_tickets=0,
@@ -1195,12 +1195,12 @@ class TestRaffleDrawCommand:
 
         bot.mark_raffle_announcement_sent.assert_not_called()
 
-    def test_formats_repeat_winners_in_draw_order(self) -> None:
+    def test_formats_repeat_winners_with_win_chances_in_draw_order(self) -> None:
         result = SimpleNamespace(
             winners=(
-                SimpleNamespace(username="Repeat.1234"),
-                SimpleNamespace(username="Other.5678"),
-                SimpleNamespace(username="Repeat.1234"),
+                RaffleWinner("Repeat.1234", 3, 20, tickets_held=5),
+                RaffleWinner("Other.5678", 11, 19, tickets_held=3),
+                RaffleWinner("Repeat.1234", 2, 18, tickets_held=4),
             ),
             total_tickets=20,
             purchased_tickets=17,
@@ -1211,10 +1211,23 @@ class TestRaffleDrawCommand:
 
         assert message.startswith(
             "Raffle winners:\n"
-            "1. **Repeat.1234**\n"
-            "2. **Other.5678**\n"
-            "3. **Repeat.1234**\n"
+            "1. **Repeat.1234** (25.0% chance)\n"
+            "2. **Other.5678** (15.8% chance)\n"
+            "3. **Repeat.1234** (22.2% chance)\n"
         )
+
+    def test_formats_legacy_winner_without_win_chance(self) -> None:
+        result = SimpleNamespace(
+            winners=(RaffleWinner("Legacy.1234", 4, 10),),
+            total_tickets=10,
+            purchased_tickets=10,
+            free_tickets=0,
+        )
+
+        message = format_raffle_result(result)  # type: ignore[arg-type]
+
+        assert "1. **Legacy.1234**\n" in message
+        assert "chance" not in message
 
     async def test_does_not_draw_when_guild_log_refresh_fails(
         self,

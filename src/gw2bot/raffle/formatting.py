@@ -15,6 +15,7 @@ from gw2bot.raffle.models import (
     RaffleResult,
     RaffleRewardTier,
     RaffleTotal,
+    RaffleWinner,
     format_gold,
 )
 
@@ -115,9 +116,17 @@ def format_removetickets_audit(
     )
 
 
+def _format_winner_line(position: int, winner: RaffleWinner) -> str:
+    line = f"{position}. **{winner.username}**"
+    chance = winner.win_chance
+    if chance is not None:
+        line += f" ({chance:.1%} chance)"
+    return line
+
+
 def format_raffle_result(result: RaffleResult) -> str:
     winners = "\n".join(
-        f"{position}. **{winner.username}**"
+        _format_winner_line(position, winner)
         for position, winner in enumerate(result.winners, start=1)
     )
     return (
