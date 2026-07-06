@@ -15,15 +15,26 @@ from gw2bot.raffle.formatting import format_raffle_milestone_preview
 
 
 class TestAutomatedMessageDiagnostics:
-    def test_formats_all_non_command_automated_message_previews(self) -> None:
+    def test_formats_all_text_automated_message_previews(self) -> None:
         messages = format_automated_message_diagnostics(
             [RaffleContribution("Free Only.1234", 0, 1)],
             purchased_tickets=125,
         )
         output = "\n".join(messages)
 
-        # The gold donation preview is delivered separately as an embed.
-        assert "deposited 3 gold" not in output
+        # The contribution-channel gold donation preview is delivered
+        # separately as an embed; the log-channel audit stays plain text.
+        assert (
+            "**Gold donation audit log (test)**\n"
+            "DiagnosticUser.1234 deposited 3 gold and purchased "
+            "3 raffle tickets"
+        ) in output
+        assert "**Gold donation purchase notification (test)**" not in output
+        assert "<@0> added 1 raffle ticket to DiagnosticUser.1234." in output
+        assert (
+            "<@0> removed 2 purchased raffle tickets from DiagnosticUser.1234."
+            in output
+        )
         assert "DiagnosticUser.1234 has joined the guild." in output
         assert "DiagnosticUser.1234 has left the guild." in output
         assert (
@@ -230,12 +241,31 @@ class TestAutomatedMessageDiagnostics:
             for call_ in channel.send.await_args_list
             if call_.args and "embed" in call_.kwargs
         )
-        assert deposit_embed.title == "Raffle Tickets Purchased"
-        assert [(field.name, field.value) for field in deposit_embed.fields] == [
-            ("Member", "DiagnosticUser.1234"),
-            ("Gold Deposited", "3"),
-            ("Tickets Purchased", "3"),
-        ]
+        assert deposit_embed.title is None
+        assert deposit_embed.description == (
+            "DiagnosticUser.1234 deposited 3 gold and purchased "
+            "3 raffle tickets"
+        )
+        assert not deposit_embed.fields
+        labelled_embeds = {
+            call_.args[0]: call_.kwargs["embed"]
+            for call_ in channel.send.await_args_list
+            if call_.args and "embed" in call_.kwargs
+        }
+        draw_embed = labelled_embeds["**Raffle draw announcement (test)**"]
+        assert draw_embed.title == "Raffle Winners"
+        assert "1. **DiagnosticWinner.5678** (37.5% chance)" in (
+            draw_embed.description or ""
+        )
+        assert draw_embed.footer.text == (
+            "Run ID: 0 — anyone can verify this draw with /raffle audit."
+        )
+        audit_embed = labelled_embeds["**Raffle audit (test)**"]
+        assert audit_embed.title == "Raffle Run #0 Audit"
+        assert any(
+            field.name == "Ticket Ranges (2 entrants)"
+            for field in audit_embed.fields
+        )
         assert (
             "100 total tickets have been purchased for this raffle. "
             "Tier 2 rewards have been reached!"
@@ -264,13 +294,13 @@ class TestAutomatedMessageDiagnostics:
 
         assert secret not in caplog.text
         assert (
-            "Prepared automated message diagnostics; messages=10 contributors=1"
+            "Prepared automated message diagnostics; messages=13 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 12
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 12
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 17
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 17
         assert (
-            "Automated message diagnostics completed; attempted=12 delivered=12 "
+            "Automated message diagnostics completed; attempted=17 delivered=17 "
             "failed=0"
             in caplog.text
         )
@@ -282,20 +312,7 @@ class TestAutomatedMessageDiagnostics:
         secret = "diagnostic-failure-secret"
         channel = SimpleNamespace(
             send=AsyncMock(
-                side_effect=[
-                    None,
-                    RuntimeError(secret),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ]
+                side_effect=[None, RuntimeError(secret)] + [None] * 15
             )
         )
         bot = SimpleNamespace(
@@ -314,7 +331,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 12
+        assert channel.send.await_count == 17
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -322,7 +339,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=12 delivered=11 "
+            "Automated message diagnostics completed; attempted=17 delivered=16 "
             "failed=1"
             in caplog.text
         )

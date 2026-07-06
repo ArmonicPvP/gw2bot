@@ -30,11 +30,11 @@ from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_VERIFY_FOOTER,
     format_addticket_audit,
     format_bulk_addtickets_summary,
-    format_raffle_result,
     format_removetickets_audit,
     format_unknown_raffle_run_message,
     parse_squad_attendance_usernames,
     raffle_audit_embeds,
+    raffle_result_embed,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
     raffle_tier_summary_embed,
@@ -1141,12 +1141,18 @@ class TestRaffleDrawCommand:
 
         assert events == ["defer", "refresh", "run"]
         interaction.response.send_message.assert_not_awaited()
-        interaction.followup.send.assert_awaited_once_with(
-            "Raffle winners:\n"
+        interaction.followup.send.assert_awaited_once()
+        assert not interaction.followup.send.await_args.args
+        embed = interaction.followup.send.await_args.kwargs["embed"]
+        assert embed.title == "Raffle Winners"
+        assert embed.description == (
             "1. **Winner A.1234** (60.0% chance)\n"
             "2. **Winner B.5678** (44.4% chance)\n"
             "Selected 2 winners from 8 purchased tickets and 2 free tickets. "
             "All current raffle tickets have been reset."
+        )
+        assert embed.footer.text == (
+            "Run ID: 7 — anyone can verify this draw with /raffle audit."
         )
         bot.mark_raffle_announcement_sent.assert_called_once_with(7)
 
@@ -1216,6 +1222,7 @@ class TestRaffleDrawCommand:
 
     def test_formats_repeat_winners_with_win_chances_in_draw_order(self) -> None:
         result = SimpleNamespace(
+            run_id=5,
             winners=(
                 RaffleWinner("Repeat.1234", 3, 20, tickets_held=5),
                 RaffleWinner("Other.5678", 11, 19, tickets_held=3),
@@ -1226,10 +1233,10 @@ class TestRaffleDrawCommand:
             free_tickets=3,
         )
 
-        message = format_raffle_result(result)  # type: ignore[arg-type]
+        embed = raffle_result_embed(result)  # type: ignore[arg-type]
 
-        assert message.startswith(
-            "Raffle winners:\n"
+        assert embed.title == "Raffle Winners"
+        assert (embed.description or "").startswith(
             "1. **Repeat.1234** (25.0% chance)\n"
             "2. **Other.5678** (15.8% chance)\n"
             "3. **Repeat.1234** (22.2% chance)\n"
@@ -1237,16 +1244,21 @@ class TestRaffleDrawCommand:
 
     def test_formats_legacy_winner_without_win_chance(self) -> None:
         result = SimpleNamespace(
+            run_id=3,
             winners=(RaffleWinner("Legacy.1234", 4, 10),),
             total_tickets=10,
             purchased_tickets=10,
             free_tickets=0,
         )
 
-        message = format_raffle_result(result)  # type: ignore[arg-type]
+        embed = raffle_result_embed(result)  # type: ignore[arg-type]
 
-        assert "1. **Legacy.1234**\n" in message
-        assert "chance" not in message
+        description = embed.description or ""
+        assert "1. **Legacy.1234**\n" in description
+        assert "chance" not in description
+        assert embed.footer.text == (
+            "Run ID: 3 — anyone can verify this draw with /raffle audit."
+        )
 
     async def test_does_not_draw_when_guild_log_refresh_fails(
         self,

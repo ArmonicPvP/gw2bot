@@ -15,17 +15,26 @@ from gw2bot.guild_members import (
 from gw2bot.member_count import format_guild_member_count_topic
 from gw2bot.raffle.formatting import (
     RAFFLE_TICKETS_PAGE_SIZE,
+    format_addticket_audit,
     format_raffle_milestone_preview,
+    format_removetickets_audit,
+    raffle_audit_embeds,
     raffle_contribution_report_embed,
     raffle_deposit_embed,
+    raffle_result_embed,
 )
 from gw2bot.raffle.models import (
     GuildInvite,
     GuildJoin,
     GuildLeave,
     GuildRankChange,
+    RaffleAudit,
+    RaffleAuditDraw,
+    RaffleAuditRange,
     RaffleContribution,
     RaffleDeposit,
+    RaffleResult,
+    RaffleWinner,
 )
 from gw2bot.raffle.reports import raffle_contribution_report_end
 from gw2bot.raffle.views import RaffleContributionReportView
@@ -34,6 +43,67 @@ if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _diagnostic_raffle_result() -> RaffleResult:
+    # Mirrors _diagnostic_raffle_audit so both previews tell the same story.
+    return RaffleResult(
+        run_id=0,
+        winners=(
+            RaffleWinner(
+                username="DiagnosticWinner.5678",
+                winning_ticket=11,
+                tickets_before_draw=16,
+                tickets_held=6,
+            ),
+            RaffleWinner(
+                username="DiagnosticUser.1234",
+                winning_ticket=4,
+                tickets_before_draw=15,
+                tickets_held=10,
+            ),
+        ),
+        total_tickets=16,
+        purchased_tickets=15,
+        free_tickets=1,
+    )
+
+
+def _diagnostic_raffle_audit() -> RaffleAudit:
+    first_ranges = (
+        RaffleAuditRange("DiagnosticUser.1234", 10, 1, 10),
+        RaffleAuditRange("DiagnosticWinner.5678", 6, 11, 16),
+    )
+    second_ranges = (
+        RaffleAuditRange("DiagnosticUser.1234", 10, 1, 10),
+        RaffleAuditRange("DiagnosticWinner.5678", 5, 11, 15),
+    )
+    return RaffleAudit(
+        run_id=0,
+        run_time="2026-01-01 00:00:00",
+        total_tickets=16,
+        purchased_tickets=15,
+        free_tickets=1,
+        entrants=first_ranges,
+        draws=(
+            RaffleAuditDraw(
+                draw_position=1,
+                username="DiagnosticWinner.5678",
+                winning_ticket=11,
+                tickets_before_draw=16,
+                tickets_held=6,
+                ranges=first_ranges,
+            ),
+            RaffleAuditDraw(
+                draw_position=2,
+                username="DiagnosticUser.1234",
+                winning_ticket=4,
+                tickets_before_draw=15,
+                tickets_held=10,
+                ranges=second_ranges,
+            ),
+        ),
+    )
 
 
 def format_automated_message_diagnostics(
@@ -103,6 +173,24 @@ def format_automated_message_diagnostics(
                     event_time="",
                     changed_by="Officer.5678",
                 ).message
+            ),
+            (
+                "**Gold donation audit log (test)**\n"
+                + RaffleDeposit(
+                    event_id=0,
+                    username="DiagnosticUser.1234",
+                    coins_deposited=30_000,
+                    raffle_tickets=3,
+                    event_time="",
+                ).message
+            ),
+            (
+                "**Manual raffle ticket audit (test)**\n"
+                + format_addticket_audit(0, "DiagnosticUser.1234")
+            ),
+            (
+                "**Purchased ticket removal audit (test)**\n"
+                + format_removetickets_audit(0, "DiagnosticUser.1234", 2)
             ),
             (
                 "**Next raffle reward tier notification (test)**\n"
@@ -237,6 +325,20 @@ async def send_automated_message_diagnostics(
                 event_time="",
             )
         ),
+    )
+    attempted += 1
+    delivered += await try_send_automated_diagnostic(
+        channel,
+        "raffle-draw-preview",
+        message="**Raffle draw announcement (test)**",
+        embed=raffle_result_embed(_diagnostic_raffle_result()),
+    )
+    attempted += 1
+    delivered += await try_send_automated_diagnostic(
+        channel,
+        "raffle-audit-preview",
+        message="**Raffle audit (test)**",
+        embed=raffle_audit_embeds(_diagnostic_raffle_audit())[0],
     )
     for index, diagnostic_message in enumerate(messages[1:], start=1):
         attempted += 1

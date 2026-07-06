@@ -15,10 +15,10 @@ from gw2bot.raffle.formatting import (
     format_addticket_audit,
     format_bulk_addtickets_summary,
     format_removetickets_audit,
-    format_raffle_result,
     format_unknown_raffle_run_message,
     order_raffle_ticket_rows,
     raffle_audit_embeds,
+    raffle_result_embed,
     raffle_contribution_table_rows,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
@@ -218,7 +218,7 @@ class RaffleCommands(app_commands.Group):
             )
             return
 
-        await interaction.followup.send(format_raffle_result(result))
+        await interaction.followup.send(embed=raffle_result_embed(result))
         self._bot.mark_raffle_announcement_sent(result.run_id)
         LOGGER.debug("Raffle draw command announced run %s", result.run_id)
 
