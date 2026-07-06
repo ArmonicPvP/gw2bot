@@ -12,6 +12,7 @@ import discord
 
 from gw2bot.discord_utils import log_discord_failure
 from gw2bot.guild_members import (
+    SUNBORNE_DISCORD_STATUS,
     TRIAL_BEFORE_MARK_HEADER,
     TRIAL_WARNING_MARK_HEADER,
     TRIAL_WARNING_PENDING_HEADER,
@@ -104,22 +105,38 @@ async def build_trial_report_messages(
     )
     for username in stale_tracked:
         bot.untrack_trial_member(username)
+    tracked_entries = await bot._resolve_trial_member_discord_statuses(
+        tracked_overdue
+    )
+    # Tracked members who reached Sunborne in Discord no longer need their
+    # warning; untrack them and return them to the past-14-day report so
+    # the in-game rank-up is not forgotten.
+    promoted_entries = filter_sunborne_discord_entries(tracked_entries)
+    for entry in promoted_entries:
+        bot.untrack_trial_member(entry.username)
+    still_tracked_entries = [
+        entry
+        for entry in tracked_entries
+        if entry.discord_status != SUNBORNE_DISCORD_STATUS
+    ]
+    still_tracked = [entry.username for entry in still_tracked_entries]
     warned_overdue = select_warned_overdue_members(
-        tracked_overdue,
+        still_tracked,
         tracked_times,
         now,
     )
     pending_deadlines = select_pending_warning_members(
-        tracked_overdue,
+        still_tracked,
         tracked_times,
         now,
     )
     LOGGER.debug(
-        "Found %s overdue (%s tracked, %s inside warning window, %s past "
-        "7-day warning) and %s recent Trial members from %s guild members; "
-        "auto_untracked=%s",
+        "Found %s overdue (%s tracked, %s untracked after Discord rank-up, "
+        "%s inside warning window, %s past 7-day warning) and %s recent "
+        "Trial members from %s guild members; auto_untracked=%s",
         len(overdue),
         len(tracked_overdue),
+        len(promoted_entries),
         len(pending_deadlines),
         len(warned_overdue),
         len(recent),
@@ -128,18 +145,20 @@ async def build_trial_report_messages(
     )
     recent_entries = await bot._resolve_trial_member_discord_statuses(recent)
     before_mark_entries = filter_sunborne_discord_entries(recent_entries)
-    overdue_entries = await bot._resolve_trial_member_discord_statuses(
-        untracked_overdue
+    overdue_entries = (
+        await bot._resolve_trial_member_discord_statuses(untracked_overdue)
+        + promoted_entries
     )
+    entries_by_username = {
+        entry.username: entry for entry in still_tracked_entries
+    }
     pending_entries = [
-        replace(entry, warning_deadline=pending_deadlines[entry.username])
-        for entry in await bot._resolve_trial_member_discord_statuses(
-            list(pending_deadlines)
-        )
+        replace(entries_by_username[username], warning_deadline=deadline)
+        for username, deadline in pending_deadlines.items()
     ]
-    warning_entries = await bot._resolve_trial_member_discord_statuses(
-        warned_overdue
-    )
+    warning_entries = [
+        entries_by_username[username] for username in warned_overdue
+    ]
     messages = (
         format_overdue_trial_report(
             before_mark_entries,
