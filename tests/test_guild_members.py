@@ -302,6 +302,14 @@ class TestTrialMemberReport:
         for username in usernames:
             assert sum(username in message for message in messages) == 1
         assert all("ranked up to Sunborne" in message for message in messages)
+        # Alphabetical order must continue across the message split.
+        listed = [
+            line.removeprefix("* ")
+            for message in messages
+            for line in message.splitlines()
+            if line.startswith("* ")
+        ]
+        assert listed == usernames
 
     def test_empty_trial_report_does_not_create_message(self) -> None:
         assert format_overdue_trial_report([]) == []
@@ -320,7 +328,7 @@ class TestTrialMemberReport:
         assert "* Unresolved.5678" in messages[0]
         assert "Unresolved.5678 -" not in messages[0]
 
-    def test_sorts_sunborne_then_trial_then_unresolved(self) -> None:
+    def test_sorts_alphabetically_regardless_of_discord_status(self) -> None:
         message = format_overdue_trial_report(
             [
                 TrialMemberReportEntry("Zulu.1234"),
@@ -334,15 +342,15 @@ class TestTrialMemberReport:
 
         lines = [line for line in message.splitlines() if line.startswith("* ")]
         assert lines == [
-            "* Charlie.1234 - <@3> - Sunborne",
-            "* Delta.1234 - <@4> - Sunborne",
             "* Alpha.1234 - <@1> - Trial",
             "* Bravo.1234 - <@2> - Trial",
+            "* Charlie.1234 - <@3> - Sunborne",
+            "* Delta.1234 - <@4> - Sunborne",
             "* Echo.1234 - <@5>",
             "* Zulu.1234",
         ]
 
-    def test_uppercase_names_sort_before_lowercase(self) -> None:
+    def test_names_sort_case_insensitively(self) -> None:
         message = format_overdue_trial_report(
             [
                 TrialMemberReportEntry("apple.1234"),
@@ -355,8 +363,8 @@ class TestTrialMemberReport:
         lines = [line for line in message.splitlines() if line.startswith("* ")]
         assert lines == [
             "* Apple.1234",
-            "* Zebra.1234",
             "* apple.1234",
+            "* Zebra.1234",
             "* zebra.1234",
         ]
 
