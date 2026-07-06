@@ -47,6 +47,15 @@ class RaffleWinner:
     username: str
     winning_ticket: int
     tickets_before_draw: int
+    # Tickets the winner held at the moment of this draw; None for legacy
+    # runs recorded before ticket counts were kept.
+    tickets_held: int | None = None
+
+    @property
+    def win_chance(self) -> float | None:
+        if self.tickets_held is None or self.tickets_before_draw <= 0:
+            return None
+        return self.tickets_held / self.tickets_before_draw
 
 
 @dataclass(frozen=True, slots=True)

@@ -842,12 +842,18 @@ class TestRaffleStore:
                     winner.username,
                     winner.winning_ticket,
                     winner.tickets_before_draw,
+                    winner.tickets_held,
                 )
                 for winner in result.winners
             ] == [
-                ("Username.1234", 1, 3),
-                ("Username.1234", 1, 2),
-                ("Username.1234", 1, 1),
+                ("Username.1234", 1, 3, 3),
+                ("Username.1234", 1, 2, 2),
+                ("Username.1234", 1, 1, 1),
+            ]
+            assert [winner.win_chance for winner in result.winners] == [
+                1.0,
+                1.0,
+                1.0,
             ]
             store.close()
 
@@ -944,8 +950,9 @@ class TestRaffleStore:
                 "User B.2222",
             ]
             assert [
-                winner.tickets_before_draw for winner in result.winners
-            ] == [16, 15]
+                (winner.tickets_before_draw, winner.tickets_held)
+                for winner in result.winners
+            ] == [(16, 6), (15, 5)]
             assert result.total_tickets == 16
             assert result.purchased_tickets == 15
             assert result.free_tickets == 1
@@ -1316,9 +1323,11 @@ class TestRaffleStore:
                     winner.username,
                     winner.winning_ticket,
                     winner.tickets_before_draw,
+                    winner.tickets_held,
                 )
                 for winner in result.winners
-            ] == [("Winner.1234", 4, 10)]
+            ] == [("Winner.1234", 4, 10, None)]
+            assert result.winners[0].win_chance is None
             store.close()
 
     def test_new_store_cursor_skips_historical_events(self) -> None:

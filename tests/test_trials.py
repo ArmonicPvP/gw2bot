@@ -378,6 +378,65 @@ class TestTrialMemberReportMessages:
         assert "Tracked.5678" in warning
         untrack.assert_called_once_with("Gone.9012")
 
+    async def test_sunborne_tracked_members_return_to_past_mark_report(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {
+                        "name": name,
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=20)).isoformat(),
+                    }
+                    for name in (
+                        "Promoted Warned.1234",
+                        "Promoted Pending.5678",
+                        "Still Trial.9012",
+                    )
+                ]
+            )
+        )
+        untrack = MagicMock()
+        bot = SimpleNamespace(
+            _api=api,
+            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            get_tracked_trial_member_times=MagicMock(
+                return_value={
+                    "Promoted Warned.1234": now - timedelta(days=8),
+                    "Promoted Pending.5678": now - timedelta(days=2),
+                    "Still Trial.9012": now - timedelta(days=8),
+                }
+            ),
+            untrack_trial_member=untrack,
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {
+                    "Promoted Warned.1234": "Sunborne",
+                    "Promoted Pending.5678": "Sunborne",
+                    "Still Trial.9012": "Trial",
+                }
+            ),
+        )
+
+        past_mark, warning = await Gw2Bot._build_trial_report_messages(
+            cast(Gw2Bot, bot),
+            now,
+        )
+
+        # Members who reached Sunborne in Discord leave the warning flow and
+        # return to the past-14-day report until their in-game rank changes.
+        assert "Trial members past the 14-day mark" in past_mark
+        assert "Promoted Warned.1234 - <@100> - Sunborne" in past_mark
+        assert "Promoted Pending.5678 - <@100> - Sunborne" in past_mark
+        assert "Still Trial.9012" not in past_mark
+        assert "Trial members past the 7-day warning mark (to be kicked)" in warning
+        assert "Still Trial.9012" in warning
+        assert "Promoted Warned.1234" not in warning
+        assert "Promoted Pending.5678" not in warning
+        assert sorted(call_.args[0] for call_ in untrack.call_args_list) == [
+            "Promoted Pending.5678",
+            "Promoted Warned.1234",
+        ]
+
     async def test_tracked_member_in_grace_window_shows_kick_countdown(self) -> None:
         now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         api = SimpleNamespace(

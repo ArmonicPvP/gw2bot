@@ -677,12 +677,14 @@ class RaffleStore:
                     if winning_ticket <= cursor:
                         winner = username
                         break
+                tickets_held = remaining_tickets[winner]
                 remaining_tickets[winner] -= 1
                 winners.append(
                     RaffleWinner(
                         username=winner,
                         winning_ticket=winning_ticket,
                         tickets_before_draw=tickets_before_draw,
+                        tickets_held=tickets_held,
                     )
                 )
 
@@ -1155,14 +1157,35 @@ def _to_raffle_result(session: Session, record: RaffleRunRecord) -> RaffleResult
         .where(RaffleRunWinnerRecord.run_id == record.run_id)
         .order_by(RaffleRunWinnerRecord.draw_position)
     ).all()
-    winners = tuple(
-        RaffleWinner(
-            username=winner.username,
-            winning_ticket=winner.winning_ticket,
-            tickets_before_draw=winner.tickets_before_draw,
+    # Each win removes one of the winner's tickets, so the tickets held at a
+    # given draw are the run entry's tickets minus their earlier wins.
+    entry_tickets = {
+        entry.username: entry.raffle_tickets
+        for entry in session.scalars(
+            select(RaffleRunEntryRecord).where(
+                RaffleRunEntryRecord.run_id == record.run_id
+            )
+        ).all()
+    }
+    prior_wins: dict[str, int] = {}
+    winner_models: list[RaffleWinner] = []
+    for winner in winner_records:
+        initial_tickets = entry_tickets.get(winner.username)
+        tickets_held = (
+            initial_tickets - prior_wins.get(winner.username, 0)
+            if initial_tickets is not None
+            else None
         )
-        for winner in winner_records
-    )
+        prior_wins[winner.username] = prior_wins.get(winner.username, 0) + 1
+        winner_models.append(
+            RaffleWinner(
+                username=winner.username,
+                winning_ticket=winner.winning_ticket,
+                tickets_before_draw=winner.tickets_before_draw,
+                tickets_held=tickets_held,
+            )
+        )
+    winners = tuple(winner_models)
     if not winners:
         winners = (
             RaffleWinner(
