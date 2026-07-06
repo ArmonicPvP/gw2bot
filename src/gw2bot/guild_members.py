@@ -17,11 +17,6 @@ TRIAL_REPORT_HOUR_UTC = 17
 DISCORD_MESSAGE_LIMIT = 2_000
 BACKGROUND_REFRESH_RETRY_SECONDS = 30
 SUNBORNE_DISCORD_STATUS = "Sunborne"
-TRIAL_DISCORD_STATUS = "Trial"
-TRIAL_REPORT_STATUS_ORDER = {
-    SUNBORNE_DISCORD_STATUS: 0,
-    TRIAL_DISCORD_STATUS: 1,
-}
 TRIAL_PAST_MARK_HEADER = (
     "**Trial members past the 14-day mark**\n"
     "Please confirm whether these users have completed the challenges "
@@ -393,8 +388,7 @@ def format_overdue_trial_report(
             for value in entries
         ),
         key=lambda entry: (
-            TRIAL_REPORT_STATUS_ORDER.get(entry.discord_status or "", 2),
-            # Case-sensitive: uppercase sorts before lowercase ("Z" before "a").
+            entry.username.casefold(),
             entry.username,
         ),
     )
