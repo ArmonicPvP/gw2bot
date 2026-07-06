@@ -16,8 +16,10 @@ from gw2bot.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.poll_status import PollStatusTracker
 from gw2bot.raffle import (
+    RaffleAudit,
     RaffleContribution,
     RaffleResult,
+    RaffleRunSummary,
     RaffleStore,
     RaffleTotal,
 )
@@ -336,6 +338,12 @@ class Gw2Bot(discord.Client):
 
     def get_pending_raffle_result(self) -> RaffleResult | None:
         return self._raffle_store.get_pending_raffle_result()
+
+    def get_raffle_audit(self, run_id: int) -> RaffleAudit | None:
+        return self._raffle_store.get_raffle_audit(run_id)
+
+    def get_raffle_run_summaries(self) -> list[RaffleRunSummary]:
+        return self._raffle_store.get_raffle_run_summaries()
 
     def mark_raffle_announcement_sent(self, run_id: int) -> None:
         self._raffle_store.mark_raffle_announcement_sent(run_id)

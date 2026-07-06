@@ -68,6 +68,57 @@ class RaffleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RaffleRunSummary:
+    run_id: int
+    run_time: str
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleAuditRange:
+    username: str
+    tickets: int
+    first_ticket: int
+    last_ticket: int
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleAuditDraw:
+    draw_position: int
+    username: str
+    winning_ticket: int
+    tickets_before_draw: int
+    # Tickets the winner held at the moment of this draw; None for legacy
+    # runs recorded before entrant snapshots were kept.
+    tickets_held: int | None
+    # Ticket ranges in effect for this draw, alphabetical by username;
+    # empty for legacy runs without an entrant snapshot.
+    ranges: tuple[RaffleAuditRange, ...]
+
+    @property
+    def win_chance(self) -> float | None:
+        if self.tickets_held is None or self.tickets_before_draw <= 0:
+            return None
+        return self.tickets_held / self.tickets_before_draw
+
+
+@dataclass(frozen=True, slots=True)
+class RaffleAudit:
+    run_id: int
+    run_time: str
+    total_tickets: int
+    purchased_tickets: int
+    free_tickets: int
+    # Ticket ranges for the first draw, alphabetical by username; empty for
+    # legacy runs recorded before entrant snapshots were kept.
+    entrants: tuple[RaffleAuditRange, ...]
+    draws: tuple[RaffleAuditDraw, ...]
+
+    @property
+    def has_entrant_snapshot(self) -> bool:
+        return bool(self.entrants)
+
+
+@dataclass(frozen=True, slots=True)
 class RaffleContribution:
     username: str
     purchased_tickets: int

@@ -874,6 +874,188 @@ class TestRaffleStore:
                 ]
             engine.dispose()
 
+    def test_audit_reconstructs_multi_winner_ticket_ranges_per_draw(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    gold_deposit(101, username="Alpha One.1111", coins=20_000),
+                    gold_deposit(102, username="Beta Two.2222", coins=30_000),
+                    gold_deposit(103, username="Gamma Three.3333", coins=40_000),
+                ]
+            )
+            tickets = iter([0, 1])
+            result = store.run_raffle(randbelow=lambda total: next(tickets))
+            assert result is not None
+
+            audit = store.get_raffle_audit(result.run_id)
+
+            assert audit is not None
+            assert audit.run_id == result.run_id
+            assert audit.run_time
+            assert audit.total_tickets == 9
+            assert audit.purchased_tickets == 9
+            assert audit.free_tickets == 0
+            assert audit.has_entrant_snapshot
+            assert [
+                (
+                    entrant.username,
+                    entrant.tickets,
+                    entrant.first_ticket,
+                    entrant.last_ticket,
+                )
+                for entrant in audit.entrants
+            ] == [
+                ("Alpha One.1111", 2, 1, 2),
+                ("Beta Two.2222", 3, 3, 5),
+                ("Gamma Three.3333", 4, 6, 9),
+            ]
+            assert [
+                (
+                    draw.draw_position,
+                    draw.username,
+                    draw.winning_ticket,
+                    draw.tickets_before_draw,
+                    draw.tickets_held,
+                )
+                for draw in audit.draws
+            ] == [
+                (1, "Alpha One.1111", 1, 9, 2),
+                (2, "Beta Two.2222", 2, 8, 3),
+            ]
+            assert audit.draws[0].ranges == audit.entrants
+            # Alpha's win removed one ticket, so every later range shifts.
+            assert [
+                (
+                    entrant.username,
+                    entrant.tickets,
+                    entrant.first_ticket,
+                    entrant.last_ticket,
+                )
+                for entrant in audit.draws[1].ranges
+            ] == [
+                ("Alpha One.1111", 1, 1, 1),
+                ("Beta Two.2222", 3, 2, 4),
+                ("Gamma Three.3333", 4, 5, 8),
+            ]
+            assert audit.draws[0].win_chance == pytest.approx(2 / 9)
+            assert audit.draws[1].win_chance == pytest.approx(3 / 8)
+            store.close()
+
+    def test_audit_reconstructs_single_winner_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(
+                str(Path(directory) / "raffle.db"),
+                "guild-id",
+                draw_tiers=(RaffleDrawTier(0, 1),),
+            )
+            store.initialize_cursor(100)
+            store.process_events([gold_deposit(101, coins=20_000)])
+            result = store.run_raffle(randbelow=lambda total: 1)
+            assert result is not None
+
+            audit = store.get_raffle_audit(result.run_id)
+
+            assert audit is not None
+            assert [
+                (
+                    entrant.username,
+                    entrant.tickets,
+                    entrant.first_ticket,
+                    entrant.last_ticket,
+                )
+                for entrant in audit.entrants
+            ] == [("Username.1234", 2, 1, 2)]
+            assert len(audit.draws) == 1
+            draw = audit.draws[0]
+            assert (
+                draw.draw_position,
+                draw.username,
+                draw.winning_ticket,
+                draw.tickets_before_draw,
+                draw.tickets_held,
+            ) == (1, "Username.1234", 2, 2, 2)
+            assert draw.ranges == audit.entrants
+            assert draw.win_chance == 1.0
+            store.close()
+
+    def test_audit_degrades_gracefully_for_legacy_run_without_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            engine = create_engine(f"sqlite:///{database_path}")
+            metadata = MetaData()
+            legacy_runs = Table(
+                "raffle_runs",
+                metadata,
+                Column("run_id", Integer, primary_key=True, autoincrement=True),
+                Column("run_time", String, nullable=False),
+                Column("winner", String, nullable=False),
+                Column("winning_ticket", Integer, nullable=False),
+                Column("total_tickets", Integer, nullable=False),
+            )
+            metadata.create_all(engine)
+            with engine.begin() as connection:
+                connection.execute(
+                    legacy_runs.insert().values(
+                        run_time="2026-06-07 12:00:00",
+                        winner="Winner.1234",
+                        winning_ticket=4,
+                        total_tickets=10,
+                    )
+                )
+            engine.dispose()
+
+            store = RaffleStore(database_path, "guild-id")
+            audit = store.get_raffle_audit(1)
+
+            assert audit is not None
+            assert audit.run_time == "2026-06-07 12:00:00"
+            assert audit.total_tickets == 10
+            assert audit.purchased_tickets == 10
+            assert audit.free_tickets == 0
+            assert not audit.has_entrant_snapshot
+            assert audit.entrants == ()
+            assert [
+                (
+                    draw.draw_position,
+                    draw.username,
+                    draw.winning_ticket,
+                    draw.tickets_before_draw,
+                    draw.tickets_held,
+                    draw.ranges,
+                )
+                for draw in audit.draws
+            ] == [(1, "Winner.1234", 4, 10, None, ())]
+            assert audit.draws[0].win_chance is None
+            store.close()
+
+    def test_audit_returns_none_for_unknown_run_and_lists_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            assert store.get_raffle_run_summaries() == []
+            assert store.get_raffle_audit(1) is None
+
+            store.process_events([gold_deposit(101, coins=20_000)])
+            first = store.run_raffle(randbelow=lambda total: 0)
+            assert first is not None
+            store.mark_raffle_announcement_sent(first.run_id)
+            store.process_events([gold_deposit(102, coins=10_000)])
+            second = store.run_raffle(randbelow=lambda total: 0)
+            assert second is not None
+
+            summaries = store.get_raffle_run_summaries()
+            assert [summary.run_id for summary in summaries] == [
+                second.run_id,
+                first.run_id,
+            ]
+            assert all(summary.run_time for summary in summaries)
+            assert store.get_raffle_audit(999) is None
+            store.close()
+
     def test_draw_count_uses_current_purchased_ticket_tier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(

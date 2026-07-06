@@ -48,12 +48,16 @@ from gw2bot.raffle.models import (
     GuildJoin,
     GuildLeave,
     GuildRankChange,
+    RaffleAudit,
+    RaffleAuditDraw,
+    RaffleAuditRange,
     RaffleContribution,
     RaffleDeposit,
     RaffleDrawTier,
     RaffleMilestone,
     RaffleResult,
     RaffleRewardTier,
+    RaffleRunSummary,
     RaffleTotal,
     RaffleWinner,
     TrialForumPost,
@@ -759,6 +763,87 @@ class RaffleStore:
             LOGGER.debug("Loaded pending raffle result; found=%s", result is not None)
             return result
 
+    def get_raffle_run_summaries(self) -> list[RaffleRunSummary]:
+        statement = select(RaffleRunRecord).order_by(RaffleRunRecord.run_id.desc())
+        with self._sessions() as session:
+            results = [
+                RaffleRunSummary(run_id=record.run_id, run_time=record.run_time)
+                for record in session.scalars(statement).all()
+            ]
+            LOGGER.debug("Loaded %s raffle run summaries", len(results))
+            return results
+
+    def get_raffle_audit(self, run_id: int) -> RaffleAudit | None:
+        with self._sessions() as session:
+            record = session.get(RaffleRunRecord, run_id)
+            if record is None:
+                LOGGER.debug("Raffle audit requested for unknown run %s", run_id)
+                return None
+            # Alphabetical username order matches the ORDER BY username pool
+            # that run_raffle drew from, so the rebuilt ranges are exact.
+            entries = session.scalars(
+                select(RaffleRunEntryRecord)
+                .where(RaffleRunEntryRecord.run_id == run_id)
+                .order_by(RaffleRunEntryRecord.username)
+            ).all()
+            winner_records = session.scalars(
+                select(RaffleRunWinnerRecord)
+                .where(RaffleRunWinnerRecord.run_id == run_id)
+                .order_by(RaffleRunWinnerRecord.draw_position)
+            ).all()
+
+            remaining_tickets = {
+                entry.username: entry.raffle_tickets for entry in entries
+            }
+            entrants = _to_audit_ranges(remaining_tickets)
+
+            draws: list[RaffleAuditDraw] = []
+            # Each win removes one of the winner's tickets, so the ranges for
+            # a given draw come from the run entries minus earlier wins.
+            for winner in winner_records:
+                draws.append(
+                    RaffleAuditDraw(
+                        draw_position=winner.draw_position,
+                        username=winner.username,
+                        winning_ticket=winner.winning_ticket,
+                        tickets_before_draw=winner.tickets_before_draw,
+                        tickets_held=remaining_tickets.get(winner.username),
+                        ranges=_to_audit_ranges(remaining_tickets),
+                    )
+                )
+                if winner.username in remaining_tickets:
+                    remaining_tickets[winner.username] -= 1
+            if not draws:
+                draws.append(
+                    RaffleAuditDraw(
+                        draw_position=1,
+                        username=record.winner,
+                        winning_ticket=record.winning_ticket,
+                        tickets_before_draw=record.total_tickets,
+                        tickets_held=remaining_tickets.get(record.winner),
+                        ranges=entrants,
+                    )
+                )
+
+            audit = RaffleAudit(
+                run_id=record.run_id,
+                run_time=record.run_time,
+                total_tickets=record.total_tickets,
+                purchased_tickets=record.purchased_tickets,
+                free_tickets=record.free_tickets,
+                entrants=entrants,
+                draws=tuple(draws),
+            )
+            LOGGER.debug(
+                "Loaded raffle audit for run %s; entrants=%s draws=%s "
+                "snapshot_available=%s",
+                run_id,
+                len(audit.entrants),
+                len(audit.draws),
+                audit.has_entrant_snapshot,
+            )
+            return audit
+
     def mark_raffle_announcement_sent(self, run_id: int) -> None:
         with self._sessions.begin() as session:
             record = session.get(RaffleRunRecord, run_id)
@@ -1149,6 +1234,28 @@ def _to_raffle_total(record: RaffleTotalRecord) -> RaffleTotal:
         gold_raffle_tickets=record.gold_raffle_tickets,
         manual_raffle_tickets=record.manual_raffle_tickets,
     )
+
+
+def _to_audit_ranges(
+    remaining_tickets: dict[str, int],
+) -> tuple[RaffleAuditRange, ...]:
+    # Mirrors the cursor walk in run_raffle: tickets are numbered from one
+    # in the iteration order, and empty entrants occupy no ticket numbers.
+    ranges: list[RaffleAuditRange] = []
+    cursor = 0
+    for username, tickets in remaining_tickets.items():
+        if tickets <= 0:
+            continue
+        ranges.append(
+            RaffleAuditRange(
+                username=username,
+                tickets=tickets,
+                first_ticket=cursor + 1,
+                last_ticket=cursor + tickets,
+            )
+        )
+        cursor += tickets
+    return tuple(ranges)
 
 
 def _to_raffle_result(session: Session, record: RaffleRunRecord) -> RaffleResult:
