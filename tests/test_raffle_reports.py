@@ -8,8 +8,11 @@ import discord
 import pytest
 
 from gw2bot.bot import Gw2Bot
-from gw2bot.raffle import RaffleContribution
-from gw2bot.raffle.formatting import raffle_contribution_report_embed
+from gw2bot.raffle import RaffleContribution, RaffleDeposit
+from gw2bot.raffle.formatting import (
+    raffle_contribution_report_embed,
+    raffle_deposit_embed,
+)
 from gw2bot.raffle.reports import (
     RAFFLE_CONTRIBUTION_CHANNEL_ID,
     raffle_contribution_report_end,
@@ -127,20 +130,30 @@ class TestRaffleContributionNotification:
         assert "Member 10.1234" in (second_embed.description or "")
         assert "Member 09.1234" not in (second_embed.description or "")
 
-    async def test_sends_pending_purchase_messages_to_raffle_channel(self) -> None:
-        deposit = SimpleNamespace(event_id=101, message="purchase message")
+    async def test_sends_pending_purchase_embeds_to_raffle_channel(self) -> None:
+        deposit = RaffleDeposit(
+            event_id=101,
+            username="Member.1234",
+            coins_deposited=30_000,
+            raffle_tickets=3,
+            event_time="2026-06-07T06:26:17.000Z",
+        )
         store = MagicMock()
         store.get_pending_notifications.return_value = [deposit]
         bot = SimpleNamespace(
             _raffle_store=store,
-            _try_send_raffle_contribution_message=AsyncMock(return_value=True),
+            _try_send_raffle_contribution_embed=AsyncMock(return_value=True),
         )
 
         await Gw2Bot._send_pending_raffle_notifications(cast(Gw2Bot, bot))
 
-        bot._try_send_raffle_contribution_message.assert_awaited_once_with(
-            "purchase message"
-        )
+        embed = bot._try_send_raffle_contribution_embed.await_args.args[0]
+        assert embed.title == "Raffle Tickets Purchased"
+        assert [(field.name, field.value) for field in embed.fields] == [
+            ("Member", "Member.1234"),
+            ("Gold Deposited", "3"),
+            ("Tickets Purchased", "3"),
+        ]
         store.mark_notification_sent.assert_called_once_with(101)
 
     async def test_officer_purchase_attempts_all_purchase_deliveries(self) -> None:
@@ -310,12 +323,18 @@ class TestRaffleContributionNotification:
     async def test_retries_pending_purchase_after_raffle_channel_failure(
         self,
     ) -> None:
-        deposit = SimpleNamespace(event_id=101, message="purchase message")
+        deposit = RaffleDeposit(
+            event_id=101,
+            username="Member.1234",
+            coins_deposited=30_000,
+            raffle_tickets=3,
+            event_time="2026-06-07T06:26:17.000Z",
+        )
         store = MagicMock()
         store.get_pending_notifications.return_value = [deposit]
         bot = SimpleNamespace(
             _raffle_store=store,
-            _try_send_raffle_contribution_message=AsyncMock(return_value=False),
+            _try_send_raffle_contribution_embed=AsyncMock(return_value=False),
         )
 
         await Gw2Bot._send_pending_raffle_notifications(cast(Gw2Bot, bot))
@@ -342,6 +361,37 @@ class TestRaffleContributionNotification:
         assert not sent
         assert secret not in caplog.text
         assert "Could not send raffle contribution message" in caplog.text
+
+    async def test_raffle_channel_embed_failure_does_not_log_credentials(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "raffle-channel-embed-secret"
+        bot = SimpleNamespace(
+            _send_raffle_contribution_embed=AsyncMock(
+                side_effect=discord.ClientException(secret)
+            ),
+        )
+        embed = raffle_deposit_embed(
+            RaffleDeposit(
+                event_id=101,
+                username="Member.1234",
+                coins_deposited=30_000,
+                raffle_tickets=3,
+                event_time="2026-06-07T06:26:17.000Z",
+            )
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            sent = await Gw2Bot._try_send_raffle_contribution_embed(
+                cast(Gw2Bot, bot),
+                embed,
+            )
+
+        assert not sent
+        assert secret not in caplog.text
+        assert "Member.1234" not in caplog.text
+        assert "Could not send raffle contribution embed" in caplog.text
 
     async def test_sends_report_to_configured_gw2_chat_and_caches_channel(
         self,

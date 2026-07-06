@@ -16,6 +16,7 @@ from gw2bot.raffle.formatting import (
     format_bulk_addtickets_summary,
     format_removetickets_audit,
     format_raffle_result,
+    order_raffle_ticket_rows,
     raffle_contribution_table_rows,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
@@ -32,6 +33,7 @@ from gw2bot.raffle.views import (
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
 from gw2bot.raffle.roles import (
+    GUILD_ROSTER_ROLE_ID as GUILD_ROSTER_ROLE_ID,
     RAFFLE_ADDTICKET_ROLE_ID as RAFFLE_ADDTICKET_ROLE_ID,
     RAFFLE_DRAW_ROLE_ID as RAFFLE_DRAW_ROLE_ID,
     RAFFLE_OFFICER_ROLE_ID as RAFFLE_OFFICER_ROLE_ID,
@@ -54,10 +56,7 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not (
-            user_has_role(interaction.user, RAFFLE_ADDTICKET_ROLE_ID)
-            or user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID)
-        ):
+        if not user_has_role(interaction.user, GUILD_ROSTER_ROLE_ID):
             LOGGER.debug(
                 "Skipped raffle guild member autocomplete; authorized=false"
             )
@@ -453,8 +452,9 @@ class RaffleCommands(app_commands.Group):
         description="View your or another player's tickets",
     )
     @app_commands.describe(
-        username="Enter your GW2 account name, including the four digits",
+        username="Guild Wars 2 account name, including the four digits",
     )
+    @app_commands.autocomplete(username=guild_member_autocomplete)
     async def tickets(
         self,
         interaction: discord.Interaction,
@@ -534,19 +534,40 @@ class RaffleCommands(app_commands.Group):
         name="leaderboard",
         description="List every user's lifetime earned and purchased tickets",
     )
-    async def leaderboard(self, interaction: discord.Interaction) -> None:
+    @app_commands.describe(
+        sortby="Ticket type to sort the leaderboard by; defaults to total",
+    )
+    @app_commands.choices(
+        sortby=[
+            app_commands.Choice(name="purchased", value="purchased"),
+            app_commands.Choice(name="free", value="free"),
+            app_commands.Choice(name="total", value="total"),
+        ]
+    )
+    async def leaderboard(
+        self,
+        interaction: discord.Interaction,
+        sortby: str | None = None,
+    ) -> None:
+        sort_key = sortby if sortby is not None else "total"
         contributions = self._bot.get_lifetime_raffle_contributions()
         LOGGER.debug(
-            "Raffle leaderboard command invoked; contributors=%s",
+            "Raffle leaderboard command invoked; contributors=%s sort_key=%s",
             len(contributions),
+            sort_key,
         )
         if not contributions:
             await interaction.response.send_message(
                 "No lifetime raffle tickets have been recorded yet."
             )
             return
-        rows = raffle_contribution_table_rows(contributions)
+        rows = order_raffle_ticket_rows(
+            raffle_contribution_table_rows(contributions),
+            sort_key,
+        )
         title = "Lifetime raffle tickets"
+        if sort_key != "total":
+            title += f" (by {sort_key})"
         view = (
             RaffleTicketTableView(rows, title)
             if len(rows) > RAFFLE_TICKETS_PAGE_SIZE

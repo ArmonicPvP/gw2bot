@@ -10,6 +10,7 @@ from discord import app_commands
 
 from gw2bot.raffle import RaffleContribution
 from gw2bot.raffle.commands import (
+    GUILD_ROSTER_ROLE_ID,
     RAFFLE_ADDTICKET_ROLE_ID,
     RAFFLE_DRAW_ROLE_ID,
     RAFFLE_OFFICER_ROLE_ID,
@@ -94,11 +95,24 @@ class TestRaffleCommandGroup:
         tickets = commands["tickets"]
         assert isinstance(tickets, app_commands.Command)
         assert [parameter.name for parameter in tickets.parameters] == ["username"]
+        assert tickets.parameters[0].autocomplete
+        assert not tickets.parameters[0].required
         removetickets = commands["removetickets"]
         assert isinstance(removetickets, app_commands.Command)
         assert [parameter.name for parameter in removetickets.parameters] == [
             "username",
             "amount",
+        ]
+        leaderboard = commands["leaderboard"]
+        assert isinstance(leaderboard, app_commands.Command)
+        assert [parameter.name for parameter in leaderboard.parameters] == [
+            "sortby"
+        ]
+        assert not leaderboard.parameters[0].required
+        assert [choice.value for choice in leaderboard.parameters[0].choices] == [
+            "purchased",
+            "free",
+            "total",
         ]
 
     def test_checks_required_raffle_roles(self) -> None:
@@ -138,7 +152,7 @@ class TestRaffleGuildMemberAutocomplete:
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(
-                roles=[SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID)]
+                roles=[SimpleNamespace(id=GUILD_ROSTER_ROLE_ID)]
             )
         )
         group = RaffleCommands(bot)  # type: ignore[arg-type]
@@ -167,13 +181,15 @@ class TestRaffleGuildMemberAutocomplete:
         assert choices == []
         bot.search_guild_members.assert_not_awaited()
 
-    async def test_returns_matching_guild_members_for_officer(self) -> None:
-        bot = SimpleNamespace(
-            search_guild_members=AsyncMock(return_value=["Member.1234"])
-        )
+    async def test_raffle_roles_alone_do_not_expose_guild_members(self) -> None:
+        bot = SimpleNamespace(search_guild_members=AsyncMock())
         interaction = SimpleNamespace(
             user=SimpleNamespace(
-                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)]
+                roles=[
+                    SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID),
+                    SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID),
+                    SimpleNamespace(id=RAFFLE_DRAW_ROLE_ID),
+                ]
             )
         )
         group = RaffleCommands(bot)  # type: ignore[arg-type]
@@ -183,7 +199,8 @@ class TestRaffleGuildMemberAutocomplete:
             "member",
         )
 
-        assert [choice.value for choice in choices] == ["Member.1234"]
+        assert choices == []
+        bot.search_guild_members.assert_not_awaited()
 
     async def test_failure_logging_omits_secret_bearing_exception(
         self,
@@ -199,7 +216,7 @@ class TestRaffleGuildMemberAutocomplete:
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(
-                roles=[SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID)]
+                roles=[SimpleNamespace(id=GUILD_ROSTER_ROLE_ID)]
             )
         )
         group = RaffleCommands(bot)  # type: ignore[arg-type]
@@ -827,6 +844,40 @@ class TestRaffleTicketsCommand:
         await leaderboard.callback(group, interaction)  # type: ignore[arg-type]
         view = interaction.response.send_message.await_args.kwargs["view"]
         assert isinstance(view, RaffleTicketTableView)
+
+    async def test_leaderboard_sortby_reorders_rows(self) -> None:
+        bot = SimpleNamespace(
+            get_lifetime_raffle_contributions=MagicMock(
+                return_value=[
+                    RaffleContribution("Buyer.1234", 5, 0),
+                    RaffleContribution("Earner.5678", 1, 3),
+                ]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        leaderboard = next(
+            command for command in group.commands if command.name == "leaderboard"
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        await leaderboard.callback(group, interaction, sortby="free")  # type: ignore[arg-type]
+
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        assert embed.title == "Lifetime raffle tickets (by free)"
+        assert (
+            embed.description
+            == "**Earner.5678**\nPurchased: 1\nFree: 3\nTotal: 4\n\n"
+            "**Buyer.1234**\nPurchased: 5\nFree: 0\nTotal: 5"
+        )
+
+        interaction.response.send_message.reset_mock()
+        await leaderboard.callback(group, interaction, sortby="purchased")  # type: ignore[arg-type]
+
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        assert embed.title == "Lifetime raffle tickets (by purchased)"
+        assert (embed.description or "").startswith("**Buyer.1234**")
 
     async def test_leaderboard_reports_when_no_history(self) -> None:
         bot = SimpleNamespace(

@@ -17,6 +17,7 @@ from gw2bot.raffle.formatting import (
     RAFFLE_TICKETS_PAGE_SIZE,
     format_raffle_milestone_preview,
     raffle_contribution_report_embed,
+    raffle_deposit_embed,
 )
 from gw2bot.raffle.models import (
     GuildInvite,
@@ -67,16 +68,6 @@ def format_automated_message_diagnostics(
 
     messages.extend(
         (
-            (
-                "**Gold donation purchase notification (test)**\n"
-                + RaffleDeposit(
-                    event_id=0,
-                    username="DiagnosticUser.1234",
-                    coins_deposited=30_000,
-                    raffle_tickets=3,
-                    event_time="",
-                ).message
-            ),
             (
                 "**Guild join notification (test)**\n"
                 + GuildJoin(
@@ -166,7 +157,9 @@ async def try_send_automated_diagnostic(
         view is not None,
     )
     try:
-        if message is not None:
+        if message is not None and embed is not None:
+            await channel.send(message, embed=embed)
+        elif message is not None:
             await channel.send(message)
         elif view is None:
             await channel.send(embed=embed)
@@ -230,6 +223,21 @@ async def send_automated_message_diagnostics(
             ),
             view=report_view,
         )
+    attempted += 1
+    delivered += await try_send_automated_diagnostic(
+        channel,
+        "deposit-embed-preview",
+        message="**Gold donation purchase notification (test)**",
+        embed=raffle_deposit_embed(
+            RaffleDeposit(
+                event_id=0,
+                username="DiagnosticUser.1234",
+                coins_deposited=30_000,
+                raffle_tickets=3,
+                event_time="",
+            )
+        ),
+    )
     for index, diagnostic_message in enumerate(messages[1:], start=1):
         attempted += 1
         delivered += await try_send_automated_diagnostic(

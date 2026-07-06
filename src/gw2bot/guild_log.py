@@ -8,6 +8,7 @@ import aiohttp
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.raffle import OFFICER_RANK, parse_gold_deposit
+from gw2bot.raffle.formatting import raffle_deposit_embed
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -85,7 +86,9 @@ async def send_pending_raffle_notifications(bot: Gw2Bot) -> None:
     pending = bot._raffle_store.get_pending_notifications()
     LOGGER.debug("Found %s pending raffle notifications", len(pending))
     for deposit in pending:
-        if await bot._try_send_raffle_contribution_message(deposit.message):
+        if await bot._try_send_raffle_contribution_embed(
+            raffle_deposit_embed(deposit)
+        ):
             bot._raffle_store.mark_notification_sent(deposit.event_id)
 
 async def send_pending_deposit_audit_notifications(bot: Gw2Bot) -> None:

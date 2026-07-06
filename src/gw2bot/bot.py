@@ -489,6 +489,12 @@ class Gw2Bot(discord.Client):
     async def _try_send_raffle_contribution_message(self, message: str) -> bool:
         return await raffle_reports.try_send_raffle_contribution_message(self, message)
 
+    async def _try_send_raffle_contribution_embed(
+        self,
+        embed: discord.Embed,
+    ) -> bool:
+        return await raffle_reports.try_send_raffle_contribution_embed(self, embed)
+
     async def _send_notification(self, message: str) -> None:
         await notifications.send_notification(self, message)
 
