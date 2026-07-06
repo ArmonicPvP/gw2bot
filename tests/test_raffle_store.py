@@ -3,6 +3,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from sqlalchemy import (
     Boolean,
     Column,
@@ -16,218 +17,23 @@ from sqlalchemy import (
 )
 
 from gw2bot.raffle import (
-    RAFFLE_DRAW_TIERS,
-    RAFFLE_REWARD_TIERS,
     RaffleDrawTier,
     RaffleRewardTier,
     RaffleStore,
     TrialForumPost,
-    format_gold,
-    parse_gold_deposit,
-    parse_guild_invite,
-    parse_guild_join,
-    parse_guild_leave,
-    parse_guild_rank_change,
 )
-import pytest
+
+from factories import (
+    gold_deposit,
+    guild_invite,
+    guild_join,
+    guild_kick,
+    guild_leave,
+    guild_rank_change,
+)
 
 
-def gold_deposit(
-    event_id: int,
-    username: str = "Username.1234",
-    coins: int = 10_000,
-    event_time: str = "2026-06-07T06:26:17.000Z",
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "time": event_time,
-        "type": "stash",
-        "user": username,
-        "operation": "deposit",
-        "coins": coins,
-        "item_id": 0,
-        "count": 0,
-    }
-
-
-def guild_leave(
-    event_id: int,
-    username: str = "Username.1234",
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
-        "type": "kick",
-        "user": username,
-        "kicked_by": username,
-    }
-
-
-def guild_kick(
-    event_id: int,
-    username: str = "Kicked.1234",
-    kicked_by: str = "Officer.5678",
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
-        "type": "kick",
-        "user": username,
-        "kicked_by": kicked_by,
-    }
-
-
-def guild_join(
-    event_id: int,
-    username: str = "Username.1234",
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
-        "type": "joined",
-        "user": username,
-    }
-
-
-def guild_invite(
-    event_id: int,
-    username: str = "Invited.1234",
-    invited_by: str = "Officer.5678",
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
-        "type": "invited",
-        "user": username,
-        "invited_by": invited_by,
-    }
-
-
-def guild_rank_change(
-    event_id: int,
-    username: str = "Member.1234",
-    old_rank: str = "Trial",
-    new_rank: str = "Sunborne",
-    changed_by: str = "Officer.5678",
-) -> dict[str, object]:
-    return {
-        "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
-        "type": "rank_change",
-        "user": username,
-        "old_rank": old_rank,
-        "new_rank": new_rank,
-        "changed_by": changed_by,
-    }
-
-
-class TestRaffle:
-    def test_default_reward_tiers_are_data_driven(self) -> None:
-        assert [
-            (tier.threshold, tier.name) for tier in RAFFLE_REWARD_TIERS
-        ] == [
-            (50, "Tier 1"),
-            (100, "Tier 2"),
-            (150, "Tier 3"),
-            (200, "Tier 4"),
-        ]
-        assert [
-            (tier.minimum_purchased_tickets, tier.winner_count)
-            for tier in RAFFLE_DRAW_TIERS
-        ] == [
-            (0, 2),
-            (50, 2),
-            (100, 3),
-            (150, 4),
-            (200, 5),
-        ]
-
-    def test_parses_gold_deposit_and_formats_message(self) -> None:
-        deposit = parse_gold_deposit(gold_deposit(101, coins=35_000))
-
-        assert deposit is not None
-        assert deposit.raffle_tickets == 3
-        assert (
-            deposit.message
-            == "Username.1234 deposited 3.5 gold and purchased 3 raffle tickets"
-        )
-
-    def test_tracks_partial_gold_but_ignores_non_deposit_events(self) -> None:
-        partial = parse_gold_deposit(gold_deposit(101, coins=9_999))
-        assert partial is not None
-        assert partial.raffle_tickets == 0
-        assert (
-            parse_gold_deposit({**gold_deposit(102), "operation": "withdraw"}) is None
-        )
-        assert parse_gold_deposit({**gold_deposit(103), "type": "treasury"}) is None
-
-    def test_parses_guild_leave_with_exact_message(self) -> None:
-        leave = parse_guild_leave(guild_leave(104))
-
-        assert leave is not None
-        assert leave.message == "Username.1234 has left the guild."
-        assert parse_guild_leave({**guild_leave(105), "type": "joined"}) is None
-
-    def test_parses_guild_kick_with_exact_message(self) -> None:
-        leave = parse_guild_leave(guild_kick(106))
-
-        assert leave is not None
-        assert leave.message == "Officer.5678 kicked Kicked.1234 from the guild."
-
-    def test_parses_guild_join_with_exact_message(self) -> None:
-        join = parse_guild_join(guild_join(104))
-
-        assert join is not None
-        assert join.message == "Username.1234 has joined the guild."
-        assert parse_guild_join({**guild_join(105), "type": "invited"}) is None
-        assert parse_guild_join({**guild_join(106), "user": ""}) is None
-
-    def test_parses_guild_invite_with_exact_message(self) -> None:
-        invite = parse_guild_invite(guild_invite(104))
-
-        assert invite is not None
-        assert invite.message == "Officer.5678 invited Invited.1234 to the guild."
-        assert parse_guild_invite({**guild_invite(105), "type": "joined"}) is None
-        assert parse_guild_invite({**guild_invite(106), "user": ""}) is None
-
-    def test_parses_guild_invite_without_inviter(self) -> None:
-        invite = parse_guild_invite({**guild_invite(104), "invited_by": ""})
-
-        assert invite is not None
-        assert invite.message == "Invited.1234 was invited to the guild."
-
-    def test_parses_guild_rank_change_with_exact_message(self) -> None:
-        rank_change = parse_guild_rank_change(guild_rank_change(104))
-
-        assert rank_change is not None
-        assert rank_change.message == (
-            "Officer.5678 changed Member.1234's guild rank from Trial to Sunborne."
-        )
-        assert (
-            parse_guild_rank_change({**guild_rank_change(105), "type": "joined"})
-            is None
-        )
-        assert (
-            parse_guild_rank_change({**guild_rank_change(106), "user": ""}) is None
-        )
-
-    def test_parses_self_or_unattributed_rank_change_without_actor(self) -> None:
-        unattributed = parse_guild_rank_change(
-            {**guild_rank_change(104), "changed_by": ""}
-        )
-        assert unattributed is not None
-        assert unattributed.message == (
-            "Member.1234's guild rank changed from Trial to Sunborne."
-        )
-
-        self_change = parse_guild_rank_change(
-            {**guild_rank_change(105), "changed_by": "Member.1234"}
-        )
-        assert self_change is not None
-        assert self_change.message == (
-            "Member.1234's guild rank changed from Trial to Sunborne."
-        )
-
+class TestRaffleStore:
     def test_persists_leave_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")
@@ -1547,7 +1353,3 @@ class TestRaffle:
             reopened.clear_feast_alert(1078)
             assert reopened.get_feast_alert_times() == {}
             reopened.close()
-
-    def test_formats_whole_and_fractional_gold(self) -> None:
-        assert format_gold(10_000) == "1"
-        assert format_gold(12_345) == "1.2345"

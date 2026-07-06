@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,177 +29,42 @@ from gw2bot.database import (
     create_database_engine,
     initialize_database,
 )
+from gw2bot.raffle.events import (
+    event_in_window,
+    parse_gold_deposit,
+    parse_guild_invite,
+    parse_guild_join,
+    parse_guild_leave,
+    parse_guild_rank_change,
+)
+from gw2bot.raffle.models import (
+    COPPER_PER_GOLD,
+    MAX_GOLD_RAFFLE_TICKETS,
+    MAX_MANUAL_RAFFLE_TICKETS,
+    OFFICER_MAX_TICKET_DEPOSIT_COINS,
+    RAFFLE_DRAW_TIERS,
+    RAFFLE_REWARD_TIERS,
+    GuildInvite,
+    GuildJoin,
+    GuildLeave,
+    GuildRankChange,
+    RaffleContribution,
+    RaffleDeposit,
+    RaffleDrawTier,
+    RaffleMilestone,
+    RaffleResult,
+    RaffleRewardTier,
+    RaffleTotal,
+    RaffleWinner,
+    TrialForumPost,
+)
 
 LOGGER = logging.getLogger(__name__)
 
-COPPER_PER_GOLD = 10_000
-MAX_GOLD_RAFFLE_TICKETS = 10
-MAX_MANUAL_RAFFLE_TICKETS = 1
 MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
 OFFICER_PURCHASE_EVENT_ID_KEY = "officer_purchase_event_id"
 OFFICER_PURCHASE_EVENT_ID_START = -(2**63)
-OFFICER_RANK = "Officer"
-OFFICER_MAX_TICKET_DEPOSIT_COINS = 10 * COPPER_PER_GOLD
 TRIAL_FORUM_INDEX_WATERMARK_KEY = "trial_forum_index_watermark"
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleDeposit:
-    event_id: int
-    username: str
-    coins_deposited: int
-    raffle_tickets: int
-    event_time: str
-
-    @property
-    def message(self) -> str:
-        gold = format_gold(self.coins_deposited)
-        return (
-            f"{self.username} deposited {gold} gold and purchased "
-            f"{self.raffle_tickets} raffle tickets"
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleTotal:
-    username: str
-    coins_deposited: int
-    raffle_tickets: int
-    gold_raffle_tickets: int
-    manual_raffle_tickets: int
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleWinner:
-    username: str
-    winning_ticket: int
-    tickets_before_draw: int
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleResult:
-    run_id: int
-    winners: tuple[RaffleWinner, ...]
-    total_tickets: int
-    purchased_tickets: int
-    free_tickets: int
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleContribution:
-    username: str
-    purchased_tickets: int
-    event_tickets: int
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleRewardTier:
-    threshold: int
-    name: str
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleDrawTier:
-    minimum_purchased_tickets: int
-    winner_count: int
-
-
-@dataclass(frozen=True, slots=True)
-class RaffleMilestone:
-    threshold: int
-    tier_name: str
-
-    @property
-    def message(self) -> str:
-        return (
-            f"{self.threshold} total tickets have been purchased for this raffle. "
-            f"{self.tier_name} rewards have been reached!"
-        )
-
-
-RAFFLE_REWARD_TIERS = (
-    RaffleRewardTier(50, "Tier 1"),
-    RaffleRewardTier(100, "Tier 2"),
-    RaffleRewardTier(150, "Tier 3"),
-    RaffleRewardTier(200, "Tier 4"),
-)
-
-RAFFLE_DRAW_TIERS = (
-    RaffleDrawTier(0, 2),
-    RaffleDrawTier(50, 2),
-    RaffleDrawTier(100, 3),
-    RaffleDrawTier(150, 4),
-    RaffleDrawTier(200, 5),
-)
-
-
-@dataclass(frozen=True, slots=True)
-class GuildLeave:
-    event_id: int
-    username: str
-    event_time: str
-    kicked_by: str | None = None
-
-    @property
-    def message(self) -> str:
-        if self.kicked_by is not None:
-            return f"{self.kicked_by} kicked {self.username} from the guild."
-        return f"{self.username} has left the guild."
-
-
-@dataclass(frozen=True, slots=True)
-class GuildJoin:
-    event_id: int
-    username: str
-    event_time: str
-
-    @property
-    def message(self) -> str:
-        return f"{self.username} has joined the guild."
-
-
-@dataclass(frozen=True, slots=True)
-class TrialForumPost:
-    thread_id: int
-    owner_id: int | None
-    normalized_content: str
-    last_activity: str
-
-
-@dataclass(frozen=True, slots=True)
-class GuildInvite:
-    event_id: int
-    username: str
-    event_time: str
-    invited_by: str | None = None
-
-    @property
-    def message(self) -> str:
-        if self.invited_by is not None:
-            return f"{self.invited_by} invited {self.username} to the guild."
-        return f"{self.username} was invited to the guild."
-
-
-@dataclass(frozen=True, slots=True)
-class GuildRankChange:
-    event_id: int
-    username: str
-    old_rank: str
-    new_rank: str
-    event_time: str
-    changed_by: str | None = None
-
-    @property
-    def message(self) -> str:
-        if self.changed_by is not None and self.changed_by != self.username:
-            return (
-                f"{self.changed_by} changed {self.username}'s guild rank "
-                f"from {self.old_rank} to {self.new_rank}."
-            )
-        return (
-            f"{self.username}'s guild rank changed "
-            f"from {self.old_rank} to {self.new_rank}."
-        )
 
 
 class RaffleStore:
@@ -710,11 +574,11 @@ class RaffleStore:
             manual_tickets = session.scalars(select(RaffleManualTicketRecord)).all()
 
         for deposit in deposits:
-            if _event_in_window(deposit.event_time, start_utc, end_utc):
+            if event_in_window(deposit.event_time, start_utc, end_utc):
                 counts = contributions.setdefault(deposit.username, [0, 0])
                 counts[0] += deposit.raffle_tickets
         for ticket in manual_tickets:
-            if _event_in_window(ticket.event_time, start_utc, end_utc):
+            if event_in_window(ticket.event_time, start_utc, end_utc):
                 counts = contributions.setdefault(ticket.username, [0, 0])
                 counts[1] += 1
 
@@ -1316,84 +1180,6 @@ def _to_raffle_result(session: Session, record: RaffleRunRecord) -> RaffleResult
     )
 
 
-def parse_gold_deposit(event: dict[str, Any]) -> RaffleDeposit | None:
-    coins = int(event.get("coins", 0))
-    if (
-        event.get("type") != "stash"
-        or event.get("operation") != "deposit"
-        or not event.get("user")
-        or coins <= 0
-    ):
-        return None
-
-    return RaffleDeposit(
-        event_id=int(event["id"]),
-        username=str(event["user"]),
-        coins_deposited=coins,
-        raffle_tickets=coins // COPPER_PER_GOLD,
-        event_time=str(event.get("time", "")),
-    )
-
-
-def parse_guild_leave(event: dict[str, Any]) -> GuildLeave | None:
-    if not event.get("user"):
-        return None
-    if event.get("type") not in {"kick", "left"}:
-        return None
-    username = str(event["user"])
-    kicked_by_raw = event.get("kicked_by")
-    # GW2 reports a voluntary departure as a self-kick.
-    kicked_by = (
-        str(kicked_by_raw)
-        if kicked_by_raw and str(kicked_by_raw) != username
-        else None
-    )
-    return GuildLeave(
-        event_id=int(event["id"]),
-        username=username,
-        event_time=str(event.get("time", "")),
-        kicked_by=kicked_by,
-    )
-
-
-def parse_guild_join(event: dict[str, Any]) -> GuildJoin | None:
-    if event.get("type") != "joined" or not event.get("user"):
-        return None
-    return GuildJoin(
-        event_id=int(event["id"]),
-        username=str(event["user"]),
-        event_time=str(event.get("time", "")),
-    )
-
-
-def parse_guild_invite(event: dict[str, Any]) -> GuildInvite | None:
-    if event.get("type") != "invited" or not event.get("user"):
-        return None
-    invited_by_raw = event.get("invited_by")
-    invited_by = str(invited_by_raw) if invited_by_raw else None
-    return GuildInvite(
-        event_id=int(event["id"]),
-        username=str(event["user"]),
-        event_time=str(event.get("time", "")),
-        invited_by=invited_by,
-    )
-
-
-def parse_guild_rank_change(event: dict[str, Any]) -> GuildRankChange | None:
-    if event.get("type") != "rank_change" or not event.get("user"):
-        return None
-    changed_by_raw = event.get("changed_by")
-    changed_by = str(changed_by_raw) if changed_by_raw else None
-    return GuildRankChange(
-        event_id=int(event["id"]),
-        username=str(event["user"]),
-        old_rank=str(event.get("old_rank", "")),
-        new_rank=str(event.get("new_rank", "")),
-        event_time=str(event.get("time", "")),
-        changed_by=changed_by,
-    )
-
-
 def _validate_reward_tiers(
     tiers: tuple[RaffleRewardTier, ...],
 ) -> tuple[RaffleRewardTier, ...]:
@@ -1432,21 +1218,3 @@ def _winner_count_for_purchased_tickets(
             break
         winner_count = tier.winner_count
     return winner_count
-
-
-def format_gold(coins: int) -> str:
-    whole, remainder = divmod(coins, COPPER_PER_GOLD)
-    if remainder == 0:
-        return str(whole)
-    return f"{whole}.{remainder:04d}".rstrip("0")
-
-
-def _event_in_window(event_time: str, start: datetime, end: datetime) -> bool:
-    try:
-        parsed = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    parsed_utc = parsed.astimezone(UTC)
-    return start <= parsed_utc < end
