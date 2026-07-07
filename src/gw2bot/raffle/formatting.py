@@ -27,11 +27,9 @@ LOGGER = logging.getLogger(__name__)
 RAFFLE_TICKETS_PAGE_SIZE = 10
 RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
 RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
-# Discord caps embed field values at 1,024 characters, embeds at 25 fields,
-# and the combined embed content at 6,000 characters.
+# Discord caps embed field values at 1,024 characters.
 RAFFLE_AUDIT_FIELD_CHAR_LIMIT = 1_024
-RAFFLE_AUDIT_EMBED_FIELD_LIMIT = 25
-RAFFLE_AUDIT_EMBED_CHAR_LIMIT = 5_900
+RAFFLE_AUDIT_RANGES_PAGE_SIZE = 20
 RAFFLE_AUDIT_RUN_ID_SAMPLE_SIZE = 15
 RAFFLE_AUDIT_VERIFY_FOOTER = (
     "Verify: find each drawn ticket number in the ranges above. "
@@ -152,12 +150,7 @@ def raffle_result_embed(result: RaffleResult) -> discord.Embed:
             "All current raffle tickets have been reset."
         ),
     )
-    embed.set_footer(
-        text=(
-            f"Run ID: {result.run_id} — anyone can verify this draw "
-            "with /raffle audit."
-        )
-    )
+    embed.set_footer(text=f"Run ID: {result.run_id}")
     return embed
 
 
@@ -243,7 +236,10 @@ def format_unknown_raffle_run_message(
     return message + "."
 
 
-def raffle_audit_embeds(audit: RaffleAudit) -> list[discord.Embed]:
+def raffle_audit_embeds(
+    audit: RaffleAudit,
+    page: int = 0,
+) -> list[discord.Embed]:
     title = f"Raffle Run #{audit.run_id} Audit"
     description_lines = [f"Drawn at {audit.run_time} UTC."]
     if audit.has_entrant_snapshot:
@@ -264,84 +260,79 @@ def raffle_audit_embeds(audit: RaffleAudit) -> list[discord.Embed]:
             "it was drawn before entrant snapshots were added. Showing the "
             "recorded results only."
         )
-    description = "\n".join(description_lines)
 
-    pool_name = "Ticket Pool"
-    pool_value = (
-        f"Total tickets: {audit.total_tickets}\n"
-        f"Purchased: {audit.purchased_tickets}\n"
-        f"Free: {audit.free_tickets}"
+    ranges_embed = discord.Embed(
+        title=title,
+        description="\n".join(description_lines),
     )
-    draw_label = "Draw" if len(audit.draws) == 1 else "Draws"
-    draw_fields = [
-        (draw_label if index == 0 else f"{draw_label} (continued)", chunk)
-        for index, chunk in enumerate(
-            _chunk_field_lines(
-                [_format_audit_draw_line(draw) for draw in audit.draws],
-                RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
-            )
-        )
-    ]
-    entrant_noun = "entrant" if len(audit.entrants) == 1 else "entrants"
-    entrant_label = f"Ticket Ranges ({len(audit.entrants)} {entrant_noun})"
-    entrant_fields = [
-        (entrant_label if index == 0 else "Ticket Ranges (continued)", chunk)
+    page_count = 1
+    if audit.has_entrant_snapshot:
+        page_count = (
+            len(audit.entrants) + RAFFLE_AUDIT_RANGES_PAGE_SIZE - 1
+        ) // RAFFLE_AUDIT_RANGES_PAGE_SIZE
+        page = max(0, min(page, page_count - 1))
+        first = page * RAFFLE_AUDIT_RANGES_PAGE_SIZE
+        page_entrants = audit.entrants[
+            first : first + RAFFLE_AUDIT_RANGES_PAGE_SIZE
+        ]
+        entrant_noun = "entrant" if len(audit.entrants) == 1 else "entrants"
+        entrant_label = f"Ticket Ranges ({len(audit.entrants)} {entrant_noun})"
         for index, chunk in enumerate(
             _chunk_field_lines(
                 [
                     _format_audit_entrant_line(entrant)
-                    for entrant in audit.entrants
+                    for entrant in page_entrants
                 ],
                 RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
             )
-        )
-    ]
-
-    first = discord.Embed(title=title, description=description)
-    first.set_footer(text=RAFFLE_AUDIT_VERIFY_FOOTER)
-    fixed_characters = (
-        len(title)
-        + len(description)
-        + len(RAFFLE_AUDIT_VERIFY_FOOTER)
-        + len(pool_name)
-        + len(pool_value)
-        + sum(len(name) + len(value) for name, value in draw_fields)
-    )
-    remaining_fields = (
-        RAFFLE_AUDIT_EMBED_FIELD_LIMIT - 1 - len(draw_fields)
-    )
-    remaining_characters = RAFFLE_AUDIT_EMBED_CHAR_LIMIT - fixed_characters
-
-    embeds = [first]
-    current = first
-    overflow_title = f"{title} — Ticket Ranges (continued)"
-    for name, value in entrant_fields:
-        cost = len(name) + len(value)
-        if remaining_fields < 1 or remaining_characters < cost:
-            current = discord.Embed(title=overflow_title)
-            embeds.append(current)
-            remaining_fields = RAFFLE_AUDIT_EMBED_FIELD_LIMIT
-            remaining_characters = (
-                RAFFLE_AUDIT_EMBED_CHAR_LIMIT - len(overflow_title)
+        ):
+            ranges_embed.add_field(
+                name=(
+                    entrant_label if index == 0
+                    else "Ticket Ranges (continued)"
+                ),
+                value=chunk,
+                inline=False,
             )
-        current.add_field(name=name, value=value, inline=False)
-        remaining_fields -= 1
-        remaining_characters -= cost
+        ranges_embed.set_footer(text=f"Page {page + 1} of {page_count}")
 
-    first.add_field(name=pool_name, value=pool_value, inline=False)
-    for name, value in draw_fields:
-        first.add_field(name=name, value=value, inline=False)
+    results_embed = discord.Embed()
+    results_embed.add_field(
+        name="Ticket Pool",
+        value=(
+            f"Total tickets: {audit.total_tickets}\n"
+            f"Purchased: {audit.purchased_tickets}\n"
+            f"Free: {audit.free_tickets}"
+        ),
+        inline=False,
+    )
+    draw_label = "Draw" if len(audit.draws) == 1 else "Draws"
+    for index, chunk in enumerate(
+        _chunk_field_lines(
+            [_format_audit_draw_line(draw) for draw in audit.draws],
+            RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
+        )
+    ):
+        results_embed.add_field(
+            name=draw_label if index == 0 else f"{draw_label} (continued)",
+            value=chunk,
+            inline=False,
+        )
+    if audit.has_entrant_snapshot:
+        # The verify instructions reference the ranges embed, which legacy
+        # runs without an entrant snapshot do not include.
+        results_embed.set_footer(text=RAFFLE_AUDIT_VERIFY_FOOTER)
 
     LOGGER.debug(
-        "Rendered raffle audit embeds; entrants=%s draws=%s "
-        "entrant_fields=%s embeds=%s snapshot_available=%s",
+        "Rendered raffle audit embeds; entrants=%s draws=%s page=%s "
+        "page_count=%s snapshot_available=%s",
         len(audit.entrants),
         len(audit.draws),
-        len(entrant_fields),
-        len(embeds),
+        page + 1,
+        page_count,
         audit.has_entrant_snapshot,
     )
-    return embeds
+    return [ranges_embed, results_embed]
 
 
 def raffle_deposit_embed(deposit: RaffleDeposit) -> discord.Embed:

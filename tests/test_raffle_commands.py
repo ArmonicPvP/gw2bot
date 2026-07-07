@@ -25,8 +25,8 @@ from gw2bot.raffle.commands import (
     RaffleCommands,
 )
 from gw2bot.raffle.formatting import (
-    RAFFLE_AUDIT_EMBED_FIELD_LIMIT,
     RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
+    RAFFLE_AUDIT_RANGES_PAGE_SIZE,
     RAFFLE_AUDIT_VERIFY_FOOTER,
     format_addticket_audit,
     format_bulk_addtickets_summary,
@@ -41,6 +41,7 @@ from gw2bot.raffle.formatting import (
 )
 from gw2bot.raffle.views import (
     RaffleAccountLinkModal,
+    RaffleAuditRangesView,
     RaffleTicketTableView,
     RaffleBulkAddTicketsModal,
     RaffleTicketsListView,
@@ -1151,9 +1152,7 @@ class TestRaffleDrawCommand:
             "Selected 2 winners from 8 purchased tickets and 2 free tickets. "
             "All current raffle tickets have been reset."
         )
-        assert embed.footer.text == (
-            "Run ID: 7 — anyone can verify this draw with /raffle audit."
-        )
+        assert embed.footer.text == "Run ID: 7"
         bot.mark_raffle_announcement_sent.assert_called_once_with(7)
 
     async def test_retries_pending_announcement_without_refreshing_or_redrawing(
@@ -1256,9 +1255,7 @@ class TestRaffleDrawCommand:
         description = embed.description or ""
         assert "1. **Legacy.1234**\n" in description
         assert "chance" not in description
-        assert embed.footer.text == (
-            "Run ID: 3 — anyone can verify this draw with /raffle audit."
-        )
+        assert embed.footer.text == "Run ID: 3"
 
     async def test_does_not_draw_when_guild_log_refresh_fails(
         self,
@@ -1457,6 +1454,31 @@ def legacy_audit() -> RaffleAudit:
     )
 
 
+def many_entrant_audit(entrant_count: int) -> RaffleAudit:
+    entrants = tuple(
+        RaffleAuditRange(f"Member {index:03d}.1234", 1, index + 1, index + 1)
+        for index in range(entrant_count)
+    )
+    return RaffleAudit(
+        run_id=9,
+        run_time="2026-06-07 12:00:00",
+        total_tickets=entrant_count,
+        purchased_tickets=entrant_count,
+        free_tickets=0,
+        entrants=entrants,
+        draws=(
+            RaffleAuditDraw(
+                draw_position=1,
+                username="Member 000.1234",
+                winning_ticket=1,
+                tickets_before_draw=entrant_count,
+                tickets_held=1,
+                ranges=entrants,
+            ),
+        ),
+    )
+
+
 class TestRaffleAuditCommand:
     async def test_sends_public_audit_embed_without_role_gate(self) -> None:
         # The bot namespace omits authorize_raffle_command on purpose: the
@@ -1478,19 +1500,25 @@ class TestRaffleAuditCommand:
         bot.get_raffle_audit.assert_called_once_with(7)
         kwargs = interaction.response.send_message.await_args.kwargs
         assert "ephemeral" not in kwargs
-        embed = kwargs["embed"]
-        assert embed.title == "Raffle Run #7 Audit"
-        assert "Drawn at 2026-06-07 12:00:00 UTC." in (embed.description or "")
-        assert [field.name for field in embed.fields] == [
+        assert "view" not in kwargs
+        ranges_embed, results_embed = kwargs["embeds"]
+        assert ranges_embed.title == "Raffle Run #7 Audit"
+        assert "Drawn at 2026-06-07 12:00:00 UTC." in (
+            ranges_embed.description or ""
+        )
+        assert [field.name for field in ranges_embed.fields] == [
             "Ticket Ranges (2 entrants)",
-            "Ticket Pool",
-            "Draws",
         ]
-        fields = {field.name: field.value for field in embed.fields}
-        assert fields["Ticket Ranges (2 entrants)"] == (
+        assert ranges_embed.fields[0].value == (
             "**Alice.1111** — #1–#10 (10 tickets)\n"
             "**Bob.2222** — #11–#16 (6 tickets)"
         )
+        assert ranges_embed.footer.text == "Page 1 of 1"
+        assert [field.name for field in results_embed.fields] == [
+            "Ticket Pool",
+            "Draws",
+        ]
+        fields = {field.name: field.value for field in results_embed.fields}
         assert fields["Ticket Pool"] == "Total tickets: 16\nPurchased: 15\nFree: 1"
         assert fields["Draws"] == (
             "Draw 1: ticket #11 of 16 — **Bob.2222** "
@@ -1498,7 +1526,30 @@ class TestRaffleAuditCommand:
             "Draw 2: ticket #11 of 15 — **Bob.2222** "
             "(held #11–#15, 33.3% chance)"
         )
-        assert embed.footer.text == RAFFLE_AUDIT_VERIFY_FOOTER
+        assert results_embed.footer.text == RAFFLE_AUDIT_VERIFY_FOOTER
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_attaches_pagination_view_for_many_entrants(self) -> None:
+        audit = many_entrant_audit(RAFFLE_AUDIT_RANGES_PAGE_SIZE + 5)
+        bot = SimpleNamespace(get_raffle_audit=MagicMock(return_value=audit))
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(send_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "audit"
+        )
+
+        await command.callback(group, interaction, 9)  # type: ignore[arg-type]
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        view = kwargs["view"]
+        assert isinstance(view, RaffleAuditRangesView)
+        assert len(view.children) == 2
+        ranges_embed = kwargs["embeds"][0]
+        assert ranges_embed.footer.text == "Page 1 of 2"
         interaction.followup.send.assert_not_awaited()
 
     async def test_reports_unknown_run_and_lists_valid_ids(self) -> None:
@@ -1607,19 +1658,26 @@ class TestRaffleAuditFormatting:
     def test_legacy_run_embed_notes_missing_snapshot(self) -> None:
         embeds = raffle_audit_embeds(legacy_audit())
 
-        assert len(embeds) == 1
-        embed = embeds[0]
+        assert len(embeds) == 2
+        header_embed, results_embed = embeds
         assert (
             "The full entrant snapshot isn't available for this run"
-            in (embed.description or "")
+            in (header_embed.description or "")
         )
-        assert [field.name for field in embed.fields] == ["Ticket Pool", "Draw"]
-        fields = {field.name: field.value for field in embed.fields}
+        assert not header_embed.fields
+        assert header_embed.footer.text is None
+        assert [field.name for field in results_embed.fields] == [
+            "Ticket Pool",
+            "Draw",
+        ]
+        fields = {field.name: field.value for field in results_embed.fields}
         assert fields["Draw"] == "Draw 1: ticket #4 of 10 — **Winner.1234**"
         assert fields["Ticket Pool"] == (
             "Total tickets: 10\nPurchased: 10\nFree: 0"
         )
-        assert embed.footer.text == RAFFLE_AUDIT_VERIFY_FOOTER
+        # Without a ranges embed there is nothing for the verify
+        # instructions to point at.
+        assert results_embed.footer.text is None
 
     def test_single_ticket_range_renders_one_number(self) -> None:
         entrants = (RaffleAuditRange("Solo.1234", 1, 1, 1),)
@@ -1642,68 +1700,70 @@ class TestRaffleAuditFormatting:
             ),
         )
 
-        embeds = raffle_audit_embeds(audit)
+        ranges_embed, results_embed = raffle_audit_embeds(audit)
 
-        fields = {field.name: field.value for field in embeds[0].fields}
-        assert fields["Ticket Ranges (1 entrant)"] == (
-            "**Solo.1234** — #1 (1 ticket)"
-        )
+        assert [field.name for field in ranges_embed.fields] == [
+            "Ticket Ranges (1 entrant)",
+        ]
+        assert ranges_embed.fields[0].value == "**Solo.1234** — #1 (1 ticket)"
+        fields = {field.name: field.value for field in results_embed.fields}
         assert fields["Draw"] == (
             "Draw 1: ticket #1 of 1 — **Solo.1234** (held #1, 100.0% chance)"
         )
 
-    def test_splits_long_entrant_list_across_fields_and_embeds(self) -> None:
-        entrants = tuple(
-            RaffleAuditRange(f"Member {index:03d}.1234", 1, index + 1, index + 1)
-            for index in range(400)
-        )
-        audit = RaffleAudit(
-            run_id=9,
-            run_time="2026-06-07 12:00:00",
-            total_tickets=400,
-            purchased_tickets=400,
-            free_tickets=0,
-            entrants=entrants,
-            draws=(
-                RaffleAuditDraw(
-                    draw_position=1,
-                    username="Member 000.1234",
-                    winning_ticket=1,
-                    tickets_before_draw=400,
-                    tickets_held=1,
-                    ranges=entrants,
-                ),
-            ),
-        )
+    def test_paginates_long_entrant_list_twenty_ranges_per_page(self) -> None:
+        audit = many_entrant_audit(45)
 
-        embeds = raffle_audit_embeds(audit)
-
-        assert len(embeds) > 1
-        for embed in embeds:
-            assert len(embed.fields) <= RAFFLE_AUDIT_EMBED_FIELD_LIMIT
-            characters = (
-                len(embed.title or "")
-                + len(embed.description or "")
-                + len(embed.footer.text or "")
-            )
-            for field in embed.fields:
+        seen_lines: list[str] = []
+        for page in range(3):
+            ranges_embed, results_embed = raffle_audit_embeds(audit, page)
+            assert ranges_embed.footer.text == f"Page {page + 1} of 3"
+            assert [field.name for field in results_embed.fields] == [
+                "Ticket Pool",
+                "Draw",
+            ]
+            page_lines = [
+                line
+                for field in ranges_embed.fields
+                for line in (field.value or "").splitlines()
+            ]
+            assert len(page_lines) <= RAFFLE_AUDIT_RANGES_PAGE_SIZE
+            for field in ranges_embed.fields:
                 assert field.value is not None
                 assert len(field.value) <= RAFFLE_AUDIT_FIELD_CHAR_LIMIT
-                characters += len(field.name or "") + len(field.value)
-            assert characters <= 6_000
-        combined = "\n".join(
-            field.value or "" for embed in embeds for field in embed.fields
+            seen_lines.extend(page_lines)
+
+        assert len(seen_lines) == 45
+        combined = "\n".join(seen_lines)
+        assert all(
+            entrant.username in combined for entrant in audit.entrants
         )
-        assert all(entrant.username in combined for entrant in entrants)
-        assert [field.name for field in embeds[0].fields][-2:] == [
+
+    def test_clamps_out_of_range_page_numbers(self) -> None:
+        audit = many_entrant_audit(45)
+
+        assert raffle_audit_embeds(audit, 99)[0].footer.text == "Page 3 of 3"
+        assert raffle_audit_embeds(audit, -5)[0].footer.text == "Page 1 of 3"
+
+    async def test_ranges_view_pages_keep_results_embed(self) -> None:
+        audit = many_entrant_audit(RAFFLE_AUDIT_RANGES_PAGE_SIZE + 5)
+        view = RaffleAuditRangesView(audit)
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        await view.change_page(interaction, 1)  # type: ignore[arg-type]
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert kwargs["view"] is view
+        ranges_embed, results_embed = kwargs["embeds"]
+        assert ranges_embed.footer.text == "Page 2 of 2"
+        assert "Member 024.1234" in (ranges_embed.fields[0].value or "")
+        assert "Member 000.1234" not in (ranges_embed.fields[0].value or "")
+        assert [field.name for field in results_embed.fields] == [
             "Ticket Pool",
             "Draw",
         ]
-        assert all(
-            field.name is not None and field.name.startswith("Ticket Ranges")
-            for embed in embeds[1:]
-            for field in embed.fields
-        )
 
     def test_unknown_run_message_truncates_long_id_lists(self) -> None:
         summaries = [

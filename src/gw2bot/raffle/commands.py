@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import user_has_role
 from gw2bot.raffle.formatting import (
+    RAFFLE_AUDIT_RANGES_PAGE_SIZE,
     RAFFLE_TICKETS_PAGE_SIZE,
     format_addticket_audit,
     format_bulk_addtickets_summary,
@@ -27,6 +28,7 @@ from gw2bot.raffle.formatting import (
 )
 from gw2bot.raffle.views import (
     RaffleAccountLinkModal,
+    RaffleAuditRangesView,
     RaffleBulkAddTicketsModal,
     RaffleTicketTableView,
     RaffleTicketsListView,
@@ -251,13 +253,20 @@ class RaffleCommands(app_commands.Group):
             return
 
         embeds = raffle_audit_embeds(audit)
-        await interaction.response.send_message(embed=embeds[0])
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed)
+        view = (
+            RaffleAuditRangesView(audit)
+            if len(audit.entrants) > RAFFLE_AUDIT_RANGES_PAGE_SIZE
+            else None
+        )
+        if view is None:
+            await interaction.response.send_message(embeds=embeds)
+        else:
+            await interaction.response.send_message(embeds=embeds, view=view)
         LOGGER.debug(
-            "Raffle audit command completed; run_id=%s embeds=%s",
+            "Raffle audit command completed; run_id=%s embeds=%s paginated=%s",
             run_id,
             len(embeds),
+            view is not None,
         )
 
     @app_commands.command(

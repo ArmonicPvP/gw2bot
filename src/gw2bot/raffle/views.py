@@ -8,17 +8,19 @@ import aiohttp
 import discord
 
 from gw2bot.raffle.formatting import (
+    RAFFLE_AUDIT_RANGES_PAGE_SIZE,
     RAFFLE_TICKETS_PAGE_SIZE,
     RaffleTicketTableRow,
     order_raffle_totals,
     parse_squad_attendance_usernames,
+    raffle_audit_embeds,
     raffle_contribution_table_rows,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
     raffle_ticket_table_embed,
     raffle_tier_summary_embed,
 )
-from gw2bot.raffle.models import RaffleContribution, RaffleTotal
+from gw2bot.raffle.models import RaffleAudit, RaffleContribution, RaffleTotal
 from gw2bot.raffle.roles import RAFFLE_ADDTICKET_ROLE_ID
 
 if TYPE_CHECKING:
@@ -134,6 +136,60 @@ class RaffleTicketsListView(discord.ui.View):
         ) // RAFFLE_TICKETS_PAGE_SIZE
         self._previous.disabled = self._page == 0
         self._next.disabled = self._page >= page_count - 1
+
+
+class RaffleAuditRangesPageButton(discord.ui.Button["RaffleAuditRangesView"]):
+    def __init__(self, direction: int):
+        super().__init__(
+            label="<" if direction < 0 else ">",
+            style=discord.ButtonStyle.secondary,
+        )
+        self._direction = direction
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.view is not None:
+            await self.view.change_page(interaction, self._direction)
+
+
+class RaffleAuditRangesView(discord.ui.View):
+    def __init__(self, audit: RaffleAudit):
+        super().__init__(timeout=180)
+        self._audit = audit
+        self._page = 0
+        self._previous = RaffleAuditRangesPageButton(-1)
+        self._next = RaffleAuditRangesPageButton(1)
+        self.add_item(self._previous)
+        self.add_item(self._next)
+        self._sync_buttons()
+
+    async def change_page(
+        self,
+        interaction: discord.Interaction,
+        direction: int,
+    ) -> None:
+        page_count = self._page_count()
+        self._page = max(0, min(self._page + direction, page_count - 1))
+        LOGGER.debug(
+            "Changing raffle audit ranges page; direction=%s page=%s "
+            "page_count=%s",
+            direction,
+            self._page + 1,
+            page_count,
+        )
+        self._sync_buttons()
+        await interaction.response.edit_message(
+            embeds=raffle_audit_embeds(self._audit, self._page),
+            view=self,
+        )
+
+    def _page_count(self) -> int:
+        return (
+            len(self._audit.entrants) + RAFFLE_AUDIT_RANGES_PAGE_SIZE - 1
+        ) // RAFFLE_AUDIT_RANGES_PAGE_SIZE
+
+    def _sync_buttons(self) -> None:
+        self._previous.disabled = self._page == 0
+        self._next.disabled = self._page >= self._page_count() - 1
 
 
 class RaffleContributionReportView(RaffleTicketTableView):

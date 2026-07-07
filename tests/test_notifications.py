@@ -257,9 +257,7 @@ class TestAutomatedMessageDiagnostics:
         assert "1. **DiagnosticWinner.5678** (37.5% chance)" in (
             draw_embed.description or ""
         )
-        assert draw_embed.footer.text == (
-            "Run ID: 0 — anyone can verify this draw with /raffle audit."
-        )
+        assert draw_embed.footer.text == "Run ID: 0"
         audit_embed = labelled_embeds["**Raffle audit (test)**"]
         assert audit_embed.title == "Raffle Run #0 Audit"
         assert any(
