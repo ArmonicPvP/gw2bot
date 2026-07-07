@@ -254,7 +254,7 @@ class RaffleCommands(app_commands.Group):
 
         embeds = raffle_audit_embeds(audit)
         view = (
-            RaffleAuditRangesView(audit)
+            RaffleAuditRangesView(audit.run_id, len(audit.entrants))
             if len(audit.entrants) > RAFFLE_AUDIT_RANGES_PAGE_SIZE
             else None
         )

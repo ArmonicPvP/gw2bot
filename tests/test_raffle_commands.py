@@ -1,6 +1,6 @@
 import logging
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from unittest.mock import AsyncMock, MagicMock, call
 
 import aiohttp
@@ -41,6 +41,7 @@ from gw2bot.raffle.formatting import (
 )
 from gw2bot.raffle.views import (
     RaffleAccountLinkModal,
+    RaffleAuditRangesButton,
     RaffleAuditRangesView,
     RaffleTicketTableView,
     RaffleBulkAddTicketsModal,
@@ -1547,7 +1548,19 @@ class TestRaffleAuditCommand:
         kwargs = interaction.response.send_message.await_args.kwargs
         view = kwargs["view"]
         assert isinstance(view, RaffleAuditRangesView)
-        assert len(view.children) == 2
+        # A finite timeout would leave old audit messages with dead
+        # buttons; persistence comes from the dynamic custom_ids.
+        assert view.timeout is None
+        buttons = [
+            child
+            for child in view.children
+            if isinstance(child, RaffleAuditRangesButton)
+        ]
+        assert [button.custom_id for button in buttons] == [
+            "gw2bot:raffle-audit-ranges:9:0:-1",
+            "gw2bot:raffle-audit-ranges:9:0:1",
+        ]
+        assert [button.item.disabled for button in buttons] == [True, False]
         ranges_embed = kwargs["embeds"][0]
         assert ranges_embed.footer.text == "Page 1 of 2"
         interaction.followup.send.assert_not_awaited()
@@ -1745,17 +1758,20 @@ class TestRaffleAuditFormatting:
         assert raffle_audit_embeds(audit, 99)[0].footer.text == "Page 3 of 3"
         assert raffle_audit_embeds(audit, -5)[0].footer.text == "Page 1 of 3"
 
-    async def test_ranges_view_pages_keep_results_embed(self) -> None:
+    async def test_ranges_button_pages_keep_results_embed(self) -> None:
         audit = many_entrant_audit(RAFFLE_AUDIT_RANGES_PAGE_SIZE + 5)
-        view = RaffleAuditRangesView(audit)
+        button = RaffleAuditRangesButton(9, 0, 1)
         interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_audit=MagicMock(return_value=audit)
+            ),
             response=SimpleNamespace(edit_message=AsyncMock()),
         )
 
-        await view.change_page(interaction, 1)  # type: ignore[arg-type]
+        await button.callback(interaction)  # type: ignore[arg-type]
 
+        interaction.client.get_raffle_audit.assert_called_once_with(9)
         kwargs = interaction.response.edit_message.await_args.kwargs
-        assert kwargs["view"] is view
         ranges_embed, results_embed = kwargs["embeds"]
         assert ranges_embed.footer.text == "Page 2 of 2"
         assert "Member 024.1234" in (ranges_embed.fields[0].value or "")
@@ -1764,6 +1780,77 @@ class TestRaffleAuditFormatting:
             "Ticket Pool",
             "Draw",
         ]
+        view = kwargs["view"]
+        assert isinstance(view, RaffleAuditRangesView)
+        assert view.timeout is None
+
+    async def test_ranges_button_restores_state_from_custom_id(self) -> None:
+        # Dispatch rebuilds the button from the custom_id alone, so paging
+        # keeps working after view timeouts and bot restarts.
+        original = RaffleAuditRangesButton(12, 3, -1)
+        match = original.template.fullmatch(original.custom_id)
+        assert match is not None
+
+        restored = await RaffleAuditRangesButton.from_custom_id(
+            cast(discord.Interaction, SimpleNamespace()),
+            cast("discord.ui.Item[Any]", SimpleNamespace()),
+            match,
+        )
+
+        assert restored.run_id == 12
+        assert restored.page == 3
+        assert restored.direction == -1
+
+    async def test_ranges_button_reports_missing_run(self) -> None:
+        button = RaffleAuditRangesButton(9, 0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_audit=MagicMock(return_value=None)
+            ),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        await button.callback(interaction)  # type: ignore[arg-type]
+
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Raffle run 9 is no longer recorded.",
+            ephemeral=True,
+        )
+
+    async def test_ranges_button_failure_logging_omits_secrets(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "audit-paging-secret"
+        button = RaffleAuditRangesButton(9, 0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_audit=MagicMock(
+                    side_effect=SQLAlchemyError(
+                        f"query failed with access_token={secret}"
+                    )
+                )
+            ),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            await button.callback(interaction)  # type: ignore[arg-type]
+
+        assert secret not in caplog.text
+        assert "Could not load raffle audit for range paging" in caplog.text
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Could not load this raffle audit. Try again later.",
+            ephemeral=True,
+        )
 
     def test_unknown_run_message_truncates_long_id_lists(self) -> None:
         summaries = [
