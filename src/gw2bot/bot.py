@@ -25,6 +25,7 @@ from gw2bot.raffle import (
 )
 from gw2bot.raffle import reports as raffle_reports
 from gw2bot.raffle.commands import RaffleCommands
+from gw2bot.raffle.views import RaffleAuditRangesButton
 from gw2bot.trials.commands import (
     create_check_command,
     create_track_command,
@@ -75,6 +76,9 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(RaffleCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
+        # Rebuild raffle audit pager buttons from their custom_ids so old
+        # audit messages keep paging after view timeouts and restarts.
+        self.add_dynamic_items(RaffleAuditRangesButton)
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")

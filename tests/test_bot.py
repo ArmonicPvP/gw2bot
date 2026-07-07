@@ -12,6 +12,7 @@ from factories import forbidden_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.main import main as run_main
+from gw2bot.raffle.views import RaffleAuditRangesButton
 
 
 class TestCommand:
@@ -104,6 +105,30 @@ class TestBotIntent:
         assert not bot.intents.members
         assert bot.intents.message_content
         raffle_store.assert_called_once()
+
+    @patch("gw2bot.bot.RaffleStore")
+    def test_registers_persistent_raffle_audit_pager(
+        self,
+        raffle_store: MagicMock,
+    ) -> None:
+        # Registration lets Discord dispatch audit pager clicks from any
+        # old message, keeping /raffle audit pages reachable after the
+        # original interaction ages out or the bot restarts.
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "RAFFLE_DB_PATH": str(Path(directory) / "raffle.db"),
+                }
+            )
+            with patch.object(Gw2Bot, "add_dynamic_items") as add_dynamic_items:
+                Gw2Bot(config)
+
+        add_dynamic_items.assert_called_once_with(RaffleAuditRangesButton)
 
 
 class TestStartupStatus:
