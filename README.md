@@ -30,6 +30,7 @@ For local development, copy `.env.example` to `.env`.
 | `GW2_GUILD_MEMBER_CACHE_SECONDS` | `900` | Guild member cache lifetime in seconds. Must be a positive integer. |
 | `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. The Docker image overrides this default with `/app/data/gw2bot.db`. |
 | `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. |
+| `EVENT_TIMEZONE` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times and to format event thread names. |
 
 The application loads `.env` automatically. Existing environment variables take
 precedence over `.env`, so an Unraid container can inject the same variables at

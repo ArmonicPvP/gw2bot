@@ -227,6 +227,94 @@ class RaffleRunEntryRecord(Base):
     raffle_tickets: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class EventRecord(Base):
+    __tablename__ = "gw2_events"
+
+    event_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False)
+    channel_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    leader_discord_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_time: Mapped[str] = mapped_column(String, nullable=False)
+    duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    repeat_frequency: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="none",
+    )
+    repeat_days: Mapped[str] = mapped_column(String, nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    cancelled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class EventOccurrenceRecord(Base):
+    __tablename__ = "gw2_event_occurrences"
+
+    occurrence_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_events.event_id"),
+        nullable=False,
+    )
+    start_time: Mapped[str] = mapped_column(String, nullable=False)
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="open")
+
+
+class EventSignupRecord(Base):
+    __tablename__ = "gw2_event_signups"
+
+    occurrence_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_event_occurrences.occurrence_id"),
+        primary_key=True,
+    )
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    role: Mapped[str | None] = mapped_column(String, nullable=True)
+    assigned_role: Mapped[str | None] = mapped_column(String, nullable=True)
+    flex_roles: Mapped[str] = mapped_column(String, nullable=False, default="")
+    signed_up_at: Mapped[str] = mapped_column(String, nullable=False)
+    waitlisted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class EventSignupPreferenceRecord(Base):
+    __tablename__ = "gw2_event_signup_preferences"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    role: Mapped[str | None] = mapped_column(String, nullable=True)
+    flex_roles: Mapped[str] = mapped_column(String, nullable=False, default="")
+    mode: Mapped[str] = mapped_column(String, nullable=False, default="ask")
+
+
+class EventAutoSignupRecord(Base):
+    __tablename__ = "gw2_event_auto_signups"
+
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_events.event_id"),
+        primary_key=True,
+    )
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    choice: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str | None] = mapped_column(String, nullable=True)
+    flex_roles: Mapped[str] = mapped_column(String, nullable=False, default="")
+
+
 class RaffleRunWinnerRecord(Base):
     __tablename__ = "raffle_run_winners"
 

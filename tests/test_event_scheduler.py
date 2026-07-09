@@ -1,0 +1,205 @@
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+from gw2bot.events.models import (
+    AutoSignupChoice,
+    EventCategory,
+    EventRole,
+    EventStatus,
+    RepeatFrequency,
+)
+from gw2bot.events.posting import post_occurrence
+from gw2bot.events.scheduler import run_event_maintenance
+from gw2bot.events.store import EventStore
+
+from test_event_posting import FakeBot, FakeChannel
+
+START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
+BEFORE_START = START - timedelta(hours=2)
+AFTER_END = START + timedelta(hours=2)
+
+
+@pytest.fixture
+def store(tmp_path: Path):
+    store = EventStore(str(tmp_path / "gw2bot.db"))
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def channel() -> FakeChannel:
+    return FakeChannel()
+
+
+@pytest.fixture
+def bot(store: EventStore, channel: FakeChannel) -> Any:
+    return cast(Any, FakeBot(store, channel))
+
+
+async def post_event(
+    bot: Any,
+    store: EventStore,
+    repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+    repeat_days: tuple[int, ...] = (),
+):
+    event = store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Kitty Cleanup",
+        description="Bring food.",
+        channel_id=1234,
+        leader_discord_id=42,
+        start_time=START,
+        duration_minutes=90,
+        repeat_frequency=repeat_frequency,
+        repeat_days=repeat_days,
+    )
+    occurrence = store.create_occurrence(event.event_id, event.start_time)
+    posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+    return event, posted
+
+
+class TestRunEventMaintenance:
+    async def test_transitions_status_and_renames_thread(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_event(bot, store)
+
+        await run_event_maintenance(bot, START + timedelta(minutes=5))
+
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert updated.status is EventStatus.ONGOING
+        channel.thread.edit.assert_awaited_once()
+
+    async def test_unchanged_occurrences_are_left_alone(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        await post_event(bot, store)
+
+        await run_event_maintenance(bot, BEFORE_START)
+
+        channel.thread.edit.assert_not_awaited()
+        channel.partial_message.edit.assert_not_awaited()
+
+    async def test_finished_non_repeating_event_posts_nothing_new(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_event(bot, store)
+        posted_before = len(channel.sent)
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert updated.status is EventStatus.OVER
+        assert len(channel.sent) == posted_before
+        assert not store.has_later_occurrence(
+            event.event_id,
+            occurrence.start_time,
+        )
+
+    async def test_finished_repeating_event_posts_the_next_occurrence(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        occurrences = store.get_posted_unfinished_occurrences()
+        assert len(occurrences) == 1
+        next_occurrence = occurrences[0]
+        assert next_occurrence.occurrence_id != occurrence.occurrence_id
+        assert next_occurrence.start_time == START + timedelta(days=1)
+        assert len(channel.sent) == 2
+        signups = store.get_signups(next_occurrence.occurrence_id)
+        assert [signup.discord_user_id for signup in signups] == [11]
+        channel.thread.add_user.assert_awaited()
+
+    async def test_catch_up_skips_past_occurrences_after_downtime(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        long_after = START + timedelta(days=10, hours=3)
+
+        await run_event_maintenance(bot, long_after)
+
+        occurrences = store.get_posted_unfinished_occurrences()
+        assert len(occurrences) == 1
+        assert occurrences[0].start_time > long_after
+
+    async def test_second_pass_does_not_duplicate_the_next_occurrence(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+
+        await run_event_maintenance(bot, AFTER_END)
+        await run_event_maintenance(bot, AFTER_END)
+
+        assert len(channel.sent) == 2
+
+    async def test_maintenance_logs_never_contain_user_content(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description=description,
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        with caplog.at_level("DEBUG"):
+            await run_event_maintenance(bot, AFTER_END)
+
+        assert title not in caplog.text
+        assert description not in caplog.text
