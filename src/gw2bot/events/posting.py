@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import discord
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.formatting import (
     compute_status,
@@ -95,12 +96,28 @@ async def post_occurrence(
             occurrence.occurrence_id,
             type(exc).__name__,
         )
-    bot.event_store.set_occurrence_message(
-        occurrence.occurrence_id,
-        message.id,
-        thread_id,
-    )
-    bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
+    try:
+        # Write the status before the message id. The message id marks the
+        # occurrence as posted, so persisting it last keeps the sequence
+        # recoverable: if any write fails the occurrence still looks unposted
+        # and the just-sent message can be deleted, avoiding an orphaned post
+        # (whose buttons would reference a missing occurrence) or a duplicate
+        # message from the next scheduler pass.
+        bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
+        bot.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            message.id,
+            thread_id,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not persist posted event occurrence; occurrence_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        await _delete_orphaned_message(message, occurrence.occurrence_id)
+        raise
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
         "thread_created=%s signups=%s",
@@ -114,6 +131,19 @@ async def post_occurrence(
     if updated is None:
         raise RuntimeError("The posted event occurrence disappeared")
     return updated
+
+
+async def _delete_orphaned_message(message: Any, occurrence_id: int) -> None:
+    # Deleting the starter message also removes any thread anchored to it.
+    try:
+        await message.delete()
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not delete orphaned event message; occurrence_id=%s "
+            "error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
 
 
 async def refresh_occurrence_message(

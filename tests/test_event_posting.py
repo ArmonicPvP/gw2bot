@@ -2,11 +2,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import discord
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.models import (
     AutoSignupChoice,
@@ -56,6 +57,7 @@ class FakeChannel:
         message = SimpleNamespace(
             id=555,
             create_thread=AsyncMock(return_value=self.thread),
+            delete=AsyncMock(),
         )
         if self.create_thread_error is not None:
             message.create_thread = AsyncMock(
@@ -173,6 +175,33 @@ class TestPostOccurrence:
 
         assert posted.message_id == 555
         assert posted.thread_id is None
+
+    async def test_persistence_failure_deletes_the_orphaned_message(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("database is locked")
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        # The sent message must be removed so it is not left orphaned, and the
+        # occurrence must still look unposted so a retry can re-send cleanly
+        # instead of the scheduler adding a duplicate public message.
+        channel.sent[-1]["message"].delete.assert_awaited_once()
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.message_id is None
+        assert stored.occurrence_id in {
+            entry.occurrence_id
+            for entry in store.get_unposted_occurrences()
+        }
 
 
 class TestCompleteSignup:
