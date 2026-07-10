@@ -65,7 +65,9 @@ async def run_event_maintenance(
             continue
         signups = bot.event_store.get_signups(occurrence.occurrence_id)
         status = occurrence_status(event, occurrence, signups, current_time)
-        if status == occurrence.status:
+        # A dirty occurrence still needs its message re-rendered even when the
+        # status is unchanged, because an earlier roster-change refresh failed.
+        if status == occurrence.status and not occurrence.needs_refresh:
             continue
         # The next occurrence row is secured before the OVER status is
         # persisted, so a failure here leaves the transition unfinished

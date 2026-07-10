@@ -558,11 +558,55 @@ class TestRefreshOccurrenceMessage:
         updated = store.get_occurrence(occurrence.occurrence_id)
         assert updated is not None
         assert updated.status is EventStatus.OPEN
+        assert updated.needs_refresh
         assert updated.occurrence_id in {
             live.occurrence_id
             for live in store.get_posted_unfinished_occurrences()
         }
         channel.thread.edit.assert_not_awaited()
+
+    async def test_failed_refresh_marks_dirty_when_status_unchanged(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        channel.partial_message.edit = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+
+        # A roster change that leaves the status OPEN but fails to edit the
+        # message must still record dirty state so the scheduler retries.
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            BEFORE_START,
+        )
+
+        assert status is EventStatus.OPEN
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert updated.needs_refresh
+
+    async def test_successful_refresh_clears_dirty_flag(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        store.set_occurrence_needs_refresh(occurrence.occurrence_id, True)
+        dirty = store.get_occurrence(occurrence.occurrence_id)
+        assert dirty is not None and dirty.needs_refresh
+
+        await refresh_occurrence_message(bot, event, dirty, BEFORE_START)
+
+        cleared = store.get_occurrence(occurrence.occurrence_id)
+        assert cleared is not None
+        assert not cleared.needs_refresh
+        channel.partial_message.edit.assert_awaited()
 
 
 class TestPostingLoggingSafety:

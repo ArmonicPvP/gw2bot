@@ -272,6 +272,11 @@ class EventOccurrenceRecord(Base):
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
+    needs_refresh: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
 
 
 class EventSignupRecord(Base):
@@ -387,6 +392,24 @@ def initialize_database(engine: Engine) -> set[str]:
                 "notification_sent = 1"
             )
             added_columns.add("audit_notification_sent")
+
+        occurrence_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                EventOccurrenceRecord.__tablename__
+            )
+        }
+        if "needs_refresh" not in occurrence_columns:
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(
+                    "needs_refresh",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            added_columns.add("needs_refresh")
 
         guild_leave_columns = {
             column["name"]

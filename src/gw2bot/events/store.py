@@ -84,6 +84,7 @@ def _occurrence_from_record(
         message_id=record.message_id,
         thread_id=record.thread_id,
         status=EventStatus(record.status),
+        needs_refresh=record.needs_refresh,
     )
 
 
@@ -210,6 +211,24 @@ class EventStore:
             "Updated occurrence status; occurrence_id=%s status=%s",
             occurrence_id,
             status.value,
+        )
+
+    def set_occurrence_needs_refresh(
+        self,
+        occurrence_id: int,
+        needs_refresh: bool,
+    ) -> None:
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.needs_refresh = needs_refresh
+            session.commit()
+        LOGGER.debug(
+            "Updated occurrence refresh flag; occurrence_id=%s "
+            "needs_refresh=%s",
+            occurrence_id,
+            needs_refresh,
         )
 
     def get_event(self, event_id: int) -> Event | None:

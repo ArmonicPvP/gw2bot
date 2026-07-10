@@ -137,12 +137,22 @@ async def refresh_occurrence_message(
                 occurrence.occurrence_id,
                 type(exc).__name__,
             )
-            # The public message is now stale. Leave the stored status
-            # unchanged so the scheduler keeps this occurrence in the
-            # unfinished set and retries; persisting the transition (for
-            # example to OVER) would drop it and leave the message stale
-            # indefinitely.
+            # The public message is now stale. Mark it dirty so the
+            # scheduler retries even when the status is unchanged, and leave
+            # the stored status alone so the occurrence stays in the
+            # unfinished set (persisting a transition to OVER would drop it
+            # and leave the message stale indefinitely).
+            bot.event_store.set_occurrence_needs_refresh(
+                occurrence.occurrence_id,
+                True,
+            )
             return occurrence.status
+        if occurrence.needs_refresh:
+            # A previously failed refresh has now succeeded; clear the flag.
+            bot.event_store.set_occurrence_needs_refresh(
+                occurrence.occurrence_id,
+                False,
+            )
     if status != occurrence.status:
         bot.event_store.set_occurrence_status(
             occurrence.occurrence_id,

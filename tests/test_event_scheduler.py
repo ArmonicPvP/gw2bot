@@ -227,6 +227,27 @@ class TestRunEventMaintenance:
 
         assert len(channel.sent) == 2
 
+    async def test_dirty_occurrence_is_refreshed_without_status_change(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_event(bot, store)
+        # An earlier roster-change refresh failed while the status stayed
+        # OPEN, so the occurrence is flagged dirty.
+        store.set_occurrence_needs_refresh(occurrence.occurrence_id, True)
+
+        # The status still matches, but the stale message must be re-rendered
+        # and the flag cleared instead of being skipped forever.
+        await run_event_maintenance(bot, BEFORE_START)
+
+        channel.partial_message.edit.assert_awaited()
+        refreshed = store.get_occurrence(occurrence.occurrence_id)
+        assert refreshed is not None
+        assert refreshed.status is EventStatus.OPEN
+        assert not refreshed.needs_refresh
+
     async def test_pending_occurrence_already_over_seeds_the_next(
         self,
         bot: Any,

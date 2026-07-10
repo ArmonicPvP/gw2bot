@@ -131,6 +131,9 @@ class EventOccurrence:
     message_id: int | None
     thread_id: int | None
     status: EventStatus
+    # Set when the public message failed to refresh so the scheduler retries
+    # even if the computed status still matches the stored one.
+    needs_refresh: bool = False
 
 
 @dataclass(frozen=True, slots=True)
