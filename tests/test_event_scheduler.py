@@ -227,6 +227,41 @@ class TestRunEventMaintenance:
 
         assert len(channel.sent) == 2
 
+    async def test_pending_occurrence_already_over_seeds_the_next(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        from factories import forbidden_error
+
+        await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        # The next occurrence is created but its posting fails, leaving it
+        # pending and unposted.
+        channel.send_error = forbidden_error(50001)
+        await run_event_maintenance(bot, AFTER_END)
+        pending = store.get_unposted_occurrences()
+        assert len(pending) == 1
+        next_start = pending[0].start_time
+
+        # Posting is only fixed after that pending occurrence has itself
+        # ended, so it can only post as OVER.
+        after_next_end = next_start + timedelta(hours=2)
+        await run_event_maintenance(bot, after_next_end)
+
+        finished = store.get_occurrence(pending[0].occurrence_id)
+        assert finished is not None
+        assert finished.status is EventStatus.OVER
+        # The recurring series must catch up with a fresh future occurrence
+        # instead of stopping with nothing to drive it.
+        upcoming = store.get_unposted_occurrences()
+        assert len(upcoming) == 1
+        assert upcoming[0].start_time > after_next_end
+
     async def test_pending_occurrence_of_a_never_posted_event_is_skipped(
         self,
         bot: Any,

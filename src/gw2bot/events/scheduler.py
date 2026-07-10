@@ -173,3 +173,17 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
             event.event_id,
             posted.occurrence_id,
         )
+        # A pending occurrence can already be over by the time it is posted
+        # (for example, posting was blocked past its end). Posting it
+        # persists OVER, so it never enters the unfinished set that drives
+        # the OVER transition; seed the next occurrence here so a recurring
+        # series catches up instead of stopping.
+        if (
+            posted.status is EventStatus.OVER
+            and event.repeat_frequency is not RepeatFrequency.NONE
+            and not bot.event_store.has_later_occurrence(
+                event.event_id,
+                posted.start_time,
+            )
+        ):
+            _create_next_occurrence(bot, event, posted, now)
