@@ -512,6 +512,20 @@ class EventConfirmView(discord.ui.View):
     ) -> None:
         from gw2bot.events.posting import post_occurrence
 
+        # The preview can sit open for minutes; the creator role may have
+        # been revoked since /event new, so recheck before the irreversible
+        # save/post path.
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event post from Discord user %s; required role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to create events.",
+                ephemeral=True,
+            )
+            return
         if self._draft.posted:
             await interaction.response.send_message(
                 "This event was already posted.",

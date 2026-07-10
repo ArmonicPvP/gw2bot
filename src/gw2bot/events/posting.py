@@ -124,6 +124,7 @@ async def refresh_occurrence_message(
 ) -> EventStatus:
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
+    message_refreshed = True
     if occurrence.message_id is not None:
         try:
             channel = await resolve_channel(bot, event.channel_id)
@@ -137,34 +138,44 @@ async def refresh_occurrence_message(
                 occurrence.occurrence_id,
                 type(exc).__name__,
             )
-            # The public message is now stale. Mark it dirty so the
-            # scheduler retries even when the status is unchanged, and leave
-            # the stored status alone so the occurrence stays in the
-            # unfinished set (persisting a transition to OVER would drop it
-            # and leave the message stale indefinitely).
+            message_refreshed = False
+    # Only commit the status transition once both the message and the thread
+    # name reflect it. Committing early (especially to OVER) would let the
+    # scheduler see a matching status and stop retrying, leaving the public
+    # message or thread name stale forever.
+    thread_renamed = True
+    if message_refreshed and status != occurrence.status:
+        thread_renamed = await _rename_occurrence_thread(
+            bot,
+            occurrence,
+            status,
+        )
+        if thread_renamed:
+            bot.event_store.set_occurrence_status(
+                occurrence.occurrence_id,
+                status,
+            )
+            LOGGER.debug(
+                "Event occurrence status transitioned; occurrence_id=%s "
+                "previous=%s status=%s",
+                occurrence.occurrence_id,
+                occurrence.status.value,
+                status.value,
+            )
+    if not (message_refreshed and thread_renamed):
+        # A stale message or thread name must be retried by the scheduler,
+        # so mark the occurrence dirty and leave the stored status alone.
+        if not occurrence.needs_refresh:
             bot.event_store.set_occurrence_needs_refresh(
                 occurrence.occurrence_id,
                 True,
             )
-            return occurrence.status
-        if occurrence.needs_refresh:
-            # A previously failed refresh has now succeeded; clear the flag.
-            bot.event_store.set_occurrence_needs_refresh(
-                occurrence.occurrence_id,
-                False,
-            )
-    if status != occurrence.status:
-        bot.event_store.set_occurrence_status(
+        return occurrence.status
+    if occurrence.needs_refresh:
+        # Every part of the refresh has now succeeded; clear the flag.
+        bot.event_store.set_occurrence_needs_refresh(
             occurrence.occurrence_id,
-            status,
-        )
-        await _rename_occurrence_thread(bot, occurrence, status)
-        LOGGER.debug(
-            "Event occurrence status transitioned; occurrence_id=%s "
-            "previous=%s status=%s",
-            occurrence.occurrence_id,
-            occurrence.status.value,
-            status.value,
+            False,
         )
     return status
 
@@ -173,9 +184,9 @@ async def _rename_occurrence_thread(
     bot: Gw2Bot,
     occurrence: EventOccurrence,
     status: EventStatus,
-) -> None:
+) -> bool:
     if occurrence.thread_id is None:
-        return
+        return True
     name = event_thread_name(
         status,
         occurrence.start_time,
@@ -190,6 +201,8 @@ async def _rename_occurrence_thread(
             occurrence.occurrence_id,
             type(exc).__name__,
         )
+        return False
+    return True
 
 
 async def update_thread_membership(

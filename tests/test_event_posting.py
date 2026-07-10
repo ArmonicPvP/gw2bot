@@ -533,6 +533,52 @@ class TestRefreshOccurrenceMessage:
         assert status is EventStatus.OPEN
         channel.thread.edit.assert_not_awaited()
 
+    async def test_failed_thread_rename_defers_status_for_retry(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        during_event = START + timedelta(minutes=10)
+        channel.thread.edit = AsyncMock(side_effect=forbidden_error(50001))
+
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            during_event,
+        )
+
+        # The transition must not be committed while the thread name is still
+        # stale, or the scheduler would stop retrying the rename.
+        assert status is EventStatus.OPEN
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert updated.status is EventStatus.OPEN
+        assert updated.needs_refresh
+        assert updated.occurrence_id in {
+            live.occurrence_id
+            for live in store.get_posted_unfinished_occurrences()
+        }
+
+        # Once the thread rename succeeds, the transition is committed and the
+        # dirty flag cleared.
+        channel.thread.edit = AsyncMock()
+        retry = await refresh_occurrence_message(
+            bot,
+            event,
+            updated,
+            during_event,
+        )
+
+        assert retry is EventStatus.ONGOING
+        committed = store.get_occurrence(occurrence.occurrence_id)
+        assert committed is not None
+        assert committed.status is EventStatus.ONGOING
+        assert not committed.needs_refresh
+        channel.thread.edit.assert_awaited_once()
+
     async def test_failed_message_edit_keeps_status_for_retry(
         self,
         bot: Any,

@@ -313,7 +313,10 @@ class TestPostEventButton:
         draft = make_complete_draft()
         view = EventConfirmView(fake_bot, draft)
         channel.send_error = forbidden_error(50001)
-        interaction = make_interaction(message=ephemeral_message())
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
         interaction.followup.send = AsyncMock()
         interaction.edit_original_response = AsyncMock()
 
@@ -332,7 +335,10 @@ class TestPostEventButton:
         # from the same preview rather than restarting /event new.
         interaction.edit_original_response.assert_awaited_once_with(view=view)
 
-        retry_interaction = make_interaction(message=ephemeral_message())
+        retry_interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
         retry_interaction.followup.send = AsyncMock()
         retry_interaction.edit_original_response = AsyncMock()
 
@@ -356,7 +362,10 @@ class TestPostEventButton:
     ) -> None:
         draft = make_complete_draft()
         view = EventConfirmView(fake_bot, draft)
-        interaction = make_interaction(message=ephemeral_message())
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
         interaction.followup.send = AsyncMock()
 
         await view.post_event.callback(interaction)
@@ -375,7 +384,10 @@ class TestPostEventButton:
         store.create_event = MagicMock(  # type: ignore[method-assign]
             side_effect=SQLAlchemyError("boom")
         )
-        interaction = make_interaction(message=ephemeral_message())
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
         interaction.followup.send = AsyncMock()
         interaction.edit_original_response = AsyncMock()
 
@@ -389,6 +401,29 @@ class TestPostEventButton:
             in interaction.followup.send.await_args.args[0]
         )
         interaction.edit_original_response.assert_awaited_once_with(view=view)
+
+    async def test_post_rejected_when_creator_role_revoked(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        # The preview was opened earlier, but the creator role is gone now.
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.post_event.callback(interaction)
+
+        assert not draft.posted
+        assert channel.sent == []
+        assert store.get_unposted_occurrences() == []
+        interaction.response.send_message.assert_awaited_once()
+        assert interaction.response.send_message.await_args is not None
+        assert (
+            "required role"
+            in interaction.response.send_message.await_args.args[0]
+        )
 
 
 class TestRolePickSelect:
