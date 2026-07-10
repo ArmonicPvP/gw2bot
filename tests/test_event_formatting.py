@@ -1,9 +1,11 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from gw2bot.events.formatting import (
+    EMBED_TOTAL_LIMIT,
     compute_status,
     confirm_embed,
     describe_repeat,
@@ -422,6 +424,44 @@ class TestEventEmbed:
         )
 
         assert embed.footer.text == "eventID: —"
+
+    def test_long_description_and_roster_stay_within_aggregate_limit(
+        self,
+    ) -> None:
+        event = replace(
+            make_event(EventCategory.WVW),
+            description="x" * 4000,
+        )
+        active = [make_signup(10**17 + user_id) for user_id in range(50)]
+        waitlist = [
+            make_signup(10**17 + 1000 + user_id, waitlisted=True)
+            for user_id in range(30)
+        ]
+
+        embed = event_embed(event, active + waitlist, EventStatus.OPEN)
+
+        # Discord rejects embeds over 6000 characters; without a budget the
+        # roster would push a full description past that and every edit fails.
+        assert len(embed) <= EMBED_TOTAL_LIMIT
+        # The description is the oversized part, so it is what gets trimmed;
+        # every roster member is still listed.
+        assert embed.description is not None
+        assert embed.description.endswith("…")
+        mentions = sum(
+            (field.value or "").count("<@")
+            for field in embed.fields
+            if field.name != "Leader"
+        )
+        assert mentions == len(active) + len(waitlist)
+
+    def test_embed_within_limit_is_left_untouched(self) -> None:
+        event = make_event(EventCategory.WVW)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert len(embed) <= EMBED_TOTAL_LIMIT
+        assert embed.description == "Bring food."
 
 
 class TestConfirmEmbed:

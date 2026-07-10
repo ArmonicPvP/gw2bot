@@ -28,7 +28,9 @@ EVENT_DATETIME_FORMAT = "%m.%d.%Y %H:%M"
 EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"
 EVENT_DURATION_PATTERN = re.compile(r"^(\d{1,3}):([0-5]\d)$")
 EMBED_FIELD_VALUE_LIMIT = 1024
+EMBED_TOTAL_LIMIT = 6000
 EMPTY_FIELD_TEXT = "—"
+_TRUNCATION_MARKER = "…"
 
 _WEEKDAY_NAMES = (
     "monday",
@@ -353,7 +355,44 @@ def event_embed(
         event.event_id
     )
     embed.set_footer(text=f"eventID: {footer_id}")
+    _fit_within_total_limit(embed)
     return embed
+
+
+def _fit_within_total_limit(embed: discord.Embed) -> None:
+    # Discord rejects any embed whose title, description, field names/values
+    # and footer exceed 6000 characters in aggregate. A long author
+    # description combined with a growing roster (the waitlist is unbounded)
+    # can cross that line, which would make every signup/removal edit fail and
+    # leave the public message stale forever. Reclaim budget from the author
+    # description first, then from trailing roster fields, so the embed always
+    # stays sendable.
+    if len(embed) <= EMBED_TOTAL_LIMIT:
+        return
+    if embed.description:
+        overflow = len(embed) - EMBED_TOTAL_LIMIT
+        keep = len(embed.description) - overflow - len(_TRUNCATION_MARKER)
+        if keep > 0:
+            embed.description = (
+                embed.description[:keep].rstrip() + _TRUNCATION_MARKER
+            )
+        else:
+            embed.description = None
+    while len(embed) > EMBED_TOTAL_LIMIT and embed.fields:
+        index = len(embed.fields) - 1
+        field = embed.fields[index]
+        value = field.value or ""
+        overflow = len(embed) - EMBED_TOTAL_LIMIT
+        if len(value) > overflow + len(_TRUNCATION_MARKER):
+            trimmed = value[: len(value) - overflow - len(_TRUNCATION_MARKER)]
+            embed.set_field_at(
+                index,
+                name=field.name,
+                value=trimmed.rstrip() + _TRUNCATION_MARKER,
+                inline=field.inline,
+            )
+        else:
+            embed.remove_field(index)
 
 
 def confirm_embed() -> discord.Embed:
