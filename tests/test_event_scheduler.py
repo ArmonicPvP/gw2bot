@@ -176,6 +176,83 @@ class TestRunEventMaintenance:
 
         assert len(channel.sent) == 2
 
+    async def test_failed_recurrence_post_is_retried_on_the_next_pass(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        from factories import forbidden_error
+
+        event, occurrence = await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        channel.send_error = forbidden_error(50001)
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        # The failed send leaves the next occurrence stored but unposted,
+        # with its auto signups already applied.
+        assert len(channel.sent) == 1
+        finished = store.get_occurrence(occurrence.occurrence_id)
+        assert finished is not None
+        assert finished.status is EventStatus.OVER
+        pending = store.get_unposted_occurrences()
+        assert len(pending) == 1
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(pending[0].occurrence_id)
+        ] == [11]
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        assert len(channel.sent) == 2
+        posted = store.get_posted_unfinished_occurrences()
+        assert [entry.occurrence_id for entry in posted] == [
+            pending[0].occurrence_id
+        ]
+        assert store.get_unposted_occurrences() == []
+        channel.thread.add_user.assert_awaited()
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        assert len(channel.sent) == 2
+
+    async def test_pending_occurrence_of_a_never_posted_event_is_skipped(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A series without any posted occurrence belongs to a manual post
+        # still in flight; posting it would race the creator's own flow.
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        store.create_occurrence(event.event_id, event.start_time)
+
+        await run_event_maintenance(bot, BEFORE_START)
+
+        assert channel.sent == []
+        assert len(store.get_unposted_occurrences()) == 1
+
     async def test_maintenance_logs_never_contain_user_content(
         self,
         bot: Any,

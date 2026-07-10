@@ -46,8 +46,13 @@ class FakeChannel:
         self.sent: list[dict[str, Any]] = []
         self.partial_message = SimpleNamespace(edit=AsyncMock())
         self.create_thread_error: Exception | None = None
+        self.send_error: Exception | None = None
 
     async def send(self, *, embed: Any = None, view: Any = None) -> Any:
+        if self.send_error is not None:
+            error = self.send_error
+            self.send_error = None
+            raise error
         message = SimpleNamespace(
             id=555,
             create_thread=AsyncMock(return_value=self.thread),

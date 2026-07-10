@@ -105,6 +105,70 @@ class TestEventStoreOccurrences:
             entry.occurrence_id for entry in live
         }
 
+    def test_unposted_occurrences_lists_rows_without_a_message(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        unposted = store.create_occurrence(event.event_id, START)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1, None)
+
+        pending = store.get_unposted_occurrences()
+
+        assert [entry.occurrence_id for entry in pending] == [
+            unposted.occurrence_id
+        ]
+
+    def test_has_posted_occurrence(self, store: EventStore) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+
+        assert not store.has_posted_occurrence(event.event_id)
+
+        store.set_occurrence_message(occurrence.occurrence_id, 1, None)
+
+        assert store.has_posted_occurrence(event.event_id)
+
+    def test_delete_event_removes_occurrences_and_signups(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            1,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        untouched = create_event(store)
+        untouched_occurrence = store.create_occurrence(
+            untouched.event_id,
+            START,
+        )
+
+        store.delete_event(event.event_id)
+
+        assert store.get_event(event.event_id) is None
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert store.get_signups(occurrence.occurrence_id) == []
+        assert store.get_auto_signup(event.event_id, 1) is None
+        assert store.get_event(untouched.event_id) is not None
+        assert (
+            store.get_occurrence(untouched_occurrence.occurrence_id)
+            is not None
+        )
+
     def test_has_later_occurrence(self, store: EventStore) -> None:
         event = create_event(store)
         store.create_occurrence(event.event_id, START)

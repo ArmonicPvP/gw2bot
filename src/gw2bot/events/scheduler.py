@@ -67,7 +67,9 @@ async def run_event_maintenance(
         status = occurrence_status(event, occurrence, signups, current_time)
         if status == occurrence.status:
             continue
-        await refresh_occurrence_message(bot, event, occurrence, current_time)
+        # The next occurrence row is secured before the OVER status is
+        # persisted, so a failure here leaves the transition unfinished
+        # and it is retried on the next maintenance pass.
         if (
             status is EventStatus.OVER
             and event.repeat_frequency is not RepeatFrequency.NONE
@@ -76,15 +78,17 @@ async def run_event_maintenance(
                 occurrence.start_time,
             )
         ):
-            await _post_next_occurrence(bot, event, occurrence, current_time)
+            _create_next_occurrence(bot, event, occurrence, current_time)
+        await refresh_occurrence_message(bot, event, occurrence, current_time)
+    await _post_pending_occurrences(bot, current_time)
 
 
-async def _post_next_occurrence(
+def _create_next_occurrence(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
     now: datetime,
-) -> None:
+) -> EventOccurrence:
     next_start = next_occurrence_start(
         event.repeat_frequency,
         event.repeat_days,
@@ -104,19 +108,68 @@ async def _post_next_occurrence(
         next_start,
     )
     applied = apply_auto_signups(bot, event, new_occurrence)
-    posted = await post_occurrence(bot, event, new_occurrence, now)
-    if applied:
-        for signup in bot.event_store.get_signups(posted.occurrence_id):
-            await update_thread_membership(
-                bot,
-                posted,
-                signup.discord_user_id,
-                add=True,
-            )
     LOGGER.debug(
-        "Posted recurring event occurrence; event_id=%s occurrence_id=%s "
-        "auto_signups=%s",
+        "Created next recurring event occurrence; event_id=%s "
+        "occurrence_id=%s auto_signups=%s",
         event.event_id,
-        posted.occurrence_id,
+        new_occurrence.occurrence_id,
         applied,
     )
+    return new_occurrence
+
+
+async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
+    pending = bot.event_store.get_unposted_occurrences()
+    if not pending:
+        return
+    LOGGER.debug(
+        "Posting pending event occurrences; pending=%s",
+        len(pending),
+    )
+    for occurrence in pending:
+        event = bot.event_store.get_event(occurrence.event_id)
+        if event is None or event.cancelled:
+            LOGGER.debug(
+                "Skipping pending occurrence without an active event; "
+                "occurrence_id=%s",
+                occurrence.occurrence_id,
+            )
+            continue
+        # A series without any posted occurrence is a manual post still in
+        # flight (or abandoned); posting it here would race the creator's
+        # own posting flow and duplicate the message.
+        if not bot.event_store.has_posted_occurrence(event.event_id):
+            LOGGER.debug(
+                "Skipping pending occurrence awaiting manual posting; "
+                "occurrence_id=%s",
+                occurrence.occurrence_id,
+            )
+            continue
+        # One failed posting must not block the remaining pending
+        # occurrences; failures are retried on the next maintenance pass.
+        try:
+            posted = await post_occurrence(bot, event, occurrence, now)
+            for signup in bot.event_store.get_signups(
+                posted.occurrence_id
+            ):
+                await update_thread_membership(
+                    bot,
+                    posted,
+                    signup.discord_user_id,
+                    add=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.error(
+                "Could not post pending event occurrence; occurrence_id=%s "
+                "error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            continue
+        LOGGER.debug(
+            "Posted pending event occurrence; event_id=%s occurrence_id=%s",
+            event.event_id,
+            posted.occurrence_id,
+        )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
 
 from gw2bot.database import (
@@ -235,6 +235,59 @@ class EventStore:
                 .order_by(EventOccurrenceRecord.occurrence_id)
             ).all()
             return [_occurrence_from_record(record) for record in records]
+
+    def get_unposted_occurrences(self) -> list[EventOccurrence]:
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.message_id.is_(None))
+                .order_by(EventOccurrenceRecord.occurrence_id)
+            ).all()
+            return [_occurrence_from_record(record) for record in records]
+
+    def delete_event(self, event_id: int) -> None:
+        with self._sessions() as session:
+            occurrence_ids = session.scalars(
+                select(EventOccurrenceRecord.occurrence_id).where(
+                    EventOccurrenceRecord.event_id == event_id
+                )
+            ).all()
+            if occurrence_ids:
+                session.execute(
+                    delete(EventSignupRecord).where(
+                        EventSignupRecord.occurrence_id.in_(occurrence_ids)
+                    )
+                )
+            session.execute(
+                delete(EventAutoSignupRecord).where(
+                    EventAutoSignupRecord.event_id == event_id
+                )
+            )
+            session.execute(
+                delete(EventOccurrenceRecord).where(
+                    EventOccurrenceRecord.event_id == event_id
+                )
+            )
+            session.execute(
+                delete(EventRecord).where(EventRecord.event_id == event_id)
+            )
+            session.commit()
+        LOGGER.debug(
+            "Deleted event with its occurrences and signups; event_id=%s "
+            "occurrences=%s",
+            event_id,
+            len(occurrence_ids),
+        )
+
+    def has_posted_occurrence(self, event_id: int) -> bool:
+        with self._sessions() as session:
+            record = session.scalars(
+                select(EventOccurrenceRecord.occurrence_id)
+                .where(EventOccurrenceRecord.event_id == event_id)
+                .where(EventOccurrenceRecord.message_id.is_not(None))
+                .limit(1)
+            ).first()
+            return record is not None
 
     def has_later_occurrence(self, event_id: int, after: datetime) -> bool:
         with self._sessions() as session:

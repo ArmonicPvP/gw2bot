@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -7,13 +8,18 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from gw2bot.events.commands import EventCommands
+from gw2bot.events.posting import post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.models import (
+    AutoSignupChoice,
     EventCategory,
     EventRole,
     RepeatFrequency,
 )
+from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
+    AutoSignupChoiceView,
+    EventConfirmView,
     EventDetailsModal,
     EventDraft,
     EventRepeatModal,
@@ -24,6 +30,9 @@ from gw2bot.events.views import (
     _signup_summary,
     build_signup_view,
 )
+
+from factories import forbidden_error
+from test_event_posting import FakeBot, FakeChannel
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
 
@@ -260,6 +269,212 @@ class TestEventRepeatModal:
             "Try again"
             in interaction.response.send_message.await_args.args[0]
         )
+
+
+@pytest.fixture
+def store(tmp_path: Path):
+    store = EventStore(str(tmp_path / "gw2bot.db"))
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def channel() -> FakeChannel:
+    return FakeChannel()
+
+
+@pytest.fixture
+def fake_bot(store: EventStore, channel: FakeChannel) -> Any:
+    return cast(Any, FakeBot(store, channel))
+
+
+def make_complete_draft() -> EventDraft:
+    return EventDraft(
+        leader_discord_id=42,
+        category=EventCategory.FRACTAL,
+        title="Kitty Cleanup",
+        description="Bring food.",
+        channel_id=1234,
+        start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+        duration_minutes=90,
+    )
+
+
+class TestPostEventButton:
+    async def test_failed_post_cleans_up_and_a_retry_posts_once(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        channel.send_error = forbidden_error(50001)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        assert not draft.posted
+        assert channel.sent == []
+        assert store.get_unposted_occurrences() == []
+        interaction.followup.send.assert_awaited_once()
+        assert interaction.followup.send.await_args is not None
+        assert (
+            "could not be posted"
+            in interaction.followup.send.await_args.args[0]
+        )
+
+        retry_interaction = make_interaction(message=ephemeral_message())
+        retry_interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(retry_interaction)
+
+        assert draft.posted
+        assert len(channel.sent) == 1
+        posted = store.get_posted_unfinished_occurrences()
+        assert len(posted) == 1
+        events = {
+            store.get_event(occurrence.event_id).event_id  # type: ignore[union-attr]
+            for occurrence in posted
+        }
+        assert len(events) == 1
+
+    async def test_successful_post_stores_and_sends_once(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        assert draft.posted
+        assert len(channel.sent) == 1
+        assert len(store.get_posted_unfinished_occurrences()) == 1
+
+
+class TestAutoSignupPrompt:
+    async def make_flow(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        user_id: int,
+    ) -> SignupFlow:
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        occurrence = await post_occurrence(
+            fake_bot,
+            event,
+            occurrence,
+            datetime(2107, 1, 30, 10, 0, tzinfo=UTC),
+        )
+        flow = SignupFlow(fake_bot, event, occurrence, user_id)
+        flow.role = EventRole.DPS
+        return flow
+
+    def make_flow_interaction(self) -> Any:
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def finalize_and_get_kwargs(
+        self,
+        flow: SignupFlow,
+    ) -> dict[str, Any]:
+        interaction = self.make_flow_interaction()
+        await flow.finalize(interaction)
+        interaction.edit_original_response.assert_awaited_once()
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        return await_args.kwargs
+
+    async def test_prompts_when_no_choice_is_stored(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+
+        kwargs = await self.finalize_and_get_kwargs(flow)
+
+        assert "automatically" in kwargs["content"]
+        assert isinstance(kwargs["view"], AutoSignupChoiceView)
+
+    async def test_prompts_again_after_a_plain_no(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        store.set_auto_signup(
+            flow.event.event_id,
+            21,
+            AutoSignupChoice.NO,
+            None,
+            (),
+        )
+
+        kwargs = await self.finalize_and_get_kwargs(flow)
+
+        assert "automatically" in kwargs["content"]
+        assert isinstance(kwargs["view"], AutoSignupChoiceView)
+
+    async def test_never_ask_again_suppresses_the_prompt(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        store.set_auto_signup(
+            flow.event.event_id,
+            21,
+            AutoSignupChoice.NEVER_ASK,
+            None,
+            (),
+        )
+
+        kwargs = await self.finalize_and_get_kwargs(flow)
+
+        assert "automatically" not in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_yes_suppresses_the_prompt(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        store.set_auto_signup(
+            flow.event.event_id,
+            21,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        kwargs = await self.finalize_and_get_kwargs(flow)
+
+        assert "automatically" not in kwargs["content"]
+        assert kwargs["view"] is None
 
 
 class TestSignupViews:

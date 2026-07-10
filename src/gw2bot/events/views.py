@@ -552,6 +552,19 @@ class EventConfirmView(discord.ui.View):
                 event.event_id,
                 event.start_time,
             )
+        except SQLAlchemyError as exc:
+            self._draft.posted = False
+            LOGGER.error(
+                "Could not store event; user_id=%s error_type=%s",
+                interaction.user.id,
+                type(exc).__name__,
+            )
+            await interaction.followup.send(
+                "The event could not be saved. Try again later.",
+                ephemeral=True,
+            )
+            return
+        try:
             await post_occurrence(self._bot, event, occurrence)
         except (discord.HTTPException, SQLAlchemyError) as exc:
             self._draft.posted = False
@@ -560,6 +573,17 @@ class EventConfirmView(discord.ui.View):
                 interaction.user.id,
                 type(exc).__name__,
             )
+            # Remove the stored rows so retrying cannot create duplicate
+            # events and the scheduler cannot resurrect this occurrence.
+            try:
+                self._bot.event_store.delete_event(event.event_id)
+            except SQLAlchemyError as cleanup_exc:
+                LOGGER.error(
+                    "Could not clean up unposted event; event_id=%s "
+                    "error_type=%s",
+                    event.event_id,
+                    type(cleanup_exc).__name__,
+                )
             await interaction.followup.send(
                 "The event could not be posted to the selected channel. "
                 "Check the bot's permissions there and try again.",
@@ -1364,13 +1388,14 @@ class SignupFlow:
             await edit(content=str(error), view=None)
             return
         content = _signup_summary(signup)
-        if (
-            self.event.repeat_frequency is not RepeatFrequency.NONE
-            and self.bot.event_store.get_auto_signup(
-                self.event.event_id,
-                self.discord_user_id,
-            )
-            is None
+        auto = self.bot.event_store.get_auto_signup(
+            self.event.event_id,
+            self.discord_user_id,
+        )
+        # A plain "No" only declines for now; just "Yes" and "No, never
+        # ask again" persist across future manual signups.
+        if self.event.repeat_frequency is not RepeatFrequency.NONE and (
+            auto is None or auto.choice is AutoSignupChoice.NO
         ):
             await edit(
                 content=(
