@@ -271,6 +271,31 @@ class TestCompleteSignup:
         with pytest.raises(ValueError, match="requires picking a role"):
             await complete_signup(bot, event, occurrence, 11, None, ())
 
+    async def test_signup_after_event_ends_is_rejected(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        after_end = START + timedelta(hours=3)
+
+        # A view left open until after the event ends must not be able to
+        # mutate the historical roster on a late click.
+        with pytest.raises(ValueError, match="already ended"):
+            await complete_signup(
+                bot,
+                event,
+                occurrence,
+                11,
+                EventRole.DPS,
+                (),
+                now=after_end,
+            )
+
+        assert store.get_signups(occurrence.occurrence_id) == []
+        channel.thread.add_user.assert_not_awaited()
+
     async def test_full_event_status_becomes_full(
         self,
         bot: Any,

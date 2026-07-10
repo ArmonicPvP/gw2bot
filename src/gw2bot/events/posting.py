@@ -224,8 +224,17 @@ async def complete_signup(
     discord_user_id: int,
     role: EventRole | None,
     flex_roles: tuple[EventRole, ...],
+    now: datetime | None = None,
 ) -> EventSignup:
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    # The role/flex/remember views can linger until their timeout, so the
+    # occurrence may have ended between opening the flow and this click.
+    # Refuse to mutate a historical roster (which would also update thread
+    # membership and refresh the past message).
+    if occurrence_status(event, occurrence, signups, now) is EventStatus.OVER:
+        raise ValueError(
+            "This event has already ended, so you can no longer sign up."
+        )
     assigned_role: EventRole | None = None
     waitlisted: bool
     if event.capacity.has_roles:
