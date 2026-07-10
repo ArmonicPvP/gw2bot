@@ -554,6 +554,7 @@ class EventConfirmView(discord.ui.View):
             )
         except SQLAlchemyError as exc:
             self._draft.posted = False
+            await self._restore_post_controls(interaction)
             LOGGER.error(
                 "Could not store event; user_id=%s error_type=%s",
                 interaction.user.id,
@@ -568,6 +569,7 @@ class EventConfirmView(discord.ui.View):
             await post_occurrence(self._bot, event, occurrence)
         except (discord.HTTPException, SQLAlchemyError) as exc:
             self._draft.posted = False
+            await self._restore_post_controls(interaction)
             LOGGER.error(
                 "Could not post event; user_id=%s error_type=%s",
                 interaction.user.id,
@@ -602,6 +604,23 @@ class EventConfirmView(discord.ui.View):
             f"<#{event.channel_id}>.",
             ephemeral=True,
         )
+
+    async def _restore_post_controls(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        # The preview buttons are removed before saving/posting; on failure
+        # put them back so the user can retry from the same message instead
+        # of restarting /event new. A failure here is logged but must not
+        # mask the original error being reported to the user.
+        try:
+            await interaction.edit_original_response(view=self)
+        except discord.HTTPException as exc:
+            LOGGER.error(
+                "Could not restore post controls; user_id=%s error_type=%s",
+                interaction.user.id,
+                type(exc).__name__,
+            )
 
 
 _CHANGE_FIELDS = (
@@ -1428,22 +1447,38 @@ def _signup_summary(signup: EventSignup) -> str:
     return "You signed up for the event."
 
 
+def _role_pick_label(
+    role: EventRole,
+    fits: bool,
+    waitlist_only: bool,
+) -> str:
+    # Every role is always offered so a user can pick a full preferred role
+    # and fall back to an open flex role (or waitlist for a specific role
+    # while others remain open). When the whole roster is full, picking any
+    # role can only waitlist; otherwise a full role may still resolve to a
+    # flex assignment, so it is labelled "full" rather than "waitlist".
+    if waitlist_only:
+        return f"{role.value} (waitlist)"
+    if not fits:
+        return f"{role.value} (full)"
+    return role.value
+
+
 class RolePickSelect(discord.ui.Select["RolePickView"]):
     def __init__(self, flow: SignupFlow):
         signups = flow.bot.event_store.get_signups(
             flow.occurrence.occurrence_id
         )
-        available = fitting_roles(flow.event.capacity, signups)
+        available = set(fitting_roles(flow.event.capacity, signups))
         waitlist_only = not available
-        roles = list(EventRole) if waitlist_only else available
         options = [
             discord.SelectOption(
-                label=(
-                    f"{role.value} (waitlist)" if waitlist_only else role.value
+                label=_role_pick_label(
+                    role, role in available, waitlist_only
                 ),
                 value=role.value,
             )
-            for role in roles
+            for role in EventRole
         ]
         super().__init__(placeholder="Pick your role", options=options)
 

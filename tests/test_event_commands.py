@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import post_occurrence
@@ -312,6 +313,7 @@ class TestPostEventButton:
         channel.send_error = forbidden_error(50001)
         interaction = make_interaction(message=ephemeral_message())
         interaction.followup.send = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
 
         await view.post_event.callback(interaction)
 
@@ -324,9 +326,13 @@ class TestPostEventButton:
             "could not be posted"
             in interaction.followup.send.await_args.args[0]
         )
+        # The Post event button must be restored so the user can retry
+        # from the same preview rather than restarting /event new.
+        interaction.edit_original_response.assert_awaited_once_with(view=view)
 
         retry_interaction = make_interaction(message=ephemeral_message())
         retry_interaction.followup.send = AsyncMock()
+        retry_interaction.edit_original_response = AsyncMock()
 
         await view.post_event.callback(retry_interaction)
 
@@ -356,6 +362,129 @@ class TestPostEventButton:
         assert draft.posted
         assert len(channel.sent) == 1
         assert len(store.get_posted_unfinished_occurrences()) == 1
+
+    async def test_failed_save_restores_post_controls(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        store.create_event = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.followup.send = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        assert not draft.posted
+        interaction.followup.send.assert_awaited_once()
+        assert interaction.followup.send.await_args is not None
+        assert (
+            "could not be saved"
+            in interaction.followup.send.await_args.args[0]
+        )
+        interaction.edit_original_response.assert_awaited_once_with(view=view)
+
+
+class TestRolePickSelect:
+    def _make_role_flow(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> SignupFlow:
+        event = store.create_event(
+            category=EventCategory.RAID,
+            title="Full quickness",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        # Fill both quickness slots so Quickness roles are full while
+        # Alacrity and plain DPS remain open.
+        for user_id, role in (
+            (1, EventRole.QUICKNESS_HEAL),
+            (2, EventRole.QUICKNESS_DPS),
+        ):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=role,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        return SignupFlow(fake_bot, event, occurrence, 42)
+
+    def test_offers_full_roles_alongside_open_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = self._make_role_flow(fake_bot, store)
+
+        select = RolePickSelect(flow)
+        labels = {option.value: option.label for option in select.options}
+
+        # Every role is selectable so a full preferred role can fall back to
+        # an open flex role (or waitlist for a specific role).
+        assert set(labels) == {role.value for role in EventRole}
+        assert labels[EventRole.QUICKNESS_HEAL.value] == "Quickness Heal (full)"
+        assert labels[EventRole.QUICKNESS_DPS.value] == "Quickness DPS (full)"
+        assert labels[EventRole.ALACRITY_HEAL.value] == "Alacrity Heal"
+        assert labels[EventRole.DPS.value] == "Just DPS"
+
+    def test_labels_all_roles_as_waitlist_when_roster_full(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Packed fractal",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        # Fractal capacity is 1 healer and 4 dps; fill every slot.
+        assignments = [
+            EventRole.QUICKNESS_HEAL,
+            EventRole.ALACRITY_DPS,
+            EventRole.DPS,
+            EventRole.DPS,
+            EventRole.DPS,
+        ]
+        for user_id, role in enumerate(assignments, start=1):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=role,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        flow = SignupFlow(fake_bot, event, occurrence, 99)
+
+        select = RolePickSelect(flow)
+
+        assert {option.value for option in select.options} == {
+            role.value for role in EventRole
+        }
+        assert all(
+            option.label.endswith("(waitlist)") for option in select.options
+        )
 
 
 class TestAutoSignupPrompt:
