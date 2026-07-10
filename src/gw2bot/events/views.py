@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import discord
@@ -906,6 +906,17 @@ def build_signup_view(occurrence_id: int) -> discord.ui.View:
     return view
 
 
+def _occurrence_has_ended(
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime,
+) -> bool:
+    end_time = occurrence.start_time + timedelta(
+        minutes=event.duration_minutes
+    )
+    return now >= end_time
+
+
 async def _load_event_context(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -994,6 +1005,19 @@ class EventSignOutButton(
         if context is None:
             return
         event, occurrence = context
+        if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+            LOGGER.debug(
+                "Sign out pressed after the event ended; occurrence_id=%s "
+                "user_id=%s",
+                occurrence.occurrence_id,
+                interaction.user.id,
+            )
+            await interaction.response.send_message(
+                "This event has already ended, so its roster can no longer "
+                "be changed.",
+                ephemeral=True,
+            )
+            return
         signup = bot.event_store.get_signup(
             occurrence.occurrence_id,
             interaction.user.id,
@@ -1253,6 +1277,26 @@ class SignOutConfirmView(discord.ui.View):
     ) -> None:
         from gw2bot.events.posting import remove_signup
 
+        # The event may have ended while this confirmation was open; never
+        # mutate a historical roster (which could also promote a waitlisted
+        # user into a past event).
+        if _occurrence_has_ended(
+            self._event, self._occurrence, datetime.now(UTC)
+        ):
+            LOGGER.debug(
+                "Sign out confirmed after the event ended; occurrence_id=%s "
+                "user_id=%s",
+                self._occurrence.occurrence_id,
+                interaction.user.id,
+            )
+            await interaction.response.edit_message(
+                content=(
+                    "This event has already ended, so its roster can no "
+                    "longer be changed."
+                ),
+                view=None,
+            )
+            return
         await interaction.response.edit_message(
             content="Removing you from the event…",
             view=None,
@@ -1300,9 +1344,7 @@ async def start_signup_flow(
     event, occurrence = context
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     now = datetime.now(UTC)
-    if occurrence.start_time.timestamp() + event.duration_minutes * 60 <= (
-        now.timestamp()
-    ):
+    if _occurrence_has_ended(event, occurrence, now):
         await interaction.response.send_message(
             "This event is already over.",
             ephemeral=True,

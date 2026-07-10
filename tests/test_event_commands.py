@@ -25,8 +25,10 @@ from gw2bot.events.views import (
     EventDraft,
     EventRepeatModal,
     EventScheduleModal,
+    EventSignOutButton,
     EventSignUpButton,
     RolePickSelect,
+    SignOutConfirmView,
     SignupFlow,
     _signup_summary,
     build_signup_view,
@@ -484,6 +486,91 @@ class TestRolePickSelect:
         }
         assert all(
             option.label.endswith("(waitlist)") for option in select.options
+        )
+
+
+class TestSignOutFlow:
+    def _make_ended_occurrence(self, store: EventStore) -> Any:
+        past_start = datetime.now(UTC) - timedelta(hours=3)
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=past_start,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        return event, occurrence
+
+    async def test_confirm_after_end_keeps_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_ended_occurrence(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=99,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        view = SignOutConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.remove_me.callback(interaction)
+
+        # The historical roster must be untouched: no removal of the active
+        # participant and no promotion of the waitlisted one.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        waitlisted = store.get_signup(occurrence.occurrence_id, 99)
+        assert waitlisted is not None
+        assert waitlisted.waitlisted
+        interaction.response.edit_message.assert_awaited_once()
+        assert interaction.response.edit_message.await_args is not None
+        assert (
+            "already ended"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_button_after_end_does_not_open_confirmation(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_ended_occurrence(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        button = EventSignOutButton(occurrence.occurrence_id)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.client = fake_bot
+
+        await button.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert interaction.response.send_message.await_args is not None
+        assert (
+            "already ended"
+            in interaction.response.send_message.await_args.args[0]
         )
 
 

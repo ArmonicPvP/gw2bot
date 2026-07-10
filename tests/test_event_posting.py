@@ -508,6 +508,37 @@ class TestRefreshOccurrenceMessage:
         assert status is EventStatus.OPEN
         channel.thread.edit.assert_not_awaited()
 
+    async def test_failed_message_edit_keeps_status_for_retry(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        after_end = START + timedelta(hours=3)
+        channel.partial_message.edit = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            after_end,
+        )
+
+        # The transition to OVER must not be persisted when the public
+        # message could not be refreshed, so the scheduler keeps retrying.
+        assert status is EventStatus.OPEN
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert updated.status is EventStatus.OPEN
+        assert updated.occurrence_id in {
+            live.occurrence_id
+            for live in store.get_posted_unfinished_occurrences()
+        }
+        channel.thread.edit.assert_not_awaited()
+
 
 class TestPostingLoggingSafety:
     async def test_posting_and_signup_logs_never_contain_user_content(
