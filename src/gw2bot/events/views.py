@@ -550,6 +550,7 @@ class EventConfirmView(discord.ui.View):
         self._draft.posted = True
         await interaction.response.edit_message(view=None)
         draft_event = self._draft.to_event()
+        event: Event | None = None
         try:
             event = self._bot.event_store.create_event(
                 category=draft_event.category,
@@ -574,6 +575,19 @@ class EventConfirmView(discord.ui.View):
                 interaction.user.id,
                 type(exc).__name__,
             )
+            # If create_event committed before create_occurrence failed, the
+            # event row is orphaned (no occurrence for the scheduler to post).
+            # Remove it so retrying cannot leave duplicate, unpostable events.
+            if event is not None:
+                try:
+                    self._bot.event_store.delete_event(event.event_id)
+                except SQLAlchemyError as cleanup_exc:
+                    LOGGER.error(
+                        "Could not clean up partially stored event; "
+                        "event_id=%s error_type=%s",
+                        event.event_id,
+                        type(cleanup_exc).__name__,
+                    )
             await interaction.followup.send(
                 "The event could not be saved. Try again later.",
                 ephemeral=True,
