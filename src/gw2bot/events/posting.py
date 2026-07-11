@@ -332,15 +332,20 @@ async def remove_signup(
     )
     if removed is None:
         return None, None
+    # Promote a waitlisted user into the freed slot before yielding to any
+    # awaited Discord I/O. Both the removal and promotion are synchronous store
+    # writes, so keeping them adjacent makes the mutation atomic: a concurrent
+    # complete_signup cannot observe the freed slot and claim it ahead of the
+    # existing waitlist while we await the thread update below.
+    promoted: EventSignup | None = None
+    if not removed.waitlisted:
+        promoted = _promote_first_fitting_waitlisted(bot, event, occurrence)
     await update_thread_membership(
         bot,
         occurrence,
         discord_user_id,
         add=False,
     )
-    promoted: EventSignup | None = None
-    if not removed.waitlisted:
-        promoted = _promote_first_fitting_waitlisted(bot, event, occurrence)
     await refresh_occurrence_message(bot, event, occurrence)
     return removed, promoted
 
