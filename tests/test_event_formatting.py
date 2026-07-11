@@ -19,6 +19,7 @@ from gw2bot.events.formatting import (
     parse_repeat_days,
 )
 from gw2bot.events.models import (
+    CATEGORY_EMOJI,
     EMOJI_ALACRITY,
     EMOJI_DPS,
     EMOJI_QUICKNESS,
@@ -320,27 +321,29 @@ class TestEventEmbed:
 
         embed = event_embed(event, signups, EventStatus.OPEN)
 
-        assert embed.title == "Kitty Cleanup"
+        assert embed.title == (
+            f"{CATEGORY_EMOJI[EventCategory.FRACTAL]} Kitty Cleanup"
+        )
         assert embed.description == "Bring food."
         names = [field.name for field in embed.fields]
         assert names == [
-            "Date & Time",
-            "Duration",
-            "Leader",
-            "Participants (2/5)",
-            "Healer (1/1)",
-            "DPS (1/4)",
+            "📅 Date & Time",
+            "⏳ Duration",
+            "👑 Leader",
+            "👥 Participants (2/5)",
+            "💚 Healer (1/1)",
+            "⚔️ DPS (1/4)",
             "Boons",
             "🔁 Flexroles",
             "⌛️ Waitlist",
         ]
         values = {field.name: field.value for field in embed.fields}
         start_epoch = int(event.start_time.timestamp())
-        assert values["Date & Time"] == f"<t:{start_epoch}:F>"
-        assert values["Duration"] == "1h 30m"
-        assert values["Leader"] == "<@42>"
-        assert values["Healer (1/1)"] == f"└ {EMOJI_QUICKNESS} <@11>"
-        assert values["DPS (1/4)"] == f"└ {EMOJI_ALACRITY} <@12>"
+        assert values["📅 Date & Time"] == f"<t:{start_epoch}:f>"
+        assert values["⏳ Duration"] == "1h 30m"
+        assert values["👑 Leader"] == "<@42>"
+        assert values["💚 Healer (1/1)"] == f"└ {EMOJI_QUICKNESS} <@11>"
+        assert values["⚔️ DPS (1/4)"] == f"└ {EMOJI_ALACRITY} <@12>"
         assert values["Boons"] == (
             f"{EMOJI_ALACRITY} 1/1 | {EMOJI_QUICKNESS} 1/1"
         )
@@ -357,9 +360,9 @@ class TestEventEmbed:
             embed = event_embed(make_event(category), [], EventStatus.OPEN)
 
             names = [field.name for field in embed.fields]
-            assert "Participants (0/10)" in names
-            assert "Healer (0/2)" in names
-            assert "DPS (0/8)" in names
+            assert "👥 Participants (0/10)" in names
+            assert "💚 Healer (0/2)" in names
+            assert "⚔️ DPS (0/8)" in names
             values = {field.name: field.value for field in embed.fields}
             assert values["Boons"] == (
                 f"{EMOJI_ALACRITY} 0/2 | {EMOJI_QUICKNESS} 0/2"
@@ -372,11 +375,11 @@ class TestEventEmbed:
         embed = event_embed(event, signups, EventStatus.OPEN)
 
         names = [field.name or "" for field in embed.fields]
-        assert "Participants (3/50)" in names
-        assert not any(name.startswith("Healer") for name in names)
+        assert "👥 Participants (3/50)" in names
+        assert not any("Healer" in name for name in names)
         assert not any(name.startswith("Boons") for name in names)
         values = {field.name: field.value for field in embed.fields}
-        assert values["Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+        assert values["👥 Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
 
     def test_wvw_participant_list_chunks_below_field_value_limit(self) -> None:
         event = make_event(EventCategory.WVW)
@@ -389,7 +392,7 @@ class TestEventEmbed:
         participant_fields = [
             field
             for field in embed.fields
-            if field.name and field.name.startswith("Participants")
+            if field.name and "Participants" in field.name
         ]
         assert participant_fields
         assert all(
@@ -403,7 +406,7 @@ class TestEventEmbed:
             field.value or ""
             for field in embed.fields
             if field.name is not None
-            and (field.name.startswith("Participants") or field.name == "​")
+            and ("Participants" in field.name or field.name == "​")
         )
         assert continuation.count("<@") == 50
 
@@ -455,7 +458,7 @@ class TestEventEmbed:
         mentions = sum(
             (field.value or "").count("<@")
             for field in embed.fields
-            if field.name != "Leader"
+            if field.name != "👑 Leader"
         )
         assert mentions == len(active) + len(waitlist)
 
