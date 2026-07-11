@@ -355,6 +355,20 @@ class TestEventEmbed:
         )
         assert embed.footer.text == "eventID: 7"
 
+    def test_title_with_emoji_prefix_stays_within_title_limit(self) -> None:
+        # A user may enter a title at the full 256-character limit; the emoji
+        # prefix must not push the embed title past Discord's cap.
+        event = replace(make_event(), title="x" * 256)
+
+        embed = event_embed(event, [], EventStatus.OPEN)
+
+        assert embed.title is not None
+        assert len(embed.title) <= 256
+        assert embed.title.startswith(
+            f"{CATEGORY_EMOJI[EventCategory.FRACTAL]} "
+        )
+        assert embed.title.endswith("…")
+
     def test_raid_and_strike_use_ten_player_capacities(self) -> None:
         for category in (EventCategory.RAID, EventCategory.STRIKE):
             embed = event_embed(make_event(category), [], EventStatus.OPEN)
