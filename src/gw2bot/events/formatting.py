@@ -67,17 +67,21 @@ def parse_event_duration(text: str) -> int:
 
 
 def format_duration(minutes: int) -> str:
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+    hours, mins = divmod(minutes, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if mins:
+        parts.append(f"{mins}m")
+    return " ".join(parts) if parts else "0m"
 
 
 def parse_repeat_days(frequency: RepeatFrequency, text: str) -> tuple[int, ...]:
     entries = [entry.strip() for entry in text.split(",") if entry.strip()]
     if frequency in (RepeatFrequency.NONE, RepeatFrequency.DAILY):
-        if entries:
-            raise ValueError(
-                "Leave the day(s) field blank unless the event repeats "
-                "weekly or monthly."
-            )
+        # Specific days are meaningless for non-repeating or daily events;
+        # silently ignore anything entered rather than rejecting the whole
+        # submission over a harmless extra field.
         return ()
     if not entries:
         raise ValueError(
