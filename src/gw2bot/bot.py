@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -12,6 +13,14 @@ from discord import app_commands
 from gw2bot import guild_log, guild_storage, member_count, notifications
 from gw2bot.config import Config
 from gw2bot.discord_utils import user_has_role
+from gw2bot.events import scheduler as event_scheduler
+from gw2bot.events.commands import EventCommands
+from gw2bot.events.store import EventStore
+from gw2bot.events.views import (
+    EventSettingsButton,
+    EventSignOutButton,
+    EventSignUpButton,
+)
 from gw2bot.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.poll_status import PollStatusTracker
@@ -66,6 +75,8 @@ class Gw2Bot(discord.Client):
             (config.gw2_api_key, config.discord_token)
         )
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
+        self._event_store = EventStore(config.raffle_db_path)
+        self._event_timezone = ZoneInfo(config.event_timezone)
         self._api: Gw2ApiClient | None = None
         self._guild_members: GuildMemberCache | None = None
         self._last_guild_member_count: int | None = None
@@ -74,11 +85,19 @@ class Gw2Bot(discord.Client):
         self._ready_announced = False
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
+        self.tree.add_command(EventCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
         # audit messages keep paging after view timeouts and restarts.
         self.add_dynamic_items(RaffleAuditRangesButton)
+        # Event signup buttons live on long-lived event messages and must
+        # keep working after view timeouts and bot restarts.
+        self.add_dynamic_items(
+            EventSignUpButton,
+            EventSignOutButton,
+            EventSettingsButton,
+        )
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")
@@ -118,6 +137,10 @@ class Gw2Bot(discord.Client):
                 self._poll_guild_member_count_topic(),
                 name="gw2-guild-member-count-topic-poller",
             ),
+            asyncio.create_task(
+                self._poll_event_updates(),
+                name="gw2-event-scheduler",
+            ),
         ]
 
     async def close(self) -> None:
@@ -130,6 +153,7 @@ class Gw2Bot(discord.Client):
         if self._session is not None:
             await self._session.close()
         self._raffle_store.close()
+        self._event_store.close()
         await super().close()
 
     async def on_ready(self) -> None:
@@ -431,6 +455,17 @@ class Gw2Bot(discord.Client):
         username: str,
     ) -> None:
         await handle_track_command(self, interaction, username)
+    @property
+    def event_store(self) -> EventStore:
+        return self._event_store
+
+    @property
+    def event_timezone(self) -> ZoneInfo:
+        return self._event_timezone
+
+    async def _poll_event_updates(self) -> None:
+        await event_scheduler.poll_event_updates(self)
+
     async def _poll_guild_member_count_topic(self) -> None:
         await member_count.poll_guild_member_count_topic(self)
 

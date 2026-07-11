@@ -124,6 +124,7 @@ class TestRaffleCommandGroup:
             "username",
             "amount",
         ]
+        assert removetickets.parameters[0].autocomplete
         leaderboard = commands["leaderboard"]
         assert isinstance(leaderboard, app_commands.Command)
         assert [parameter.name for parameter in leaderboard.parameters] == [
@@ -251,6 +252,101 @@ class TestRaffleGuildMemberAutocomplete:
         assert choices == []
         assert secret not in caplog.text
         assert "Could not refresh the guild member cache for autocomplete" in caplog.text
+
+
+class TestPurchasedTicketHolderAutocomplete:
+    @staticmethod
+    def _draw_interaction() -> SimpleNamespace:
+        return SimpleNamespace(
+            user=SimpleNamespace(
+                roles=[SimpleNamespace(id=RAFFLE_DRAW_ROLE_ID)]
+            )
+        )
+
+    async def test_returns_only_purchased_ticket_holders(self) -> None:
+        bot = SimpleNamespace(
+            get_raffle_totals=MagicMock(
+                return_value=[
+                    raffle_total("Zeta.9999", purchased=3),
+                    raffle_total("Alpha.1234", purchased=1, free=2),
+                    raffle_total("Free Only.5678", free=4),
+                    raffle_total("No Tickets.0000"),
+                ]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.purchased_ticket_holder_autocomplete(
+            self._draw_interaction(),  # type: ignore[arg-type]
+            "",
+        )
+
+        assert [(choice.name, choice.value) for choice in choices] == [
+            ("Alpha.1234 — 1 purchased", "Alpha.1234"),
+            ("Zeta.9999 — 3 purchased", "Zeta.9999"),
+        ]
+
+    async def test_filters_holders_by_case_insensitive_substring(self) -> None:
+        bot = SimpleNamespace(
+            get_raffle_totals=MagicMock(
+                return_value=[
+                    raffle_total("Alpha.1234", purchased=1),
+                    raffle_total("Beta.5678", purchased=2),
+                ]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.purchased_ticket_holder_autocomplete(
+            self._draw_interaction(),  # type: ignore[arg-type]
+            "BET",
+        )
+
+        assert [choice.value for choice in choices] == ["Beta.5678"]
+
+    async def test_does_not_expose_holders_to_unauthorized_user(self) -> None:
+        bot = SimpleNamespace(get_raffle_totals=MagicMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                roles=[
+                    SimpleNamespace(id=GUILD_ROSTER_ROLE_ID),
+                    SimpleNamespace(id=RAFFLE_ADDTICKET_ROLE_ID),
+                ]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.purchased_ticket_holder_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "",
+        )
+
+        assert choices == []
+        bot.get_raffle_totals.assert_not_called()
+
+    async def test_failure_logging_omits_secret_bearing_exception(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "totals-autocomplete-secret"
+        bot = SimpleNamespace(
+            get_raffle_totals=MagicMock(
+                side_effect=SQLAlchemyError(
+                    f"database failed with password={secret}"
+                )
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            choices = await group.purchased_ticket_holder_autocomplete(
+                self._draw_interaction(),  # type: ignore[arg-type]
+                "",
+            )
+
+        assert choices == []
+        assert secret not in caplog.text
+        assert "Could not load raffle totals for autocomplete" in caplog.text
 
 
 class TestAddRaffleTicketsCommand:

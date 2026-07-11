@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -24,6 +25,7 @@ class Config:
     guild_member_cache_seconds: int = 900
     raffle_db_path: str = "data/gw2bot.db"
     gw2_api_base_url: str = "https://api.guildwars2.com"
+    event_timezone: str = "UTC"
     debug: bool = False
 
     @classmethod
@@ -75,6 +77,16 @@ class Config:
             values.get("GW2_GUILD_MEMBER_CACHE_SECONDS", "900"),
             "GW2_GUILD_MEMBER_CACHE_SECONDS",
         )
+        event_timezone = _optional_string(
+            values.get("EVENT_TIMEZONE"),
+            "UTC",
+        )
+        try:
+            ZoneInfo(event_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ConfigurationError(
+                "EVENT_TIMEZONE must be a valid IANA timezone name"
+            ) from exc
         return cls(
             discord_token=values["DISCORD_TOKEN"].strip(),
             discord_command_guild_id=discord_command_guild_id,
@@ -93,6 +105,7 @@ class Config:
                 values.get("GW2_API_BASE_URL"),
                 "https://api.guildwars2.com",
             ).rstrip("/"),
+            event_timezone=event_timezone,
             debug=_boolean(values.get("DEBUG", "false"), "DEBUG"),
         )
 

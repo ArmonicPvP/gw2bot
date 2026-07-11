@@ -12,6 +12,11 @@ from factories import forbidden_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.main import main as run_main
+from gw2bot.events.views import (
+    EventSettingsButton,
+    EventSignOutButton,
+    EventSignUpButton,
+)
 from gw2bot.raffle.views import RaffleAuditRangesButton
 
 
@@ -128,7 +133,12 @@ class TestBotIntent:
             with patch.object(Gw2Bot, "add_dynamic_items") as add_dynamic_items:
                 Gw2Bot(config)
 
-        add_dynamic_items.assert_called_once_with(RaffleAuditRangesButton)
+        add_dynamic_items.assert_any_call(RaffleAuditRangesButton)
+        add_dynamic_items.assert_any_call(
+            EventSignUpButton,
+            EventSignOutButton,
+            EventSettingsButton,
+        )
 
 
 class TestStartupStatus:

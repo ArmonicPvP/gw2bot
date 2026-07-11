@@ -79,6 +79,47 @@ class RaffleCommands(app_commands.Group):
             for username in usernames
         ]
 
+    async def purchased_ticket_holder_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not user_has_role(interaction.user, RAFFLE_DRAW_ROLE_ID):
+            LOGGER.debug(
+                "Skipped purchased ticket holder autocomplete; authorized=false"
+            )
+            return []
+        try:
+            totals = self._bot.get_raffle_totals()
+        except SQLAlchemyError:
+            LOGGER.error("Could not load raffle totals for autocomplete")
+            return []
+        text = current.strip().casefold()
+        holders = sorted(
+            (
+                total
+                for total in totals
+                if total.gold_raffle_tickets > 0
+                and (not text or text in total.username.casefold())
+            ),
+            key=lambda total: total.username.casefold(),
+        )[:25]
+        LOGGER.debug(
+            "Returning purchased ticket holder autocomplete choices; "
+            "records=%s choices=%s",
+            len(totals),
+            len(holders),
+        )
+        return [
+            app_commands.Choice(
+                name=(
+                    f"{total.username} — {total.gold_raffle_tickets} purchased"
+                ),
+                value=total.username,
+            )
+            for total in holders
+        ]
+
     async def raffle_run_autocomplete(
         self,
         interaction: discord.Interaction,
@@ -465,6 +506,7 @@ class RaffleCommands(app_commands.Group):
         username="Guild Wars 2 account name, including the four digits",
         amount="Number of purchased tickets to remove",
     )
+    @app_commands.autocomplete(username=purchased_ticket_holder_autocomplete)
     async def removetickets(
         self,
         interaction: discord.Interaction,
