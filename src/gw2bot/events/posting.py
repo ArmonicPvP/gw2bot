@@ -246,6 +246,16 @@ async def _rename_occurrence_thread(
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         await thread.edit(name=name)
+    except discord.NotFound:
+        # The thread was deleted, so there is nothing left to rename. Treat it
+        # as done rather than a transient failure: returning False here would
+        # block the status from being persisted and keep the occurrence in
+        # maintenance forever, retrying this same doomed rename every minute.
+        LOGGER.warning(
+            "Event thread is gone; skipping rename; occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return True
     except discord.HTTPException as exc:
         LOGGER.error(
             "Could not rename event thread; occurrence_id=%s error_type=%s",
