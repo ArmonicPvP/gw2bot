@@ -106,11 +106,16 @@ notification channel:
 - **Trial members before the 14-day mark** — Trial accounts whose `joined`
   timestamp is less than 14 days old, restricted to members who are still `Trial`
   in-game but have already been given the Sunborne role in Discord (a premature
-  promotion). This report is omitted when no such member exists.
+  promotion). A copy-and-paste congratulations code block is attached below the
+  list so officers can announce the promotions. This report is omitted when no
+  such member exists.
 - **Trial members past the 14-day mark** — Trial accounts whose `joined`
   timestamp is at least 14 days old, awaiting confirmation that they can be ranked
-  up to Sunborne. Accounts that an officer has marked with `/track` are excluded
-  here and appear in the 7-day warning report instead.
+  up to Sunborne. Members are grouped by resolved status (Sunborne in Discord,
+  then Trial in Discord, then a linked Discord account with no resolved rank, then
+  no Discord account resolved) and sorted alphabetically within each group.
+  Accounts that an officer has marked with `/track` are excluded here and appear
+  in the 7-day warning report instead.
 - **Trial members past the 7-day warning mark (to be kicked)** — Trial accounts
   past the 14-day mark that an officer tracked with `/track` at least 7 days ago.
   The 7-day countdown starts from the moment `/track` is invoked, so a tracked
@@ -122,16 +127,21 @@ notification channel:
   example after promotion to Sunborne or leaving the guild), so they drop off
   both reports.
 
-```text
+~~~text
 Trial members before the 14-day mark
 These users are still Trial in-game but already Sunborne in Discord:
-* EarlySunborne.1234 - @DiscordUser - Sunborne
+* EarlySunborne.1234 - @DiscordUser
+
+```
+Congratulations to our members who have become Sunborne!
+* (EarlySunborne.1234) - @DiscordUser
+```
 
 Trial members past the 14-day mark
 Please confirm whether these users have completed the challenges and can be ranked up to Sunborne:
 * Linked.1234 - @DiscordUser - Sunborne
 * Unresolved.5678
-```
+~~~
 
 To match each reported account to its application, the bot maintains a
 persistent index of the `Accepted` posts in forum channel

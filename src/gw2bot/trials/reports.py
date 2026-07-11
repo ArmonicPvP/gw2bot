@@ -13,11 +13,11 @@ import discord
 from gw2bot.discord_utils import log_discord_failure
 from gw2bot.guild_members import (
     SUNBORNE_DISCORD_STATUS,
-    TRIAL_BEFORE_MARK_HEADER,
     TRIAL_WARNING_MARK_HEADER,
     TRIAL_WARNING_PENDING_HEADER,
     TrialMemberReportEntry,
     filter_sunborne_discord_entries,
+    format_before_mark_trial_report,
     format_overdue_trial_report,
     get_overdue_trial_members,
     get_recent_trial_members,
@@ -160,10 +160,7 @@ async def build_trial_report_messages(
         entries_by_username[username] for username in warned_overdue
     ]
     messages = (
-        format_overdue_trial_report(
-            before_mark_entries,
-            header=TRIAL_BEFORE_MARK_HEADER,
-        )
+        format_before_mark_trial_report(before_mark_entries)
         + format_overdue_trial_report(overdue_entries)
         + format_overdue_trial_report(
             pending_entries,
