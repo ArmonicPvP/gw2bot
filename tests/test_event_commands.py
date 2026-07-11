@@ -1158,7 +1158,7 @@ class TestEventEditConfirmView:
             in second.response.send_message.await_args.args[0]
         )
 
-    async def test_channel_move_reports_when_repost_fails(
+    async def test_channel_move_keeps_the_old_post_when_the_repost_fails(
         self,
         store: EventStore,
     ) -> None:
@@ -1169,7 +1169,7 @@ class TestEventEditConfirmView:
         bot._channels[new_channel.thread.id] = new_channel.thread
         event = make_edit_event(store, channel_id=old_channel.id)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
-        await post_occurrence(bot, event, occurrence)
+        posted = await post_occurrence(bot, event, occurrence)
         draft = draft_from_event(
             event,
             ZoneInfo("UTC"),
@@ -1186,12 +1186,54 @@ class TestEventEditConfirmView:
 
         await view.move.callback(interaction)
 
-        # The event is saved, but the failed re-post must be surfaced rather
-        # than reported as a successful update.
-        assert store.get_event(event.event_id).channel_id == new_channel.id  # type: ignore[union-attr]
+        # The move failed, so the only public post must survive in the old
+        # channel and the stored channel must be put back to match it. Leaving
+        # channel_id on the new channel would send the next scheduler refresh
+        # looking for this message there, get NotFound and retire a live event.
+        old_channel.partial_message.delete.assert_not_awaited()
+        assert store.get_event(event.event_id).channel_id == old_channel.id  # type: ignore[union-attr]
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.message_id == posted.message_id
+        assert stored.status is not EventStatus.OVER
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        assert "stays in the current one" in content
+
+    async def test_save_changes_reports_a_failed_message_refresh(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        # refresh_occurrence_message absorbs this failure, marks the occurrence
+        # dirty and returns instead of raising, so the edit flow must not report
+        # the stale public message as successfully updated.
+        channel.partial_message.edit = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.title = "Edited Title"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # The event row is still saved, and the occurrence is left dirty so the
+        # scheduler retries it.
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.needs_refresh
         assert interaction.edit_original_response.await_args is not None
         content = interaction.edit_original_response.await_args.kwargs["content"]
         assert "could not be updated" in content
+        assert "was updated" not in content
 
     async def test_save_changes_rejects_users_without_the_role(
         self,

@@ -842,6 +842,51 @@ class TestRepostOccurrence:
         assert reposted.thread_id == 888
 
 
+    async def test_repost_keeps_the_old_post_when_the_new_post_fails(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        new_channel.send_error = forbidden_error(50001)
+
+        with pytest.raises(discord.HTTPException):
+            await repost_occurrence(
+                bot,
+                moved,
+                posted,
+                old_channel_id=old_channel.id,
+            )
+
+        # The new post never went out, so the old one must still be live and
+        # still referenced. Deleting it first would strand the occurrence on a
+        # dead message id and cost the event its only public post.
+        old_channel.partial_message.delete.assert_not_awaited()
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.message_id == posted.message_id
+        assert stored.thread_id == posted.thread_id
+
+
 class TestDeleteEventPosts:
     async def test_deletes_posted_messages_and_skips_unposted(
         self,

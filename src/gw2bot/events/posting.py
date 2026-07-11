@@ -293,26 +293,34 @@ async def repost_occurrence(
     old_channel_id: int,
 ) -> EventOccurrence:
     # Discord cannot move a message between channels, so a channel change is
-    # applied by deleting the old post and sending a fresh one. The occurrence
+    # applied by sending a fresh post and removing the old one. The occurrence
     # row (and therefore the roster) is preserved because signups are keyed by
     # occurrence_id, not by message.
-    if occurrence.message_id is not None:
+    #
+    # The new post is sent and persisted *before* the old message is deleted.
+    # post_occurrence only writes the new message id once the message is live,
+    # and it raises if the send or that write fails. Deleting first would drop
+    # the only public post while occurrence.message_id still referenced it, and
+    # because the caller has already committed the new channel_id, the next
+    # refresh would look for that dead id in the new channel, get NotFound and
+    # retire a still-active occurrence. Posting first means a failed move leaves
+    # the old message live and still correctly referenced.
+    old_message_id = occurrence.message_id
+    reposted = await post_occurrence(bot, event, occurrence)
+    if old_message_id is not None:
         try:
             old_channel = await resolve_channel(bot, old_channel_id)
-            await old_channel.get_partial_message(
-                occurrence.message_id
-            ).delete()
+            await old_channel.get_partial_message(old_message_id).delete()
         except discord.HTTPException as exc:
             # Deleting the starter message also removes its thread; if this
             # fails the old message is left orphaned but the move still
-            # proceeds so the event lives in the new channel.
+            # proceeds, because the new post is already live and persisted.
             LOGGER.error(
                 "Could not delete old event message during channel move; "
                 "occurrence_id=%s error_type=%s",
                 occurrence.occurrence_id,
                 type(exc).__name__,
             )
-    reposted = await post_occurrence(bot, event, occurrence)
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(

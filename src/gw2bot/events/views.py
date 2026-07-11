@@ -976,6 +976,7 @@ async def apply_event_edit(
         )
         return
     channel_changed = old_channel_id != updated.channel_id
+    moving = repost and channel_changed
     occurrences = [
         occurrence
         for occurrence in bot.event_store.get_event_occurrences(
@@ -1013,7 +1014,7 @@ async def apply_event_edit(
             continue
         attempted += 1
         try:
-            if repost and channel_changed:
+            if moving:
                 await repost_occurrence(
                     bot,
                     updated,
@@ -1027,6 +1028,20 @@ async def apply_event_edit(
                     current,
                     force_thread_rename=True,
                 )
+                # refresh_occurrence_message absorbs Discord failures: it marks
+                # the occurrence dirty for the scheduler to retry and returns
+                # the old status rather than raising, so the handler below never
+                # sees them. Re-read the row and treat a dirty occurrence as a
+                # failed refresh, otherwise a message or thread name that is
+                # still stale would be reported as successfully updated.
+                saved = bot.event_store.get_occurrence(current.occurrence_id)
+                if saved is not None and saved.needs_refresh:
+                    LOGGER.error(
+                        "Posted occurrence left stale after edit; "
+                        "occurrence_id=%s",
+                        current.occurrence_id,
+                    )
+                    continue
         except (discord.HTTPException, SQLAlchemyError) as exc:
             # One occurrence failing must not block the others.
             LOGGER.error(
@@ -1046,7 +1061,14 @@ async def apply_event_edit(
         attempted,
         refreshed,
     )
-    if attempted > 0 and refreshed == 0:
+    move_failed = moving and attempted > 0 and refreshed == 0
+    if move_failed:
+        updated = _restore_event_channel(bot, updated, old_channel_id)
+        content = (
+            f"Event **{updated.event_id}** was saved, but it could not be "
+            "posted in the new channel, so it stays in the current one."
+        )
+    elif attempted > 0 and refreshed == 0:
         # Every posted occurrence failed to refresh, so the public message is
         # stale even though the stored event was updated; say so instead of
         # claiming the message reflects the change.
@@ -1057,6 +1079,47 @@ async def apply_event_edit(
     else:
         content = f"Event **{updated.event_id}** was updated."
     await interaction.edit_original_response(content=content, view=None)
+
+
+def _restore_event_channel(
+    bot: Gw2Bot,
+    event: Event,
+    old_channel_id: int,
+) -> Event:
+    # Every repost into the new channel failed, so the live messages are still
+    # in the old channel while the stored event already points at the new one.
+    # An occurrence's message is always resolved through event.channel_id, so
+    # leaving the move committed would make the next scheduler refresh look for
+    # those messages in a channel they are not in, get NotFound and retire a
+    # still-active occurrence. Put the stored channel back so the surviving
+    # posts stay reachable; the rest of the edit is kept.
+    try:
+        restored = bot.event_store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=old_channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            delete_previous_on_repeat=event.delete_previous_on_repeat,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not restore the event channel after a failed move; "
+            "event_id=%s error_type=%s",
+            event.event_id,
+            type(exc).__name__,
+        )
+        return event
+    LOGGER.debug(
+        "Restored the event channel after a failed move; event_id=%s",
+        event.event_id,
+    )
+    return restored
 
 
 class EventDeleteConfirmView(discord.ui.View):
