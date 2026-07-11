@@ -153,6 +153,8 @@ async def refresh_occurrence_message(
     event: Event,
     occurrence: EventOccurrence,
     now: datetime | None = None,
+    *,
+    force_thread_rename: bool = False,
 ) -> EventStatus:
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
@@ -203,15 +205,23 @@ async def refresh_occurrence_message(
     # Only commit the status transition once both the message and the thread
     # name reflect it. Committing early (especially to OVER) would let the
     # scheduler see a matching status and stop retrying, leaving the public
-    # message or thread name stale forever.
+    # message or thread name stale forever. An edit that reschedules the
+    # occurrence forces a rename even when the status is unchanged, because the
+    # thread name encodes the date and time. A dirty occurrence also re-attempts
+    # the rename: the forced rename may have failed transiently, and the
+    # scheduler's retry (which never passes force_thread_rename) must still be
+    # able to finish it before clearing the dirty flag.
+    status_changed = status != occurrence.status
     thread_renamed = True
-    if message_refreshed and status != occurrence.status:
+    if message_refreshed and (
+        status_changed or force_thread_rename or occurrence.needs_refresh
+    ):
         thread_renamed = await _rename_occurrence_thread(
             bot,
             occurrence,
             status,
         )
-        if thread_renamed:
+        if thread_renamed and status_changed:
             bot.event_store.set_occurrence_status(
                 occurrence.occurrence_id,
                 status,
@@ -274,6 +284,50 @@ async def _rename_occurrence_thread(
         )
         return False
     return True
+
+
+async def repost_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    old_channel_id: int,
+) -> EventOccurrence:
+    # Discord cannot move a message between channels, so a channel change is
+    # applied by deleting the old post and sending a fresh one. The occurrence
+    # row (and therefore the roster) is preserved because signups are keyed by
+    # occurrence_id, not by message.
+    if occurrence.message_id is not None:
+        try:
+            old_channel = await resolve_channel(bot, old_channel_id)
+            await old_channel.get_partial_message(
+                occurrence.message_id
+            ).delete()
+        except discord.HTTPException as exc:
+            # Deleting the starter message also removes its thread; if this
+            # fails the old message is left orphaned but the move still
+            # proceeds so the event lives in the new channel.
+            LOGGER.error(
+                "Could not delete old event message during channel move; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+    reposted = await post_occurrence(bot, event, occurrence)
+    signups = bot.event_store.get_signups(reposted.occurrence_id)
+    for signup in signups:
+        await update_thread_membership(
+            bot,
+            reposted,
+            signup.discord_user_id,
+            add=True,
+        )
+    LOGGER.debug(
+        "Reposted event occurrence to new channel; occurrence_id=%s "
+        "signups=%s",
+        reposted.occurrence_id,
+        len(signups),
+    )
+    return reposted
 
 
 async def update_thread_membership(

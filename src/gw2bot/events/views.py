@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
+from zoneinfo import ZoneInfo
 
 import discord
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,7 +15,11 @@ from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
     confirm_embed,
     describe_repeat,
+    edit_confirm_embed,
     event_embed,
+    format_duration_input,
+    format_event_datetime,
+    format_repeat_days,
     parse_event_datetime,
     parse_event_duration,
     parse_repeat_days,
@@ -61,6 +66,13 @@ class EventDraft:
     repeat_days: tuple[int, ...] = field(default_factory=tuple)
     repeat_days_text: str = ""
     posted: bool = False
+    # Set when the draft edits an existing event rather than creating one. The
+    # whole "Change something" flow reuses this draft, so a single flag steers
+    # every editor back to the edit preview and Save-changes path.
+    editing_event_id: int | None = None
+    # Guards the Save-changes / Move-event terminal actions against a double
+    # click that would otherwise apply the edit (or re-post) twice.
+    edit_applied: bool = False
 
     def is_complete(self) -> bool:
         return (
@@ -92,6 +104,42 @@ class EventDraft:
             repeat_frequency=self.repeat_frequency,
             repeat_days=self.repeat_days,
         )
+
+
+def draft_from_event(
+    event: Event,
+    timezone: ZoneInfo,
+    *,
+    start_time_override: datetime | None = None,
+) -> EventDraft:
+    # Pre-fill the text mirror fields so the reused edit modals show the current
+    # values (start/duration/repeat are re-parsed from these strings). For a
+    # recurring event the live occurrence's start diverges from the series
+    # origin (event.start_time), so callers pass that occurrence's start: the
+    # preview then shows the date the commander sees, and leaving it unchanged
+    # does not spuriously reschedule the occurrence back to the series origin.
+    start_time = (
+        start_time_override
+        if start_time_override is not None
+        else event.start_time
+    )
+    return EventDraft(
+        leader_discord_id=event.leader_discord_id,
+        category=event.category,
+        title=event.title,
+        description=event.description,
+        channel_id=event.channel_id,
+        start_time=start_time,
+        start_text=format_event_datetime(start_time, timezone),
+        duration_minutes=event.duration_minutes,
+        duration_text=format_duration_input(event.duration_minutes),
+        repeat_frequency=event.repeat_frequency,
+        repeat_days=event.repeat_days,
+        repeat_days_text=format_repeat_days(
+            event.repeat_frequency, event.repeat_days
+        ),
+        editing_event_id=event.event_id,
+    )
 
 
 def _category_options(
@@ -147,31 +195,86 @@ def _is_ephemeral_component_interaction(
     return message is not None and message.flags.ephemeral
 
 
+def _live_occurrences(
+    bot: Gw2Bot,
+    event_id: int,
+) -> list[EventOccurrence]:
+    # get_event_occurrences is ordered by start_time, so the result stays in
+    # chronological order for callers that want the soonest.
+    return [
+        occurrence
+        for occurrence in bot.event_store.get_event_occurrences(event_id)
+        if occurrence.status is not EventStatus.OVER
+    ]
+
+
+def _primary_live_occurrence(
+    bot: Gw2Bot,
+    event_id: int,
+) -> EventOccurrence | None:
+    # The soonest non-OVER occurrence is the one the commander is editing: it is
+    # what the preview mirrors and what a date change reschedules. It may still
+    # be unposted (a recurring series' next occurrence), in which case a
+    # reschedule still applies and the scheduler posts it later.
+    live = _live_occurrences(bot, event_id)
+    return live[0] if live else None
+
+
 async def send_event_preview(
     bot: Gw2Bot,
     interaction: discord.Interaction,
     draft: EventDraft,
+    *,
+    primary: EventOccurrence | None = None,
 ) -> None:
-    preview = event_embed(
-        draft.to_event(),
-        [],
-        EventStatus.OPEN,
-        event_id_text=PREVIEW_EVENT_ID_TEXT,
-    )
-    confirmation = confirm_embed()
+    editing_event_id = draft.editing_event_id
+    view: discord.ui.View
+    if editing_event_id is not None:
+        # Show the live roster so the preview mirrors the posted message, but
+        # render the pending date/time from the draft (to_event uses the draft's
+        # start_time), not the occurrence's stored time. The initial /event edit
+        # call passes the occurrence it already fetched; change-flow re-renders
+        # do not have it, so look it up.
+        occurrence = (
+            primary
+            if primary is not None
+            else _primary_live_occurrence(bot, editing_event_id)
+        )
+        signups = (
+            bot.event_store.get_signups(occurrence.occurrence_id)
+            if occurrence is not None
+            else []
+        )
+        preview = event_embed(
+            draft.to_event(editing_event_id),
+            signups,
+            EventStatus.OPEN,
+            event_id_text=str(editing_event_id),
+        )
+        confirmation = edit_confirm_embed()
+        view = EventEditConfirmView(bot, draft)
+    else:
+        preview = event_embed(
+            draft.to_event(),
+            [],
+            EventStatus.OPEN,
+            event_id_text=PREVIEW_EVENT_ID_TEXT,
+        )
+        confirmation = confirm_embed()
+        view = EventConfirmView(bot, draft)
     repeat_text = describe_repeat(draft.repeat_frequency, draft.repeat_days)
     confirmation.description = (
         f"{confirmation.description}\n\n*{repeat_text}.*"
     )
-    view = EventConfirmView(bot, draft)
     LOGGER.debug(
         "Sending event preview; user_id=%s category=%s repeat=%s "
-        "title_characters=%s in_place=%s",
+        "title_characters=%s in_place=%s editing=%s",
         draft.leader_discord_id,
         draft.category.value if draft.category is not None else None,
         draft.repeat_frequency.value,
         len(draft.title),
         _is_ephemeral_component_interaction(interaction),
+        editing_event_id is not None,
     )
     if _is_ephemeral_component_interaction(interaction):
         await interaction.response.edit_message(
@@ -486,7 +589,7 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
         await send_event_preview(self._bot, interaction, self._draft)
 
 
-class EventConfirmView(discord.ui.View):
+class _PreviewConfirmView(discord.ui.View):
     def __init__(self, bot: Gw2Bot, draft: EventDraft):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
@@ -499,7 +602,7 @@ class EventConfirmView(discord.ui.View):
     async def change_something(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button[EventConfirmView],
+        button: discord.ui.Button[_PreviewConfirmView],
     ) -> None:
         await interaction.response.send_message(
             "What would you like to change?",
@@ -507,6 +610,8 @@ class EventConfirmView(discord.ui.View):
             ephemeral=True,
         )
 
+
+class EventConfirmView(_PreviewConfirmView):
     @discord.ui.button(label="Post event", style=discord.ButtonStyle.success)
     async def post_event(
         self,
@@ -652,6 +757,278 @@ class EventConfirmView(discord.ui.View):
                 interaction.user.id,
                 type(exc).__name__,
             )
+
+
+class EventEditConfirmView(_PreviewConfirmView):
+    @discord.ui.button(label="Save changes", style=discord.ButtonStyle.success)
+    async def save_changes(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventEditConfirmView],
+    ) -> None:
+        editing_event_id = self._draft.editing_event_id
+        if editing_event_id is None:
+            await interaction.response.send_message(
+                "This edit session is no longer valid.",
+                ephemeral=True,
+            )
+            return
+        # The preview can sit open for minutes; recheck the role before the
+        # save path, mirroring post_event.
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event edit save from Discord user %s; required "
+                "role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to edit events.",
+                ephemeral=True,
+            )
+            return
+        if not self._draft.is_complete():
+            await interaction.response.send_message(
+                "The event is missing required details. Use "
+                "**Change something** to fill them in.",
+                ephemeral=True,
+            )
+            return
+        stored = self._bot.event_store.get_event(editing_event_id)
+        if stored is None:
+            await interaction.response.send_message(
+                "This event no longer exists.",
+                ephemeral=True,
+            )
+            return
+        channel_changed = stored.channel_id != self._draft.channel_id
+        # Only a live occurrence that is actually posted has a message/thread to
+        # delete and re-post; a channel change on an unposted event just retargets
+        # where the scheduler posts it, so it needs no warning.
+        has_posted_message = any(
+            occurrence.message_id is not None
+            for occurrence in _live_occurrences(self._bot, editing_event_id)
+        )
+        if channel_changed and has_posted_message:
+            # Moving a posted event re-posts it, which deletes the current
+            # message and its thread; confirm before doing anything.
+            await interaction.response.edit_message(
+                content=(
+                    "Changing the channel will **delete the current event "
+                    "message and its thread**, including every message posted "
+                    "in that thread. The roster is kept and re-posted in the "
+                    "new channel. Continue?"
+                ),
+                embeds=[],
+                view=ChannelMoveConfirmView(
+                    self._bot,
+                    self._draft,
+                    stored.channel_id,
+                ),
+            )
+            return
+        await apply_event_edit(
+            self._bot,
+            interaction,
+            self._draft,
+            stored.channel_id,
+            repost=False,
+        )
+
+
+class ChannelMoveConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        old_channel_id: int,
+    ):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._draft = draft
+        self._old_channel_id = old_channel_id
+
+    @discord.ui.button(label="Move event", style=discord.ButtonStyle.danger)
+    async def move(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[ChannelMoveConfirmView],
+    ) -> None:
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event channel move from Discord user %s; required "
+                "role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to edit events.",
+                ephemeral=True,
+            )
+            return
+        await apply_event_edit(
+            self._bot,
+            interaction,
+            self._draft,
+            self._old_channel_id,
+            repost=True,
+        )
+
+    @discord.ui.button(
+        label="Keep current channel",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[ChannelMoveConfirmView],
+    ) -> None:
+        # Undo the pending channel change and return to the edit preview.
+        self._draft.channel_id = self._old_channel_id
+        await send_event_preview(self._bot, interaction, self._draft)
+
+
+async def apply_event_edit(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    draft: EventDraft,
+    old_channel_id: int,
+    *,
+    repost: bool,
+) -> None:
+    from gw2bot.events.posting import (
+        refresh_occurrence_message,
+        repost_occurrence,
+    )
+
+    editing_event_id = draft.editing_event_id
+    if editing_event_id is None:
+        raise ValueError("apply_event_edit requires an editing draft")
+    # Guard against a double click racing two callbacks before the first removes
+    # the buttons; without it a channel move would re-post twice and orphan a
+    # duplicate message. The check and set are synchronous (no await between),
+    # so the second callback always observes the flag.
+    if draft.edit_applied:
+        await interaction.response.send_message(
+            "This event was already updated.",
+            ephemeral=True,
+        )
+        return
+    draft.edit_applied = True
+    edited = draft.to_event(editing_event_id)
+    await interaction.response.edit_message(
+        content="Saving your changes…",
+        embeds=[],
+        view=None,
+    )
+    try:
+        updated = bot.event_store.update_event(
+            event_id=editing_event_id,
+            category=edited.category,
+            title=edited.title,
+            description=edited.description,
+            channel_id=edited.channel_id,
+            leader_discord_id=edited.leader_discord_id,
+            start_time=edited.start_time,
+            duration_minutes=edited.duration_minutes,
+            repeat_frequency=edited.repeat_frequency,
+            repeat_days=edited.repeat_days,
+        )
+    except SQLAlchemyError as exc:
+        # The save did not happen, so clear the guard to allow a fresh retry.
+        draft.edit_applied = False
+        LOGGER.error(
+            "Could not save event edit; event_id=%s error_type=%s",
+            editing_event_id,
+            type(exc).__name__,
+        )
+        await interaction.edit_original_response(
+            content="The changes could not be saved. Try again later.",
+            view=None,
+        )
+        return
+    channel_changed = old_channel_id != updated.channel_id
+    occurrences = [
+        occurrence
+        for occurrence in bot.event_store.get_event_occurrences(
+            updated.event_id
+        )
+        if occurrence.status is not EventStatus.OVER
+    ]
+    # The soonest non-OVER occurrence is what a date change reschedules, whether
+    # it is already posted or still waiting for the scheduler to post it.
+    primary = occurrences[0] if occurrences else None
+    attempted = 0
+    refreshed = 0
+    for occurrence in occurrences:
+        current = occurrence
+        if (
+            primary is not None
+            and occurrence.occurrence_id == primary.occurrence_id
+            and occurrence.start_time != updated.start_time
+        ):
+            # A date/time edit reschedules the occurrence the commander sees;
+            # sync its own start_time so the embed and thread name update too.
+            bot.event_store.set_occurrence_start_time(
+                occurrence.occurrence_id,
+                updated.start_time,
+            )
+            refetched = bot.event_store.get_occurrence(
+                occurrence.occurrence_id
+            )
+            if refetched is not None:
+                current = refetched
+        if current.message_id is None:
+            # Unposted (e.g. a recurring series' next occurrence): the
+            # reschedule above is persisted and the scheduler will post it with
+            # the new time; there is no live message to refresh now.
+            continue
+        attempted += 1
+        try:
+            if repost and channel_changed:
+                await repost_occurrence(
+                    bot,
+                    updated,
+                    current,
+                    old_channel_id,
+                )
+            else:
+                await refresh_occurrence_message(
+                    bot,
+                    updated,
+                    current,
+                    force_thread_rename=True,
+                )
+        except (discord.HTTPException, SQLAlchemyError) as exc:
+            # One occurrence failing must not block the others.
+            LOGGER.error(
+                "Could not update posted occurrence after edit; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            continue
+        refreshed += 1
+    LOGGER.debug(
+        "Applied event edit; event_id=%s repost=%s channel_changed=%s "
+        "occurrences_attempted=%s occurrences_refreshed=%s",
+        updated.event_id,
+        repost,
+        channel_changed,
+        attempted,
+        refreshed,
+    )
+    if attempted > 0 and refreshed == 0:
+        # Every posted occurrence failed to refresh, so the public message is
+        # stale even though the stored event was updated; say so instead of
+        # claiming the message reflects the change.
+        content = (
+            f"Event **{updated.event_id}** was saved, but its posted message "
+            "could not be updated and may be out of date."
+        )
+    else:
+        content = f"Event **{updated.event_id}** was updated."
+    await interaction.edit_original_response(content=content, view=None)
 
 
 _CHANGE_FIELDS = (

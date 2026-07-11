@@ -63,6 +63,52 @@ class TestEventStoreEvents:
     ) -> None:
         assert store.get_event(999) is None
 
+    def test_update_event_overwrites_fields_and_returns(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        new_start = datetime(2027, 2, 1, 18, 30, tzinfo=UTC)
+
+        updated = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.RAID,
+            title="New Title",
+            description="New description.",
+            channel_id=9999,
+            leader_discord_id=7,
+            start_time=new_start,
+            duration_minutes=120,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(0, 3),
+        )
+
+        assert updated.category is EventCategory.RAID
+        assert updated.title == "New Title"
+        assert updated.description == "New description."
+        assert updated.channel_id == 9999
+        assert updated.leader_discord_id == 7
+        assert updated.start_time == new_start
+        assert updated.duration_minutes == 120
+        assert updated.repeat_frequency is RepeatFrequency.WEEKLY
+        assert updated.repeat_days == (0, 3)
+        assert store.get_event(event.event_id) == updated
+
+    def test_update_event_unknown_id_raises(self, store: EventStore) -> None:
+        with pytest.raises(ValueError, match="Unknown event"):
+            store.update_event(
+                event_id=999,
+                category=EventCategory.RAID,
+                title="x",
+                description="y",
+                channel_id=1,
+                leader_discord_id=1,
+                start_time=START,
+                duration_minutes=60,
+                repeat_frequency=RepeatFrequency.NONE,
+                repeat_days=(),
+            )
+
 
 class TestEventStoreOccurrences:
     def test_create_occurrence_and_store_message(
@@ -179,6 +225,104 @@ class TestEventStoreOccurrences:
         store.create_occurrence(event.event_id, later)
 
         assert store.has_later_occurrence(event.event_id, START)
+
+    def test_set_occurrence_start_time_reschedules(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        new_start = START.replace(hour=22)
+
+        store.set_occurrence_start_time(occurrence.occurrence_id, new_start)
+
+        loaded = store.get_occurrence(occurrence.occurrence_id)
+        assert loaded is not None
+        assert loaded.start_time == new_start
+
+    def test_set_occurrence_start_time_unknown_raises(
+        self,
+        store: EventStore,
+    ) -> None:
+        with pytest.raises(ValueError, match="Unknown event occurrence"):
+            store.set_occurrence_start_time(999, START)
+
+    def test_get_event_occurrences_orders_by_start(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        later = store.create_occurrence(
+            event.event_id,
+            START.replace(hour=23),
+        )
+        earlier = store.create_occurrence(
+            event.event_id,
+            START.replace(hour=18),
+        )
+
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        assert [entry.occurrence_id for entry in occurrences] == [
+            earlier.occurrence_id,
+            later.occurrence_id,
+        ]
+
+    def test_get_active_events_excludes_over_and_empty_events(
+        self,
+        store: EventStore,
+    ) -> None:
+        active = create_event(store, title="Active")
+        active_occurrence = store.create_occurrence(active.event_id, START)
+        store.set_occurrence_message(active_occurrence.occurrence_id, 1, None)
+        completed = create_event(store, title="Completed")
+        completed_occurrence = store.create_occurrence(
+            completed.event_id,
+            START,
+        )
+        store.set_occurrence_status(
+            completed_occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        create_event(store, title="No occurrences")
+
+        events = store.get_active_events()
+
+        ids = [entry.event_id for entry in events]
+        assert active.event_id in ids
+        assert completed.event_id not in ids
+        assert len(ids) == 1
+
+    def test_get_active_events_orders_newest_first(
+        self,
+        store: EventStore,
+    ) -> None:
+        first = create_event(store)
+        store.create_occurrence(first.event_id, START)
+        second = create_event(store)
+        store.create_occurrence(second.event_id, START)
+
+        events = store.get_active_events()
+
+        assert [entry.event_id for entry in events] == [
+            second.event_id,
+            first.event_id,
+        ]
+
+    def test_get_active_events_includes_events_with_mixed_statuses(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        over = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_status(over.occurrence_id, EventStatus.OVER)
+        store.create_occurrence(event.event_id, START.replace(hour=22))
+
+        events = store.get_active_events()
+
+        # The correlated EXISTS must count the still-live occurrence even when
+        # an earlier one is OVER.
+        assert event.event_id in [entry.event_id for entry in events]
 
 
 class TestEventStoreSignups:

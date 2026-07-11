@@ -23,6 +23,7 @@ from gw2bot.events.posting import (
     post_occurrence,
     refresh_occurrence_message,
     remove_signup,
+    repost_occurrence,
 )
 from gw2bot.events.store import EventStore
 
@@ -45,7 +46,10 @@ class FakeChannel:
         self.id = channel_id
         self.thread = thread if thread is not None else FakeThread()
         self.sent: list[dict[str, Any]] = []
-        self.partial_message = SimpleNamespace(edit=AsyncMock())
+        self.partial_message = SimpleNamespace(
+            edit=AsyncMock(),
+            delete=AsyncMock(),
+        )
         self.create_thread_error: Exception | None = None
         self.send_error: Exception | None = None
 
@@ -682,6 +686,158 @@ class TestRefreshOccurrenceMessage:
         assert cleared is not None
         assert not cleared.needs_refresh
         channel.partial_message.edit.assert_awaited()
+
+    async def test_forced_rename_updates_thread_without_status_change(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+
+        # An edit that reschedules the occurrence keeps the OPEN status but must
+        # still rename the thread, whose name encodes the date and time.
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            BEFORE_START,
+            force_thread_rename=True,
+        )
+
+        assert status is EventStatus.OPEN
+        channel.thread.edit.assert_awaited_once()
+        rename = channel.thread.edit.await_args
+        assert rename is not None
+        assert rename.kwargs["name"].startswith("🟢|")
+
+    async def test_forced_rename_failure_recovers_on_scheduler_retry(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        channel.thread.edit = AsyncMock(side_effect=forbidden_error(50001))
+
+        # An edit forces a rename (status unchanged) but the rename fails
+        # transiently, so the occurrence is left dirty.
+        await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            BEFORE_START,
+            force_thread_rename=True,
+        )
+        dirty = store.get_occurrence(occurrence.occurrence_id)
+        assert dirty is not None
+        assert dirty.needs_refresh
+
+        # The scheduler retry does NOT pass force_thread_rename, so the dirty
+        # flag itself must trigger the rename; otherwise the thread name would
+        # be cleared as clean while still stale.
+        channel.thread.edit = AsyncMock()
+        await refresh_occurrence_message(bot, event, dirty, BEFORE_START)
+
+        channel.thread.edit.assert_awaited_once()
+        cleared = store.get_occurrence(occurrence.occurrence_id)
+        assert cleared is not None
+        assert not cleared.needs_refresh
+
+
+class TestRepostOccurrence:
+    async def test_reposts_to_new_channel_and_readds_members(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        for user_id in (11, 12):
+            store.add_signup(
+                occurrence_id=posted.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        reposted = await repost_occurrence(
+            bot,
+            moved,
+            posted,
+            old_channel_id=old_channel.id,
+        )
+
+        # Old message deleted, fresh one sent in the new channel, and every
+        # existing signup re-added to the new thread.
+        old_channel.partial_message.delete.assert_awaited_once()
+        assert len(new_channel.sent) == 1
+        assert reposted.thread_id == 888
+        assert new_channel.thread.add_user.await_count == 2
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.thread_id == 888
+
+    async def test_repost_survives_a_failed_old_message_delete(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        old_channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        reposted = await repost_occurrence(
+            bot,
+            moved,
+            posted,
+            old_channel_id=old_channel.id,
+        )
+
+        # A failed delete of the old post must not stop the move from posting
+        # into the new channel.
+        assert len(new_channel.sent) == 1
+        assert reposted.thread_id == 888
 
 
 class TestPostingLoggingSafety:

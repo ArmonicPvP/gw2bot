@@ -155,6 +155,44 @@ class EventStore:
             )
             return _event_from_record(record)
 
+    def update_event(
+        self,
+        *,
+        event_id: int,
+        category: EventCategory,
+        title: str,
+        description: str,
+        channel_id: int,
+        leader_discord_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        repeat_frequency: RepeatFrequency,
+        repeat_days: tuple[int, ...],
+    ) -> Event:
+        with self._sessions() as session:
+            record = session.get(EventRecord, event_id)
+            if record is None:
+                raise ValueError(f"Unknown event {event_id}")
+            record.category = category.value
+            record.title = title
+            record.description = description
+            record.channel_id = channel_id
+            record.leader_discord_id = leader_discord_id
+            record.start_time = _serialize_time(start_time)
+            record.duration_minutes = duration_minutes
+            record.repeat_frequency = repeat_frequency.value
+            record.repeat_days = _serialize_days(repeat_days)
+            session.commit()
+            LOGGER.debug(
+                "Updated event; event_id=%s category=%s repeat=%s "
+                "title_characters=%s",
+                event_id,
+                category.value,
+                repeat_frequency.value,
+                len(title),
+            )
+            return _event_from_record(record)
+
     def create_occurrence(
         self,
         event_id: int,
@@ -194,6 +232,22 @@ class EventStore:
             "Stored occurrence message; occurrence_id=%s has_thread=%s",
             occurrence_id,
             thread_id is not None,
+        )
+
+    def set_occurrence_start_time(
+        self,
+        occurrence_id: int,
+        start_time: datetime,
+    ) -> None:
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.start_time = _serialize_time(start_time)
+            session.commit()
+        LOGGER.debug(
+            "Rescheduled occurrence; occurrence_id=%s",
+            occurrence_id,
         )
 
     def set_occurrence_status(
@@ -263,6 +317,38 @@ class EventStore:
                 .order_by(EventOccurrenceRecord.occurrence_id)
             ).all()
             return [_occurrence_from_record(record) for record in records]
+
+    def get_event_occurrences(self, event_id: int) -> list[EventOccurrence]:
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.event_id == event_id)
+                .order_by(EventOccurrenceRecord.start_time)
+            ).all()
+            return [_occurrence_from_record(record) for record in records]
+
+    def get_active_events(self) -> list[Event]:
+        with self._sessions() as session:
+            # A correlated EXISTS keeps this to a single query with no
+            # per-id bound parameters, so it does not hit SQLite's variable
+            # limit no matter how many events have accumulated.
+            has_active_occurrence = (
+                select(EventOccurrenceRecord.occurrence_id)
+                .where(
+                    EventOccurrenceRecord.event_id == EventRecord.event_id
+                )
+                .where(
+                    EventOccurrenceRecord.status != EventStatus.OVER.value
+                )
+                .exists()
+            )
+            records = session.scalars(
+                select(EventRecord)
+                .where(has_active_occurrence)
+                .where(EventRecord.cancelled.is_(False))
+                .order_by(EventRecord.event_id.desc())
+            ).all()
+            return [_event_from_record(record) for record in records]
 
     def delete_event(self, event_id: int) -> None:
         with self._sessions() as session:
