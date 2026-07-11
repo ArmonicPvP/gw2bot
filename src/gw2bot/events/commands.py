@@ -10,6 +10,7 @@ from gw2bot.discord_utils import user_has_role
 from gw2bot.events.models import Event, EventStatus
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
+    EventDeleteConfirmView,
     EventDetailsModal,
     EventDraft,
     draft_from_event,
@@ -75,13 +76,14 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
         )
 
-    async def edit_event_id_autocomplete(
+    async def active_event_id_autocomplete(
         self,
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[int]]:
-        # Autocomplete must never error out; unauthorized users simply see no
-        # suggestions (the command itself still enforces the role).
+        # Shared by /event edit and /event delete. Autocomplete must never error
+        # out; unauthorized users simply see no suggestions (each command still
+        # enforces the role).
         if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
             return []
         query = current.strip().casefold()
@@ -101,7 +103,7 @@ class EventCommands(app_commands.Group):
             if len(choices) >= EVENT_AUTOCOMPLETE_LIMIT:
                 break
         LOGGER.debug(
-            "Returning event edit autocomplete choices; choices=%s",
+            "Returning active event autocomplete choices; choices=%s",
             len(choices),
         )
         return choices
@@ -112,7 +114,7 @@ class EventCommands(app_commands.Group):
     @app_commands.describe(
         event_id="The event to edit (shown as eventID in its footer)"
     )
-    @app_commands.autocomplete(event_id=edit_event_id_autocomplete)
+    @app_commands.autocomplete(event_id=active_event_id_autocomplete)
     async def edit(
         self,
         interaction: discord.Interaction,
@@ -177,6 +179,61 @@ class EventCommands(app_commands.Group):
         )
         LOGGER.debug(
             "Event edit preview opened; user_id=%s event_id=%s",
+            interaction.user.id,
+            event_id,
+        )
+
+    @app_commands.command(
+        name="delete", description="Delete an existing guild event"
+    )
+    @app_commands.describe(
+        event_id="The event to delete (shown as eventID in its footer)"
+    )
+    @app_commands.autocomplete(event_id=active_event_id_autocomplete)
+    async def delete(
+        self,
+        interaction: discord.Interaction,
+        event_id: int,
+    ) -> None:
+        LOGGER.debug(
+            "Event delete command invoked by Discord user %s; event_id=%s",
+            interaction.user.id,
+            event_id,
+        )
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event delete command from Discord user %s; "
+                "required role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to delete events.",
+                ephemeral=True,
+            )
+            return
+        event = self._bot.event_store.get_event(event_id)
+        if event is None:
+            LOGGER.debug(
+                "Event delete rejected for missing event; "
+                "user_id=%s event_id=%s",
+                interaction.user.id,
+                event_id,
+            )
+            await interaction.response.send_message(
+                "That event does not exist.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Delete **{event.title}** (event **{event.event_id}**)? This "
+            "removes its message(s), thread(s) and everyone's sign-ups, and "
+            "cannot be undone.",
+            view=EventDeleteConfirmView(self._bot, event),
+            ephemeral=True,
+        )
+        LOGGER.debug(
+            "Event delete confirmation opened; user_id=%s event_id=%s",
             interaction.user.id,
             event_id,
         )

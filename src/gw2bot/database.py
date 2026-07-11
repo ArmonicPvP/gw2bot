@@ -254,6 +254,11 @@ class EventRecord(Base):
         nullable=False,
         default=False,
     )
+    delete_previous_on_repeat: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
 
 
 class EventOccurrenceRecord(Base):
@@ -410,6 +415,24 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("needs_refresh")
+
+        event_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                EventRecord.__tablename__
+            )
+        }
+        if "delete_previous_on_repeat" not in event_columns:
+            operations.add_column(
+                EventRecord.__tablename__,
+                Column(
+                    "delete_previous_on_repeat",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            added_columns.add("delete_previous_on_repeat")
 
         guild_leave_columns = {
             column["name"]

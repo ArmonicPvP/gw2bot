@@ -2,7 +2,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 
+from gw2bot.database import create_database_engine, initialize_database
 from gw2bot.events.models import (
     AutoSignupChoice,
     EventCategory,
@@ -21,6 +23,46 @@ def store(tmp_path: Path):
     store = EventStore(str(tmp_path / "gw2bot.db"))
     yield store
     store.close()
+
+
+def test_migration_adds_delete_previous_on_repeat_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before the
+    # column existed by dropping it and inserting a legacy row.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE gw2_events "
+                "DROP COLUMN delete_previous_on_repeat"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled) VALUES "
+                "('Fractal', 't', 'd', 1, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "delete_previous_on_repeat" in added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_event(1)
+        assert legacy is not None
+        # The backfilled column defaults to False for pre-existing rows.
+        assert legacy.delete_previous_on_repeat is False
+    finally:
+        store.close()
 
 
 def create_event(store: EventStore, **overrides: object):
@@ -93,6 +135,47 @@ class TestEventStoreEvents:
         assert updated.repeat_frequency is RepeatFrequency.WEEKLY
         assert updated.repeat_days == (0, 3)
         assert store.get_event(event.event_id) == updated
+
+    def test_create_event_stores_delete_previous_on_repeat(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            delete_previous_on_repeat=True,
+        )
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        assert loaded.delete_previous_on_repeat is True
+
+    def test_update_event_sets_delete_previous_on_repeat(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        assert not event.delete_previous_on_repeat
+
+        updated = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+            delete_previous_on_repeat=True,
+        )
+
+        assert updated.delete_previous_on_repeat is True
+        reloaded = store.get_event(event.event_id)
+        assert reloaded is not None
+        assert reloaded.delete_previous_on_repeat is True
 
     def test_update_event_unknown_id_raises(self, store: EventStore) -> None:
         with pytest.raises(ValueError, match="Unknown event"):
@@ -214,6 +297,30 @@ class TestEventStoreOccurrences:
             store.get_occurrence(untouched_occurrence.occurrence_id)
             is not None
         )
+
+    def test_delete_occurrence_removes_occurrence_and_signups(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        other = store.create_occurrence(event.event_id, START.replace(hour=22))
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        store.delete_occurrence(occurrence.occurrence_id)
+
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert store.get_signups(occurrence.occurrence_id) == []
+        # The event and the other occurrence are untouched.
+        assert store.get_event(event.event_id) is not None
+        assert store.get_occurrence(other.occurrence_id) is not None
 
     def test_has_later_occurrence(self, store: EventStore) -> None:
         event = create_event(store)

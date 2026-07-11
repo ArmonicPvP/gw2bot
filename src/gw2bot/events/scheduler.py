@@ -5,8 +5,9 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from gw2bot.events.models import EventStatus
+from gw2bot.events.models import EventStatus, RepeatFrequency
 from gw2bot.events.posting import (
+    delete_superseded_occurrences,
     ensure_next_recurring_occurrence,
     occurrence_status,
     post_occurrence,
@@ -129,6 +130,14 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
             event.event_id,
             posted.occurrence_id,
         )
+        # Once the new occurrence is posted, a recurring event that opted in
+        # removes the occurrence(s) it supersedes so the channel keeps only the
+        # current post. This is best-effort and never raises.
+        if (
+            event.repeat_frequency is not RepeatFrequency.NONE
+            and event.delete_previous_on_repeat
+        ):
+            await delete_superseded_occurrences(bot, event, posted)
         # A pending occurrence can already be over by the time it is posted
         # (for example, posting was blocked past its end). Posting it
         # persists OVER, so it never enters the unfinished set that drives

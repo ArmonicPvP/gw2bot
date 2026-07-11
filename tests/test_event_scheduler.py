@@ -141,6 +141,55 @@ class TestRunEventMaintenance:
         assert [signup.discord_user_id for signup in signups] == [11]
         channel.thread.add_user.assert_awaited()
 
+    async def test_rollover_deletes_previous_occurrence_when_opted_in(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+            delete_previous_on_repeat=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        # The finished occurrence and its post are removed; only the freshly
+        # posted next occurrence remains.
+        assert store.get_occurrence(posted.occurrence_id) is None
+        channel.partial_message.delete.assert_awaited()
+        live = store.get_posted_unfinished_occurrences()
+        assert len(live) == 1
+        assert live[0].occurrence_id != posted.occurrence_id
+
+    async def test_rollover_keeps_previous_occurrence_by_default(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        # Without the opt-in, history is kept and no message is deleted.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+
     async def test_catch_up_skips_past_occurrences_after_downtime(
         self,
         bot: Any,

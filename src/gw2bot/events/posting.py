@@ -330,6 +330,95 @@ async def repost_occurrence(
     return reposted
 
 
+async def delete_event_posts(
+    bot: Gw2Bot,
+    event: Event,
+    occurrences: list[EventOccurrence],
+) -> int:
+    # Best-effort cleanup of the public posts when an event is deleted. Deleting
+    # a starter message also removes its thread, so there is no separate thread
+    # delete. This runs after the store rows are gone, so any message that
+    # survives a failure here just has buttons that gracefully report the event
+    # is no longer available. Occurrences posted before a channel change live in
+    # a previous channel and cannot be resolved from event.channel_id; those
+    # deletes simply fail and are logged.
+    channel: Any = None
+    deleted = 0
+    for occurrence in occurrences:
+        if occurrence.message_id is None:
+            continue
+        if channel is None:
+            try:
+                channel = await resolve_channel(bot, event.channel_id)
+            except discord.HTTPException as exc:
+                LOGGER.error(
+                    "Could not resolve channel to delete event posts; "
+                    "event_id=%s error_type=%s",
+                    event.event_id,
+                    type(exc).__name__,
+                )
+                return deleted
+        try:
+            await channel.get_partial_message(occurrence.message_id).delete()
+            deleted += 1
+        except discord.HTTPException as exc:
+            LOGGER.error(
+                "Could not delete event message during deletion; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+    LOGGER.debug(
+        "Deleted event posts; event_id=%s messages_deleted=%s",
+        event.event_id,
+        deleted,
+    )
+    return deleted
+
+
+async def delete_superseded_occurrences(
+    bot: Gw2Bot,
+    event: Event,
+    new_occurrence: EventOccurrence,
+) -> int:
+    # For a recurring event with delete_previous_on_repeat, remove the
+    # occurrences the just-posted one supersedes (their message, thread and store
+    # rows) so the channel keeps only the current post. Only finished (OVER)
+    # occurrences earlier than the new one qualify, so a live occurrence is never
+    # removed. Message deletes are best-effort; the store rows are always removed
+    # so the series does not accumulate history.
+    superseded = [
+        occurrence
+        for occurrence in bot.event_store.get_event_occurrences(event.event_id)
+        if occurrence.occurrence_id != new_occurrence.occurrence_id
+        and occurrence.status is EventStatus.OVER
+        and occurrence.start_time < new_occurrence.start_time
+    ]
+    if not superseded:
+        return 0
+    await delete_event_posts(bot, event, superseded)
+    deleted = 0
+    for occurrence in superseded:
+        try:
+            bot.event_store.delete_occurrence(occurrence.occurrence_id)
+            deleted += 1
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not delete superseded occurrence row; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+    LOGGER.debug(
+        "Deleted superseded occurrences; event_id=%s count=%s "
+        "new_occurrence_id=%s",
+        event.event_id,
+        deleted,
+        new_occurrence.occurrence_id,
+    )
+    return deleted
+
+
 async def update_thread_membership(
     bot: Gw2Bot,
     occurrence: EventOccurrence,

@@ -23,6 +23,7 @@ from gw2bot.events.views import (
     AutoSignupChoiceView,
     ChannelMoveConfirmView,
     EventConfirmView,
+    EventDeleteConfirmView,
     EventDetailsModal,
     EventDraft,
     EventEditConfirmView,
@@ -79,7 +80,7 @@ class TestEventCommandGroup:
 
         assert group.name == "event"
         assert group.guild_only
-        assert commands == {"new", "edit"}
+        assert commands == {"new", "edit", "delete"}
 
     async def test_new_rejects_users_without_the_create_role(self) -> None:
         group = EventCommands(make_bot())
@@ -252,19 +253,24 @@ class TestEventRepeatModal:
         modal = EventRepeatModal(make_bot(), draft)
         modal.frequency._values = ["weekly"]
         modal.days_input._value = "Sunday, Wednesday"
+        modal.delete_previous._values = ["yes"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
 
         assert draft.repeat_frequency is RepeatFrequency.WEEKLY
         assert draft.repeat_days == (2, 6)
+        assert draft.delete_previous_on_repeat is True
         interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "removing the previous post" in kwargs["embeds"][1].description
 
     async def test_submit_invalid_days_offers_retry(self) -> None:
         draft = self.make_draft()
         modal = EventRepeatModal(make_bot(), draft)
         modal.frequency._values = ["monthly"]
         modal.days_input._value = "first"
+        modal.delete_previous._values = ["no"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
@@ -936,7 +942,7 @@ class TestEditCommand:
         )
         interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
 
-        choices = await group.edit_event_id_autocomplete(interaction, "")
+        choices = await group.active_event_id_autocomplete(interaction, "")
 
         values = [choice.value for choice in choices]
         assert active.event_id in values
@@ -974,7 +980,7 @@ class TestEditCommand:
         store.create_occurrence(dailies.event_id, FAR_FUTURE)
         interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
 
-        choices = await group.edit_event_id_autocomplete(interaction, "wing")
+        choices = await group.active_event_id_autocomplete(interaction, "wing")
 
         assert [choice.value for choice in choices] == [wing.event_id]
 
@@ -987,7 +993,7 @@ class TestEditCommand:
         make_posted_edit_event(store)
         interaction = make_interaction()
 
-        choices = await group.edit_event_id_autocomplete(interaction, "")
+        choices = await group.active_event_id_autocomplete(interaction, "")
 
         assert choices == []
 
@@ -1282,3 +1288,161 @@ class TestEventEditConfirmView:
         assert interaction.response.edit_message.await_args is not None
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert isinstance(kwargs["view"], EventEditConfirmView)
+
+
+class TestDeleteCommand:
+    async def test_delete_rejects_users_without_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction()
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "view" not in kwargs
+        # The event is untouched.
+        assert store.get_event(event.event_id) is not None
+
+    async def test_delete_rejects_unknown_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(group, interaction, 999)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert (
+            "does not exist"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_delete_opens_confirmation_for_an_existing_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDeleteConfirmView)
+        assert kwargs["ephemeral"] is True
+        # Confirmation only; nothing is deleted yet.
+        assert store.get_event(event.event_id) is not None
+
+
+class TestEventDeleteConfirmView:
+    async def test_delete_removes_event_rows_and_message(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        assert store.get_event(event.event_id) is None
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert store.get_signups(occurrence.occurrence_id) == []
+        channel.partial_message.delete.assert_awaited_once()
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "was deleted"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+    async def test_delete_rejects_users_without_the_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.delete.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert store.get_event(event.event_id) is not None
+
+    async def test_delete_ignores_a_racing_second_click(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        first = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        first.edit_original_response = AsyncMock()
+
+        await view.delete.callback(first)
+        assert view._deleting
+
+        second = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        await view.delete.callback(second)
+
+        second.response.send_message.assert_awaited_once()
+        assert (
+            "already being deleted"
+            in second.response.send_message.await_args.args[0]
+        )
+
+    async def test_keep_cancels_without_deleting(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.keep.callback(interaction)
+
+        assert store.get_event(event.event_id) is not None
+        interaction.response.edit_message.assert_awaited_once()
+        assert (
+            "not deleted"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )

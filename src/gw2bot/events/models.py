@@ -130,6 +130,10 @@ class Event:
     repeat_frequency: RepeatFrequency
     repeat_days: tuple[int, ...]
     cancelled: bool = False
+    # For a repeating event, delete the previous occurrence's post (and its
+    # thread) once the next occurrence is posted, so the channel keeps only the
+    # current event. Ignored when the event does not repeat.
+    delete_previous_on_repeat: bool = False
 
     @property
     def capacity(self) -> CategoryCapacity:

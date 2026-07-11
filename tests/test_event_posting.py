@@ -19,6 +19,8 @@ from gw2bot.events.models import (
 from gw2bot.events.posting import (
     apply_auto_signups,
     complete_signup,
+    delete_event_posts,
+    delete_superseded_occurrences,
     occurrence_status,
     post_occurrence,
     refresh_occurrence_message,
@@ -838,6 +840,96 @@ class TestRepostOccurrence:
         # into the new channel.
         assert len(new_channel.sent) == 1
         assert reposted.thread_id == 888
+
+
+class TestDeleteEventPosts:
+    async def test_deletes_posted_messages_and_skips_unposted(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store)
+        posted = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, posted, BEFORE_START)
+        unposted = store.create_occurrence(event.event_id, event.start_time)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        deleted = await delete_event_posts(bot, event, occurrences)
+
+        # Only the posted occurrence has a message to remove.
+        assert deleted == 1
+        assert unposted.message_id is None
+        channel.partial_message.delete.assert_awaited_once()
+
+    async def test_a_failed_message_delete_does_not_stop_the_others(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store)
+        first = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, first, BEFORE_START)
+        second = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, second, BEFORE_START)
+        channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        deleted = await delete_event_posts(bot, event, occurrences)
+
+        # Both deletes were attempted even though they fail.
+        assert deleted == 0
+        assert channel.partial_message.delete.await_count == 2
+
+
+class TestDeleteSupersededOccurrences:
+    async def test_removes_earlier_over_occurrences_and_their_posts(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        old = store.create_occurrence(event.event_id, START)
+        await post_occurrence(bot, event, old, BEFORE_START)
+        store.set_occurrence_status(old.occurrence_id, EventStatus.OVER)
+        new_start = START + timedelta(days=1)
+        new = store.create_occurrence(event.event_id, new_start)
+        posted_new = await post_occurrence(
+            bot, event, new, new_start - timedelta(hours=1)
+        )
+
+        deleted = await delete_superseded_occurrences(bot, event, posted_new)
+
+        assert deleted == 1
+        assert store.get_occurrence(old.occurrence_id) is None
+        assert store.get_occurrence(posted_new.occurrence_id) is not None
+        channel.partial_message.delete.assert_awaited()
+
+    async def test_keeps_earlier_occurrence_that_is_not_over(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        old = store.create_occurrence(event.event_id, START)
+        posted_old = await post_occurrence(bot, event, old, BEFORE_START)
+        new_start = START + timedelta(days=1)
+        new = store.create_occurrence(event.event_id, new_start)
+        posted_new = await post_occurrence(
+            bot, event, new, new_start - timedelta(hours=1)
+        )
+
+        deleted = await delete_superseded_occurrences(bot, event, posted_new)
+
+        # The still-live earlier occurrence must never be removed.
+        assert deleted == 0
+        assert store.get_occurrence(posted_old.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
 
 
 class TestPostingLoggingSafety:

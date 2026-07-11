@@ -65,6 +65,7 @@ class EventDraft:
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE
     repeat_days: tuple[int, ...] = field(default_factory=tuple)
     repeat_days_text: str = ""
+    delete_previous_on_repeat: bool = False
     posted: bool = False
     # Set when the draft edits an existing event rather than creating one. The
     # whole "Change something" flow reuses this draft, so a single flag steers
@@ -103,6 +104,7 @@ class EventDraft:
             duration_minutes=self.duration_minutes,
             repeat_frequency=self.repeat_frequency,
             repeat_days=self.repeat_days,
+            delete_previous_on_repeat=self.delete_previous_on_repeat,
         )
 
 
@@ -138,6 +140,7 @@ def draft_from_event(
         repeat_days_text=format_repeat_days(
             event.repeat_frequency, event.repeat_days
         ),
+        delete_previous_on_repeat=event.delete_previous_on_repeat,
         editing_event_id=event.event_id,
     )
 
@@ -263,6 +266,11 @@ async def send_event_preview(
         confirmation = confirm_embed()
         view = EventConfirmView(bot, draft)
     repeat_text = describe_repeat(draft.repeat_frequency, draft.repeat_days)
+    if (
+        draft.repeat_frequency is not RepeatFrequency.NONE
+        and draft.delete_previous_on_repeat
+    ):
+        repeat_text += ", removing the previous post each time"
     confirmation.description = (
         f"{confirmation.description}\n\n*{repeat_text}.*"
     )
@@ -513,6 +521,7 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
             self._draft.repeat_frequency = RepeatFrequency.NONE
             self._draft.repeat_days = ()
             self._draft.repeat_days_text = ""
+            self._draft.delete_previous_on_repeat = False
             await send_event_preview(self._bot, interaction, self._draft)
             return
         if self._draft.repeat_frequency is RepeatFrequency.NONE:
@@ -562,11 +571,26 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
                 component=self.days_input,
             )
         )
+        self.delete_previous = discord.ui.Select["EventRepeatModal"](
+            options=_yes_no_options(draft.delete_previous_on_repeat),
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Delete the previous post when the next one is posted?",
+                description=(
+                    "Keeps only the current occurrence in the channel."
+                ),
+                component=self.delete_previous,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         frequency = RepeatFrequency(self.frequency.values[0])
         self._draft.repeat_frequency = frequency
         self._draft.repeat_days_text = self.days_input.value.strip()
+        self._draft.delete_previous_on_repeat = (
+            self.delete_previous.values[0] == "yes"
+        )
         try:
             repeat_days = parse_repeat_days(
                 frequency,
@@ -670,6 +694,9 @@ class EventConfirmView(_PreviewConfirmView):
                 duration_minutes=draft_event.duration_minutes,
                 repeat_frequency=draft_event.repeat_frequency,
                 repeat_days=draft_event.repeat_days,
+                delete_previous_on_repeat=(
+                    draft_event.delete_previous_on_repeat
+                ),
             )
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,
@@ -933,6 +960,7 @@ async def apply_event_edit(
             duration_minutes=edited.duration_minutes,
             repeat_frequency=edited.repeat_frequency,
             repeat_days=edited.repeat_days,
+            delete_previous_on_repeat=edited.delete_previous_on_repeat,
         )
     except SQLAlchemyError as exc:
         # The save did not happen, so clear the guard to allow a fresh retry.
@@ -1029,6 +1057,95 @@ async def apply_event_edit(
     else:
         content = f"Event **{updated.event_id}** was updated."
     await interaction.edit_original_response(content=content, view=None)
+
+
+class EventDeleteConfirmView(discord.ui.View):
+    def __init__(self, bot: Gw2Bot, event: Event):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event = event
+        self._deleting = False
+
+    @discord.ui.button(label="Delete event", style=discord.ButtonStyle.danger)
+    async def delete(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventDeleteConfirmView],
+    ) -> None:
+        from gw2bot.events.posting import delete_event_posts
+
+        # The confirmation can sit open for minutes; recheck the role before the
+        # irreversible delete, mirroring the edit/post paths.
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event delete from Discord user %s; required role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to delete events.",
+                ephemeral=True,
+            )
+            return
+        # Guard a double click racing two callbacks before the first removes the
+        # buttons; the check and set are synchronous, so the second observes it.
+        if self._deleting:
+            await interaction.response.send_message(
+                "This event is already being deleted.",
+                ephemeral=True,
+            )
+            return
+        self._deleting = True
+        await interaction.response.edit_message(
+            content="Deleting the event…",
+            embeds=[],
+            view=None,
+        )
+        # Read the occurrences before the store rows are removed so their
+        # messages can still be cleaned up afterwards.
+        occurrences = self._bot.event_store.get_event_occurrences(
+            self._event.event_id
+        )
+        try:
+            self._bot.event_store.delete_event(self._event.event_id)
+        except SQLAlchemyError as exc:
+            self._deleting = False
+            LOGGER.error(
+                "Could not delete event; event_id=%s error_type=%s",
+                self._event.event_id,
+                type(exc).__name__,
+            )
+            await interaction.edit_original_response(
+                content="The event could not be deleted. Try again later.",
+                view=None,
+            )
+            return
+        await delete_event_posts(self._bot, self._event, occurrences)
+        LOGGER.debug(
+            "Deleted event; event_id=%s occurrences=%s user_id=%s",
+            self._event.event_id,
+            len(occurrences),
+            interaction.user.id,
+        )
+        await interaction.edit_original_response(
+            content=f"Event **{self._event.event_id}** was deleted.",
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="Keep event",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventDeleteConfirmView],
+    ) -> None:
+        await interaction.response.edit_message(
+            content="The event was not deleted.",
+            embeds=[],
+            view=None,
+        )
 
 
 _CHANGE_FIELDS = (
@@ -1303,6 +1420,7 @@ class RepeatChoiceView(discord.ui.View):
         self._draft.repeat_frequency = RepeatFrequency.NONE
         self._draft.repeat_days = ()
         self._draft.repeat_days_text = ""
+        self._draft.delete_previous_on_repeat = False
         await send_event_preview(self._bot, interaction, self._draft)
 
 

@@ -71,6 +71,7 @@ def _event_from_record(record: EventRecord) -> Event:
         repeat_frequency=RepeatFrequency(record.repeat_frequency),
         repeat_days=_parse_days(record.repeat_days),
         cancelled=record.cancelled,
+        delete_previous_on_repeat=record.delete_previous_on_repeat,
     )
 
 
@@ -126,6 +127,7 @@ class EventStore:
         duration_minutes: int,
         repeat_frequency: RepeatFrequency,
         repeat_days: tuple[int, ...],
+        delete_previous_on_repeat: bool = False,
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -142,6 +144,7 @@ class EventStore:
                 repeat_days=_serialize_days(repeat_days),
                 created_at=_serialize_time(created_at),
                 cancelled=False,
+                delete_previous_on_repeat=delete_previous_on_repeat,
             )
             session.add(record)
             session.commit()
@@ -168,6 +171,7 @@ class EventStore:
         duration_minutes: int,
         repeat_frequency: RepeatFrequency,
         repeat_days: tuple[int, ...],
+        delete_previous_on_repeat: bool = False,
     ) -> Event:
         with self._sessions() as session:
             record = session.get(EventRecord, event_id)
@@ -182,6 +186,7 @@ class EventStore:
             record.duration_minutes = duration_minutes
             record.repeat_frequency = repeat_frequency.value
             record.repeat_days = _serialize_days(repeat_days)
+            record.delete_previous_on_repeat = delete_previous_on_repeat
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "
@@ -349,6 +354,24 @@ class EventStore:
                 .order_by(EventRecord.event_id.desc())
             ).all()
             return [_event_from_record(record) for record in records]
+
+    def delete_occurrence(self, occurrence_id: int) -> None:
+        with self._sessions() as session:
+            session.execute(
+                delete(EventSignupRecord).where(
+                    EventSignupRecord.occurrence_id == occurrence_id
+                )
+            )
+            session.execute(
+                delete(EventOccurrenceRecord).where(
+                    EventOccurrenceRecord.occurrence_id == occurrence_id
+                )
+            )
+            session.commit()
+        LOGGER.debug(
+            "Deleted event occurrence with its signups; occurrence_id=%s",
+            occurrence_id,
+        )
 
     def delete_event(self, event_id: int) -> None:
         with self._sessions() as session:
