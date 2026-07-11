@@ -78,14 +78,14 @@ class Config:
             "GW2_GUILD_MEMBER_CACHE_SECONDS",
         )
         event_timezone = _optional_string(
-            values.get("EVENT_TIMEZONE"),
+            values.get("TZ"),
             "UTC",
         )
         try:
             ZoneInfo(event_timezone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ConfigurationError(
-                "EVENT_TIMEZONE must be a valid IANA timezone name"
+                "TZ must be a valid IANA timezone name"
             ) from exc
         return cls(
             discord_token=values["DISCORD_TOKEN"].strip(),

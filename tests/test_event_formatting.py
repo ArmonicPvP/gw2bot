@@ -105,8 +105,11 @@ class TestParseEventDuration:
         with pytest.raises(ValueError, match="longer than zero"):
             parse_event_duration("00:00")
 
-    def test_round_trips_through_format_duration(self) -> None:
-        assert format_duration(parse_event_duration("02:05")) == "02:05"
+    def test_formats_duration_as_hours_and_minutes(self) -> None:
+        assert format_duration(parse_event_duration("02:05")) == "2h 5m"
+        assert format_duration(parse_event_duration("01:00")) == "1h"
+        assert format_duration(parse_event_duration("01:08")) == "1h 8m"
+        assert format_duration(parse_event_duration("00:45")) == "45m"
 
 
 class TestParseRepeatDays:
@@ -136,10 +139,12 @@ class TestParseRepeatDays:
             with pytest.raises(ValueError, match="Enter the day"):
                 parse_repeat_days(frequency, "  ")
 
-    def test_requires_blank_days_for_daily(self) -> None:
+    def test_ignores_days_for_daily(self) -> None:
         assert parse_repeat_days(RepeatFrequency.DAILY, "") == ()
-        with pytest.raises(ValueError, match="blank"):
-            parse_repeat_days(RepeatFrequency.DAILY, "Monday")
+        # Days are meaningless for a daily event, so extra input is ignored
+        # rather than rejected.
+        assert parse_repeat_days(RepeatFrequency.DAILY, "Monday") == ()
+        assert parse_repeat_days(RepeatFrequency.NONE, "1, 15") == ()
 
 
 class TestNextOccurrenceStart:
@@ -332,7 +337,7 @@ class TestEventEmbed:
         values = {field.name: field.value for field in embed.fields}
         start_epoch = int(event.start_time.timestamp())
         assert values["Date & Time"] == f"<t:{start_epoch}:F>"
-        assert values["Duration"] == "01:30"
+        assert values["Duration"] == "1h 30m"
         assert values["Leader"] == "<@42>"
         assert values["Healer (1/1)"] == f"└ {EMOJI_QUICKNESS} <@11>"
         assert values["DPS (1/4)"] == f"└ {EMOJI_ALACRITY} <@12>"
