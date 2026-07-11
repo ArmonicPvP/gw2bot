@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from gw2bot.events.formatting import next_occurrence_start
@@ -97,8 +97,12 @@ def _create_next_occurrence(
         occurrence.start_time,
         bot.event_timezone,
     )
-    # Catch up after downtime so the next posted occurrence is in the future.
-    while next_start <= now:
+    # Catch up after downtime, but skip only occurrences that have fully
+    # ended. If the bot was down when an occurrence's start passed yet it is
+    # still in progress, keep it so it can post as ongoing (preserving its
+    # auto-signups and public post) instead of jumping to the next one.
+    duration = timedelta(minutes=event.duration_minutes)
+    while next_start + duration <= now:
         next_start = next_occurrence_start(
             event.repeat_frequency,
             event.repeat_days,

@@ -161,6 +161,27 @@ async def refresh_occurrence_message(
             await channel.get_partial_message(occurrence.message_id).edit(
                 embed=occurrence_embed(event, occurrence, signups, now),
             )
+        except discord.NotFound:
+            # The message or its channel was permanently deleted. Retrying
+            # every maintenance pass would fail forever, so retire the
+            # occurrence: persist OVER and clear the refresh flag so it drops
+            # out of get_posted_unfinished_occurrences() instead of logging the
+            # same failure each minute.
+            LOGGER.warning(
+                "Event message or channel is gone; retiring occurrence; "
+                "occurrence_id=%s",
+                occurrence.occurrence_id,
+            )
+            bot.event_store.set_occurrence_status(
+                occurrence.occurrence_id,
+                EventStatus.OVER,
+            )
+            if occurrence.needs_refresh:
+                bot.event_store.set_occurrence_needs_refresh(
+                    occurrence.occurrence_id,
+                    False,
+                )
+            return EventStatus.OVER
         except discord.HTTPException as exc:
             LOGGER.error(
                 "Could not refresh event message; occurrence_id=%s "
