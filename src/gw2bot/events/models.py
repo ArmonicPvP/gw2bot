@@ -4,9 +4,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-EMOJI_QUICKNESS = "<:e:730558718843813930>"
-EMOJI_ALACRITY = "<:e:730558718978162769>"
-EMOJI_DPS = "<:e:688551054606073927>"
+EMOJI_QUICKNESS = "<:quickness:1525428594371985459>"
+EMOJI_ALACRITY = "<:alacrity:1525428627045351515>"
+EMOJI_DPS = "⚔️"
+
+EMOJI_RAID = "<:raid:1525431773498970172>"
+EMOJI_STRIKE = "<:strike:1525431254340866171>"
+EMOJI_WVW = "<:wvw:1525431137982353428>"
+EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
 
 
 class EventCategory(StrEnum):
@@ -14,6 +19,14 @@ class EventCategory(StrEnum):
     STRIKE = "Strike"
     FRACTAL = "Fractal"
     WVW = "World vs. World"
+
+
+CATEGORY_EMOJI: dict[EventCategory, str] = {
+    EventCategory.RAID: EMOJI_RAID,
+    EventCategory.STRIKE: EMOJI_STRIKE,
+    EventCategory.FRACTAL: EMOJI_FRACTAL,
+    EventCategory.WVW: EMOJI_WVW,
+}
 
 
 class EventRole(StrEnum):

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from gw2bot.events.models import (
+    CATEGORY_EMOJI,
     EMOJI_ALACRITY,
     EMOJI_QUICKNESS,
     HEAL_ROLES,
@@ -273,32 +274,33 @@ def event_embed(
     active = [signup for signup in signups if not signup.waitlisted]
     waitlisted = [signup for signup in signups if signup.waitlisted]
     embed = discord.Embed(
-        title=event.title,
+        title=f"{CATEGORY_EMOJI[event.category]} {event.title}",
         description=event.description,
         color=STATUS_COLORS[status],
     )
     start = start_time if start_time is not None else event.start_time
     start_epoch = int(start.timestamp())
+    # Date & Time, Duration, and Leader share one row via inline fields.
     embed.add_field(
-        name="Date & Time",
-        value=f"<t:{start_epoch}:F>",
-        inline=False,
+        name="📅 Date & Time",
+        value=f"<t:{start_epoch}:f>",
+        inline=True,
     )
     embed.add_field(
-        name="Duration",
+        name="⏳ Duration",
         value=format_duration(event.duration_minutes),
-        inline=False,
+        inline=True,
     )
     embed.add_field(
-        name="Leader",
+        name="👑 Leader",
         value=f"<@{event.leader_discord_id}>",
-        inline=False,
+        inline=True,
     )
 
     if capacity.has_roles:
         counts = count_roster(signups)
         embed.add_field(
-            name=f"Participants ({counts.active}/{capacity.total})",
+            name=f"👥 Participants ({counts.active}/{capacity.total})",
             value="​",
             inline=False,
         )
@@ -315,12 +317,12 @@ def event_embed(
         ]
         _add_chunked_field(
             embed,
-            f"Healer ({len(healers)}/{capacity.healers})",
+            f"💚 Healer ({len(healers)}/{capacity.healers})",
             [_member_line(signup) for signup in healers],
         )
         _add_chunked_field(
             embed,
-            f"DPS ({len(dps)}/{capacity.dps})",
+            f"⚔️ DPS ({len(dps)}/{capacity.dps})",
             [_member_line(signup) for signup in dps],
         )
         embed.add_field(
@@ -331,21 +333,25 @@ def event_embed(
             ),
             inline=False,
         )
+        # Flexroles and Waitlist are only shown when populated, so an empty
+        # section never clutters the embed.
         flexers = [signup for signup in active if signup.flex_roles]
-        _add_chunked_field(
-            embed,
-            "🔁 Flexroles",
-            _role_group_lines(flexers),
-        )
-        _add_chunked_field(
-            embed,
-            "⌛️ Waitlist",
-            _role_group_lines(waitlisted),
-        )
+        if flexers:
+            _add_chunked_field(
+                embed,
+                "🔁 Flexroles",
+                _role_group_lines(flexers),
+            )
+        if waitlisted:
+            _add_chunked_field(
+                embed,
+                "⌛️ Waitlist",
+                _role_group_lines(waitlisted),
+            )
     else:
         _add_chunked_field(
             embed,
-            f"Participants ({len(active)}/{capacity.total})",
+            f"👥 Participants ({len(active)}/{capacity.total})",
             [_member_line(signup) for signup in active],
         )
         if waitlisted:

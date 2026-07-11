@@ -21,6 +21,7 @@ from gw2bot.events.formatting import (
 )
 from gw2bot.events.models import (
     AutoSignupChoice,
+    CATEGORY_EMOJI,
     Event,
     EventCategory,
     EventOccurrence,
@@ -28,6 +29,7 @@ from gw2bot.events.models import (
     EventSignup,
     EventStatus,
     PreferenceMode,
+    ROLE_EMOJI,
     RepeatFrequency,
     fitting_roles,
 )
@@ -100,6 +102,7 @@ def _category_options(
             label=category.value,
             value=category.value,
             default=category is selected,
+            emoji=CATEGORY_EMOJI[category],
         )
         for category in EventCategory
     ]
@@ -1078,7 +1081,7 @@ class EventSettingsButton(
         self.occurrence_id = occurrence_id
         super().__init__(
             discord.ui.Button(
-                label="⚙️",
+                emoji="⚙️",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"gw2bot:event-settings:{occurrence_id}",
             )
@@ -1547,6 +1550,7 @@ class RolePickSelect(discord.ui.Select["RolePickView"]):
                     role, role in available, waitlist_only
                 ),
                 value=role.value,
+                emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
         ]
@@ -1585,7 +1589,11 @@ class RolePickView(discord.ui.View):
 class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
     def __init__(self, flow: SignupFlow):
         options = [
-            discord.SelectOption(label=role.value, value=role.value)
+            discord.SelectOption(
+                label=role.value,
+                value=role.value,
+                emoji=ROLE_EMOJI[role],
+            )
             for role in EventRole
             if role != flow.role
         ]
