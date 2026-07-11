@@ -30,6 +30,7 @@ EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"
 EVENT_DURATION_PATTERN = re.compile(r"^(\d{1,3}):([0-5]\d)$")
 EMBED_FIELD_VALUE_LIMIT = 1024
 EMBED_TOTAL_LIMIT = 6000
+EMBED_TITLE_LIMIT = 256
 EMPTY_FIELD_TEXT = "—"
 _TRUNCATION_MARKER = "…"
 
@@ -263,6 +264,21 @@ def _role_group_lines(signups: list[EventSignup]) -> list[str]:
     return lines
 
 
+def _embed_title(event: Event) -> str:
+    # The category emoji is prefixed to the title, but a custom-emoji string
+    # such as "<:fractal:...>" counts in full toward Discord's 256-character
+    # title limit. A user-entered title may already be at that limit, so
+    # reserve room for the prefix and truncate the title rather than letting
+    # the API reject the whole embed as an invalid form body.
+    prefix = f"{CATEGORY_EMOJI[event.category]} "
+    budget = EMBED_TITLE_LIMIT - len(prefix)
+    title = event.title
+    if len(title) > budget:
+        keep = budget - len(_TRUNCATION_MARKER)
+        title = title[:keep].rstrip() + _TRUNCATION_MARKER
+    return f"{prefix}{title}"
+
+
 def event_embed(
     event: Event,
     signups: list[EventSignup],
@@ -274,7 +290,7 @@ def event_embed(
     active = [signup for signup in signups if not signup.waitlisted]
     waitlisted = [signup for signup in signups if signup.waitlisted]
     embed = discord.Embed(
-        title=f"{CATEGORY_EMOJI[event.category]} {event.title}",
+        title=_embed_title(event),
         description=event.description,
         color=STATUS_COLORS[status],
     )
