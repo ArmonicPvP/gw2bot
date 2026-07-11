@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import discord
@@ -11,6 +11,7 @@ from gw2bot.events.formatting import (
     compute_status,
     event_embed,
     event_thread_name,
+    next_occurrence_start,
 )
 from gw2bot.events.models import (
     Event,
@@ -18,6 +19,7 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    RepeatFrequency,
     choose_assigned_role,
     is_roster_full,
 )
@@ -171,6 +173,14 @@ async def refresh_occurrence_message(
                 "Event message or channel is gone; retiring occurrence; "
                 "occurrence_id=%s",
                 occurrence.occurrence_id,
+            )
+            # We may be retiring an occurrence that has not naturally ended, so
+            # the scheduler's normal "create the next occurrence once status is
+            # OVER" path never runs for it. Seed the next occurrence here so a
+            # recurring series does not stop after a single deleted message.
+            current_time = now if now is not None else datetime.now(UTC)
+            ensure_next_recurring_occurrence(
+                bot, event, occurrence, current_time
             )
             bot.event_store.set_occurrence_status(
                 occurrence.occurrence_id,
@@ -470,3 +480,63 @@ def apply_auto_signups(
         applied,
     )
     return applied
+
+
+def ensure_next_recurring_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime,
+) -> EventOccurrence | None:
+    """Seed the next occurrence of a recurring series when one is due.
+
+    Returns the created occurrence, or None for a non-repeating event or when a
+    later occurrence already exists (so callers never create duplicates).
+    """
+    if event.repeat_frequency is RepeatFrequency.NONE:
+        return None
+    if bot.event_store.has_later_occurrence(
+        event.event_id,
+        occurrence.start_time,
+    ):
+        return None
+    return _create_next_occurrence(bot, event, occurrence, now)
+
+
+def _create_next_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime,
+) -> EventOccurrence:
+    next_start = next_occurrence_start(
+        event.repeat_frequency,
+        event.repeat_days,
+        occurrence.start_time,
+        bot.event_timezone,
+    )
+    # Catch up after downtime, but skip only occurrences that have fully
+    # ended. If the bot was down when an occurrence's start passed yet it is
+    # still in progress, keep it so it can post as ongoing (preserving its
+    # auto-signups and public post) instead of jumping to the next one.
+    duration = timedelta(minutes=event.duration_minutes)
+    while next_start + duration <= now:
+        next_start = next_occurrence_start(
+            event.repeat_frequency,
+            event.repeat_days,
+            next_start,
+            bot.event_timezone,
+        )
+    new_occurrence = bot.event_store.create_occurrence(
+        event.event_id,
+        next_start,
+    )
+    applied = apply_auto_signups(bot, event, new_occurrence)
+    LOGGER.debug(
+        "Created next recurring event occurrence; event_id=%s "
+        "occurrence_id=%s auto_signups=%s",
+        event.event_id,
+        new_occurrence.occurrence_id,
+        applied,
+    )
+    return new_occurrence

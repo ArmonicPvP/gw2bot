@@ -2,18 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from gw2bot.events.formatting import next_occurrence_start
-from gw2bot.events.models import (
-    Event,
-    EventOccurrence,
-    EventStatus,
-    RepeatFrequency,
-)
+from gw2bot.events.models import EventStatus
 from gw2bot.events.posting import (
-    apply_auto_signups,
+    ensure_next_recurring_occurrence,
     occurrence_status,
     post_occurrence,
     refresh_occurrence_message,
@@ -72,56 +66,12 @@ async def run_event_maintenance(
         # The next occurrence row is secured before the OVER status is
         # persisted, so a failure here leaves the transition unfinished
         # and it is retried on the next maintenance pass.
-        if (
-            status is EventStatus.OVER
-            and event.repeat_frequency is not RepeatFrequency.NONE
-            and not bot.event_store.has_later_occurrence(
-                event.event_id,
-                occurrence.start_time,
+        if status is EventStatus.OVER:
+            ensure_next_recurring_occurrence(
+                bot, event, occurrence, current_time
             )
-        ):
-            _create_next_occurrence(bot, event, occurrence, current_time)
         await refresh_occurrence_message(bot, event, occurrence, current_time)
     await _post_pending_occurrences(bot, current_time)
-
-
-def _create_next_occurrence(
-    bot: Gw2Bot,
-    event: Event,
-    occurrence: EventOccurrence,
-    now: datetime,
-) -> EventOccurrence:
-    next_start = next_occurrence_start(
-        event.repeat_frequency,
-        event.repeat_days,
-        occurrence.start_time,
-        bot.event_timezone,
-    )
-    # Catch up after downtime, but skip only occurrences that have fully
-    # ended. If the bot was down when an occurrence's start passed yet it is
-    # still in progress, keep it so it can post as ongoing (preserving its
-    # auto-signups and public post) instead of jumping to the next one.
-    duration = timedelta(minutes=event.duration_minutes)
-    while next_start + duration <= now:
-        next_start = next_occurrence_start(
-            event.repeat_frequency,
-            event.repeat_days,
-            next_start,
-            bot.event_timezone,
-        )
-    new_occurrence = bot.event_store.create_occurrence(
-        event.event_id,
-        next_start,
-    )
-    applied = apply_auto_signups(bot, event, new_occurrence)
-    LOGGER.debug(
-        "Created next recurring event occurrence; event_id=%s "
-        "occurrence_id=%s auto_signups=%s",
-        event.event_id,
-        new_occurrence.occurrence_id,
-        applied,
-    )
-    return new_occurrence
 
 
 async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
@@ -184,12 +134,5 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
         # persists OVER, so it never enters the unfinished set that drives
         # the OVER transition; seed the next occurrence here so a recurring
         # series catches up instead of stopping.
-        if (
-            posted.status is EventStatus.OVER
-            and event.repeat_frequency is not RepeatFrequency.NONE
-            and not bot.event_store.has_later_occurrence(
-                event.event_id,
-                posted.start_time,
-            )
-        ):
-            _create_next_occurrence(bot, event, posted, now)
+        if posted.status is EventStatus.OVER:
+            ensure_next_recurring_occurrence(bot, event, posted, now)
