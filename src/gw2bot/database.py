@@ -254,6 +254,11 @@ class EventRecord(Base):
         nullable=False,
         default=False,
     )
+    delete_previous_on_repeat: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
 
 
 class EventOccurrenceRecord(Base):
@@ -269,6 +274,11 @@ class EventOccurrenceRecord(Base):
         nullable=False,
     )
     start_time: Mapped[str] = mapped_column(String, nullable=False)
+    # The channel the message was actually posted to. An event's channel can be
+    # changed later, and occurrences that were not re-posted keep living in the
+    # channel they were sent to, so a message must be resolved through this and
+    # not through the event's current channel. NULL until the occurrence posts.
+    channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
@@ -410,6 +420,42 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("needs_refresh")
+
+        if "channel_id" not in occurrence_columns:
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column("channel_id", Integer, nullable=True),
+            )
+            # Legacy rows predate per-occurrence channels. Every message they
+            # reference was posted through the event's channel, which is the
+            # only information those rows ever carried, so backfill from it.
+            # Posts made before a channel change are unrecoverable this way, but
+            # the backfill is no worse than the behaviour it replaces.
+            connection.exec_driver_sql(
+                "UPDATE gw2_event_occurrences SET channel_id = ("
+                "SELECT channel_id FROM gw2_events "
+                "WHERE gw2_events.event_id = gw2_event_occurrences.event_id"
+                ") WHERE message_id IS NOT NULL"
+            )
+            added_columns.add("channel_id")
+
+        event_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                EventRecord.__tablename__
+            )
+        }
+        if "delete_previous_on_repeat" not in event_columns:
+            operations.add_column(
+                EventRecord.__tablename__,
+                Column(
+                    "delete_previous_on_repeat",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            added_columns.add("delete_previous_on_repeat")
 
         guild_leave_columns = {
             column["name"]

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,6 +16,7 @@ from gw2bot.events.posting import post_occurrence
 from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.store import EventStore
 
+from factories import forbidden_error
 from test_event_posting import FakeBot, FakeChannel
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
@@ -140,6 +142,103 @@ class TestRunEventMaintenance:
         signups = store.get_signups(next_occurrence.occurrence_id)
         assert [signup.discord_user_id for signup in signups] == [11]
         channel.thread.add_user.assert_awaited()
+
+    async def test_rollover_deletes_previous_occurrence_when_opted_in(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+            delete_previous_on_repeat=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        # The finished occurrence and its post are removed; only the freshly
+        # posted next occurrence remains.
+        assert store.get_occurrence(posted.occurrence_id) is None
+        channel.partial_message.delete.assert_awaited()
+        live = store.get_posted_unfinished_occurrences()
+        assert len(live) == 1
+        assert live[0].occurrence_id != posted.occurrence_id
+
+    async def test_rollover_keeps_previous_occurrence_by_default(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        # Without the opt-in, history is kept and no message is deleted.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+
+    async def test_rollover_prunes_the_previous_post_on_a_refresh_retry(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+            delete_previous_on_repeat=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        # The refresh that would persist OVER fails transiently, so the next
+        # occurrence gets posted while the old one is still not OVER.
+        channel.partial_message.edit = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        stale = store.get_occurrence(posted.occurrence_id)
+        assert stale is not None
+        assert stale.status is not EventStatus.OVER
+        assert stale.needs_refresh
+        channel.partial_message.delete.assert_not_awaited()
+
+        # The refresh recovers on a later pass, which is when the old occurrence
+        # finally reaches OVER. Nothing new is posted then, so the post-time
+        # cleanup never runs again: without pruning on the OVER transition too,
+        # the old message and row would survive forever despite the opt-in.
+        channel.partial_message.edit = AsyncMock()
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        assert store.get_occurrence(posted.occurrence_id) is None
+        channel.partial_message.delete.assert_awaited()
+        live = store.get_posted_unfinished_occurrences()
+        assert len(live) == 1
+        assert live[0].occurrence_id != posted.occurrence_id
 
     async def test_catch_up_skips_past_occurrences_after_downtime(
         self,

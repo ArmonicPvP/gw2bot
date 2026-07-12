@@ -10,6 +10,7 @@ from gw2bot.events.posting import (
     ensure_next_recurring_occurrence,
     occurrence_status,
     post_occurrence,
+    prune_superseded_occurrences,
     refresh_occurrence_message,
     update_thread_membership,
 )
@@ -70,7 +71,18 @@ async def run_event_maintenance(
             ensure_next_recurring_occurrence(
                 bot, event, occurrence, current_time
             )
-        await refresh_occurrence_message(bot, event, occurrence, current_time)
+        refreshed = await refresh_occurrence_message(
+            bot, event, occurrence, current_time
+        )
+        # refresh_occurrence_message only commits OVER once the message edit and
+        # the thread rename have both landed, so a transient Discord failure can
+        # push the OVER transition to a later pass - by which time the next
+        # occurrence has already been posted and its own cleanup has run and
+        # found nothing to remove. Prune on this edge too, otherwise the retry
+        # has no trigger and the superseded post and row survive forever despite
+        # the opt-in. The prune is idempotent, so the common case is a no-op.
+        if refreshed is EventStatus.OVER:
+            await prune_superseded_occurrences(bot, event)
     await _post_pending_occurrences(bot, current_time)
 
 
@@ -129,6 +141,11 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
             event.event_id,
             posted.occurrence_id,
         )
+        # Once the new occurrence is posted, a recurring event that opted in
+        # removes the occurrence(s) it supersedes so the channel keeps only the
+        # current post. This is best-effort and never raises, and it no-ops for
+        # an event that did not opt in.
+        await prune_superseded_occurrences(bot, event)
         # A pending occurrence can already be over by the time it is posted
         # (for example, posting was blocked past its end). Posting it
         # persists OVER, so it never enters the unfinished set that drives

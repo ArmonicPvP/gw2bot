@@ -17,6 +17,7 @@ TRIAL_REPORT_HOUR_UTC = 17
 DISCORD_MESSAGE_LIMIT = 2_000
 BACKGROUND_REFRESH_RETRY_SECONDS = 30
 SUNBORNE_DISCORD_STATUS = "Sunborne"
+TRIAL_DISCORD_STATUS = "Trial"
 TRIAL_PAST_MARK_HEADER = (
     "**Trial members past the 14-day mark**\n"
     "Please confirm whether these users have completed the challenges "
@@ -25,6 +26,9 @@ TRIAL_PAST_MARK_HEADER = (
 TRIAL_BEFORE_MARK_HEADER = (
     "**Trial members before the 14-day mark**\n"
     "These users are still Trial in-game but already Sunborne in Discord:\n"
+)
+TRIAL_BEFORE_MARK_CONGRATS_MESSAGE = (
+    "Congratulations to our members who have become Sunborne!"
 )
 TRIAL_WARNING_MARK_HEADER = (
     "**Trial members past the 7-day warning mark (to be kicked)**\n"
@@ -373,6 +377,51 @@ def filter_sunborne_discord_entries(
     return filtered
 
 
+def _trial_status_sort_key(entry: TrialMemberReportEntry) -> tuple[int, str, str]:
+    """Group entries by resolved status, then sort alphabetically within a group.
+
+    Ordering: Sunborne in Discord, then Trial in Discord, then members with a
+    linked Discord account but no resolved rank, then members with no Discord
+    account resolved at all.
+    """
+    if entry.discord_status == SUNBORNE_DISCORD_STATUS:
+        rank = 0
+    elif entry.discord_status == TRIAL_DISCORD_STATUS:
+        rank = 1
+    elif entry.discord_user_id is not None:
+        rank = 2
+    else:
+        rank = 3
+    return (rank, entry.username.casefold(), entry.username)
+
+
+def _format_trial_report_line(
+    entry: TrialMemberReportEntry,
+    *,
+    show_status: bool = True,
+) -> str:
+    line = f"* {entry.username}"
+    if entry.discord_user_id is not None:
+        line += f" - <@{entry.discord_user_id}>"
+        if show_status and entry.discord_status is not None:
+            line += f" - {entry.discord_status}"
+    if entry.warning_deadline is not None:
+        line += f" - kick <t:{int(entry.warning_deadline.timestamp())}:R>"
+    return line
+
+
+def _pack_trial_report_messages(header: str, lines: Sequence[str]) -> list[str]:
+    messages: list[str] = []
+    current = header
+    for line in lines:
+        if len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
+            messages.append(current.rstrip())
+            current = header
+        current += line
+    messages.append(current.rstrip())
+    return messages
+
+
 def format_overdue_trial_report(
     entries: Sequence[TrialMemberReportEntry | str],
     header: str = TRIAL_PAST_MARK_HEADER,
@@ -387,29 +436,78 @@ def format_overdue_trial_report(
             else value
             for value in entries
         ),
-        key=lambda entry: (
-            entry.username.casefold(),
-            entry.username,
-        ),
+        key=_trial_status_sort_key,
     )
-    messages: list[str] = []
-    current = header
-    for entry in sorted_entries:
-        line = f"* {entry.username}"
-        if entry.discord_user_id is not None:
-            line += f" - <@{entry.discord_user_id}>"
-            if entry.discord_status is not None:
-                line += f" - {entry.discord_status}"
-        if entry.warning_deadline is not None:
-            line += f" - kick <t:{int(entry.warning_deadline.timestamp())}:R>"
-        line += "\n"
-        if len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
-            messages.append(current.rstrip())
-            current = header
-        current += line
-    messages.append(current.rstrip())
+    lines = [
+        _format_trial_report_line(entry) + "\n" for entry in sorted_entries
+    ]
+    messages = _pack_trial_report_messages(header, lines)
     LOGGER.debug(
         "Formatted %s Trial report entries into %s Discord messages",
+        len(sorted_entries),
+        len(messages),
+    )
+    return messages
+
+
+def _format_congrats_line(entry: TrialMemberReportEntry) -> str:
+    line = f"* ({entry.username})"
+    if entry.discord_user_id is not None:
+        line += f" - <@{entry.discord_user_id}>"
+    return line
+
+
+def _pack_congrats_messages(lines: Sequence[str]) -> list[str]:
+    opening = f"```\n{TRIAL_BEFORE_MARK_CONGRATS_MESSAGE}"
+    closing = "```"
+    messages: list[str] = []
+    current = opening
+    for line in lines:
+        candidate = f"{current}\n{line}"
+        if len(candidate) + 1 + len(closing) > DISCORD_MESSAGE_LIMIT:
+            messages.append(f"{current}\n{closing}")
+            current = f"{opening}\n{line}"
+        else:
+            current = candidate
+    messages.append(f"{current}\n{closing}")
+    return messages
+
+
+def format_before_mark_trial_report(
+    entries: Sequence[TrialMemberReportEntry],
+) -> list[str]:
+    """Format the before-14-day report with an attached congratulations block.
+
+    Members here are already Sunborne in Discord, so the redundant per-line
+    status label is dropped. A copy-and-paste congratulations code block is
+    attached below the report so officers can announce the promotions.
+    """
+    if not entries:
+        return []
+    sorted_entries = sorted(
+        entries,
+        key=lambda entry: (entry.username.casefold(), entry.username),
+    )
+    list_lines = [
+        _format_trial_report_line(entry, show_status=False) + "\n"
+        for entry in sorted_entries
+    ]
+    list_messages = _pack_trial_report_messages(
+        TRIAL_BEFORE_MARK_HEADER, list_lines
+    )
+    congrats_lines = [_format_congrats_line(entry) for entry in sorted_entries]
+    congrats_messages = _pack_congrats_messages(congrats_lines)
+    if (
+        len(list_messages) == 1
+        and len(congrats_messages) == 1
+        and len(list_messages[0]) + 2 + len(congrats_messages[0])
+        <= DISCORD_MESSAGE_LIMIT
+    ):
+        messages = [f"{list_messages[0]}\n\n{congrats_messages[0]}"]
+    else:
+        messages = list_messages + congrats_messages
+    LOGGER.debug(
+        "Formatted before-mark Trial report for %s members into %s messages",
         len(sorted_entries),
         len(messages),
     )

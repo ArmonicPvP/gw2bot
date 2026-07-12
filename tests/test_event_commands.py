@@ -11,18 +11,23 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
+from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
     EventCategory,
     EventRole,
+    EventStatus,
     RepeatFrequency,
 )
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     AutoSignupChoiceView,
+    ChannelMoveConfirmView,
     EventConfirmView,
+    EventDeleteConfirmView,
     EventDetailsModal,
     EventDraft,
+    EventEditConfirmView,
     EventRepeatModal,
     EventScheduleModal,
     EventSignOutButton,
@@ -32,10 +37,11 @@ from gw2bot.events.views import (
     SignupFlow,
     _signup_summary,
     build_signup_view,
+    draft_from_event,
 )
 
 from factories import forbidden_error
-from test_event_posting import FakeBot, FakeChannel
+from test_event_posting import FakeBot, FakeChannel, FakeThread
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
 
@@ -75,7 +81,7 @@ class TestEventCommandGroup:
 
         assert group.name == "event"
         assert group.guild_only
-        assert commands == {"new"}
+        assert commands == {"new", "edit", "delete"}
 
     async def test_new_rejects_users_without_the_create_role(self) -> None:
         group = EventCommands(make_bot())
@@ -248,19 +254,24 @@ class TestEventRepeatModal:
         modal = EventRepeatModal(make_bot(), draft)
         modal.frequency._values = ["weekly"]
         modal.days_input._value = "Sunday, Wednesday"
+        modal.delete_previous._values = ["yes"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
 
         assert draft.repeat_frequency is RepeatFrequency.WEEKLY
         assert draft.repeat_days == (2, 6)
+        assert draft.delete_previous_on_repeat is True
         interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "removing the previous post" in kwargs["embeds"][1].description
 
     async def test_submit_invalid_days_offers_retry(self) -> None:
         draft = self.make_draft()
         modal = EventRepeatModal(make_bot(), draft)
         modal.frequency._values = ["monthly"]
         modal.days_input._value = "first"
+        modal.delete_previous._values = ["no"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
@@ -764,3 +775,909 @@ class TestSignupViews:
         )
 
         assert "waitlist" in summary
+
+
+FAR_FUTURE = datetime(2107, 1, 30, 20, 0, tzinfo=UTC)
+
+
+def make_edit_event(store: EventStore, channel_id: int = 1234) -> Any:
+    return store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Original Title",
+        description="Original description.",
+        channel_id=channel_id,
+        leader_discord_id=42,
+        start_time=FAR_FUTURE,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.NONE,
+        repeat_days=(),
+    )
+
+
+def make_posted_edit_event(
+    store: EventStore,
+    channel_id: int = 1234,
+) -> Any:
+    event = make_edit_event(store, channel_id)
+    occurrence = store.create_occurrence(event.event_id, event.start_time)
+    store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+    return event, occurrence
+
+
+def make_ongoing_edit_event(store: EventStore) -> Any:
+    # A recurring event that started ten minutes ago and is still running.
+    started = datetime.now(UTC) - timedelta(minutes=10)
+    event = store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Ongoing Title",
+        description="Original description.",
+        channel_id=1234,
+        leader_discord_id=42,
+        start_time=started,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.DAILY,
+        repeat_days=(),
+    )
+    occurrence = store.create_occurrence(event.event_id, started)
+    store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+    store.set_occurrence_status(occurrence.occurrence_id, EventStatus.ONGOING)
+    return event, occurrence
+
+
+# A recurring series whose live occurrence (SERIES_WEEK4) has advanced past the
+# series origin (SERIES_ORIGIN), reproducing the divergence that caused the
+# spurious-reschedule bug.
+SERIES_ORIGIN = datetime(2107, 1, 6, 20, 0, tzinfo=UTC)
+SERIES_WEEK4 = datetime(2107, 1, 27, 20, 0, tzinfo=UTC)
+
+
+def make_advanced_recurring_event(
+    store: EventStore,
+    channel_id: int = 1234,
+    *,
+    posted: bool = True,
+) -> Any:
+    event = store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Weekly clear",
+        description="Bring food.",
+        channel_id=channel_id,
+        leader_discord_id=42,
+        start_time=SERIES_ORIGIN,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.WEEKLY,
+        repeat_days=(0,),
+    )
+    occurrence = store.create_occurrence(event.event_id, SERIES_WEEK4)
+    if posted:
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+    return event, occurrence
+
+
+class TestEditCommand:
+    async def test_edit_rejects_users_without_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction()
+
+        await cast(Any, group.edit.callback)(group, interaction, event.event_id)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert interaction.response.send_message.await_args is not None
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        # An error, not a preview.
+        assert "embeds" not in kwargs
+
+    async def test_edit_rejects_unknown_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.edit.callback)(group, interaction, 999)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert interaction.response.send_message.await_args is not None
+        assert (
+            "does not exist or is over"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_edit_rejects_completed_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.edit.callback)(group, interaction, event.event_id)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert interaction.response.send_message.await_args is not None
+        assert (
+            "does not exist or is over"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_edit_opens_preview_for_an_active_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.edit.callback)(group, interaction, event.event_id)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert interaction.response.send_message.await_args is not None
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert len(kwargs["embeds"]) == 2
+        assert isinstance(kwargs["view"], EventEditConfirmView)
+
+    async def test_edit_preview_uses_the_live_occurrence_date(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_advanced_recurring_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.edit.callback)(group, interaction, event.event_id)
+
+        # The preview must show the upcoming occurrence's date (week 4), not the
+        # series origin (week 1) stored on the event.
+        kwargs = interaction.response.send_message.await_args.kwargs
+        preview = kwargs["embeds"][0]
+        date_field = next(
+            field for field in preview.fields if field.name == "📅 Date & Time"
+        )
+        assert date_field.value == f"<t:{int(SERIES_WEEK4.timestamp())}:f>"
+
+    async def test_autocomplete_lists_only_active_events(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        active, _ = make_posted_edit_event(store)
+        completed, completed_occurrence = make_posted_edit_event(store)
+        store.set_occurrence_status(
+            completed_occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        choices = await group.active_event_id_autocomplete(interaction, "")
+
+        values = [choice.value for choice in choices]
+        assert active.event_id in values
+        assert completed.event_id not in values
+
+    async def test_autocomplete_filters_by_query(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        wing = store.create_event(
+            category=EventCategory.RAID,
+            title="Wing seven",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        store.create_occurrence(wing.event_id, FAR_FUTURE)
+        dailies = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Daily fractals",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        store.create_occurrence(dailies.event_id, FAR_FUTURE)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        choices = await group.active_event_id_autocomplete(interaction, "wing")
+
+        assert [choice.value for choice in choices] == [wing.event_id]
+
+    async def test_autocomplete_returns_nothing_for_unauthorized_users(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        make_posted_edit_event(store)
+        interaction = make_interaction()
+
+        choices = await group.active_event_id_autocomplete(interaction, "")
+
+        assert choices == []
+
+
+class TestEditCommandOngoing:
+    async def test_edit_rejects_an_ongoing_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_ongoing_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        # An ongoing event can only be deleted, so no preview is opened.
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "view" not in kwargs
+        message = interaction.response.send_message.await_args.args[0]
+        assert "already started" in message
+        assert "/event delete" in message
+
+
+class TestEventEditConfirmView:
+    async def test_save_changes_updates_event_and_refreshes_message(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.title = "Edited Title"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.title == "Edited Title"
+        channel.partial_message.edit.assert_awaited()
+        interaction.edit_original_response.assert_awaited()
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "was updated"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+    async def test_save_changes_reschedules_the_posted_occurrence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        new_start = datetime(2107, 2, 5, 21, 0, tzinfo=UTC)
+        draft.start_time = new_start
+        draft.start_text = "02.05.2107 21:00"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        rescheduled = store.get_occurrence(occurrence.occurrence_id)
+        assert rescheduled is not None
+        assert rescheduled.start_time == new_start
+        # The reschedule forces the thread name to update.
+        channel.thread.edit.assert_awaited()
+
+    async def test_editing_recurring_event_does_not_reschedule_on_no_date_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Drive the whole flow through the command so the draft is hydrated the
+        # way production does; a regression in either the hydration source or
+        # the reschedule guard drags the occurrence back to the series origin.
+        group = EventCommands(fake_bot)
+        event, occurrence = make_advanced_recurring_event(store)
+        open_interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+        await cast(Any, group.edit.callback)(
+            group, open_interaction, event.event_id
+        )
+        open_args = open_interaction.response.send_message.await_args
+        assert open_args is not None
+        view = open_args.kwargs["view"]
+        assert isinstance(view, EventEditConfirmView)
+
+        # Change only the title, then save through the real preview view.
+        view._draft.title = "Renamed clear"
+        save_interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        save_interaction.edit_original_response = AsyncMock()
+        await view.save_changes.callback(save_interaction)
+
+        # The upcoming occurrence must NOT be dragged back to the series origin.
+        reloaded = store.get_occurrence(occurrence.occurrence_id)
+        assert reloaded is not None
+        assert reloaded.start_time == SERIES_WEEK4
+        assert store.get_event(event.event_id).title == "Renamed clear"  # type: ignore[union-attr]
+
+    async def test_editing_date_reschedules_an_unposted_occurrence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_advanced_recurring_event(store, posted=False)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        new_start = datetime(2107, 2, 3, 20, 0, tzinfo=UTC)
+        draft.start_time = new_start
+        draft.start_text = "02.03.2107 20:00"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # The as-yet-unposted occurrence must be rescheduled so the scheduler
+        # posts it at the new time.
+        reloaded = store.get_occurrence(occurrence.occurrence_id)
+        assert reloaded is not None
+        assert reloaded.start_time == new_start
+
+    async def test_save_changes_ignores_a_racing_second_click(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.title = "First save"
+        view = EventEditConfirmView(fake_bot, draft)
+        first = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        first.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(first)
+        assert draft.edit_applied
+
+        # A second click on the same (already-applied) draft must be a no-op.
+        draft.title = "Second save"
+        second = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        second.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(second)
+
+        assert store.get_event(event.event_id).title == "First save"  # type: ignore[union-attr]
+        second.response.send_message.assert_awaited_once()
+        assert (
+            "already updated"
+            in second.response.send_message.await_args.args[0]
+        )
+
+    async def test_channel_move_keeps_the_old_post_when_the_repost_fails(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = make_edit_event(store, channel_id=old_channel.id)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.channel_id = new_channel.id
+        new_channel.send_error = forbidden_error(50001)
+        view = ChannelMoveConfirmView(bot, draft, old_channel.id)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.move.callback(interaction)
+
+        # The move failed, so the only public post must survive in the old
+        # channel and the stored channel must be put back to match it. Leaving
+        # channel_id on the new channel would send the next scheduler refresh
+        # looking for this message there, get NotFound and retire a live event.
+        old_channel.partial_message.delete.assert_not_awaited()
+        assert store.get_event(event.event_id).channel_id == old_channel.id  # type: ignore[union-attr]
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.message_id == posted.message_id
+        assert stored.status is not EventStatus.OVER
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        assert "stays in the current one" in content
+
+    async def test_save_changes_refuses_an_event_that_started_during_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The reported failure: shortening a running recurring event's duration
+        # so that start + duration is already behind now. The refresh would
+        # persist OVER without seeding the next occurrence the way the scheduler
+        # does, which silently ends the series. Ongoing events are not editable.
+        event, occurrence = make_ongoing_edit_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.duration_minutes = 1
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # Nothing was written and the occurrence was not retired, so the
+        # scheduler still owns the OVER transition and seeds the next occurrence.
+        assert store.get_event(event.event_id).duration_minutes == 90  # type: ignore[union-attr]
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.status is not EventStatus.OVER
+        assert store.get_event_occurrences(event.event_id) == [stored]
+        channel.partial_message.edit.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        assert "already started" in content
+        assert "/event delete" in content
+
+    async def test_category_change_reseats_the_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border Push",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        # WvW has no roles, so every signup is stored without one.
+        for user_id in range(1, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        admitted = [signup for signup in signups if not signup.waitlisted]
+        waitlisted = [signup for signup in signups if signup.waitlisted]
+        # A Fractal seats 1 healer and 4 DPS. Nobody picked a role in WvW, so
+        # they all fall back to DPS: the first four keep seats in sign-up order
+        # and the rest are waitlisted, instead of seven role-less signups the
+        # capacity check would read as an empty roster and keep admitting onto.
+        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3, 4]
+        assert len(waitlisted) == 3
+        assert all(
+            signup.assigned_role is EventRole.DPS for signup in admitted
+        )
+        # The role is materialised too, because waitlist promotion skips a
+        # signup that has no role.
+        assert all(signup.role is EventRole.DPS for signup in signups)
+        assert all(signup.assigned_role is None for signup in waitlisted)
+
+    async def test_failed_move_leaves_the_old_post_flagged_for_refresh(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = make_edit_event(store, channel_id=old_channel.id)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        # A channel move bundled with a title change.
+        draft.channel_id = new_channel.id
+        draft.title = "Edited Title"
+        new_channel.send_error = forbidden_error(50001)
+        view = ChannelMoveConfirmView(bot, draft, old_channel.id)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.move.callback(interaction)
+
+        # The move failed, but the title change is committed, so the surviving
+        # post in the old channel is now stale. An edit does not change the
+        # status, so the scheduler would skip it forever unless it is flagged.
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+        stale = store.get_occurrence(occurrence.occurrence_id)
+        assert stale is not None
+        assert stale.needs_refresh
+        old_channel.partial_message.edit.assert_not_awaited()
+
+        # The next maintenance pass re-renders it in place, in the channel it
+        # actually lives in.
+        await run_event_maintenance(bot, FAR_FUTURE - timedelta(hours=2))
+
+        old_channel.partial_message.edit.assert_awaited()
+        new_channel.partial_message.edit.assert_not_awaited()
+        recovered = store.get_occurrence(occurrence.occurrence_id)
+        assert recovered is not None
+        assert not recovered.needs_refresh
+
+    async def test_save_changes_reports_a_failed_message_refresh(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        # refresh_occurrence_message absorbs this failure, marks the occurrence
+        # dirty and returns instead of raising, so the edit flow must not report
+        # the stale public message as successfully updated.
+        channel.partial_message.edit = AsyncMock(
+            side_effect=forbidden_error(50001)
+        )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.title = "Edited Title"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # The event row is still saved, and the occurrence is left dirty so the
+        # scheduler retries it.
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.needs_refresh
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        assert "could not be updated" in content
+        assert "was updated" not in content
+
+    async def test_save_changes_rejects_users_without_the_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.title = "Sneaky Edit"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.save_changes.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert store.get_event(event.event_id).title == "Original Title"  # type: ignore[union-attr]
+
+    async def test_save_changes_prompts_before_moving_a_posted_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.channel_id = 5678
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.save_changes.callback(interaction)
+
+        interaction.response.edit_message.assert_awaited_once()
+        assert interaction.response.edit_message.await_args is not None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], ChannelMoveConfirmView)
+        assert "delete" in kwargs["content"].lower()
+        # Nothing is saved until the move is confirmed.
+        assert store.get_event(event.event_id).channel_id == 1234  # type: ignore[union-attr]
+
+    async def test_channel_move_confirm_reposts_to_the_new_channel(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = make_edit_event(store, channel_id=old_channel.id)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.channel_id = new_channel.id
+        view = ChannelMoveConfirmView(bot, draft, old_channel.id)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.move.callback(interaction)
+
+        old_channel.partial_message.delete.assert_awaited_once()
+        assert len(new_channel.sent) == 1
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.channel_id == new_channel.id
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "was updated"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+    async def test_channel_move_keep_reverts_and_returns_to_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.channel_id = 5678
+        view = ChannelMoveConfirmView(fake_bot, draft, 1234)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.keep.callback(interaction)
+
+        assert draft.channel_id == 1234
+        interaction.response.edit_message.assert_awaited_once()
+        assert interaction.response.edit_message.await_args is not None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventEditConfirmView)
+
+
+class TestDeleteCommand:
+    async def test_delete_rejects_users_without_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction()
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "view" not in kwargs
+        # The event is untouched.
+        assert store.get_event(event.event_id) is not None
+
+    async def test_delete_rejects_unknown_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(group, interaction, 999)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert (
+            "does not exist"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_delete_opens_confirmation_for_an_existing_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDeleteConfirmView)
+        assert kwargs["ephemeral"] is True
+        # Confirmation only; nothing is deleted yet.
+        assert store.get_event(event.event_id) is not None
+
+
+class TestEventDeleteConfirmView:
+    async def test_delete_removes_event_rows_and_message(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        assert store.get_event(event.event_id) is None
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert store.get_signups(occurrence.occurrence_id) == []
+        channel.partial_message.delete.assert_awaited_once()
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "was deleted"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+    async def test_delete_rejects_users_without_the_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.delete.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert store.get_event(event.event_id) is not None
+
+    async def test_delete_ignores_a_racing_second_click(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        first = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        first.edit_original_response = AsyncMock()
+
+        await view.delete.callback(first)
+        assert view._deleting
+
+        second = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        await view.delete.callback(second)
+
+        second.response.send_message.assert_awaited_once()
+        assert (
+            "already being deleted"
+            in second.response.send_message.await_args.args[0]
+        )
+
+    async def test_keep_cancels_without_deleting(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.keep.callback(interaction)
+
+        assert store.get_event(event.event_id) is not None
+        interaction.response.edit_message.assert_awaited_once()
+        assert (
+            "not deleted"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )

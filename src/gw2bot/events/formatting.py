@@ -56,6 +56,10 @@ def parse_event_datetime(text: str, timezone: ZoneInfo) -> datetime:
     return parsed.replace(tzinfo=timezone).astimezone(UTC)
 
 
+def format_event_datetime(value: datetime, timezone: ZoneInfo) -> str:
+    return value.astimezone(timezone).strftime(EVENT_DATETIME_FORMAT)
+
+
 def parse_event_duration(text: str) -> int:
     match = EVENT_DURATION_PATTERN.match(text.strip())
     if match is None:
@@ -76,6 +80,13 @@ def format_duration(minutes: int) -> str:
     if mins:
         parts.append(f"{mins}m")
     return " ".join(parts) if parts else "0m"
+
+
+def format_duration_input(minutes: int) -> str:
+    # Re-parseable H:MM form for pre-filling the duration TextInput default,
+    # unlike format_duration's "1h 30m" display form.
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}:{mins:02d}"
 
 
 def parse_repeat_days(frequency: RepeatFrequency, text: str) -> tuple[int, ...]:
@@ -427,6 +438,16 @@ def confirm_embed() -> discord.Embed:
         description=(
             "Above is what the event will look like. Would you like to "
             "post the event or change something?"
+        ),
+    )
+
+
+def edit_confirm_embed() -> discord.Embed:
+    return discord.Embed(
+        title="Edit event",
+        description=(
+            "Above is what the event will look like after your changes. "
+            "Would you like to save them or change something else?"
         ),
     )
 

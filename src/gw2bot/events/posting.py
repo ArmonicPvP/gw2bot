@@ -22,6 +22,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
     choose_assigned_role,
     is_roster_full,
+    rebalance_signups,
 )
 
 if TYPE_CHECKING:
@@ -35,6 +36,21 @@ async def resolve_channel(bot: Gw2Bot, channel_id: int) -> Any:
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
     return channel
+
+
+def occurrence_channel_id(event: Event, occurrence: EventOccurrence) -> int:
+    # Where an occurrence's message actually lives. Discord addresses a message
+    # by (channel, message), so editing or deleting one must target the channel
+    # it was posted to. That is not necessarily event.channel_id: a channel edit
+    # only re-posts the live occurrences, so finished ones (and any re-post that
+    # failed) stay behind in the previous channel. Rows written before the
+    # channel was tracked fall back to the event's channel, which is where they
+    # were posted.
+    return (
+        occurrence.channel_id
+        if occurrence.channel_id is not None
+        else event.channel_id
+    )
 
 
 def occurrence_status(
@@ -108,6 +124,7 @@ async def post_occurrence(
         bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
         bot.event_store.set_occurrence_message(
             occurrence.occurrence_id,
+            event.channel_id,
             message.id,
             thread_id,
         )
@@ -153,13 +170,18 @@ async def refresh_occurrence_message(
     event: Event,
     occurrence: EventOccurrence,
     now: datetime | None = None,
+    *,
+    force_thread_rename: bool = False,
 ) -> EventStatus:
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
     message_refreshed = True
     if occurrence.message_id is not None:
         try:
-            channel = await resolve_channel(bot, event.channel_id)
+            channel = await resolve_channel(
+                bot,
+                occurrence_channel_id(event, occurrence),
+            )
             await channel.get_partial_message(occurrence.message_id).edit(
                 embed=occurrence_embed(event, occurrence, signups, now),
             )
@@ -203,15 +225,23 @@ async def refresh_occurrence_message(
     # Only commit the status transition once both the message and the thread
     # name reflect it. Committing early (especially to OVER) would let the
     # scheduler see a matching status and stop retrying, leaving the public
-    # message or thread name stale forever.
+    # message or thread name stale forever. An edit that reschedules the
+    # occurrence forces a rename even when the status is unchanged, because the
+    # thread name encodes the date and time. A dirty occurrence also re-attempts
+    # the rename: the forced rename may have failed transiently, and the
+    # scheduler's retry (which never passes force_thread_rename) must still be
+    # able to finish it before clearing the dirty flag.
+    status_changed = status != occurrence.status
     thread_renamed = True
-    if message_refreshed and status != occurrence.status:
+    if message_refreshed and (
+        status_changed or force_thread_rename or occurrence.needs_refresh
+    ):
         thread_renamed = await _rename_occurrence_thread(
             bot,
             occurrence,
             status,
         )
-        if thread_renamed:
+        if thread_renamed and status_changed:
             bot.event_store.set_occurrence_status(
                 occurrence.occurrence_id,
                 status,
@@ -274,6 +304,184 @@ async def _rename_occurrence_thread(
         )
         return False
     return True
+
+
+async def repost_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> EventOccurrence:
+    # Discord cannot move a message between channels, so a channel change is
+    # applied by sending a fresh post and removing the old one. The occurrence
+    # row (and therefore the roster) is preserved because signups are keyed by
+    # occurrence_id, not by message.
+    #
+    # The old message is addressed through the channel the occurrence was posted
+    # to, which is not necessarily the event's previous channel: a series can
+    # have posts spread over several channels after more than one move.
+    #
+    # The new post is sent and persisted *before* the old message is deleted.
+    # post_occurrence only writes the new message id once the message is live,
+    # and it raises if the send or that write fails. Deleting first would drop
+    # the only public post while occurrence.message_id still referenced it, and
+    # because the caller has already committed the new channel_id, the next
+    # refresh would look for that dead id in the new channel, get NotFound and
+    # retire a still-active occurrence. Posting first means a failed move leaves
+    # the old message live and still correctly referenced.
+    old_message_id = occurrence.message_id
+    old_channel_id = occurrence_channel_id(event, occurrence)
+    reposted = await post_occurrence(bot, event, occurrence)
+    if old_message_id is not None:
+        try:
+            old_channel = await resolve_channel(bot, old_channel_id)
+            await old_channel.get_partial_message(old_message_id).delete()
+        except discord.HTTPException as exc:
+            # Deleting the starter message also removes its thread; if this
+            # fails the old message is left orphaned but the move still
+            # proceeds, because the new post is already live and persisted.
+            LOGGER.error(
+                "Could not delete old event message during channel move; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+    signups = bot.event_store.get_signups(reposted.occurrence_id)
+    for signup in signups:
+        await update_thread_membership(
+            bot,
+            reposted,
+            signup.discord_user_id,
+            add=True,
+        )
+    LOGGER.debug(
+        "Reposted event occurrence to new channel; occurrence_id=%s "
+        "signups=%s",
+        reposted.occurrence_id,
+        len(signups),
+    )
+    return reposted
+
+
+async def delete_event_posts(
+    bot: Gw2Bot,
+    event: Event,
+    occurrences: list[EventOccurrence],
+) -> int:
+    # Best-effort cleanup of the public posts when an event is deleted. Deleting
+    # a starter message also removes its thread, so there is no separate thread
+    # delete. This runs after the store rows are gone, so any message that
+    # survives a failure here just has buttons that gracefully report the event
+    # is no longer available.
+    #
+    # Each occurrence is deleted through the channel it was posted to, not the
+    # event's current one. A channel edit only re-posts the live occurrences, so
+    # a series that has been moved has finished posts sitting in the previous
+    # channel; addressing those through the current channel returns NotFound and
+    # would leave them visible forever after the rows are gone.
+    channels: dict[int, Any] = {}
+    unresolvable: set[int] = set()
+    deleted = 0
+    for occurrence in occurrences:
+        if occurrence.message_id is None:
+            continue
+        channel_id = occurrence_channel_id(event, occurrence)
+        if channel_id in unresolvable:
+            continue
+        channel = channels.get(channel_id)
+        if channel is None:
+            try:
+                channel = await resolve_channel(bot, channel_id)
+            except discord.HTTPException as exc:
+                # One dead channel must not strand the posts in the others.
+                unresolvable.add(channel_id)
+                LOGGER.error(
+                    "Could not resolve channel to delete event posts; "
+                    "event_id=%s error_type=%s",
+                    event.event_id,
+                    type(exc).__name__,
+                )
+                continue
+            channels[channel_id] = channel
+        try:
+            await channel.get_partial_message(occurrence.message_id).delete()
+            deleted += 1
+        except discord.HTTPException as exc:
+            LOGGER.error(
+                "Could not delete event message during deletion; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+    LOGGER.debug(
+        "Deleted event posts; event_id=%s messages_deleted=%s",
+        event.event_id,
+        deleted,
+    )
+    return deleted
+
+
+async def prune_superseded_occurrences(bot: Gw2Bot, event: Event) -> int:
+    # For a recurring event with delete_previous_on_repeat, remove the
+    # occurrences the current post supersedes (their message, thread and store
+    # rows) so the channel keeps only the current post. Only finished (OVER)
+    # occurrences earlier than it qualify, so a live occurrence is never removed.
+    # Message deletes are best-effort; the store rows are always removed so the
+    # series does not accumulate history.
+    #
+    # The current post is derived here rather than passed in, because the two
+    # conditions this waits on can land in either order: the next occurrence
+    # being posted, and the previous one being persisted as OVER.
+    # refresh_occurrence_message withholds the OVER commit until the message edit
+    # and the thread rename have both succeeded, so a transient Discord failure
+    # can leave the previous occurrence still non-OVER at the moment the next one
+    # is posted. Deriving the state makes this idempotent, so whichever of the two
+    # lands last can run the cleanup.
+    if (
+        event.repeat_frequency is RepeatFrequency.NONE
+        or not event.delete_previous_on_repeat
+    ):
+        return 0
+    occurrences = bot.event_store.get_event_occurrences(event.event_id)
+    posted = [
+        occurrence
+        for occurrence in occurrences
+        if occurrence.message_id is not None
+    ]
+    if not posted:
+        return 0
+    # Only a posted occurrence can supersede the previous one: removing the old
+    # post before the next is live would leave the channel with no post at all.
+    current = max(posted, key=lambda occurrence: occurrence.start_time)
+    superseded = [
+        occurrence
+        for occurrence in occurrences
+        if occurrence.occurrence_id != current.occurrence_id
+        and occurrence.status is EventStatus.OVER
+        and occurrence.start_time < current.start_time
+    ]
+    if not superseded:
+        return 0
+    await delete_event_posts(bot, event, superseded)
+    deleted = 0
+    for occurrence in superseded:
+        try:
+            bot.event_store.delete_occurrence(occurrence.occurrence_id)
+            deleted += 1
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not delete superseded occurrence row; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+    LOGGER.debug(
+        "Deleted superseded occurrences; event_id=%s count=%s "
+        "current_occurrence_id=%s",
+        event.event_id,
+        deleted,
+        current.occurrence_id,
+    )
+    return deleted
 
 
 async def update_thread_membership(
@@ -389,6 +597,45 @@ async def remove_signup(
     )
     await refresh_occurrence_message(bot, event, occurrence)
     return removed, promoted
+
+
+def rebalance_occurrence_roster(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> int:
+    # Call this after an edit changes an event's category: the stored
+    # assignments were seated against the old category's capacity and no longer
+    # describe a valid roster. Returns how many signups actually moved.
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    if not signups:
+        return 0
+    reseated = rebalance_signups(event.capacity, signups)
+    changed = 0
+    for before, after in zip(signups, reseated, strict=True):
+        if (
+            before.role is after.role
+            and before.assigned_role is after.assigned_role
+            and before.waitlisted == after.waitlisted
+        ):
+            continue
+        bot.event_store.set_signup_assignment(
+            occurrence.occurrence_id,
+            after.discord_user_id,
+            role=after.role,
+            assigned_role=after.assigned_role,
+            waitlisted=after.waitlisted,
+        )
+        changed += 1
+    LOGGER.debug(
+        "Rebalanced event roster for a new category; occurrence_id=%s "
+        "category=%s signups=%s changed=%s",
+        occurrence.occurrence_id,
+        event.category.value,
+        len(signups),
+        changed,
+    )
+    return changed
 
 
 def _promote_first_fitting_waitlisted(

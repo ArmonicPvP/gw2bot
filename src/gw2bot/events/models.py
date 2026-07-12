@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 
@@ -130,6 +130,10 @@ class Event:
     repeat_frequency: RepeatFrequency
     repeat_days: tuple[int, ...]
     cancelled: bool = False
+    # For a repeating event, delete the previous occurrence's post (and its
+    # thread) once the next occurrence is posted, so the channel keeps only the
+    # current event. Ignored when the event does not repeat.
+    delete_previous_on_repeat: bool = False
 
     @property
     def capacity(self) -> CategoryCapacity:
@@ -144,6 +148,12 @@ class EventOccurrence:
     message_id: int | None
     thread_id: int | None
     status: EventStatus
+    # The channel the message was posted to. An event's channel can change after
+    # the fact, and occurrences that were not re-posted (finished ones, or a
+    # re-post that failed) keep living where they were sent, so the message must
+    # be resolved through this rather than the event's current channel. None
+    # until the occurrence is posted.
+    channel_id: int | None = None
     # Set when the public message failed to refresh so the scheduler retries
     # even if the computed status still matches the stored one.
     needs_refresh: bool = False
@@ -255,3 +265,64 @@ def is_roster_full(
     return counts.healers >= (capacity.healers or 0) and counts.dps >= (
         capacity.dps or 0
     )
+
+
+def rebalance_signups(
+    capacity: CategoryCapacity,
+    signups: list[EventSignup],
+) -> list[EventSignup]:
+    """Re-seat a roster against a category's capacity.
+
+    A signup's assigned_role and waitlisted flag only mean anything relative to
+    the capacity it was seated against, so changing an event's category
+    invalidates every stored assignment. The worst case is a role-less category
+    (WvW), whose signups carry no assigned_role at all: a role-based capacity
+    reads that roster as zero healers and zero DPS and keeps admitting on top of
+    it, so the roster overfills and the embed shows seats nobody holds.
+
+    Signups are re-seated in sign-up order, so seats stay first come, first
+    served. Each is offered its own role and flex roles first; one that no longer
+    fits any of them falls back to plain DPS, and is waitlisted when even that
+    has no seat left. A signup carried over from a role-less category has no
+    stored role, so it starts from that same DPS fallback, and the role is
+    materialised because waitlist promotion skips a role-less signup.
+
+    Moving *to* a role-less category clears the assignments instead: seats there
+    are plain headcount.
+    """
+    reseated: list[EventSignup] = []
+    for signup in signups:
+        if not capacity.has_roles:
+            reseated.append(
+                replace(
+                    signup,
+                    assigned_role=None,
+                    waitlisted=(
+                        count_roster(reseated).active >= capacity.total
+                    ),
+                )
+            )
+            continue
+        role = signup.role if signup.role is not None else EventRole.DPS
+        assigned = choose_assigned_role(
+            capacity,
+            reseated,
+            role,
+            signup.flex_roles,
+        )
+        if assigned is None and EventRole.DPS not in (role, *signup.flex_roles):
+            assigned = choose_assigned_role(
+                capacity,
+                reseated,
+                EventRole.DPS,
+                (),
+            )
+        reseated.append(
+            replace(
+                signup,
+                role=role,
+                assigned_role=assigned,
+                waitlisted=assigned is None,
+            )
+        )
+    return reseated

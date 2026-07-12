@@ -7,12 +7,12 @@ import pytest
 
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
-    TRIAL_BEFORE_MARK_HEADER,
     TRIAL_WARNING_MARK_HEADER,
     TRIAL_WARNING_PENDING_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
     filter_sunborne_discord_entries,
+    format_before_mark_trial_report,
     format_overdue_trial_report,
     get_overdue_trial_members,
     get_recent_trial_members,
@@ -282,15 +282,34 @@ class TestTrialMemberReport:
             TrialMemberReportEntry("EarlySunborne.1234", 1, "Sunborne"),
         ]
 
-    def test_formats_before_mark_report_with_custom_header(self) -> None:
-        messages = format_overdue_trial_report(
-            [TrialMemberReportEntry("EarlySunborne.1234", 1, "Sunborne")],
-            header=TRIAL_BEFORE_MARK_HEADER,
+    def test_formats_before_mark_report_without_status_and_with_congrats(
+        self,
+    ) -> None:
+        messages = format_before_mark_trial_report(
+            [
+                TrialMemberReportEntry("Bravo.1234", 2, "Sunborne"),
+                TrialMemberReportEntry("Alpha.1234", 1, "Sunborne"),
+            ]
         )
 
-        assert messages[0].startswith("**Trial members before the 14-day mark**")
-        assert "EarlySunborne.1234 - <@1> - Sunborne" in messages[0]
-        assert "ranked up to Sunborne" not in messages[0]
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.startswith("**Trial members before the 14-day mark**")
+        # The redundant per-line "- Sunborne" status label is removed.
+        assert "* Alpha.1234 - <@1>\n" in message
+        assert "- Sunborne" not in message.split("```")[0]
+        # A copy-and-paste congratulations code block is attached below.
+        _, congrats, _ = message.split("```")
+        assert congrats.startswith(
+            "\nCongratulations to our members who have become Sunborne!\n"
+        )
+        assert "* (Alpha.1234) - <@1>" in congrats
+        assert "* (Bravo.1234) - <@2>" in congrats
+        # Both the list and the congratulations block are alphabetically sorted.
+        assert congrats.index("Alpha.1234") < congrats.index("Bravo.1234")
+
+    def test_empty_before_mark_report_produces_no_messages(self) -> None:
+        assert format_before_mark_trial_report([]) == []
 
     def test_formats_contextual_reports_within_discord_limit(self) -> None:
         usernames = [f"Long Trial Username {index:03d}.1234" for index in range(150)]
@@ -328,7 +347,7 @@ class TestTrialMemberReport:
         assert "* Unresolved.5678" in messages[0]
         assert "Unresolved.5678 -" not in messages[0]
 
-    def test_sorts_alphabetically_regardless_of_discord_status(self) -> None:
+    def test_sorts_by_discord_status_then_alphabetically(self) -> None:
         message = format_overdue_trial_report(
             [
                 TrialMemberReportEntry("Zulu.1234"),
@@ -337,16 +356,20 @@ class TestTrialMemberReport:
                 TrialMemberReportEntry("Alpha.1234", 1, "Trial"),
                 TrialMemberReportEntry("Delta.1234", 4, "Sunborne"),
                 TrialMemberReportEntry("Echo.1234", 5),
+                TrialMemberReportEntry("Apex.1234"),
             ]
         )[0]
 
         lines = [line for line in message.splitlines() if line.startswith("* ")]
+        # Sunborne first, then Trial, then linked-but-unresolved, then members
+        # with no Discord resolved; each group sorted alphabetically.
         assert lines == [
-            "* Alpha.1234 - <@1> - Trial",
-            "* Bravo.1234 - <@2> - Trial",
             "* Charlie.1234 - <@3> - Sunborne",
             "* Delta.1234 - <@4> - Sunborne",
+            "* Alpha.1234 - <@1> - Trial",
+            "* Bravo.1234 - <@2> - Trial",
             "* Echo.1234 - <@5>",
+            "* Apex.1234",
             "* Zulu.1234",
         ]
 

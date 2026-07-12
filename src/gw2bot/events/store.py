@@ -71,6 +71,7 @@ def _event_from_record(record: EventRecord) -> Event:
         repeat_frequency=RepeatFrequency(record.repeat_frequency),
         repeat_days=_parse_days(record.repeat_days),
         cancelled=record.cancelled,
+        delete_previous_on_repeat=record.delete_previous_on_repeat,
     )
 
 
@@ -84,6 +85,7 @@ def _occurrence_from_record(
         message_id=record.message_id,
         thread_id=record.thread_id,
         status=EventStatus(record.status),
+        channel_id=record.channel_id,
         needs_refresh=record.needs_refresh,
     )
 
@@ -126,6 +128,7 @@ class EventStore:
         duration_minutes: int,
         repeat_frequency: RepeatFrequency,
         repeat_days: tuple[int, ...],
+        delete_previous_on_repeat: bool = False,
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -142,6 +145,7 @@ class EventStore:
                 repeat_days=_serialize_days(repeat_days),
                 created_at=_serialize_time(created_at),
                 cancelled=False,
+                delete_previous_on_repeat=delete_previous_on_repeat,
             )
             session.add(record)
             session.commit()
@@ -149,6 +153,46 @@ class EventStore:
                 "Created event; event_id=%s category=%s repeat=%s "
                 "title_characters=%s",
                 record.event_id,
+                category.value,
+                repeat_frequency.value,
+                len(title),
+            )
+            return _event_from_record(record)
+
+    def update_event(
+        self,
+        *,
+        event_id: int,
+        category: EventCategory,
+        title: str,
+        description: str,
+        channel_id: int,
+        leader_discord_id: int,
+        start_time: datetime,
+        duration_minutes: int,
+        repeat_frequency: RepeatFrequency,
+        repeat_days: tuple[int, ...],
+        delete_previous_on_repeat: bool = False,
+    ) -> Event:
+        with self._sessions() as session:
+            record = session.get(EventRecord, event_id)
+            if record is None:
+                raise ValueError(f"Unknown event {event_id}")
+            record.category = category.value
+            record.title = title
+            record.description = description
+            record.channel_id = channel_id
+            record.leader_discord_id = leader_discord_id
+            record.start_time = _serialize_time(start_time)
+            record.duration_minutes = duration_minutes
+            record.repeat_frequency = repeat_frequency.value
+            record.repeat_days = _serialize_days(repeat_days)
+            record.delete_previous_on_repeat = delete_previous_on_repeat
+            session.commit()
+            LOGGER.debug(
+                "Updated event; event_id=%s category=%s repeat=%s "
+                "title_characters=%s",
+                event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
@@ -180,13 +224,17 @@ class EventStore:
     def set_occurrence_message(
         self,
         occurrence_id: int,
+        channel_id: int,
         message_id: int,
         thread_id: int | None,
     ) -> None:
+        # The channel is stored with the message, because that pair is what any
+        # later edit or delete has to address; the event's channel can move on.
         with self._sessions() as session:
             record = session.get(EventOccurrenceRecord, occurrence_id)
             if record is None:
                 raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.channel_id = channel_id
             record.message_id = message_id
             record.thread_id = thread_id
             session.commit()
@@ -194,6 +242,22 @@ class EventStore:
             "Stored occurrence message; occurrence_id=%s has_thread=%s",
             occurrence_id,
             thread_id is not None,
+        )
+
+    def set_occurrence_start_time(
+        self,
+        occurrence_id: int,
+        start_time: datetime,
+    ) -> None:
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.start_time = _serialize_time(start_time)
+            session.commit()
+        LOGGER.debug(
+            "Rescheduled occurrence; occurrence_id=%s",
+            occurrence_id,
         )
 
     def set_occurrence_status(
@@ -263,6 +327,56 @@ class EventStore:
                 .order_by(EventOccurrenceRecord.occurrence_id)
             ).all()
             return [_occurrence_from_record(record) for record in records]
+
+    def get_event_occurrences(self, event_id: int) -> list[EventOccurrence]:
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.event_id == event_id)
+                .order_by(EventOccurrenceRecord.start_time)
+            ).all()
+            return [_occurrence_from_record(record) for record in records]
+
+    def get_active_events(self) -> list[Event]:
+        with self._sessions() as session:
+            # A correlated EXISTS keeps this to a single query with no
+            # per-id bound parameters, so it does not hit SQLite's variable
+            # limit no matter how many events have accumulated.
+            has_active_occurrence = (
+                select(EventOccurrenceRecord.occurrence_id)
+                .where(
+                    EventOccurrenceRecord.event_id == EventRecord.event_id
+                )
+                .where(
+                    EventOccurrenceRecord.status != EventStatus.OVER.value
+                )
+                .exists()
+            )
+            records = session.scalars(
+                select(EventRecord)
+                .where(has_active_occurrence)
+                .where(EventRecord.cancelled.is_(False))
+                .order_by(EventRecord.event_id.desc())
+            ).all()
+            return [_event_from_record(record) for record in records]
+
+    def delete_occurrence(self, occurrence_id: int) -> None:
+        with self._sessions() as session:
+            session.execute(
+                delete(EventSignupRecord).where(
+                    EventSignupRecord.occurrence_id == occurrence_id
+                )
+            )
+            session.execute(
+                delete(EventOccurrenceRecord).where(
+                    EventOccurrenceRecord.occurrence_id == occurrence_id
+                )
+            )
+            session.commit()
+        LOGGER.debug(
+            "Deleted event occurrence with its signups; occurrence_id=%s",
+            occurrence_id,
+        )
 
     def delete_event(self, event_id: int) -> None:
         with self._sessions() as session:
@@ -431,6 +545,40 @@ class EventStore:
             occurrence_id,
             discord_user_id,
             assigned_role.value if assigned_role is not None else None,
+        )
+
+    def set_signup_assignment(
+        self,
+        occurrence_id: int,
+        discord_user_id: int,
+        *,
+        role: EventRole | None,
+        assigned_role: EventRole | None,
+        waitlisted: bool,
+    ) -> None:
+        # Unlike promote_signup, this can move a signup in either direction,
+        # because re-seating a roster against a new capacity can also push an
+        # admitted signup onto the waitlist.
+        with self._sessions() as session:
+            record = session.get(
+                EventSignupRecord,
+                (occurrence_id, discord_user_id),
+            )
+            if record is None:
+                raise ValueError("The signup to reassign no longer exists.")
+            record.role = role.value if role is not None else None
+            record.assigned_role = (
+                assigned_role.value if assigned_role is not None else None
+            )
+            record.waitlisted = waitlisted
+            session.commit()
+        LOGGER.debug(
+            "Reassigned event signup; occurrence_id=%s user_id=%s "
+            "assigned_role=%s waitlisted=%s",
+            occurrence_id,
+            discord_user_id,
+            assigned_role.value if assigned_role is not None else None,
+            waitlisted,
         )
 
     def get_signup_preference(
