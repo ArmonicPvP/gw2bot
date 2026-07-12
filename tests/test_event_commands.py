@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
+from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
     EventCategory,
@@ -1342,6 +1343,55 @@ class TestEventEditConfirmView:
         # signup that has no role.
         assert all(signup.role is EventRole.DPS for signup in signups)
         assert all(signup.assigned_role is None for signup in waitlisted)
+
+    async def test_failed_move_leaves_the_old_post_flagged_for_refresh(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = make_edit_event(store, channel_id=old_channel.id)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        # A channel move bundled with a title change.
+        draft.channel_id = new_channel.id
+        draft.title = "Edited Title"
+        new_channel.send_error = forbidden_error(50001)
+        view = ChannelMoveConfirmView(bot, draft, old_channel.id)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.move.callback(interaction)
+
+        # The move failed, but the title change is committed, so the surviving
+        # post in the old channel is now stale. An edit does not change the
+        # status, so the scheduler would skip it forever unless it is flagged.
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+        stale = store.get_occurrence(occurrence.occurrence_id)
+        assert stale is not None
+        assert stale.needs_refresh
+        old_channel.partial_message.edit.assert_not_awaited()
+
+        # The next maintenance pass re-renders it in place, in the channel it
+        # actually lives in.
+        await run_event_maintenance(bot, FAR_FUTURE - timedelta(hours=2))
+
+        old_channel.partial_message.edit.assert_awaited()
+        new_channel.partial_message.edit.assert_not_awaited()
+        recovered = store.get_occurrence(occurrence.occurrence_id)
+        assert recovered is not None
+        assert not recovered.needs_refresh
 
     async def test_save_changes_reports_a_failed_message_refresh(
         self,

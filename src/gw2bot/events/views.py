@@ -1096,6 +1096,7 @@ async def apply_event_edit(
                 current.occurrence_id,
                 type(exc).__name__,
             )
+            _mark_occurrence_stale(bot, current)
             continue
         refreshed += 1
     LOGGER.debug(
@@ -1125,6 +1126,34 @@ async def apply_event_edit(
     else:
         content = f"Event **{updated.event_id}** was updated."
     await interaction.edit_original_response(content=content, view=None)
+
+
+def _mark_occurrence_stale(bot: Gw2Bot, occurrence: EventOccurrence) -> None:
+    # The edit is committed, but this occurrence's public message was never
+    # re-rendered, so it still shows the old title, category, time and roster.
+    # A failed channel move is the clearest case: the new post never went out, so
+    # the old message survives - untouched - in the previous channel.
+    #
+    # Nothing else would ever fix that. The scheduler only re-renders an
+    # occurrence whose status changed or that is flagged dirty, and an edit
+    # normally leaves the status alone (an ongoing event cannot be edited at all,
+    # so the occurrence is always still upcoming here). The post would stay stale
+    # until the event actually started. Flag it so the next maintenance pass
+    # re-renders it in place, against the channel it really lives in.
+    if occurrence.needs_refresh:
+        return
+    try:
+        bot.event_store.set_occurrence_needs_refresh(
+            occurrence.occurrence_id,
+            True,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not flag occurrence for refresh after a failed edit; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
 
 
 def _restore_event_channel(
