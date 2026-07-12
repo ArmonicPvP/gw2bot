@@ -15,6 +15,8 @@ from gw2bot.events.models import (
     EventRole,
     EventStatus,
     RepeatFrequency,
+    choose_assigned_role,
+    is_roster_full,
 )
 from gw2bot.events.posting import (
     apply_auto_signups,
@@ -23,6 +25,7 @@ from gw2bot.events.posting import (
     delete_superseded_occurrences,
     occurrence_status,
     post_occurrence,
+    rebalance_occurrence_roster,
     refresh_occurrence_message,
     remove_signup,
     repost_occurrence,
@@ -885,6 +888,185 @@ class TestRepostOccurrence:
         assert stored is not None
         assert stored.message_id == posted.message_id
         assert stored.thread_id == posted.thread_id
+
+
+class TestRebalanceOccurrenceRoster:
+    def seat(
+        self,
+        store: EventStore,
+        occurrence_id: int,
+        user_id: int,
+        role: EventRole | None,
+        assigned_role: EventRole | None,
+        waitlisted: bool = False,
+    ) -> None:
+        store.add_signup(
+            occurrence_id=occurrence_id,
+            discord_user_id=user_id,
+            role=role,
+            assigned_role=assigned_role,
+            flex_roles=(),
+            waitlisted=waitlisted,
+        )
+
+    def test_role_less_roster_falls_back_to_dps_and_waitlists(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.WVW)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        for user_id in range(1, 8):
+            self.seat(store, occurrence.occurrence_id, user_id, None, None)
+        fractal = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.FRACTAL,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        changed = rebalance_occurrence_roster(bot, fractal, occurrence)
+
+        assert changed == 7
+        signups = store.get_signups(occurrence.occurrence_id)
+        admitted = [signup for signup in signups if not signup.waitlisted]
+        # Fractal seats 4 DPS; the role-less WvW roster would otherwise read as
+        # zero DPS and keep admitting past capacity.
+        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3, 4]
+        assert all(
+            signup.assigned_role is EventRole.DPS for signup in admitted
+        )
+        assert not is_roster_full(fractal.capacity, signups)
+        # A further DPS no longer fits, so the overfill is closed.
+        assert (
+            choose_assigned_role(
+                fractal.capacity, signups, EventRole.DPS, ()
+            )
+            is None
+        )
+
+    def test_shrinking_capacity_waitlists_the_overflow_in_signup_order(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.RAID)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        # A full raid roster: 2 healers and 8 DPS.
+        self.seat(
+            store,
+            occurrence.occurrence_id,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            EventRole.QUICKNESS_HEAL,
+        )
+        self.seat(
+            store,
+            occurrence.occurrence_id,
+            2,
+            EventRole.ALACRITY_HEAL,
+            EventRole.ALACRITY_HEAL,
+        )
+        for user_id in range(3, 11):
+            self.seat(
+                store,
+                occurrence.occurrence_id,
+                user_id,
+                EventRole.DPS,
+                EventRole.DPS,
+            )
+        fractal = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.FRACTAL,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        rebalance_occurrence_roster(bot, fractal, occurrence)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        seats = {
+            signup.discord_user_id: signup.assigned_role
+            for signup in signups
+            if not signup.waitlisted
+        }
+        # Fractal seats 1 healer and 4 DPS. User 1 keeps the only heal seat.
+        # User 2 was the second healer and no longer fits as one, so rather than
+        # being waitlisted they take the DPS fallback. That plus users 3-5 fills
+        # the 4 DPS seats, and the remaining DPS drop to the waitlist in sign-up
+        # order.
+        assert seats == {
+            1: EventRole.QUICKNESS_HEAL,
+            2: EventRole.DPS,
+            3: EventRole.DPS,
+            4: EventRole.DPS,
+            5: EventRole.DPS,
+        }
+        assert [
+            signup.discord_user_id for signup in signups if signup.waitlisted
+        ] == [6, 7, 8, 9, 10]
+        assert len(signups) == 10
+        assert is_roster_full(fractal.capacity, signups)
+
+    def test_moving_to_a_role_less_category_clears_the_assignments(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.FRACTAL)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        self.seat(
+            store,
+            occurrence.occurrence_id,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            EventRole.QUICKNESS_HEAL,
+        )
+        self.seat(
+            store,
+            occurrence.occurrence_id,
+            2,
+            EventRole.DPS,
+            None,
+            waitlisted=True,
+        )
+        wvw = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.WVW,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        rebalance_occurrence_roster(bot, wvw, occurrence)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        # WvW seats plain headcount, so assignments are dropped and the
+        # waitlisted DPS gets a seat (50 slots, 2 signups).
+        assert all(signup.assigned_role is None for signup in signups)
+        assert all(not signup.waitlisted for signup in signups)
+        # The role preferences survive, so switching back can honour them.
+        assert [signup.role for signup in signups] == [
+            EventRole.QUICKNESS_HEAL,
+            EventRole.DPS,
+        ]
 
 
 class TestDeleteEventPosts:

@@ -803,6 +803,26 @@ def make_posted_edit_event(
     return event, occurrence
 
 
+def make_ongoing_edit_event(store: EventStore) -> Any:
+    # A recurring event that started ten minutes ago and is still running.
+    started = datetime.now(UTC) - timedelta(minutes=10)
+    event = store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Ongoing Title",
+        description="Original description.",
+        channel_id=1234,
+        leader_discord_id=42,
+        start_time=started,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.DAILY,
+        repeat_days=(),
+    )
+    occurrence = store.create_occurrence(event.event_id, started)
+    store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+    store.set_occurrence_status(occurrence.occurrence_id, EventStatus.ONGOING)
+    return event, occurrence
+
+
 # A recurring series whose live occurrence (SERIES_WEEK4) has advanced past the
 # series origin (SERIES_ORIGIN), reproducing the divergence that caused the
 # spurious-reschedule bug.
@@ -996,6 +1016,29 @@ class TestEditCommand:
         choices = await group.active_event_id_autocomplete(interaction, "")
 
         assert choices == []
+
+
+class TestEditCommandOngoing:
+    async def test_edit_rejects_an_ongoing_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_ongoing_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        # An ongoing event can only be deleted, so no preview is opened.
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "view" not in kwargs
+        message = interaction.response.send_message.await_args.args[0]
+        assert "already started" in message
+        assert "/event delete" in message
 
 
 class TestEventEditConfirmView:
@@ -1199,6 +1242,106 @@ class TestEventEditConfirmView:
         assert interaction.edit_original_response.await_args is not None
         content = interaction.edit_original_response.await_args.kwargs["content"]
         assert "stays in the current one" in content
+
+    async def test_save_changes_refuses_an_event_that_started_during_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The reported failure: shortening a running recurring event's duration
+        # so that start + duration is already behind now. The refresh would
+        # persist OVER without seeding the next occurrence the way the scheduler
+        # does, which silently ends the series. Ongoing events are not editable.
+        event, occurrence = make_ongoing_edit_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.duration_minutes = 1
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # Nothing was written and the occurrence was not retired, so the
+        # scheduler still owns the OVER transition and seeds the next occurrence.
+        assert store.get_event(event.event_id).duration_minutes == 90  # type: ignore[union-attr]
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.status is not EventStatus.OVER
+        assert store.get_event_occurrences(event.event_id) == [stored]
+        channel.partial_message.edit.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        assert "already started" in content
+        assert "/event delete" in content
+
+    async def test_category_change_reseats_the_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border Push",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+        # WvW has no roles, so every signup is stored without one.
+        for user_id in range(1, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        admitted = [signup for signup in signups if not signup.waitlisted]
+        waitlisted = [signup for signup in signups if signup.waitlisted]
+        # A Fractal seats 1 healer and 4 DPS. Nobody picked a role in WvW, so
+        # they all fall back to DPS: the first four keep seats in sign-up order
+        # and the rest are waitlisted, instead of seven role-less signups the
+        # capacity check would read as an empty roster and keep admitting onto.
+        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3, 4]
+        assert len(waitlisted) == 3
+        assert all(
+            signup.assigned_role is EventRole.DPS for signup in admitted
+        )
+        # The role is materialised too, because waitlist promotion skips a
+        # signup that has no role.
+        assert all(signup.role is EventRole.DPS for signup in signups)
+        assert all(signup.assigned_role is None for signup in waitlisted)
 
     async def test_save_changes_reports_a_failed_message_refresh(
         self,

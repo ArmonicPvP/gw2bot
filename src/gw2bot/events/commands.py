@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import discord
@@ -10,6 +11,7 @@ from gw2bot.discord_utils import user_has_role
 from gw2bot.events.models import Event, EventStatus
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
+    ONGOING_EDIT_REJECTION,
     EventDeleteConfirmView,
     EventDetailsModal,
     EventDraft,
@@ -162,6 +164,23 @@ class EventCommands(app_commands.Group):
             await interaction.response.send_message(
                 "That event does not exist or is over and can no longer be "
                 "edited.",
+                ephemeral=True,
+            )
+            return
+        # An event that has started is ongoing: it can only be deleted. Editing
+        # it would re-render a live roster, and shortening its duration would
+        # persist OVER without seeding a recurring series' next occurrence.
+        if any(
+            occurrence.start_time <= datetime.now(UTC) for occurrence in live
+        ):
+            LOGGER.debug(
+                "Event edit rejected for an ongoing event; "
+                "user_id=%s event_id=%s",
+                interaction.user.id,
+                event_id,
+            )
+            await interaction.response.send_message(
+                ONGOING_EDIT_REJECTION,
                 ephemeral=True,
             )
             return

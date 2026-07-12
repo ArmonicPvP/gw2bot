@@ -22,6 +22,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
     choose_assigned_role,
     is_roster_full,
+    rebalance_signups,
 )
 
 if TYPE_CHECKING:
@@ -540,6 +541,45 @@ async def remove_signup(
     )
     await refresh_occurrence_message(bot, event, occurrence)
     return removed, promoted
+
+
+def rebalance_occurrence_roster(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> int:
+    # Call this after an edit changes an event's category: the stored
+    # assignments were seated against the old category's capacity and no longer
+    # describe a valid roster. Returns how many signups actually moved.
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    if not signups:
+        return 0
+    reseated = rebalance_signups(event.capacity, signups)
+    changed = 0
+    for before, after in zip(signups, reseated, strict=True):
+        if (
+            before.role is after.role
+            and before.assigned_role is after.assigned_role
+            and before.waitlisted == after.waitlisted
+        ):
+            continue
+        bot.event_store.set_signup_assignment(
+            occurrence.occurrence_id,
+            after.discord_user_id,
+            role=after.role,
+            assigned_role=after.assigned_role,
+            waitlisted=after.waitlisted,
+        )
+        changed += 1
+    LOGGER.debug(
+        "Rebalanced event roster for a new category; occurrence_id=%s "
+        "category=%s signups=%s changed=%s",
+        occurrence.occurrence_id,
+        event.category.value,
+        len(signups),
+        changed,
+    )
+    return changed
 
 
 def _promote_first_fitting_waitlisted(

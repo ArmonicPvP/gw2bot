@@ -542,6 +542,40 @@ class EventStore:
             assigned_role.value if assigned_role is not None else None,
         )
 
+    def set_signup_assignment(
+        self,
+        occurrence_id: int,
+        discord_user_id: int,
+        *,
+        role: EventRole | None,
+        assigned_role: EventRole | None,
+        waitlisted: bool,
+    ) -> None:
+        # Unlike promote_signup, this can move a signup in either direction,
+        # because re-seating a roster against a new capacity can also push an
+        # admitted signup onto the waitlist.
+        with self._sessions() as session:
+            record = session.get(
+                EventSignupRecord,
+                (occurrence_id, discord_user_id),
+            )
+            if record is None:
+                raise ValueError("The signup to reassign no longer exists.")
+            record.role = role.value if role is not None else None
+            record.assigned_role = (
+                assigned_role.value if assigned_role is not None else None
+            )
+            record.waitlisted = waitlisted
+            session.commit()
+        LOGGER.debug(
+            "Reassigned event signup; occurrence_id=%s user_id=%s "
+            "assigned_role=%s waitlisted=%s",
+            occurrence_id,
+            discord_user_id,
+            assigned_role.value if assigned_role is not None else None,
+            waitlisted,
+        )
+
     def get_signup_preference(
         self,
         discord_user_id: int,

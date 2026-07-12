@@ -48,6 +48,14 @@ LOGGER = logging.getLogger(__name__)
 EVENT_TITLE_MAX_LENGTH = 256
 EVENT_DESCRIPTION_MAX_LENGTH = 4000
 FLOW_TIMEOUT_SECONDS = 600
+
+# An event whose occurrence has started is live and cannot be edited: re-rendering
+# it can persist OVER without seeding a recurring series' next occurrence, and its
+# roster is already in play. Deleting is the only remaining action.
+ONGOING_EDIT_REJECTION = (
+    "That event has already started, so it can no longer be edited. "
+    "Use `/event delete` to remove it."
+)
 PREVIEW_EVENT_ID_TEXT = "—"
 
 
@@ -924,6 +932,7 @@ async def apply_event_edit(
     repost: bool,
 ) -> None:
     from gw2bot.events.posting import (
+        rebalance_occurrence_roster,
         refresh_occurrence_message,
         repost_occurrence,
     )
@@ -948,6 +957,34 @@ async def apply_event_edit(
         embeds=[],
         view=None,
     )
+    occurrences = [
+        occurrence
+        for occurrence in bot.event_store.get_event_occurrences(
+            editing_event_id
+        )
+        if occurrence.status is not EventStatus.OVER
+    ]
+    # An occurrence that has already started is live: its roster is in play, and
+    # re-rendering it from an edit can persist OVER (shortening the duration puts
+    # start + duration behind now) without seeding the recurring series' next
+    # occurrence the way the scheduler does, silently ending the series. Ongoing
+    # events can only be deleted. The command refuses them too, but the preview
+    # can sit open for minutes, so the event may have started since it opened.
+    if any(
+        occurrence.start_time <= datetime.now(UTC)
+        for occurrence in occurrences
+    ):
+        LOGGER.warning(
+            "Rejected edit of an ongoing event; event_id=%s user_id=%s",
+            editing_event_id,
+            interaction.user.id,
+        )
+        await interaction.edit_original_response(
+            content=ONGOING_EDIT_REJECTION,
+            view=None,
+        )
+        return
+    previous = bot.event_store.get_event(editing_event_id)
     try:
         updated = bot.event_store.update_event(
             event_id=editing_event_id,
@@ -977,13 +1014,9 @@ async def apply_event_edit(
         return
     channel_changed = old_channel_id != updated.channel_id
     moving = repost and channel_changed
-    occurrences = [
-        occurrence
-        for occurrence in bot.event_store.get_event_occurrences(
-            updated.event_id
-        )
-        if occurrence.status is not EventStatus.OVER
-    ]
+    category_changed = (
+        previous is not None and previous.category is not updated.category
+    )
     # The soonest non-OVER occurrence is what a date change reschedules, whether
     # it is already posted or still waiting for the scheduler to post it.
     primary = occurrences[0] if occurrences else None
@@ -1007,6 +1040,21 @@ async def apply_event_edit(
             )
             if refetched is not None:
                 current = refetched
+        if category_changed:
+            # The category picks the capacity the roster was seated against, so
+            # changing it invalidates every stored assignment. Re-seat the roster
+            # before the message is re-rendered, so the embed and the capacity
+            # checks both describe the new category.
+            try:
+                rebalance_occurrence_roster(bot, updated, current)
+            except (SQLAlchemyError, ValueError) as exc:
+                # A stale roster must not block the rest of the edit.
+                LOGGER.error(
+                    "Could not rebalance roster after a category change; "
+                    "occurrence_id=%s error_type=%s",
+                    current.occurrence_id,
+                    type(exc).__name__,
+                )
         if current.message_id is None:
             # Unposted (e.g. a recurring series' next occurrence): the
             # reschedule above is persisted and the scheduler will post it with
