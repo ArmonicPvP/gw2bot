@@ -385,23 +385,44 @@ async def delete_event_posts(
     return deleted
 
 
-async def delete_superseded_occurrences(
-    bot: Gw2Bot,
-    event: Event,
-    new_occurrence: EventOccurrence,
-) -> int:
+async def prune_superseded_occurrences(bot: Gw2Bot, event: Event) -> int:
     # For a recurring event with delete_previous_on_repeat, remove the
-    # occurrences the just-posted one supersedes (their message, thread and store
+    # occurrences the current post supersedes (their message, thread and store
     # rows) so the channel keeps only the current post. Only finished (OVER)
-    # occurrences earlier than the new one qualify, so a live occurrence is never
-    # removed. Message deletes are best-effort; the store rows are always removed
-    # so the series does not accumulate history.
+    # occurrences earlier than it qualify, so a live occurrence is never removed.
+    # Message deletes are best-effort; the store rows are always removed so the
+    # series does not accumulate history.
+    #
+    # The current post is derived here rather than passed in, because the two
+    # conditions this waits on can land in either order: the next occurrence
+    # being posted, and the previous one being persisted as OVER.
+    # refresh_occurrence_message withholds the OVER commit until the message edit
+    # and the thread rename have both succeeded, so a transient Discord failure
+    # can leave the previous occurrence still non-OVER at the moment the next one
+    # is posted. Deriving the state makes this idempotent, so whichever of the two
+    # lands last can run the cleanup.
+    if (
+        event.repeat_frequency is RepeatFrequency.NONE
+        or not event.delete_previous_on_repeat
+    ):
+        return 0
+    occurrences = bot.event_store.get_event_occurrences(event.event_id)
+    posted = [
+        occurrence
+        for occurrence in occurrences
+        if occurrence.message_id is not None
+    ]
+    if not posted:
+        return 0
+    # Only a posted occurrence can supersede the previous one: removing the old
+    # post before the next is live would leave the channel with no post at all.
+    current = max(posted, key=lambda occurrence: occurrence.start_time)
     superseded = [
         occurrence
-        for occurrence in bot.event_store.get_event_occurrences(event.event_id)
-        if occurrence.occurrence_id != new_occurrence.occurrence_id
+        for occurrence in occurrences
+        if occurrence.occurrence_id != current.occurrence_id
         and occurrence.status is EventStatus.OVER
-        and occurrence.start_time < new_occurrence.start_time
+        and occurrence.start_time < current.start_time
     ]
     if not superseded:
         return 0
@@ -420,10 +441,10 @@ async def delete_superseded_occurrences(
             )
     LOGGER.debug(
         "Deleted superseded occurrences; event_id=%s count=%s "
-        "new_occurrence_id=%s",
+        "current_occurrence_id=%s",
         event.event_id,
         deleted,
-        new_occurrence.occurrence_id,
+        current.occurrence_id,
     )
     return deleted
 

@@ -22,9 +22,9 @@ from gw2bot.events.posting import (
     apply_auto_signups,
     complete_signup,
     delete_event_posts,
-    delete_superseded_occurrences,
     occurrence_status,
     post_occurrence,
+    prune_superseded_occurrences,
     rebalance_occurrence_roster,
     refresh_occurrence_message,
     remove_signup,
@@ -117,6 +117,7 @@ def create_event(
     category: EventCategory = EventCategory.FRACTAL,
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     repeat_days: tuple[int, ...] = (),
+    delete_previous_on_repeat: bool = False,
 ):
     return store.create_event(
         category=category,
@@ -128,6 +129,7 @@ def create_event(
         duration_minutes=90,
         repeat_frequency=repeat_frequency,
         repeat_days=repeat_days,
+        delete_previous_on_repeat=delete_previous_on_repeat,
     )
 
 
@@ -1112,27 +1114,43 @@ class TestDeleteEventPosts:
         assert channel.partial_message.delete.await_count == 2
 
 
-class TestDeleteSupersededOccurrences:
+class TestPruneSupersededOccurrences:
+    async def make_series(
+        self,
+        bot: Any,
+        store: EventStore,
+        *,
+        delete_previous_on_repeat: bool = True,
+    ) -> Any:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            delete_previous_on_repeat=delete_previous_on_repeat,
+        )
+        old = store.create_occurrence(event.event_id, START)
+        posted_old = await post_occurrence(bot, event, old, BEFORE_START)
+        new_start = START + timedelta(days=1)
+        new = store.create_occurrence(event.event_id, new_start)
+        posted_new = await post_occurrence(
+            bot, event, new, new_start - timedelta(hours=1)
+        )
+        return event, posted_old, posted_new
+
     async def test_removes_earlier_over_occurrences_and_their_posts(
         self,
         bot: Any,
         store: EventStore,
         channel: FakeChannel,
     ) -> None:
-        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
-        old = store.create_occurrence(event.event_id, START)
-        await post_occurrence(bot, event, old, BEFORE_START)
-        store.set_occurrence_status(old.occurrence_id, EventStatus.OVER)
-        new_start = START + timedelta(days=1)
-        new = store.create_occurrence(event.event_id, new_start)
-        posted_new = await post_occurrence(
-            bot, event, new, new_start - timedelta(hours=1)
+        event, posted_old, posted_new = await self.make_series(bot, store)
+        store.set_occurrence_status(
+            posted_old.occurrence_id, EventStatus.OVER
         )
 
-        deleted = await delete_superseded_occurrences(bot, event, posted_new)
+        deleted = await prune_superseded_occurrences(bot, event)
 
         assert deleted == 1
-        assert store.get_occurrence(old.occurrence_id) is None
+        assert store.get_occurrence(posted_old.occurrence_id) is None
         assert store.get_occurrence(posted_new.occurrence_id) is not None
         channel.partial_message.delete.assert_awaited()
 
@@ -1142,18 +1160,58 @@ class TestDeleteSupersededOccurrences:
         store: EventStore,
         channel: FakeChannel,
     ) -> None:
-        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
-        old = store.create_occurrence(event.event_id, START)
-        posted_old = await post_occurrence(bot, event, old, BEFORE_START)
-        new_start = START + timedelta(days=1)
-        new = store.create_occurrence(event.event_id, new_start)
-        posted_new = await post_occurrence(
-            bot, event, new, new_start - timedelta(hours=1)
-        )
+        event, posted_old, _ = await self.make_series(bot, store)
 
-        deleted = await delete_superseded_occurrences(bot, event, posted_new)
+        deleted = await prune_superseded_occurrences(bot, event)
 
         # The still-live earlier occurrence must never be removed.
+        assert deleted == 0
+        assert store.get_occurrence(posted_old.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+
+    async def test_no_op_for_an_event_that_did_not_opt_in(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted_old, _ = await self.make_series(
+            bot, store, delete_previous_on_repeat=False
+        )
+        store.set_occurrence_status(
+            posted_old.occurrence_id, EventStatus.OVER
+        )
+
+        deleted = await prune_superseded_occurrences(bot, event)
+
+        # The opt-in is enforced inside the prune, so no caller can forget it.
+        assert deleted == 0
+        assert store.get_occurrence(posted_old.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+
+    async def test_keeps_the_previous_post_until_the_next_one_is_live(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            delete_previous_on_repeat=True,
+        )
+        old = store.create_occurrence(event.event_id, START)
+        posted_old = await post_occurrence(bot, event, old, BEFORE_START)
+        store.set_occurrence_status(
+            posted_old.occurrence_id, EventStatus.OVER
+        )
+        # The next occurrence is seeded but not posted yet.
+        store.create_occurrence(event.event_id, START + timedelta(days=1))
+
+        deleted = await prune_superseded_occurrences(bot, event)
+
+        # Removing the old post before the new one is live would leave the
+        # channel with no post at all.
         assert deleted == 0
         assert store.get_occurrence(posted_old.occurrence_id) is not None
         channel.partial_message.delete.assert_not_awaited()
