@@ -38,6 +38,21 @@ async def resolve_channel(bot: Gw2Bot, channel_id: int) -> Any:
     return channel
 
 
+def occurrence_channel_id(event: Event, occurrence: EventOccurrence) -> int:
+    # Where an occurrence's message actually lives. Discord addresses a message
+    # by (channel, message), so editing or deleting one must target the channel
+    # it was posted to. That is not necessarily event.channel_id: a channel edit
+    # only re-posts the live occurrences, so finished ones (and any re-post that
+    # failed) stay behind in the previous channel. Rows written before the
+    # channel was tracked fall back to the event's channel, which is where they
+    # were posted.
+    return (
+        occurrence.channel_id
+        if occurrence.channel_id is not None
+        else event.channel_id
+    )
+
+
 def occurrence_status(
     event: Event,
     occurrence: EventOccurrence,
@@ -109,6 +124,7 @@ async def post_occurrence(
         bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
         bot.event_store.set_occurrence_message(
             occurrence.occurrence_id,
+            event.channel_id,
             message.id,
             thread_id,
         )
@@ -162,7 +178,10 @@ async def refresh_occurrence_message(
     message_refreshed = True
     if occurrence.message_id is not None:
         try:
-            channel = await resolve_channel(bot, event.channel_id)
+            channel = await resolve_channel(
+                bot,
+                occurrence_channel_id(event, occurrence),
+            )
             await channel.get_partial_message(occurrence.message_id).edit(
                 embed=occurrence_embed(event, occurrence, signups, now),
             )
@@ -291,12 +310,15 @@ async def repost_occurrence(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
-    old_channel_id: int,
 ) -> EventOccurrence:
     # Discord cannot move a message between channels, so a channel change is
     # applied by sending a fresh post and removing the old one. The occurrence
     # row (and therefore the roster) is preserved because signups are keyed by
     # occurrence_id, not by message.
+    #
+    # The old message is addressed through the channel the occurrence was posted
+    # to, which is not necessarily the event's previous channel: a series can
+    # have posts spread over several channels after more than one move.
     #
     # The new post is sent and persisted *before* the old message is deleted.
     # post_occurrence only writes the new message id once the message is live,
@@ -307,6 +329,7 @@ async def repost_occurrence(
     # retire a still-active occurrence. Posting first means a failed move leaves
     # the old message live and still correctly referenced.
     old_message_id = occurrence.message_id
+    old_channel_id = occurrence_channel_id(event, occurrence)
     reposted = await post_occurrence(bot, event, occurrence)
     if old_message_id is not None:
         try:
@@ -348,25 +371,37 @@ async def delete_event_posts(
     # a starter message also removes its thread, so there is no separate thread
     # delete. This runs after the store rows are gone, so any message that
     # survives a failure here just has buttons that gracefully report the event
-    # is no longer available. Occurrences posted before a channel change live in
-    # a previous channel and cannot be resolved from event.channel_id; those
-    # deletes simply fail and are logged.
-    channel: Any = None
+    # is no longer available.
+    #
+    # Each occurrence is deleted through the channel it was posted to, not the
+    # event's current one. A channel edit only re-posts the live occurrences, so
+    # a series that has been moved has finished posts sitting in the previous
+    # channel; addressing those through the current channel returns NotFound and
+    # would leave them visible forever after the rows are gone.
+    channels: dict[int, Any] = {}
+    unresolvable: set[int] = set()
     deleted = 0
     for occurrence in occurrences:
         if occurrence.message_id is None:
             continue
+        channel_id = occurrence_channel_id(event, occurrence)
+        if channel_id in unresolvable:
+            continue
+        channel = channels.get(channel_id)
         if channel is None:
             try:
-                channel = await resolve_channel(bot, event.channel_id)
+                channel = await resolve_channel(bot, channel_id)
             except discord.HTTPException as exc:
+                # One dead channel must not strand the posts in the others.
+                unresolvable.add(channel_id)
                 LOGGER.error(
                     "Could not resolve channel to delete event posts; "
                     "event_id=%s error_type=%s",
                     event.event_id,
                     type(exc).__name__,
                 )
-                return deleted
+                continue
+            channels[channel_id] = channel
         try:
             await channel.get_partial_message(occurrence.message_id).delete()
             deleted += 1

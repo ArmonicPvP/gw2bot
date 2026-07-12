@@ -799,7 +799,7 @@ def make_posted_edit_event(
 ) -> Any:
     event = make_edit_event(store, channel_id)
     occurrence = store.create_occurrence(event.event_id, event.start_time)
-    store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+    store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
     return event, occurrence
 
 
@@ -818,7 +818,7 @@ def make_ongoing_edit_event(store: EventStore) -> Any:
         repeat_days=(),
     )
     occurrence = store.create_occurrence(event.event_id, started)
-    store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+    store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
     store.set_occurrence_status(occurrence.occurrence_id, EventStatus.ONGOING)
     return event, occurrence
 
@@ -849,7 +849,7 @@ def make_advanced_recurring_event(
     )
     occurrence = store.create_occurrence(event.event_id, SERIES_WEEK4)
     if posted:
-        store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
     return event, occurrence
 
 
@@ -1300,7 +1300,7 @@ class TestEventEditConfirmView:
             repeat_days=(),
         )
         occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
-        store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
         # WvW has no roles, so every signup is stored without one.
         for user_id in range(1, 8):
             store.add_signup(

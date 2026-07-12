@@ -32,7 +32,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.events.store import EventStore
 
-from factories import forbidden_error
+from factories import forbidden_error, not_found_error
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 BEFORE_START = START - timedelta(hours=2)
@@ -92,6 +92,10 @@ class FakeBot:
         return self._channels.get(channel_id)
 
     async def fetch_channel(self, channel_id: int) -> Any:
+        # Discord raises NotFound for a channel that is gone, so an unknown id
+        # must surface that rather than a KeyError.
+        if channel_id not in self._channels:
+            raise not_found_error()
         return self._channels[channel_id]
 
 
@@ -158,6 +162,9 @@ class TestPostOccurrence:
         assert posted.message_id == 555
         assert posted.thread_id == 777
         assert posted.status is EventStatus.OPEN
+        # The channel is stored with the message, so a later edit or delete can
+        # address it even after the event's channel has moved on.
+        assert posted.channel_id == 1234
         assert len(channel.sent) == 1
         embed = channel.sent[0]["embed"]
         assert embed.footer.text == f"eventID: {event.event_id}"
@@ -788,12 +795,7 @@ class TestRepostOccurrence:
             repeat_days=event.repeat_days,
         )
 
-        reposted = await repost_occurrence(
-            bot,
-            moved,
-            posted,
-            old_channel_id=old_channel.id,
-        )
+        reposted = await repost_occurrence(bot, moved, posted)
 
         # Old message deleted, fresh one sent in the new channel, and every
         # existing signup re-added to the new thread.
@@ -834,12 +836,7 @@ class TestRepostOccurrence:
             repeat_days=event.repeat_days,
         )
 
-        reposted = await repost_occurrence(
-            bot,
-            moved,
-            posted,
-            old_channel_id=old_channel.id,
-        )
+        reposted = await repost_occurrence(bot, moved, posted)
 
         # A failed delete of the old post must not stop the move from posting
         # into the new channel.
@@ -875,12 +872,7 @@ class TestRepostOccurrence:
         new_channel.send_error = forbidden_error(50001)
 
         with pytest.raises(discord.HTTPException):
-            await repost_occurrence(
-                bot,
-                moved,
-                posted,
-                old_channel_id=old_channel.id,
-            )
+            await repost_occurrence(bot, moved, posted)
 
         # The new post never went out, so the old one must still be live and
         # still referenced. Deleting it first would strand the occurrence on a
@@ -1090,6 +1082,87 @@ class TestDeleteEventPosts:
         assert deleted == 1
         assert unposted.message_id is None
         channel.partial_message.delete.assert_awaited_once()
+
+    async def test_deletes_each_post_through_the_channel_it_was_posted_to(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        old = store.create_occurrence(event.event_id, START)
+        await post_occurrence(bot, event, old, BEFORE_START)
+        store.set_occurrence_status(old.occurrence_id, EventStatus.OVER)
+        # The event is moved to another channel. A channel edit only re-posts
+        # the live occurrences, so this finished post stays behind in the old
+        # channel while event.channel_id moves on.
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        new_start = START + timedelta(days=1)
+        new = store.create_occurrence(moved.event_id, new_start)
+        await post_occurrence(bot, moved, new, new_start - timedelta(hours=1))
+        occurrences = store.get_event_occurrences(moved.event_id)
+
+        deleted = await delete_event_posts(bot, moved, occurrences)
+
+        # Both posts are removed, each through the channel it actually lives in.
+        # Addressing the old one through the event's current channel returns
+        # NotFound and would leave it visible forever once the rows are gone.
+        assert deleted == 2
+        old_channel.partial_message.delete.assert_awaited_once()
+        new_channel.partial_message.delete.assert_awaited_once()
+
+    async def test_an_unresolvable_channel_does_not_strand_the_others(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        old = store.create_occurrence(event.event_id, START)
+        await post_occurrence(bot, event, old, BEFORE_START)
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        new_start = START + timedelta(days=1)
+        new = store.create_occurrence(moved.event_id, new_start)
+        await post_occurrence(bot, moved, new, new_start - timedelta(hours=1))
+        # The old channel is gone (deleted by a moderator, say).
+        del bot._channels[old_channel.id]
+        occurrences = store.get_event_occurrences(moved.event_id)
+
+        deleted = await delete_event_posts(bot, moved, occurrences)
+
+        # The post in the surviving channel is still removed.
+        assert deleted == 1
+        new_channel.partial_message.delete.assert_awaited_once()
 
     async def test_a_failed_message_delete_does_not_stop_the_others(
         self,

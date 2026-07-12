@@ -1063,12 +1063,10 @@ async def apply_event_edit(
         attempted += 1
         try:
             if moving:
-                await repost_occurrence(
-                    bot,
-                    updated,
-                    current,
-                    old_channel_id,
-                )
+                # The old message is addressed through the channel the
+                # occurrence was actually posted to, which repost_occurrence
+                # reads off the occurrence itself.
+                await repost_occurrence(bot, updated, current)
             else:
                 await refresh_occurrence_message(
                     bot,

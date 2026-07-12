@@ -85,6 +85,7 @@ def _occurrence_from_record(
         message_id=record.message_id,
         thread_id=record.thread_id,
         status=EventStatus(record.status),
+        channel_id=record.channel_id,
         needs_refresh=record.needs_refresh,
     )
 
@@ -223,13 +224,17 @@ class EventStore:
     def set_occurrence_message(
         self,
         occurrence_id: int,
+        channel_id: int,
         message_id: int,
         thread_id: int | None,
     ) -> None:
+        # The channel is stored with the message, because that pair is what any
+        # later edit or delete has to address; the event's channel can move on.
         with self._sessions() as session:
             record = session.get(EventOccurrenceRecord, occurrence_id)
             if record is None:
                 raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.channel_id = channel_id
             record.message_id = message_id
             record.thread_id = thread_id
             session.commit()

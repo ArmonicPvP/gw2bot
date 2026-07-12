@@ -65,6 +65,58 @@ def test_migration_adds_delete_previous_on_repeat_to_existing_db(
         store.close()
 
 
+def test_migration_backfills_occurrence_channel_id(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before the
+    # occurrence tracked its own channel.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_event_occurrences DROP COLUMN channel_id")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat) VALUES "
+                "('Fractal', 't', 'd', 4321, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_event_occurrences (event_id, start_time, "
+                "message_id, thread_id, status, needs_refresh) VALUES "
+                "(1, '2027-01-30T20:00:00+00:00', 555, 777, 'over', 0)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_event_occurrences (event_id, start_time, "
+                "message_id, thread_id, status, needs_refresh) VALUES "
+                "(1, '2027-01-31T20:00:00+00:00', NULL, NULL, 'open', 0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "channel_id" in added
+    store = EventStore(db_path)
+    try:
+        posted, unposted = store.get_event_occurrences(1)
+        # A legacy posted row is backfilled from the event's channel, which is
+        # the only channel it could have been posted through.
+        assert posted.channel_id == 4321
+        # An unposted row has no message, so it has no channel either.
+        assert unposted.channel_id is None
+    finally:
+        store.close()
+
+
 def create_event(store: EventStore, **overrides: object):
     parameters: dict = {
         "category": EventCategory.FRACTAL,
@@ -201,7 +253,7 @@ class TestEventStoreOccurrences:
         event = create_event(store)
 
         occurrence = store.create_occurrence(event.event_id, START)
-        store.set_occurrence_message(occurrence.occurrence_id, 555, 777)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
         store.set_occurrence_status(
             occurrence.occurrence_id,
             EventStatus.FULL,
@@ -221,8 +273,8 @@ class TestEventStoreOccurrences:
         unposted = store.create_occurrence(event.event_id, START)
         posted = store.create_occurrence(event.event_id, START)
         finished = store.create_occurrence(event.event_id, START)
-        store.set_occurrence_message(posted.occurrence_id, 1, None)
-        store.set_occurrence_message(finished.occurrence_id, 2, None)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 1, None)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 2, None)
         store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
 
         live = store.get_posted_unfinished_occurrences()
@@ -241,7 +293,7 @@ class TestEventStoreOccurrences:
         event = create_event(store)
         unposted = store.create_occurrence(event.event_id, START)
         posted = store.create_occurrence(event.event_id, START)
-        store.set_occurrence_message(posted.occurrence_id, 1, None)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 1, None)
 
         pending = store.get_unposted_occurrences()
 
@@ -255,7 +307,7 @@ class TestEventStoreOccurrences:
 
         assert not store.has_posted_occurrence(event.event_id)
 
-        store.set_occurrence_message(occurrence.occurrence_id, 1, None)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 1, None)
 
         assert store.has_posted_occurrence(event.event_id)
 
@@ -381,7 +433,9 @@ class TestEventStoreOccurrences:
     ) -> None:
         active = create_event(store, title="Active")
         active_occurrence = store.create_occurrence(active.event_id, START)
-        store.set_occurrence_message(active_occurrence.occurrence_id, 1, None)
+        store.set_occurrence_message(
+            active_occurrence.occurrence_id, 1234, 1, None
+        )
         completed = create_event(store, title="Completed")
         completed_occurrence = store.create_occurrence(
             completed.event_id,

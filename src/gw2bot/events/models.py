@@ -148,6 +148,12 @@ class EventOccurrence:
     message_id: int | None
     thread_id: int | None
     status: EventStatus
+    # The channel the message was posted to. An event's channel can change after
+    # the fact, and occurrences that were not re-posted (finished ones, or a
+    # re-post that failed) keep living where they were sent, so the message must
+    # be resolved through this rather than the event's current channel. None
+    # until the occurrence is posted.
+    channel_id: int | None = None
     # Set when the public message failed to refresh so the scheduler retries
     # even if the computed status still matches the stored one.
     needs_refresh: bool = False
