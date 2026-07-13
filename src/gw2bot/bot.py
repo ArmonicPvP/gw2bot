@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -54,6 +54,9 @@ from gw2bot.trials.reports import (
     resolve_trial_member_discord_statuses,
 )
 
+if TYPE_CHECKING:
+    from gw2bot.web.server import WebServer
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -78,6 +81,7 @@ class Gw2Bot(discord.Client):
         self._event_store = EventStore(config.raffle_db_path)
         self._event_timezone = ZoneInfo(config.event_timezone)
         self._api: Gw2ApiClient | None = None
+        self._web_server: WebServer | None = None
         self._guild_members: GuildMemberCache | None = None
         self._last_guild_member_count: int | None = None
         self._last_pending_guild_invite_count: int | None = None
@@ -142,12 +146,35 @@ class Gw2Bot(discord.Client):
                 name="gw2-event-scheduler",
             ),
         ]
+        if self._config.web_enabled:
+            # Imported lazily so the web layer only loads when enabled.
+            from gw2bot.web.server import WebServer
+
+            web_server = WebServer(self, self._config, self._session)
+            try:
+                await web_server.start()
+            except OSError as exc:
+                # The calendar is an optional read-only extra. A port conflict
+                # must not cost the guild its raffles, trials and events, so
+                # log loudly and carry on without it.
+                LOGGER.error(
+                    "Could not start the web calendar; the bot continues "
+                    "without it; port=%s error_type=%s",
+                    self._config.web_port,
+                    type(exc).__name__,
+                )
+            else:
+                self._web_server = web_server
+        else:
+            LOGGER.debug("Web calendar disabled")
 
     async def close(self) -> None:
         LOGGER.debug("Closing bot and cancelling %s poll tasks", len(self._poll_tasks))
         for task in self._poll_tasks:
             task.cancel()
         await asyncio.gather(*self._poll_tasks, return_exceptions=True)
+        if self._web_server is not None:
+            await self._web_server.stop()
         if self._guild_members is not None:
             await self._guild_members.close()
         if self._session is not None:

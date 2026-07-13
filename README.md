@@ -31,6 +31,13 @@ For local development, copy `.env.example` to `.env`.
 | `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. The Docker image overrides this default with `/app/data/gw2bot.db`. |
 | `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. |
 | `TZ` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times and to format event thread names. |
+| `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). Requires the four variables below. |
+| `WEB_PORT` | `8080` | Port the web calendar listens on. |
+| `WEB_BASE_URL` | unset | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed. |
+| `DISCORD_OAUTH_CLIENT_ID` | unset | OAuth2 client ID of the bot's Discord application. |
+| `DISCORD_OAUTH_CLIENT_SECRET` | unset | OAuth2 client secret of the bot's Discord application. |
+| `WEB_SESSION_SECRET` | unset | Random secret of at least 32 characters that signs web session cookies. |
+| `WEB_SESSION_TTL_SECONDS` | `604800` | How long a web sign-in stays valid. Guild membership is re-checked periodically regardless, so a departed member loses access without waiting for the session to expire. |
 
 The application loads `.env` automatically. Existing environment variables take
 precedence over `.env`, so an Unraid container can inject the same variables at
@@ -428,6 +435,45 @@ to the host path. The image runs as UID `99` and GID `100`, matching Unraid's
 usual `nobody:users` appdata ownership. If you are running an older image built
 with UID `10001`, either rebuild the image or set Unraid's extra Docker
 parameters to `--user 99:100`.
+
+## Web Calendar
+
+An optional website shows the guild event calendar in day, week, and month
+views. Events appear as one-line entries on their day, and hovering over an
+entry shows the full details: category, description, times, duration, leader,
+status, and roster counts. Future occurrences of repeating events that the
+scheduler has not posted yet appear with dashed borders as projections, and
+finished events stay visible dimmed on past days.
+
+Access requires signing in with Discord. The site only requests the `identify`
+OAuth scope and then checks with the bot that the signed-in user is a member
+of `DISCORD_COMMAND_GUILD_ID`. Non-members receive a members-only page.
+Sessions last `WEB_SESSION_TTL_SECONDS` (seven days by default). Membership is
+re-checked at sign-in and then at most every five minutes for the life of the
+session, so a member who leaves or is banned loses access within minutes rather
+than keeping it until the cookie expires.
+
+To enable it:
+
+1. Open the bot's application in the
+   [Discord developer portal](https://discord.com/developers/applications),
+   go to OAuth2, and copy the Client ID and Client Secret.
+2. Add `<WEB_BASE_URL>/oauth/callback` (for example
+   `https://calendar.example.com/oauth/callback`) to the application's
+   OAuth2 redirect URIs.
+3. Set `WEB_ENABLED=true`, `WEB_BASE_URL`, `DISCORD_OAUTH_CLIENT_ID`,
+   `DISCORD_OAUTH_CLIENT_SECRET`, and `WEB_SESSION_SECRET` in `.env`
+   (see `.env.example` for details and how to generate the session secret).
+4. Publish the port by uncommenting the `ports` block in `compose.yaml`. It
+   follows `WEB_PORT`, so there is nothing to change there if you move the port.
+
+Serve the calendar behind a reverse proxy that terminates TLS. Discord only
+accepts `https` redirect URIs (localhost excepted), and session cookies are
+marked `Secure` only when `WEB_BASE_URL` uses `https`.
+
+Times are shown in each viewer's local timezone. Weekly repeat days are
+defined in the server's `TZ` timezone, so viewers far from that timezone may
+correctly see a repeating event land on an adjacent local weekday.
 
 ## Run With Docker
 

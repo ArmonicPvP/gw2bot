@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import sessionmaker
 
 from gw2bot.database import (
@@ -359,6 +359,109 @@ class EventStore:
                 .order_by(EventRecord.event_id.desc())
             ).all()
             return [_event_from_record(record) for record in records]
+
+    def get_occurrences_between(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[Event, EventOccurrence]]:
+        # Stored times share one UTC ISO format, so string comparison
+        # matches chronological order.
+        with self._sessions() as session:
+            rows = session.execute(
+                select(EventRecord, EventOccurrenceRecord)
+                .join(
+                    EventOccurrenceRecord,
+                    EventOccurrenceRecord.event_id == EventRecord.event_id,
+                )
+                .where(
+                    EventOccurrenceRecord.start_time
+                    >= _serialize_time(start)
+                )
+                .where(EventOccurrenceRecord.start_time < _serialize_time(end))
+                .where(EventRecord.cancelled.is_(False))
+                .order_by(EventOccurrenceRecord.start_time)
+            ).all()
+            results = [
+                (
+                    _event_from_record(event_record),
+                    _occurrence_from_record(occurrence_record),
+                )
+                for event_record, occurrence_record in rows
+            ]
+        LOGGER.debug(
+            "Fetched calendar occurrences; matched=%s",
+            len(results),
+        )
+        return results
+
+    def get_signups_between(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> dict[int, list[EventSignup]]:
+        """Signups for every occurrence ``get_occurrences_between`` returns.
+
+        Joining on the same window fetches them in one query instead of one
+        per occurrence, and passes no per-id bound parameters, so it cannot
+        hit SQLite's variable limit however many occurrences are in range.
+        """
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventSignupRecord)
+                .join(
+                    EventOccurrenceRecord,
+                    EventOccurrenceRecord.occurrence_id
+                    == EventSignupRecord.occurrence_id,
+                )
+                .join(
+                    EventRecord,
+                    EventRecord.event_id == EventOccurrenceRecord.event_id,
+                )
+                .where(
+                    EventOccurrenceRecord.start_time >= _serialize_time(start)
+                )
+                .where(
+                    EventOccurrenceRecord.start_time < _serialize_time(end)
+                )
+                .where(EventRecord.cancelled.is_(False))
+                .order_by(EventSignupRecord.signed_up_at)
+            ).all()
+            signups: dict[int, list[EventSignup]] = {}
+            for record in records:
+                signups.setdefault(record.occurrence_id, []).append(
+                    _signup_from_record(record)
+                )
+        LOGGER.debug(
+            "Fetched calendar signups; occurrences=%s",
+            len(signups),
+        )
+        return signups
+
+    def get_latest_occurrence_starts(self) -> dict[int, datetime]:
+        """Newest occurrence start time for every event that has one.
+
+        Stored times share one UTC ISO format, so MAX over the string column
+        matches the chronological maximum. One grouped query replaces loading
+        each event's full occurrence history just to read its last row.
+        """
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    EventOccurrenceRecord.event_id,
+                    func.max(EventOccurrenceRecord.start_time),
+                ).group_by(EventOccurrenceRecord.event_id)
+            ).all()
+            starts = {
+                event_id: _parse_time(start_time)
+                for event_id, start_time in rows
+                if start_time is not None
+            }
+        LOGGER.debug(
+            "Fetched latest occurrence starts; events=%s",
+            len(starts),
+        )
+        return starts
 
     def delete_occurrence(self, occurrence_id: int) -> None:
         with self._sessions() as session:

@@ -27,6 +27,13 @@ class Config:
     gw2_api_base_url: str = "https://api.guildwars2.com"
     event_timezone: str = "UTC"
     debug: bool = False
+    web_enabled: bool = False
+    web_port: int = 8080
+    web_base_url: str | None = None
+    discord_oauth_client_id: str | None = None
+    discord_oauth_client_secret: str | None = None
+    web_session_secret: str | None = None
+    web_session_ttl_seconds: int = 604800
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -87,6 +94,45 @@ class Config:
             raise ConfigurationError(
                 "TZ must be a valid IANA timezone name"
             ) from exc
+        web_enabled = _boolean(values.get("WEB_ENABLED", "false"), "WEB_ENABLED")
+        web_port = _positive_int(values.get("WEB_PORT", "8080"), "WEB_PORT")
+        web_session_ttl_seconds = _positive_int(
+            values.get("WEB_SESSION_TTL_SECONDS", "604800"),
+            "WEB_SESSION_TTL_SECONDS",
+        )
+        web_base_url: str | None = None
+        discord_oauth_client_id: str | None = None
+        discord_oauth_client_secret: str | None = None
+        web_session_secret: str | None = None
+        if web_enabled:
+            web_required = (
+                "WEB_BASE_URL",
+                "DISCORD_OAUTH_CLIENT_ID",
+                "DISCORD_OAUTH_CLIENT_SECRET",
+                "WEB_SESSION_SECRET",
+            )
+            web_missing = [
+                name for name in web_required if not values.get(name, "").strip()
+            ]
+            if web_missing:
+                raise ConfigurationError(
+                    "WEB_ENABLED requires environment variables: "
+                    f"{', '.join(web_missing)}"
+                )
+            web_base_url = values["WEB_BASE_URL"].strip().rstrip("/")
+            if not web_base_url.startswith(("http://", "https://")):
+                raise ConfigurationError(
+                    "WEB_BASE_URL must start with http:// or https://"
+                )
+            discord_oauth_client_id = values["DISCORD_OAUTH_CLIENT_ID"].strip()
+            discord_oauth_client_secret = values[
+                "DISCORD_OAUTH_CLIENT_SECRET"
+            ].strip()
+            web_session_secret = values["WEB_SESSION_SECRET"].strip()
+            if len(web_session_secret) < 32:
+                raise ConfigurationError(
+                    "WEB_SESSION_SECRET must be at least 32 characters"
+                )
         return cls(
             discord_token=values["DISCORD_TOKEN"].strip(),
             discord_command_guild_id=discord_command_guild_id,
@@ -107,6 +153,13 @@ class Config:
             ).rstrip("/"),
             event_timezone=event_timezone,
             debug=_boolean(values.get("DEBUG", "false"), "DEBUG"),
+            web_enabled=web_enabled,
+            web_port=web_port,
+            web_base_url=web_base_url,
+            discord_oauth_client_id=discord_oauth_client_id,
+            discord_oauth_client_secret=discord_oauth_client_secret,
+            web_session_secret=web_session_secret,
+            web_session_ttl_seconds=web_session_ttl_seconds,
         )
 
 

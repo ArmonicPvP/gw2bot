@@ -584,7 +584,7 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
         )
         self.add_item(
             discord.ui.Label(
-                text="Delete the previous post when the next one is posted?",
+                text="Delete the previous post on repeat?",
                 description=(
                     "Keeps only the current occurrence in the channel."
                 ),
@@ -985,6 +985,22 @@ async def apply_event_edit(
         )
         return
     previous = bot.event_store.get_event(editing_event_id)
+    # The soonest non-OVER occurrence is what a date change reschedules, whether
+    # it is already posted or still waiting for the scheduler to post it.
+    primary = occurrences[0] if occurrences else None
+    # The event row's start_time is the series origin. For a repeating event the
+    # primary occurrence has long since advanced past it, and the draft is seeded
+    # with *that occurrence's* start, so writing the draft's start straight back
+    # would drag the origin forward on every edit until it no longer records when
+    # the series began. Shift the origin by the delta the commander actually
+    # applied instead: nothing moves when the date was left alone, and for a
+    # non-repeating event (whose origin and only occurrence are the same instant)
+    # it still lands exactly on the new start.
+    origin_start = edited.start_time
+    if previous is not None and primary is not None:
+        origin_start = previous.start_time + (
+            edited.start_time - primary.start_time
+        )
     try:
         updated = bot.event_store.update_event(
             event_id=editing_event_id,
@@ -993,7 +1009,7 @@ async def apply_event_edit(
             description=edited.description,
             channel_id=edited.channel_id,
             leader_discord_id=edited.leader_discord_id,
-            start_time=edited.start_time,
+            start_time=origin_start,
             duration_minutes=edited.duration_minutes,
             repeat_frequency=edited.repeat_frequency,
             repeat_days=edited.repeat_days,
@@ -1017,9 +1033,6 @@ async def apply_event_edit(
     category_changed = (
         previous is not None and previous.category is not updated.category
     )
-    # The soonest non-OVER occurrence is what a date change reschedules, whether
-    # it is already posted or still waiting for the scheduler to post it.
-    primary = occurrences[0] if occurrences else None
     attempted = 0
     refreshed = 0
     for occurrence in occurrences:
@@ -1027,13 +1040,15 @@ async def apply_event_edit(
         if (
             primary is not None
             and occurrence.occurrence_id == primary.occurrence_id
-            and occurrence.start_time != updated.start_time
+            and occurrence.start_time != edited.start_time
         ):
             # A date/time edit reschedules the occurrence the commander sees;
             # sync its own start_time so the embed and thread name update too.
+            # This tracks the draft's start, not the event's: the event now
+            # carries the series origin, which is a different instant.
             bot.event_store.set_occurrence_start_time(
                 occurrence.occurrence_id,
-                updated.start_time,
+                edited.start_time,
             )
             refetched = bot.event_store.get_occurrence(
                 occurrence.occurrence_id

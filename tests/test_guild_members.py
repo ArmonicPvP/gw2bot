@@ -311,6 +311,24 @@ class TestTrialMemberReport:
     def test_empty_before_mark_report_produces_no_messages(self) -> None:
         assert format_before_mark_trial_report([]) == []
 
+    def test_report_never_emits_a_chunk_without_a_member(self) -> None:
+        # A single line too long to fit under a bare header (or a bare
+        # greeting) must not flush an empty header message or a code block
+        # holding nothing but the greeting.
+        messages = format_before_mark_trial_report(
+            [TrialMemberReportEntry("A" * 1_990 + ".1234", 1, "Sunborne")]
+        )
+
+        assert messages
+        for message in messages:
+            assert "* " in message, f"chunk carries no member: {message[:80]!r}"
+        congrats = [
+            message for message in messages if message.startswith("```")
+        ]
+        assert congrats
+        for block in congrats:
+            assert "* (" in block
+
     def test_formats_contextual_reports_within_discord_limit(self) -> None:
         usernames = [f"Long Trial Username {index:03d}.1234" for index in range(150)]
 
@@ -347,17 +365,20 @@ class TestTrialMemberReport:
         assert "* Unresolved.5678" in messages[0]
         assert "Unresolved.5678 -" not in messages[0]
 
+    MIXED_STATUS_ENTRIES = [
+        TrialMemberReportEntry("Zulu.1234"),
+        TrialMemberReportEntry("Bravo.1234", 2, "Trial"),
+        TrialMemberReportEntry("Charlie.1234", 3, "Sunborne"),
+        TrialMemberReportEntry("Alpha.1234", 1, "Trial"),
+        TrialMemberReportEntry("Delta.1234", 4, "Sunborne"),
+        TrialMemberReportEntry("Echo.1234", 5),
+        TrialMemberReportEntry("Apex.1234"),
+    ]
+
     def test_sorts_by_discord_status_then_alphabetically(self) -> None:
         message = format_overdue_trial_report(
-            [
-                TrialMemberReportEntry("Zulu.1234"),
-                TrialMemberReportEntry("Bravo.1234", 2, "Trial"),
-                TrialMemberReportEntry("Charlie.1234", 3, "Sunborne"),
-                TrialMemberReportEntry("Alpha.1234", 1, "Trial"),
-                TrialMemberReportEntry("Delta.1234", 4, "Sunborne"),
-                TrialMemberReportEntry("Echo.1234", 5),
-                TrialMemberReportEntry("Apex.1234"),
-            ]
+            self.MIXED_STATUS_ENTRIES,
+            group_by_status=True,
         )[0]
 
         lines = [line for line in message.splitlines() if line.startswith("* ")]
@@ -370,6 +391,23 @@ class TestTrialMemberReport:
             "* Bravo.1234 - <@2> - Trial",
             "* Echo.1234 - <@5>",
             "* Apex.1234",
+            "* Zulu.1234",
+        ]
+
+    def test_status_grouping_is_opt_in(self) -> None:
+        # The warning and kick lists pass no grouping, and must stay purely
+        # alphabetical: who is closest to being removed has nothing to do with
+        # their Discord rank, so grouping would bury the wrong names.
+        message = format_overdue_trial_report(self.MIXED_STATUS_ENTRIES)[0]
+
+        lines = [line for line in message.splitlines() if line.startswith("* ")]
+        assert lines == [
+            "* Alpha.1234 - <@1> - Trial",
+            "* Apex.1234",
+            "* Bravo.1234 - <@2> - Trial",
+            "* Charlie.1234 - <@3> - Sunborne",
+            "* Delta.1234 - <@4> - Sunborne",
+            "* Echo.1234 - <@5>",
             "* Zulu.1234",
         ]
 

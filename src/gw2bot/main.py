@@ -17,7 +17,12 @@ def main() -> None:
 
     configure_logging(
         config.debug,
-        (config.gw2_api_key, config.discord_token),
+        (
+            config.gw2_api_key,
+            config.discord_token,
+            config.discord_oauth_client_secret or "",
+            config.web_session_secret or "",
+        ),
     )
     LOGGER.debug("Debug logging enabled")
     bot = Gw2Bot(config)

@@ -8,6 +8,11 @@ services:
     restart: unless-stopped
     volumes:
       - bot-data:/app/data
+    # Uncomment to publish the web calendar (set WEB_ENABLED=true in .env).
+    # Both sides follow WEB_PORT, so changing it in .env is enough; hardcoding
+    # 8080 here would silently publish a port the bot is not listening on.
+    # ports:
+    #   - "${WEB_PORT:-8080}:${WEB_PORT:-8080}"
 
 volumes:
   bot-data:
