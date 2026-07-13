@@ -275,6 +275,11 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
   padding-left: 0.5rem;
   color: var(--muted);
 }
+#tooltip .desc .md-subtext {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.25;
+}
 #tooltip .desc .md-gap { height: 0.4rem; }
 #tooltip .desc .spoiler {
   background: var(--bg);
@@ -493,6 +498,7 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
         continue;
       }
       var heading = /^(#{1,3})\\s+(.*)$/.exec(line);
+      var subtext = /^-#\\s+(.*)$/.exec(line);
       var listItem = /^\\s*[-*]\\s+(.*)$/.exec(line);
       var quote = /^>\\s?(.*)$/.exec(line);
       var row;
@@ -501,6 +507,10 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
       } else if (heading) {
         row = el("div", "md-h" + heading[1].length);
         appendInline(row, heading[2]);
+        parent.appendChild(row);
+      } else if (subtext) {
+        row = el("div", "md-subtext");
+        appendInline(row, subtext[1]);
         parent.appendChild(row);
       } else if (listItem) {
         row = el("div", "md-li");

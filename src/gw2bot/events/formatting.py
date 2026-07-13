@@ -215,7 +215,8 @@ def event_thread_name(
 ) -> str:
     start_local = start_time.astimezone(timezone)
     return (
-        f"{STATUS_EMOJI[status]}|{start_local:%m.%d.%Y}|{start_local:%H.%M}"
+        f"{STATUS_EMOJI[status]} | {start_local:%m.%d.%Y} | "
+        f"{start_local:%H:%M}"
     )
 
 

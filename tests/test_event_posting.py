@@ -560,7 +560,7 @@ class TestRefreshOccurrenceMessage:
         channel.thread.edit.assert_awaited_once()
         rename = channel.thread.edit.await_args
         assert rename is not None
-        assert rename.kwargs["name"].startswith("🟡|")
+        assert rename.kwargs["name"].startswith("🟡 |")
 
     async def test_unchanged_status_does_not_rename_the_thread(
         self,
@@ -723,7 +723,7 @@ class TestRefreshOccurrenceMessage:
         channel.thread.edit.assert_awaited_once()
         rename = channel.thread.edit.await_args
         assert rename is not None
-        assert rename.kwargs["name"].startswith("🟢|")
+        assert rename.kwargs["name"].startswith("🟢 |")
 
     async def test_forced_rename_failure_recovers_on_scheduler_retry(
         self,
