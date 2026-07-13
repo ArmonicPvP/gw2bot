@@ -3,7 +3,9 @@
 Every document is a fixed string with no server-side interpolation, so
 user-authored content can never be injected into markup. Dynamic data
 reaches the calendar page only through the JSON API and is inserted with
-``textContent`` on the client.
+``textContent`` on the client; event descriptions additionally pass
+through a small client-side Discord-markdown renderer that only ever
+builds DOM nodes and text nodes, never HTML strings.
 """
 
 from __future__ import annotations
@@ -21,11 +23,10 @@ _SHARED_STYLE = """
   --ongoing: #f1c40f;
   --full: #e74c3c;
   --over: #6b7178;
+  /* Discord's over-embed color; too dark for the badge, so the badge
+     keeps the lighter --over above. */
+  --over-embed: #31373d;
   --scheduled: #7289da;
-  --raid: #a55eea;
-  --strike: #fd9644;
-  --fractal: #2bcbba;
-  --wvw: #fc5c65;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -219,10 +220,12 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
 }
 .chip .time { color: var(--muted); flex-shrink: 0; }
 .chip .name { overflow: hidden; text-overflow: ellipsis; }
-.chip.cat-raid { border-left-color: var(--raid); }
-.chip.cat-strike { border-left-color: var(--strike); }
-.chip.cat-fractal { border-left-color: var(--fractal); }
-.chip.cat-wvw { border-left-color: var(--wvw); }
+/* The stripe mirrors the Discord embed color for the event's status. */
+.chip.st-open { border-left-color: var(--open); }
+.chip.st-ongoing { border-left-color: var(--ongoing); }
+.chip.st-full { border-left-color: var(--full); }
+.chip.st-over { border-left-color: var(--over-embed); }
+.chip.st-scheduled { border-left-color: var(--scheduled); }
 .chip.over { opacity: 0.45; }
 .chip.projected { border-style: dashed; border-left-style: solid; }
 #tooltip {
@@ -241,7 +244,43 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
 #tooltip h2 { font-size: 0.95rem; margin-bottom: 0.15rem; }
 #tooltip .meta { color: var(--muted); margin-bottom: 0.35rem; }
 #tooltip .desc { margin-bottom: 0.35rem; white-space: pre-wrap; }
+#tooltip .sep { border-top: 1px solid var(--border); margin: 0.45rem 0; }
 #tooltip .row { color: var(--text); }
+#tooltip .desc code,
+#tooltip .desc pre {
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 0.78rem;
+  background: var(--bg);
+  border-radius: 4px;
+}
+#tooltip .desc code { padding: 0 0.25rem; }
+#tooltip .desc pre {
+  padding: 0.35rem 0.5rem;
+  margin: 0.25rem 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+#tooltip .desc .md-h1 { font-size: 1rem; font-weight: 700; }
+#tooltip .desc .md-h2 { font-size: 0.95rem; font-weight: 700; }
+#tooltip .desc .md-h3 { font-size: 0.88rem; font-weight: 700; }
+#tooltip .desc .md-li { padding-left: 0.9rem; position: relative; }
+#tooltip .desc .md-li::before {
+  content: "\\2022";
+  position: absolute;
+  left: 0.25rem;
+  color: var(--muted);
+}
+#tooltip .desc .md-quote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.5rem;
+  color: var(--muted);
+}
+#tooltip .desc .md-gap { height: 0.4rem; }
+#tooltip .desc .spoiler {
+  background: var(--bg);
+  border-radius: 3px;
+  padding: 0 0.2rem;
+}
 .badge {
   display: inline-block;
   border-radius: 4px;
@@ -378,12 +417,13 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
   function statusLabel(status) {
     return status.charAt(0).toUpperCase() + status.slice(1);
   }
-  function categoryClass(category) {
-    if (category === "Raid") { return "cat-raid"; }
-    if (category === "Strike") { return "cat-strike"; }
-    if (category === "Fractal") { return "cat-fractal"; }
-    return "cat-wvw";
-  }
+  var statusClasses = {
+    open: "st-open",
+    ongoing: "st-ongoing",
+    full: "st-full",
+    over: "st-over",
+    scheduled: "st-scheduled"
+  };
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -392,9 +432,97 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
     return node;
   }
 
+  // Renders the Discord markdown subset used in event descriptions by
+  // building DOM nodes directly. Event text only ever becomes text nodes,
+  // so descriptions cannot inject markup.
+  var inlineRules = [
+    { re: /^`([^`]+)`/, tag: "code", raw: true },
+    { re: /^\\*\\*([\\s\\S]+?)\\*\\*(?!\\*)/, tag: "strong" },
+    { re: /^__([\\s\\S]+?)__(?!_)/, tag: "u" },
+    { re: /^~~([\\s\\S]+?)~~/, tag: "s" },
+    { re: /^\\|\\|([\\s\\S]+?)\\|\\|/, tag: "span", cls: "spoiler" },
+    { re: /^\\*([^*\\n]+)\\*/, tag: "em" },
+    { re: /^_([^_\\n]+)_/, tag: "em" }
+  ];
+
+  function appendInline(parent, text) {
+    var plain = "";
+    var i = 0;
+    while (i < text.length) {
+      var matched = null;
+      var rest = text.slice(i);
+      for (var r = 0; r < inlineRules.length; r += 1) {
+        var m = inlineRules[r].re.exec(rest);
+        if (m) { matched = { rule: inlineRules[r], groups: m }; break; }
+      }
+      if (!matched) {
+        plain += text.charAt(i);
+        i += 1;
+        continue;
+      }
+      if (plain) {
+        parent.appendChild(document.createTextNode(plain));
+        plain = "";
+      }
+      var node = el(matched.rule.tag, matched.rule.cls || null);
+      if (matched.rule.raw) {
+        node.textContent = matched.groups[1];
+      } else {
+        appendInline(node, matched.groups[1]);
+      }
+      parent.appendChild(node);
+      i += matched.groups[0].length;
+    }
+    if (plain) { parent.appendChild(document.createTextNode(plain)); }
+  }
+
+  function appendMarkdown(parent, text) {
+    var lines = text.replace(/\\r\\n/g, "\\n").split("\\n");
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+      if (/^\\s*```/.test(line)) {
+        var code = [];
+        i += 1;
+        while (i < lines.length && !/^\\s*```/.test(lines[i])) {
+          code.push(lines[i]);
+          i += 1;
+        }
+        i += 1;
+        parent.appendChild(el("pre", null, code.join("\\n")));
+        continue;
+      }
+      var heading = /^(#{1,3})\\s+(.*)$/.exec(line);
+      var listItem = /^\\s*[-*]\\s+(.*)$/.exec(line);
+      var quote = /^>\\s?(.*)$/.exec(line);
+      var row;
+      if (line.trim() === "") {
+        parent.appendChild(el("div", "md-gap"));
+      } else if (heading) {
+        row = el("div", "md-h" + heading[1].length);
+        appendInline(row, heading[2]);
+        parent.appendChild(row);
+      } else if (listItem) {
+        row = el("div", "md-li");
+        appendInline(row, listItem[1]);
+        parent.appendChild(row);
+      } else if (quote) {
+        row = el("div", "md-quote");
+        appendInline(row, quote[1]);
+        parent.appendChild(row);
+      } else {
+        row = el("div", "md-line");
+        appendInline(row, line);
+        parent.appendChild(row);
+      }
+      i += 1;
+    }
+  }
+
   function chipFor(entry, index) {
     var start = new Date(entry.start_epoch * 1000);
-    var chip = el("div", "chip " + categoryClass(entry.category));
+    var chip = el("div",
+      "chip " + (statusClasses[entry.status] || "st-scheduled"));
     if (entry.status === "over") { chip.classList.add("over"); }
     if (entry.projected) { chip.classList.add("projected"); }
     chip.setAttribute("data-i", String(index));
@@ -486,8 +614,11 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
       " " + formatTime(start) + " \\u2013 " + formatTime(end) +
       " (" + formatDuration(entry.duration_minutes) + ")"));
     if (entry.description) {
-      tooltip.appendChild(el("div", "desc", entry.description));
+      var desc = el("div", "desc");
+      appendMarkdown(desc, entry.description);
+      tooltip.appendChild(desc);
     }
+    tooltip.appendChild(el("div", "sep"));
     tooltip.appendChild(el("div", "row",
       "Leader: " + entry.leader_name));
     if (entry.projected) {

@@ -168,7 +168,7 @@ class TestConfig:
         )
 
         assert not config.web_enabled
-        assert config.web_port == 8080
+        assert config.web_port == 2222
         assert config.web_base_url is None
         assert config.discord_oauth_client_id is None
         assert config.discord_oauth_client_secret is None
