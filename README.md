@@ -32,7 +32,7 @@ For local development, copy `.env.example` to `.env`.
 | `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. |
 | `TZ` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times and to format event thread names. |
 | `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). Requires the four variables below. |
-| `WEB_PORT` | `8080` | Port the web calendar listens on. |
+| `WEB_PORT` | `2222` | Port the web calendar listens on. |
 | `WEB_BASE_URL` | unset | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed. |
 | `DISCORD_OAUTH_CLIENT_ID` | unset | OAuth2 client ID of the bot's Discord application. |
 | `DISCORD_OAUTH_CLIENT_SECRET` | unset | OAuth2 client secret of the bot's Discord application. |

@@ -28,7 +28,7 @@ class Config:
     event_timezone: str = "UTC"
     debug: bool = False
     web_enabled: bool = False
-    web_port: int = 8080
+    web_port: int = 2222
     web_base_url: str | None = None
     discord_oauth_client_id: str | None = None
     discord_oauth_client_secret: str | None = None
@@ -95,7 +95,7 @@ class Config:
                 "TZ must be a valid IANA timezone name"
             ) from exc
         web_enabled = _boolean(values.get("WEB_ENABLED", "false"), "WEB_ENABLED")
-        web_port = _positive_int(values.get("WEB_PORT", "8080"), "WEB_PORT")
+        web_port = _positive_int(values.get("WEB_PORT", "2222"), "WEB_PORT")
         web_session_ttl_seconds = _positive_int(
             values.get("WEB_SESSION_TTL_SECONDS", "604800"),
             "WEB_SESSION_TTL_SECONDS",
