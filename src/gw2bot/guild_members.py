@@ -377,6 +377,10 @@ def filter_sunborne_discord_entries(
     return filtered
 
 
+def _trial_username_sort_key(entry: TrialMemberReportEntry) -> tuple[str, str]:
+    return (entry.username.casefold(), entry.username)
+
+
 def _trial_status_sort_key(entry: TrialMemberReportEntry) -> tuple[int, str, str]:
     """Group entries by resolved status, then sort alphabetically within a group.
 
@@ -392,7 +396,7 @@ def _trial_status_sort_key(entry: TrialMemberReportEntry) -> tuple[int, str, str
         rank = 2
     else:
         rank = 3
-    return (rank, entry.username.casefold(), entry.username)
+    return (rank, *_trial_username_sort_key(entry))
 
 
 def _format_trial_report_line(
@@ -413,11 +417,17 @@ def _format_trial_report_line(
 def _pack_trial_report_messages(header: str, lines: Sequence[str]) -> list[str]:
     messages: list[str] = []
     current = header
+    holds_entry = False
     for line in lines:
-        if len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
+        # Only break to a new message once the current one has an entry to show
+        # for itself. A line too long to fit under a bare header would otherwise
+        # flush a header with nothing beneath it, and the message it opened next
+        # would still be over the limit.
+        if holds_entry and len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
             messages.append(current.rstrip())
             current = header
         current += line
+        holds_entry = True
     messages.append(current.rstrip())
     return messages
 
@@ -425,7 +435,16 @@ def _pack_trial_report_messages(header: str, lines: Sequence[str]) -> list[str]:
 def format_overdue_trial_report(
     entries: Sequence[TrialMemberReportEntry | str],
     header: str = TRIAL_PAST_MARK_HEADER,
+    *,
+    group_by_status: bool = False,
 ) -> list[str]:
+    """Format a Trial report.
+
+    ``group_by_status`` orders the list by resolved Discord status before
+    sorting alphabetically within each group. Only the past-14-day report wants
+    that; the warning and kick lists stay purely alphabetical, because status
+    says nothing about who is closest to being removed.
+    """
     if not entries:
         return []
 
@@ -436,7 +455,11 @@ def format_overdue_trial_report(
             else value
             for value in entries
         ),
-        key=_trial_status_sort_key,
+        key=(
+            _trial_status_sort_key
+            if group_by_status
+            else _trial_username_sort_key
+        ),
     )
     lines = [
         _format_trial_report_line(entry) + "\n" for entry in sorted_entries
@@ -462,13 +485,22 @@ def _pack_congrats_messages(lines: Sequence[str]) -> list[str]:
     closing = "```"
     messages: list[str] = []
     current = opening
+    holds_member = False
     for line in lines:
         candidate = f"{current}\n{line}"
-        if len(candidate) + 1 + len(closing) > DISCORD_MESSAGE_LIMIT:
+        # Only start a new block when the current one has a member to show for
+        # itself. A line long enough to overflow an empty block would otherwise
+        # emit a code block holding nothing but the greeting, and the block it
+        # opened next would still be over the limit.
+        if (
+            holds_member
+            and len(candidate) + 1 + len(closing) > DISCORD_MESSAGE_LIMIT
+        ):
             messages.append(f"{current}\n{closing}")
             current = f"{opening}\n{line}"
         else:
             current = candidate
+        holds_member = True
     messages.append(f"{current}\n{closing}")
     return messages
 
@@ -484,10 +516,7 @@ def format_before_mark_trial_report(
     """
     if not entries:
         return []
-    sorted_entries = sorted(
-        entries,
-        key=lambda entry: (entry.username.casefold(), entry.username),
-    )
+    sorted_entries = sorted(entries, key=_trial_username_sort_key)
     list_lines = [
         _format_trial_report_line(entry, show_status=False) + "\n"
         for entry in sorted_entries

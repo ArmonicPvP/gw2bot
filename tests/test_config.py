@@ -152,6 +152,158 @@ class TestConfig:
                 }
             )
 
+    def test_web_disabled_by_default_and_ignores_web_values(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                "GW2_API_KEY": "gw2-key",
+                "GW2_GUILD_ID": "guild-id",
+                "WEB_BASE_URL": "https://calendar.example.test",
+                "DISCORD_OAUTH_CLIENT_ID": "client-id",
+                "DISCORD_OAUTH_CLIENT_SECRET": "client-secret",
+                "WEB_SESSION_SECRET": "s" * 32,
+            }
+        )
+
+        assert not config.web_enabled
+        assert config.web_port == 8080
+        assert config.web_base_url is None
+        assert config.discord_oauth_client_id is None
+        assert config.discord_oauth_client_secret is None
+        assert config.web_session_secret is None
+        assert config.web_session_ttl_seconds == 604800
+
+    def test_web_enabled_reads_all_web_values(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                "GW2_API_KEY": "gw2-key",
+                "GW2_GUILD_ID": "guild-id",
+                "WEB_ENABLED": "true",
+                "WEB_PORT": "9090",
+                "WEB_BASE_URL": "https://calendar.example.test/",
+                "DISCORD_OAUTH_CLIENT_ID": " client-id ",
+                "DISCORD_OAUTH_CLIENT_SECRET": " client-secret ",
+                "WEB_SESSION_SECRET": "s" * 32,
+            }
+        )
+
+        assert config.web_enabled
+        assert config.web_port == 9090
+        assert config.web_base_url == "https://calendar.example.test"
+        assert config.discord_oauth_client_id == "client-id"
+        assert config.discord_oauth_client_secret == "client-secret"
+        assert config.web_session_secret == "s" * 32
+
+    def test_web_enabled_reports_all_missing_web_values(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match=(
+                "WEB_BASE_URL, DISCORD_OAUTH_CLIENT_ID, "
+                "DISCORD_OAUTH_CLIENT_SECRET, WEB_SESSION_SECRET"
+            ),
+        ):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "WEB_ENABLED": "true",
+                }
+            )
+
+    def test_web_enabled_rejects_invalid_base_url_scheme(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match="WEB_BASE_URL must start with http:// or https://",
+        ):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "WEB_ENABLED": "true",
+                    "WEB_BASE_URL": "calendar.example.test",
+                    "DISCORD_OAUTH_CLIENT_ID": "client-id",
+                    "DISCORD_OAUTH_CLIENT_SECRET": "client-secret",
+                    "WEB_SESSION_SECRET": "s" * 32,
+                }
+            )
+
+    def test_web_enabled_rejects_short_session_secret(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match="WEB_SESSION_SECRET must be at least 32 characters",
+        ):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "WEB_ENABLED": "true",
+                    "WEB_BASE_URL": "https://calendar.example.test",
+                    "DISCORD_OAUTH_CLIENT_ID": "client-id",
+                    "DISCORD_OAUTH_CLIENT_SECRET": "client-secret",
+                    "WEB_SESSION_SECRET": "short",
+                }
+            )
+
+    def test_web_session_ttl_is_configurable(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                "GW2_API_KEY": "gw2-key",
+                "GW2_GUILD_ID": "guild-id",
+                "WEB_SESSION_TTL_SECONDS": "3600",
+            }
+        )
+
+        assert config.web_session_ttl_seconds == 3600
+
+    def test_web_session_ttl_rejects_non_positive_values(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match="WEB_SESSION_TTL_SECONDS must be greater than zero",
+        ):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "WEB_SESSION_TTL_SECONDS": "0",
+                }
+            )
+
+    def test_web_enabled_rejects_invalid_port(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match="WEB_PORT must be greater than zero",
+        ):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                    "GW2_API_KEY": "gw2-key",
+                    "GW2_GUILD_ID": "guild-id",
+                    "WEB_PORT": "0",
+                }
+            )
+
     @patch("gw2bot.config.load_dotenv")
     @patch.dict(
         "os.environ",

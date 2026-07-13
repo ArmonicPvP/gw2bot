@@ -21,4 +21,8 @@ COPY --chown="${APP_UID}:${APP_GID}" src ./src
 
 USER ${APP_UID}:${APP_GID}
 
+# Documents the default web calendar port; only served when WEB_ENABLED=true,
+# and WEB_PORT overrides it at runtime (EXPOSE does not publish anything).
+EXPOSE 8080
+
 CMD ["python", "-m", "gw2bot"]

@@ -161,7 +161,9 @@ async def build_trial_report_messages(
     ]
     messages = (
         format_before_mark_trial_report(before_mark_entries)
-        + format_overdue_trial_report(overdue_entries)
+        # Only this report groups by resolved Discord status; the warning and
+        # kick lists below stay alphabetical.
+        + format_overdue_trial_report(overdue_entries, group_by_status=True)
         + format_overdue_trial_report(
             pending_entries,
             header=TRIAL_WARNING_PENDING_HEADER,

@@ -5,6 +5,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
+import discord
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -28,6 +29,7 @@ from gw2bot.events.views import (
     EventDetailsModal,
     EventDraft,
     EventEditConfirmView,
+    EventFieldEditModal,
     EventRepeatModal,
     EventScheduleModal,
     EventSignOutButton,
@@ -232,6 +234,68 @@ class TestEventScheduleModal:
 
         assert draft.duration_minutes is None
         interaction.response.send_message.assert_awaited_once()
+
+
+class TestModalComponentLimits:
+    """Discord rejects an over-long label with a 400 at send_modal time.
+
+    Nothing in the type system or the library catches it, so every modal in
+    the event flow is built here and measured against Discord's limits.
+    """
+
+    # https://discord.com/developers/docs/components/reference
+    LABEL_MAX_LENGTH = 45
+    DESCRIPTION_MAX_LENGTH = 100
+
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            start_text=FUTURE_START_TEXT,
+            duration_minutes=90,
+            duration_text="01:30",
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+
+    def modals(self) -> list[discord.ui.Modal]:
+        bot = make_bot()
+        return [
+            EventDetailsModal(bot, self.make_draft()),
+            EventScheduleModal(bot, self.make_draft()),
+            EventRepeatModal(bot, self.make_draft()),
+            *(
+                EventFieldEditModal(bot, self.make_draft(), field_name)
+                for field_name in ("title", "description", "start", "duration")
+            ),
+        ]
+
+    def test_labels_are_within_discord_limits(self) -> None:
+        for modal in self.modals():
+            labels = [
+                item
+                for item in modal.children
+                if isinstance(item, discord.ui.Label)
+            ]
+            assert labels
+            for label in labels:
+                assert 1 <= len(label.text) <= self.LABEL_MAX_LENGTH, (
+                    f"{type(modal).__name__} label {label.text!r} is "
+                    f"{len(label.text)} characters"
+                )
+                if label.description is not None:
+                    assert (
+                        1
+                        <= len(label.description)
+                        <= self.DESCRIPTION_MAX_LENGTH
+                    ), (
+                        f"{type(modal).__name__} description "
+                        f"{label.description!r} is "
+                        f"{len(label.description)} characters"
+                    )
 
 
 class TestEventRepeatModal:
@@ -1132,6 +1196,71 @@ class TestEventEditConfirmView:
         assert reloaded is not None
         assert reloaded.start_time == SERIES_WEEK4
         assert store.get_event(event.event_id).title == "Renamed clear"  # type: ignore[union-attr]
+
+    async def test_editing_recurring_event_preserves_the_series_origin(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The draft is seeded with the *live occurrence's* start, which has long
+        # since advanced past the series origin. Writing it back into the event
+        # row would drag the origin forward on every edit until it no longer
+        # records when the series began.
+        event, _ = make_advanced_recurring_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=SERIES_WEEK4,
+        )
+        draft.title = "Renamed clear"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        reloaded = store.get_event(event.event_id)
+        assert reloaded is not None
+        assert reloaded.title == "Renamed clear"
+        assert reloaded.start_time == SERIES_ORIGIN
+
+    async def test_rescheduling_a_series_shifts_the_origin_by_the_same_delta(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Moving the occurrence an hour later moves the origin an hour later
+        # too, so the origin keeps describing the same series rather than being
+        # overwritten with the occurrence's absolute date.
+        event, occurrence = make_advanced_recurring_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=SERIES_WEEK4,
+        )
+        new_start = SERIES_WEEK4 + timedelta(hours=1)
+        draft.start_time = new_start
+        draft.start_text = "01.27.2107 21:00"
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        rescheduled = store.get_occurrence(occurrence.occurrence_id)
+        assert rescheduled is not None
+        assert rescheduled.start_time == new_start
+        reloaded = store.get_event(event.event_id)
+        assert reloaded is not None
+        assert reloaded.start_time == SERIES_ORIGIN + timedelta(hours=1)
 
     async def test_editing_date_reschedules_an_unposted_occurrence(
         self,

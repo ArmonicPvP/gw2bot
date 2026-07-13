@@ -679,6 +679,217 @@ class TestEventStoreAutoSignups:
         assert [entry.discord_user_id for entry in entries] == [1]
 
 
+class TestEventStoreOccurrenceRange:
+    def test_range_is_inclusive_start_exclusive_end(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        before = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 29, 20, 0, tzinfo=UTC),
+        )
+        at_start = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 0, 0, tzinfo=UTC),
+        )
+        inside = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 31, 20, 0, tzinfo=UTC),
+        )
+        at_end = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+        )
+
+        results = store.get_occurrences_between(
+            datetime(2027, 1, 30, 0, 0, tzinfo=UTC),
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+        )
+
+        occurrence_ids = [
+            occurrence.occurrence_id for _, occurrence in results
+        ]
+        assert occurrence_ids == [
+            at_start.occurrence_id,
+            inside.occurrence_id,
+        ]
+        assert before.occurrence_id not in occurrence_ids
+        assert at_end.occurrence_id not in occurrence_ids
+
+    def test_results_are_ordered_and_paired_with_events(
+        self,
+        store: EventStore,
+    ) -> None:
+        first_event = create_event(store, title="First")
+        second_event = create_event(store, title="Second")
+        later = store.create_occurrence(
+            second_event.event_id,
+            datetime(2027, 1, 31, 20, 0, tzinfo=UTC),
+        )
+        earlier = store.create_occurrence(
+            first_event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+
+        results = store.get_occurrences_between(
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+        )
+
+        assert [
+            (event.event_id, occurrence.occurrence_id)
+            for event, occurrence in results
+        ] == [
+            (first_event.event_id, earlier.occurrence_id),
+            (second_event.event_id, later.occurrence_id),
+        ]
+
+    def test_cancelled_events_are_excluded(self, tmp_path: Path) -> None:
+        db_path = str(tmp_path / "gw2bot.db")
+        store = EventStore(db_path)
+        try:
+            event = create_event(store)
+            store.create_occurrence(event.event_id, START)
+            engine = create_database_engine(db_path)
+            with engine.begin() as connection:
+                connection.execute(
+                    text("UPDATE gw2_events SET cancelled = 1"),
+                )
+            engine.dispose()
+
+            results = store.get_occurrences_between(
+                datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+                datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            )
+        finally:
+            store.close()
+
+        assert results == []
+
+
+class TestEventStoreCalendarBatches:
+    def test_signups_between_groups_by_occurrence_in_range(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        inside = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+        outside = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 3, 30, 20, 0, tzinfo=UTC),
+        )
+        for occurrence_id in (inside.occurrence_id, outside.occurrence_id):
+            store.add_signup(
+                occurrence_id=occurrence_id,
+                discord_user_id=1,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+
+        signups = store.get_signups_between(
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+        )
+
+        assert list(signups) == [inside.occurrence_id]
+        assert [
+            signup.discord_user_id
+            for signup in signups[inside.occurrence_id]
+        ] == [1]
+
+    def test_signups_between_matches_per_occurrence_lookup(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        for user_id in (1, 2, 3):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=user_id == 3,
+            )
+
+        signups = store.get_signups_between(
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+        )
+
+        assert signups[occurrence.occurrence_id] == store.get_signups(
+            occurrence.occurrence_id
+        )
+
+    def test_signups_between_excludes_cancelled_events(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = str(tmp_path / "gw2bot.db")
+        store = EventStore(db_path)
+        try:
+            event = create_event(store)
+            occurrence = store.create_occurrence(event.event_id, START)
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=1,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+            engine = create_database_engine(db_path)
+            with engine.begin() as connection:
+                connection.execute(text("UPDATE gw2_events SET cancelled = 1"))
+            engine.dispose()
+
+            signups = store.get_signups_between(
+                datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+                datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            )
+        finally:
+            store.close()
+
+        assert signups == {}
+
+    def test_latest_occurrence_starts_returns_newest_per_event(
+        self,
+        store: EventStore,
+    ) -> None:
+        first = create_event(store, title="First")
+        second = create_event(store, title="Second")
+        without_occurrences = create_event(store, title="Third")
+        store.create_occurrence(
+            first.event_id,
+            datetime(2027, 1, 10, 20, 0, tzinfo=UTC),
+        )
+        newest = datetime(2027, 2, 20, 20, 0, tzinfo=UTC)
+        store.create_occurrence(first.event_id, newest)
+        store.create_occurrence(
+            first.event_id,
+            datetime(2027, 1, 15, 20, 0, tzinfo=UTC),
+        )
+        store.create_occurrence(
+            second.event_id,
+            datetime(2027, 1, 5, 20, 0, tzinfo=UTC),
+        )
+
+        starts = store.get_latest_occurrence_starts()
+
+        assert starts[first.event_id] == newest
+        assert starts[second.event_id] == datetime(
+            2027, 1, 5, 20, 0, tzinfo=UTC
+        )
+        assert without_occurrences.event_id not in starts
+
+
 class TestEventStoreLoggingSafety:
     def test_store_logs_never_contain_user_content(
         self,
