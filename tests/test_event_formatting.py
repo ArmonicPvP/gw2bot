@@ -263,7 +263,7 @@ class TestEventThreadName:
 
         name = event_thread_name(EventStatus.OPEN, start, NEW_YORK)
 
-        assert name == "🟢|01.30.2027|20.05"
+        assert name == "🟢 | 01.30.2027 | 20:05"
 
     def test_uses_the_status_emoji(self) -> None:
         start = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
@@ -272,7 +272,7 @@ class TestEventThreadName:
             EventStatus.OVER,
             start,
             UTC_ZONE,
-        ).startswith("⚫️|")
+        ).startswith("⚫️ |")
 
 
 class TestFormatRoleGroups:
