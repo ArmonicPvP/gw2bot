@@ -160,21 +160,98 @@ button.active { background: var(--accent); border-color: var(--accent); }
 #period { font-weight: 600; font-size: 0.95rem; min-width: 11rem; }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
+#tz { color: var(--muted); font-size: 0.78rem; }
 header a { font-size: 0.85rem; }
 header form { display: flex; }
-main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
-#grid { display: grid; gap: 4px; height: 100%; min-height: 24rem; }
+main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
+#grid { display: grid; }
 #grid.month {
+  gap: 4px;
+  /* main only pads the bottom, so the month grid keeps its own breathing room
+     at the top and gives that height back to stay inside the viewport. */
+  margin-top: 0.75rem;
+  height: calc(100% - 0.75rem);
+  min-height: 24rem;
   grid-template-columns: repeat(7, minmax(6rem, 1fr));
   grid-template-rows: auto repeat(6, minmax(5.5rem, 1fr));
 }
-#grid.week {
-  grid-template-columns: repeat(7, minmax(6rem, 1fr));
-  grid-template-rows: auto minmax(20rem, 1fr);
+/* Day and week are time grids: an hour gutter down the left, one column per
+   day, and every event positioned and sized from its own start and duration.
+   --hour-h is the height of one hour; the script converts minutes to pixels
+   against it, so the two must stay in step. */
+#grid.timegrid {
+  --hour-h: 48px;
+  --gutter: 3.75rem;
+  grid-template-rows: auto 1fr;
+  align-content: start;
 }
-#grid.day {
-  grid-template-columns: minmax(12rem, 1fr);
-  grid-template-rows: auto minmax(20rem, 1fr);
+#grid.timegrid.day { grid-template-columns: var(--gutter) 1fr; }
+#grid.timegrid.week {
+  grid-template-columns: var(--gutter) repeat(7, minmax(4.5rem, 1fr));
+}
+/* The day headers stay put while the 24-hour body scrolls under them. */
+.tg-corner, .tg-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: 0.3rem 0.25rem 0.35rem;
+  text-align: center;
+}
+.tg-dow {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.tg-daynum { font-size: 1rem; font-weight: 600; }
+.tg-head.today .tg-dow, .tg-head.today .tg-daynum { color: var(--accent); }
+.tg-hour { height: var(--hour-h); border-top: 1px solid var(--border); }
+.tg-gutter .tg-hour {
+  border-top-color: transparent;
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-align: right;
+  padding: 0.1rem 0.4rem 0 0;
+  white-space: nowrap;
+}
+.tg-col {
+  position: relative;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+.tg-col:last-child { border-right: 1px solid var(--border); }
+.tg-col.today { background: var(--panel-2); }
+.chip.tg-ev {
+  position: absolute;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  margin: 0;
+  padding: 0.1rem 0.3rem;
+  line-height: 1.25;
+  z-index: 1;
+}
+.chip.tg-ev .time { font-size: 0.7rem; }
+.chip.tg-ev .name { max-width: 100%; }
+.tg-now {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 2px solid var(--full);
+  z-index: 2;
+  pointer-events: none;
+}
+.tg-now::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--full);
 }
 .dow {
   text-align: center;
@@ -318,6 +395,7 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
     <button type="button" id="next" aria-label="Next">&rsaquo;</button>
   </div>
   <span id="period"></span>
+  <span id="tz"></span>
   <span class="spacer"></span>
   <span id="whoami"></span>
   <form method="post" action="/logout">
@@ -333,6 +411,7 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
 "use strict";
 (function () {
   var grid = document.getElementById("grid");
+  var scroller = document.querySelector("main");
   var tooltip = document.getElementById("tooltip");
   var periodLabel = document.getElementById("period");
   var statusLine = document.getElementById("status");
@@ -542,15 +621,11 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
     return chip;
   }
 
-  function buildCell(date, monthIndex, showDayNumber) {
+  function buildCell(date, monthIndex) {
     var cell = el("div", "cell");
-    if (monthIndex !== null && date.getMonth() !== monthIndex) {
-      cell.classList.add("outside");
-    }
+    if (date.getMonth() !== monthIndex) { cell.classList.add("outside"); }
     if (sameDay(date, new Date())) { cell.classList.add("today"); }
-    if (showDayNumber) {
-      cell.appendChild(el("div", "daynum", String(date.getDate())));
-    }
+    cell.appendChild(el("div", "daynum", String(date.getDate())));
     var next = addDays(date, 1);
     entries.forEach(function (entry, index) {
       var start = new Date(entry.start_epoch * 1000);
@@ -563,26 +638,180 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
 
   var dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+  // Must match --hour-h in the stylesheet: an event's offset and height are
+  // computed in pixels against the hour rows drawn from it.
+  var HOUR_PX = 48;
+  var MINUTES_PER_DAY = 1440;
+  // A 15-minute event would otherwise be too short to read its own title.
+  var MIN_EVENT_PX = 20;
+  var DEFAULT_SCROLL_HOUR = 8;
+
+  function minutesIntoDay(date) {
+    return date.getHours() * 60 + date.getMinutes();
+  }
+  function pixelsFor(minutes) {
+    return minutes * HOUR_PX / 60;
+  }
+  function formatHour(hour) {
+    // Local hour labels, in the browser's own 12/24-hour convention.
+    return new Date(2000, 0, 1, hour).toLocaleTimeString(
+      undefined, { hour: "numeric" });
+  }
+
+  // The events that start on this day, each with the span it occupies in the
+  // column. start_epoch is an absolute instant, so every offset below is the
+  // event's local wall-clock time in the viewer's own time zone. An event
+  // running past midnight is clipped to the end of the day; it is only ever
+  // drawn in the column it starts in.
+  function dayItems(date) {
+    var next = addDays(date, 1);
+    var items = [];
+    entries.forEach(function (entry, index) {
+      var start = new Date(entry.start_epoch * 1000);
+      if (start < date || start >= next) { return; }
+      var startMin = minutesIntoDay(start);
+      items.push({
+        entry: entry,
+        index: index,
+        startMin: startMin,
+        endMin: Math.min(
+          MINUTES_PER_DAY,
+          startMin + Math.max(1, entry.duration_minutes)),
+        column: 0,
+        columns: 1
+      });
+    });
+    items.sort(function (a, b) {
+      return a.startMin - b.startMin || b.endMin - a.endMin;
+    });
+    return items;
+  }
+
+  // Pack one run of transitively overlapping events into as few side-by-side
+  // lanes as it needs, reusing a lane as soon as its last event has ended.
+  // Every event in the run is then drawn at the same width, so no lane hangs
+  // over an event that does not overlap it.
+  function assignLanes(cluster) {
+    var laneEnds = [];
+    cluster.forEach(function (item) {
+      var lane = 0;
+      while (lane < laneEnds.length && laneEnds[lane] > item.startMin) {
+        lane += 1;
+      }
+      laneEnds[lane] = item.endMin;
+      item.column = lane;
+    });
+    cluster.forEach(function (item) { item.columns = laneEnds.length; });
+  }
+
+  function layoutDay(items) {
+    var cluster = [];
+    var clusterEnd = -1;
+    items.forEach(function (item) {
+      if (cluster.length && item.startMin >= clusterEnd) {
+        assignLanes(cluster);
+        cluster = [];
+        clusterEnd = -1;
+      }
+      cluster.push(item);
+      clusterEnd = Math.max(clusterEnd, item.endMin);
+    });
+    if (cluster.length) { assignLanes(cluster); }
+    return items;
+  }
+
+  function timeBlock(item) {
+    var chip = chipFor(item.entry, item.index);
+    chip.classList.add("tg-ev");
+    var width = 100 / item.columns;
+    chip.style.top = pixelsFor(item.startMin) + "px";
+    chip.style.height = Math.max(
+      MIN_EVENT_PX, pixelsFor(item.endMin - item.startMin)) + "px";
+    chip.style.left = "calc(" + (item.column * width) + "% + 2px)";
+    chip.style.width = "calc(" + width + "% - 4px)";
+    return chip;
+  }
+
+  function hourGutter() {
+    var gutter = el("div", "tg-gutter");
+    for (var hour = 0; hour < 24; hour += 1) {
+      var cell = el("div", "tg-hour");
+      cell.appendChild(el("span", null, formatHour(hour)));
+      gutter.appendChild(cell);
+    }
+    return gutter;
+  }
+
+  function dayHeader(date, longName) {
+    var head = el("div", "tg-head");
+    if (sameDay(date, new Date())) { head.classList.add("today"); }
+    head.appendChild(el("div", "tg-dow", date.toLocaleDateString(
+      undefined, { weekday: longName ? "long" : "short" })));
+    head.appendChild(el("div", "tg-daynum", String(date.getDate())));
+    return head;
+  }
+
+  function dayColumn(date, items) {
+    var column = el("div", "tg-col");
+    var now = new Date();
+    for (var hour = 0; hour < 24; hour += 1) {
+      column.appendChild(el("div", "tg-hour"));
+    }
+    items.forEach(function (item) {
+      column.appendChild(timeBlock(item));
+    });
+    if (sameDay(date, now)) {
+      column.classList.add("today");
+      var marker = el("div", "tg-now");
+      marker.style.top = pixelsFor(minutesIntoDay(now)) + "px";
+      column.appendChild(marker);
+    }
+    return column;
+  }
+
+  function renderTimeGrid(range, days) {
+    var dates = [];
+    for (var offset = 0; offset < days; offset += 1) {
+      dates.push(addDays(range.start, offset));
+    }
+    grid.appendChild(el("div", "tg-corner"));
+    dates.forEach(function (date) {
+      grid.appendChild(dayHeader(date, days === 1));
+    });
+    grid.appendChild(hourGutter());
+    var earliest = null;
+    dates.forEach(function (date) {
+      var items = layoutDay(dayItems(date));
+      grid.appendChild(dayColumn(date, items));
+      items.forEach(function (item) {
+        if (earliest === null || item.startMin < earliest) {
+          earliest = item.startMin;
+        }
+      });
+    });
+    // A 24-hour day is taller than the viewport, so open it where the events
+    // are rather than at midnight.
+    var target = earliest === null ? DEFAULT_SCROLL_HOUR * 60 : earliest;
+    scroller.scrollTop = Math.max(0, pixelsFor(target) - HOUR_PX / 2);
+  }
+
   function render() {
-    grid.className = state.view;
+    grid.className = state.view === "month"
+      ? "month"
+      : "timegrid " + state.view;
     grid.replaceChildren();
     hideTooltip();
     var range = rangeFor();
-    if (state.view === "day") {
-      grid.appendChild(el("div", "dow", state.anchor.toLocaleDateString(
-        undefined, { weekday: "long" })));
-      grid.appendChild(buildCell(range.start, null, false));
-    } else {
+    if (state.view === "month") {
       dayNames.forEach(function (name) {
         grid.appendChild(el("div", "dow", name));
       });
-      var days = state.view === "week" ? 7 : 42;
-      var monthIndex =
-        state.view === "month" ? state.anchor.getMonth() : null;
-      for (var offset = 0; offset < days; offset += 1) {
-        grid.appendChild(
-          buildCell(addDays(range.start, offset), monthIndex, true));
+      for (var offset = 0; offset < 42; offset += 1) {
+        grid.appendChild(buildCell(
+          addDays(range.start, offset), state.anchor.getMonth()));
       }
+    } else {
+      renderTimeGrid(range, state.view === "day" ? 1 : 7);
     }
     renderPeriodLabel(range);
     statusLine.textContent = entries.length
@@ -752,6 +981,19 @@ main { flex: 1; overflow: auto; padding: 0.75rem 1rem 1rem; }
       document.getElementById("whoami").textContent = payload.name || "";
     })
     .catch(function () {});
+
+  // Every time on this page is rendered from the event's absolute instant
+  // through the browser's own clock, so name the zone that produced them.
+  function timezoneLabel() {
+    var zone = "";
+    try {
+      zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch (error) {
+      zone = "";
+    }
+    return zone ? "Times in " + zone : "Times in your local time zone";
+  }
+  document.getElementById("tz").textContent = timezoneLabel();
 
   readHash();
   syncViewButtons();
