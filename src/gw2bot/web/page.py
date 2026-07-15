@@ -133,7 +133,14 @@ CALENDAR_PAGE = (
 <style>"""
     + _SHARED_STYLE
     + """
-body { display: flex; flex-direction: column; height: 100vh; }
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  /* The layout is a fixed-height app: the header is pinned and only <main>
+     scrolls, so the page itself must never grow a scrollbar of its own. */
+  overflow: hidden;
+}
 header {
   display: flex;
   align-items: center;
@@ -163,14 +170,24 @@ button.active { background: var(--accent); border-color: var(--accent); }
 #tz { color: var(--muted); font-size: 0.78rem; }
 header a { font-size: 0.85rem; }
 header form { display: flex; }
-main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
+main {
+  /* min-height:0 lets this flex child shrink to the viewport so its own
+     overflow scrolls, instead of pushing the page past 100vh. A column flex
+     box so the month grid can flex to leave room for the status line. */
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 1rem;
+  display: flex;
+  flex-direction: column;
+}
 #grid { display: grid; }
 #grid.month {
   gap: 4px;
-  /* main only pads the bottom, so the month grid keeps its own breathing room
-     at the top and gives that height back to stay inside the viewport. */
-  margin-top: 0.75rem;
-  height: calc(100% - 0.75rem);
+  /* Take the space left after the status line instead of a fixed height, so
+     the grid and the status line together never spill past main. */
+  flex: 1;
+  margin: 0.75rem 0;
   min-height: 24rem;
   grid-template-columns: repeat(7, minmax(6rem, 1fr));
   grid-template-rows: auto repeat(6, minmax(5.5rem, 1fr));
