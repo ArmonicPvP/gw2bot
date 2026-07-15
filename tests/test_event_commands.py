@@ -2069,6 +2069,47 @@ class TestRemoveSignups:
             in interaction.response.edit_message.await_args.kwargs["content"]
         )
 
+    async def test_removal_stops_when_the_event_ends_mid_loop(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The end check runs once before the loop, but remove_signup awaits
+        # Discord I/O between members, so the event can cross its end partway
+        # through. Every member still pending when it does must be left alone.
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        # False for the pre-loop check and the first iteration, then True: the
+        # event ends right after the first member is removed.
+        calls = {"count": 0}
+
+        def fake_ended(_event: Any, _occurrence: Any, _now: Any) -> bool:
+            calls["count"] += 1
+            return calls["count"] > 2
+
+        monkeypatch.setattr(
+            "gw2bot.events.views._occurrence_has_ended",
+            fake_ended,
+        )
+
+        await view.remove(interaction, picked_users(2, 3, 4))
+
+        # Only the first pick, applied while the event was still live, is gone;
+        # the members pending when it ended stay signed up.
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert store.get_signup(occurrence.occurrence_id, 3) is not None
+        assert store.get_signup(occurrence.occurrence_id, 4) is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        # The edit session is void once the event ends, so no preview returns.
+        assert kwargs["view"] is None
+        assert "Removed <@2>" in kwargs["content"]
+        assert "ended before" in kwargs["content"]
+        assert "<@3>" in kwargs["content"]
+        assert "<@4>" in kwargs["content"]
+
     async def test_removal_reports_a_deleted_event(
         self,
         fake_bot: Any,

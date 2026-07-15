@@ -1065,7 +1065,23 @@ class RemoveSignupsView(discord.ui.View):
         removed: list[int] = []
         skipped: list[int] = []
         promoted: list[int] = []
-        for user in users:
+        kept_after_end: list[int] = []
+        for index, user in enumerate(users):
+            # The picker holds several members and remove_signup awaits Discord
+            # I/O between each, so the event can cross its end partway through
+            # the loop even though the pre-loop check passed. Re-check every
+            # iteration and stop the moment it has ended, so no removal (and no
+            # waitlist promotion behind it) ever lands on a finished roster.
+            if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+                kept_after_end = [pending.id for pending in users[index:]]
+                LOGGER.debug(
+                    "Event ended mid-removal; stopping; occurrence_id=%s "
+                    "user_id=%s kept=%s",
+                    occurrence.occurrence_id,
+                    interaction.user.id,
+                    len(kept_after_end),
+                )
+                break
             signup, promotion = await remove_signup(
                 self._bot,
                 event,
@@ -1080,7 +1096,7 @@ class RemoveSignupsView(discord.ui.View):
                 promoted.append(promotion.discord_user_id)
         LOGGER.debug(
             "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
-            "picked=%s removed=%s not_signed_up=%s promoted=%s",
+            "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s",
             event.event_id,
             occurrence.occurrence_id,
             interaction.user.id,
@@ -1088,14 +1104,27 @@ class RemoveSignupsView(discord.ui.View):
             len(removed),
             len(skipped),
             len(promoted),
+            len(kept_after_end),
         )
+        summary = _removal_summary(removed, skipped, promoted, kept_after_end)
+        if kept_after_end:
+            # The event ended partway through, so the edit session is no longer
+            # valid (an ended event cannot be edited). Report what was applied
+            # and stop, rather than re-showing an edit preview that can no
+            # longer be saved.
+            await interaction.edit_original_response(
+                content=summary,
+                embeds=[],
+                view=None,
+            )
+            return
         embeds, view = build_event_preview(
             self._bot,
             self._draft,
             primary=occurrence,
         )
         await interaction.edit_original_response(
-            content=_removal_summary(removed, skipped, promoted),
+            content=summary,
             embeds=embeds,
             view=view,
         )
@@ -1109,6 +1138,7 @@ def _removal_summary(
     removed: list[int],
     skipped: list[int],
     promoted: list[int],
+    kept_after_end: list[int] | None = None,
 ) -> str:
     lines: list[str] = []
     if removed:
@@ -1123,6 +1153,12 @@ def _removal_summary(
         )
     if promoted:
         lines.append(f"{_mention_list(promoted)} moved up from the waitlist.")
+    if kept_after_end:
+        lines.append(
+            "The event ended before the rest could be removed, so "
+            + _mention_list(kept_after_end)
+            + (" was kept." if len(kept_after_end) == 1 else " were kept.")
+        )
     return "\n".join(lines)
 
 
