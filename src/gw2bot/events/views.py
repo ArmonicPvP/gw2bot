@@ -942,12 +942,23 @@ class EventEditConfirmView(_PreviewConfirmView):
             interaction.user.id,
             len(signups),
         )
+        # Keep the roster embed on screen while the picker is open: the picker
+        # is a guild-wide member search, not a list of the signed-up members,
+        # so without the embed the commander would have to pick from memory.
+        # Mirror how build_event_preview renders the editing preview so the two
+        # views show the same roster.
+        roster = event_embed(
+            self._draft.to_event(editing_event_id),
+            signups,
+            EventStatus.OPEN,
+            event_id_text=str(editing_event_id),
+        )
         await interaction.response.edit_message(
             content=(
                 "Pick the members to remove from this event's roster. The "
                 "roster above lists everyone who is signed up."
             ),
-            embeds=[],
+            embeds=[roster],
             view=RemoveSignupsView(
                 self._bot,
                 self._draft,

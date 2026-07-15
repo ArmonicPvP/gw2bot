@@ -1947,6 +1947,15 @@ class TestRemoveSignups:
         # One pick per member on the roster, never more.
         assert select.min_values == 1
         assert select.max_values == 6
+        # The picker is a guild-wide member search, so the roster embed must
+        # stay on screen; otherwise the commander picks from memory.
+        embeds = kwargs["embeds"]
+        assert len(embeds) == 1
+        rendered = "\n".join(
+            field.value for field in embeds[0].fields if field.value
+        )
+        for user_id in (1, 2, 3, 4, 5, 6):
+            assert f"<@{user_id}>" in rendered
 
     def test_picker_stays_within_the_discord_select_cap(self) -> None:
         # A WvW roster holds 50, but a select may return at most 25 users.
