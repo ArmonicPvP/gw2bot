@@ -2011,6 +2011,31 @@ class TestRemoveSignups:
         ]
         assert "Removed <@2>, <@3>" in content
 
+    async def test_promoting_then_removing_the_same_member_is_not_reported(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Picking a seated member (2) together with the waitlisted member (6):
+        # removing 2 promotes 6, and 6 is then removed by the next iteration.
+        # 6 ends up off the roster, so the summary must not also claim they
+        # moved up from the waitlist.
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 6))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert store.get_signup(occurrence.occurrence_id, 6) is None
+        remaining = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in remaining} == {1, 3, 4, 5}
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Removed <@2>, <@6>" in content
+        assert "moved up from the waitlist" not in content
+
     async def test_removal_reports_members_who_were_not_signed_up(
         self,
         fake_bot: Any,

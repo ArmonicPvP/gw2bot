@@ -1105,6 +1105,15 @@ class RemoveSignupsView(discord.ui.View):
             removed.append(user.id)
             if promotion is not None:
                 promoted.append(promotion.discord_user_id)
+        # Removing a seated member promotes the first fitting waitlisted one, so
+        # a member picked alongside their own promoter can be promoted by an
+        # earlier iteration and then removed by a later one. They are off the
+        # roster, so drop them from the promotions before reporting, or the
+        # summary would claim they both left and moved up.
+        removed_set = set(removed)
+        promoted = [
+            user_id for user_id in promoted if user_id not in removed_set
+        ]
         LOGGER.debug(
             "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
             "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s",
