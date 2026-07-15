@@ -58,6 +58,9 @@ ONGOING_EDIT_REJECTION = (
 )
 PREVIEW_EVENT_ID_TEXT = "—"
 
+# Discord's hard cap on how many users one select may return.
+REMOVE_SELECT_MAX_VALUES = 25
+
 
 @dataclass
 class EventDraft:
@@ -231,13 +234,15 @@ def _primary_live_occurrence(
     return live[0] if live else None
 
 
-async def send_event_preview(
+def build_event_preview(
     bot: Gw2Bot,
-    interaction: discord.Interaction,
     draft: EventDraft,
     *,
     primary: EventOccurrence | None = None,
-) -> None:
+) -> tuple[list[discord.Embed], discord.ui.View]:
+    # Split out from send_event_preview so a flow that has already answered the
+    # interaction (the roster removal below awaits Discord I/O first) can still
+    # re-render the same preview through edit_original_response.
     editing_event_id = draft.editing_event_id
     view: discord.ui.View
     if editing_event_id is not None:
@@ -282,6 +287,17 @@ async def send_event_preview(
     confirmation.description = (
         f"{confirmation.description}\n\n*{repeat_text}.*"
     )
+    return [preview, confirmation], view
+
+
+async def send_event_preview(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    draft: EventDraft,
+    *,
+    primary: EventOccurrence | None = None,
+) -> None:
+    embeds, view = build_event_preview(bot, draft, primary=primary)
     LOGGER.debug(
         "Sending event preview; user_id=%s category=%s repeat=%s "
         "title_characters=%s in_place=%s editing=%s",
@@ -290,17 +306,17 @@ async def send_event_preview(
         draft.repeat_frequency.value,
         len(draft.title),
         _is_ephemeral_component_interaction(interaction),
-        editing_event_id is not None,
+        draft.editing_event_id is not None,
     )
     if _is_ephemeral_component_interaction(interaction):
         await interaction.response.edit_message(
             content=None,
-            embeds=[preview, confirmation],
+            embeds=embeds,
             view=view,
         )
     else:
         await interaction.response.send_message(
-            embeds=[preview, confirmation],
+            embeds=embeds,
             view=view,
             ephemeral=True,
         )
@@ -869,6 +885,301 @@ class EventEditConfirmView(_PreviewConfirmView):
             stored.channel_id,
             repost=False,
         )
+
+    @discord.ui.button(
+        label="Remove sign-ups",
+        style=discord.ButtonStyle.danger,
+    )
+    async def remove_signups(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventEditConfirmView],
+    ) -> None:
+        editing_event_id = self._draft.editing_event_id
+        if editing_event_id is None:
+            await interaction.response.send_message(
+                "This edit session is no longer valid.",
+                ephemeral=True,
+            )
+            return
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event roster removal from Discord user %s; required "
+                "role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to edit events.",
+                ephemeral=True,
+            )
+            return
+        # The roster belongs to the occurrence, not the draft, so it is read
+        # fresh: members can sign up or out while the preview sits open.
+        occurrence = _primary_live_occurrence(self._bot, editing_event_id)
+        signups = (
+            self._bot.event_store.get_signups(occurrence.occurrence_id)
+            if occurrence is not None
+            else []
+        )
+        if occurrence is None or not signups:
+            LOGGER.debug(
+                "Roster removal opened with an empty roster; event_id=%s "
+                "user_id=%s",
+                editing_event_id,
+                interaction.user.id,
+            )
+            await interaction.response.send_message(
+                "Nobody is signed up for this event yet.",
+                ephemeral=True,
+            )
+            return
+        LOGGER.debug(
+            "Opened roster removal; event_id=%s occurrence_id=%s user_id=%s "
+            "roster=%s",
+            editing_event_id,
+            occurrence.occurrence_id,
+            interaction.user.id,
+            len(signups),
+        )
+        # Keep the roster embed on screen while the picker is open: the picker
+        # is a guild-wide member search, not a list of the signed-up members,
+        # so without the embed the commander would have to pick from memory.
+        # Mirror how build_event_preview renders the editing preview so the two
+        # views show the same roster.
+        roster = event_embed(
+            self._draft.to_event(editing_event_id),
+            signups,
+            EventStatus.OPEN,
+            event_id_text=str(editing_event_id),
+        )
+        await interaction.response.edit_message(
+            content=(
+                "Pick the members to remove from this event's roster. The "
+                "roster above lists everyone who is signed up."
+            ),
+            embeds=[roster],
+            view=RemoveSignupsView(
+                self._bot,
+                self._draft,
+                occurrence,
+                len(signups),
+            ),
+        )
+
+
+class RemoveSignupsSelect(discord.ui.UserSelect["RemoveSignupsView"]):
+    def __init__(self, roster_size: int):
+        # A member picker rather than a select built from the roster: the bot
+        # runs without the members intent, so turning signup ids into names
+        # would cost one Discord fetch per member, and a select is capped at 25
+        # options while a WvW roster holds 50. Discord resolves the names
+        # client-side instead; a pick that is not on the roster is refused
+        # below.
+        super().__init__(
+            placeholder="Search for the members to remove",
+            min_values=1,
+            max_values=min(roster_size, REMOVE_SELECT_MAX_VALUES),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is not None:
+            await view.remove(interaction, list(self.values))
+
+
+class RemoveSignupsView(discord.ui.View):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        occurrence: EventOccurrence,
+        roster_size: int,
+    ):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._draft = draft
+        self._occurrence = occurrence
+        self.add_item(RemoveSignupsSelect(roster_size))
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[RemoveSignupsView],
+    ) -> None:
+        await send_event_preview(self._bot, interaction, self._draft)
+
+    async def remove(
+        self,
+        interaction: discord.Interaction,
+        users: list[discord.Member | discord.User],
+    ) -> None:
+        from gw2bot.events.posting import remove_signup
+
+        editing_event_id = self._draft.editing_event_id
+        # The picker can sit open for minutes, so re-check the role and re-read
+        # the event and occurrence before mutating the roster.
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event roster removal from Discord user %s; required "
+                "role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to edit events.",
+                ephemeral=True,
+            )
+            return
+        event = (
+            self._bot.event_store.get_event(editing_event_id)
+            if editing_event_id is not None
+            else None
+        )
+        occurrence = self._bot.event_store.get_occurrence(
+            self._occurrence.occurrence_id
+        )
+        if event is None or occurrence is None:
+            await interaction.response.edit_message(
+                content="This event no longer exists.",
+                embeds=[],
+                view=None,
+            )
+            return
+        # An ended event's roster is history: removing from it would also
+        # promote someone off the waitlist into a run that is already finished,
+        # and re-rendering the message could persist OVER without seeding the
+        # next occurrence of a recurring series. This mirrors the sign-out
+        # button, which stays usable while an event is ongoing.
+        if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+            LOGGER.debug(
+                "Rejected roster removal for an ended event; occurrence_id=%s "
+                "user_id=%s",
+                occurrence.occurrence_id,
+                interaction.user.id,
+            )
+            await interaction.response.edit_message(
+                content=(
+                    "This event has already ended, so its roster can no longer "
+                    "be changed."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            content="Removing the selected members…",
+            embeds=[],
+            view=None,
+        )
+        removed: list[int] = []
+        skipped: list[int] = []
+        promoted: list[int] = []
+        kept_after_end: list[int] = []
+        for index, user in enumerate(users):
+            # The picker holds several members and remove_signup awaits Discord
+            # I/O between each, so the event can cross its end partway through
+            # the loop even though the pre-loop check passed. Re-check every
+            # iteration and stop the moment it has ended, so no removal (and no
+            # waitlist promotion behind it) ever lands on a finished roster.
+            if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+                kept_after_end = [pending.id for pending in users[index:]]
+                LOGGER.debug(
+                    "Event ended mid-removal; stopping; occurrence_id=%s "
+                    "user_id=%s kept=%s",
+                    occurrence.occurrence_id,
+                    interaction.user.id,
+                    len(kept_after_end),
+                )
+                break
+            signup, promotion = await remove_signup(
+                self._bot,
+                event,
+                occurrence,
+                user.id,
+            )
+            if signup is None:
+                skipped.append(user.id)
+                continue
+            removed.append(user.id)
+            if promotion is not None:
+                promoted.append(promotion.discord_user_id)
+        # Removing a seated member promotes the first fitting waitlisted one, so
+        # a member picked alongside their own promoter can be promoted by an
+        # earlier iteration and then removed by a later one. They are off the
+        # roster, so drop them from the promotions before reporting, or the
+        # summary would claim they both left and moved up.
+        removed_set = set(removed)
+        promoted = [
+            user_id for user_id in promoted if user_id not in removed_set
+        ]
+        LOGGER.debug(
+            "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
+            "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s",
+            event.event_id,
+            occurrence.occurrence_id,
+            interaction.user.id,
+            len(users),
+            len(removed),
+            len(skipped),
+            len(promoted),
+            len(kept_after_end),
+        )
+        summary = _removal_summary(removed, skipped, promoted, kept_after_end)
+        if kept_after_end:
+            # The event ended partway through, so the edit session is no longer
+            # valid (an ended event cannot be edited). Report what was applied
+            # and stop, rather than re-showing an edit preview that can no
+            # longer be saved.
+            await interaction.edit_original_response(
+                content=summary,
+                embeds=[],
+                view=None,
+            )
+            return
+        embeds, view = build_event_preview(
+            self._bot,
+            self._draft,
+            primary=occurrence,
+        )
+        await interaction.edit_original_response(
+            content=summary,
+            embeds=embeds,
+            view=view,
+        )
+
+
+def _mention_list(discord_user_ids: list[int]) -> str:
+    return ", ".join(f"<@{user_id}>" for user_id in discord_user_ids)
+
+
+def _removal_summary(
+    removed: list[int],
+    skipped: list[int],
+    promoted: list[int],
+    kept_after_end: list[int] | None = None,
+) -> str:
+    lines: list[str] = []
+    if removed:
+        lines.append(f"Removed {_mention_list(removed)} from the roster.")
+    else:
+        lines.append("Nobody was removed from the roster.")
+    if skipped:
+        lines.append(
+            f"{_mention_list(skipped)} was not signed up for this event."
+            if len(skipped) == 1
+            else f"{_mention_list(skipped)} were not signed up for this event."
+        )
+    if promoted:
+        lines.append(f"{_mention_list(promoted)} moved up from the waitlist.")
+    if kept_after_end:
+        lines.append(
+            "The event ended before the rest could be removed, so "
+            + _mention_list(kept_after_end)
+            + (" was kept." if len(kept_after_end) == 1 else " were kept.")
+        )
+    return "\n".join(lines)
 
 
 class ChannelMoveConfirmView(discord.ui.View):

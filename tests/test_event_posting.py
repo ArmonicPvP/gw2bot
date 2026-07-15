@@ -562,6 +562,60 @@ class TestRefreshOccurrenceMessage:
         assert rename is not None
         assert rename.kwargs["name"].startswith("🟡 |")
 
+    async def test_over_transition_seeds_next_recurring_occurrence(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A refresh driven by a roster change (not the scheduler) can be the one
+        # that crosses into OVER when it lands just before start + duration. The
+        # scheduler seeds the next occurrence before an OVER transition; this
+        # path must do the same, or the recurring series ends silently once the
+        # occurrence drops out of the unfinished set.
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        after_end = START + timedelta(minutes=90)
+        assert len(store.get_event_occurrences(event.event_id)) == 1
+
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            after_end,
+        )
+
+        assert status is EventStatus.OVER
+        occurrences = store.get_event_occurrences(event.event_id)
+        assert len(occurrences) == 2
+        seeded = next(
+            item
+            for item in occurrences
+            if item.occurrence_id != occurrence.occurrence_id
+        )
+        assert seeded.start_time == START + timedelta(days=1)
+
+    async def test_over_transition_does_not_seed_a_non_repeating_event(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        after_end = START + timedelta(minutes=90)
+
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            occurrence,
+            after_end,
+        )
+
+        assert status is EventStatus.OVER
+        # A one-off event has no successor to seed.
+        assert len(store.get_event_occurrences(event.event_id)) == 1
+
     async def test_unchanged_status_does_not_rename_the_thread(
         self,
         bot: Any,
