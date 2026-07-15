@@ -268,6 +268,17 @@ class WebServer:
         state = request.query.get("state", "")
         state_cookie = request.cookies.get(auth.STATE_COOKIE, "")
         now = datetime.now(UTC)
+        error = request.query.get("error", "")
+        if error:
+            # Discord returned an error instead of a code. A silent
+            # (prompt=none) attempt does this when it may not show a screen; a
+            # one-time interactive retry resolves it.
+            return self._retry_or_fail_authorization(
+                error,
+                state,
+                state_cookie,
+                now,
+            )
         if not code or not auth.verify_state(
             self._session_secret,
             state_cookie,
@@ -322,6 +333,67 @@ class WebServer:
             session_value,
             self._session_ttl,
         )
+        response.del_cookie(auth.STATE_COOKIE, path="/")
+        return response
+
+    def _retry_or_fail_authorization(
+        self,
+        error: str,
+        state: str,
+        state_cookie: str,
+        now: datetime,
+    ) -> web.Response:
+        safe_error = auth.sanitize_authorize_error(error)
+        # Only retry an error a real prompt would resolve, only for a request
+        # we actually started (the state cookie proves it and blocks a crafted
+        # error from forcing a redirect), and only when this is not already the
+        # retry, so a user is never bounced through consent more than once.
+        promptable = error in auth.PROMPTABLE_AUTHORIZE_ERRORS
+        valid_state = auth.verify_state(
+            self._session_secret,
+            state_cookie,
+            state,
+            now,
+        )
+        already_retried = auth.state_is_consent_retry(
+            self._session_secret,
+            state_cookie,
+        )
+        if promptable and valid_state and not already_retried:
+            LOGGER.info(
+                "Silent Discord authorization needs a prompt; retrying with "
+                "consent; error=%s",
+                safe_error,
+            )
+            retry_state, cookie = auth.sign_state(
+                self._session_secret,
+                now,
+                consent_retry=True,
+            )
+            response = _redirect(
+                auth.authorize_url(
+                    self._client_id,
+                    self._redirect_uri,
+                    retry_state,
+                    prompt_none=False,
+                )
+            )
+            self._set_cookie(
+                response,
+                auth.STATE_COOKIE,
+                cookie,
+                auth.STATE_TTL_SECONDS,
+            )
+            return response
+        LOGGER.warning(
+            "Discord authorization failed; error=%s promptable=%s "
+            "valid_state=%s already_retried=%s",
+            safe_error,
+            promptable,
+            valid_state,
+            already_retried,
+        )
+        response = self._html(LOGIN_FAILED_PAGE, status=403)
         response.del_cookie(auth.STATE_COOKIE, path="/")
         return response
 
