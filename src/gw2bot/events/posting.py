@@ -242,6 +242,21 @@ async def refresh_occurrence_message(
             status,
         )
         if thread_renamed and status_changed:
+            if status is EventStatus.OVER:
+                # The status is recomputed inside this call, after the awaited
+                # Discord I/O above, so a caller other than the scheduler - a
+                # roster change landing just before start + duration - can be
+                # the one that crosses into OVER. The scheduler secures the next
+                # occurrence before an OVER transition, but a non-scheduler
+                # caller has not, so seed it here too (mirroring the NotFound
+                # branch), or the series would end silently once this occurrence
+                # drops out of the unfinished set. ensure_next_recurring_
+                # occurrence is idempotent, so the scheduler's pre-seed is never
+                # duplicated.
+                current_time = now if now is not None else datetime.now(UTC)
+                ensure_next_recurring_occurrence(
+                    bot, event, occurrence, current_time
+                )
             bot.event_store.set_occurrence_status(
                 occurrence.occurrence_id,
                 status,
