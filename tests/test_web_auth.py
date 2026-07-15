@@ -3,12 +3,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from gw2bot.web.auth import (
+    PROMPTABLE_AUTHORIZE_ERRORS,
     OAuthExchangeError,
     authorize_url,
     exchange_code,
     fetch_identity,
+    sanitize_authorize_error,
     sign_session,
     sign_state,
+    state_is_consent_retry,
     verify_session,
     verify_state,
 )
@@ -131,6 +134,40 @@ class TestStateToken:
 
         assert not verify_state(SECRET, cookie, state, NOW)
 
+    def test_default_state_is_not_a_consent_retry(self) -> None:
+        _, cookie = sign_state(SECRET, NOW)
+
+        assert not state_is_consent_retry(SECRET, cookie)
+
+    def test_consent_retry_state_is_marked_and_still_verifies(self) -> None:
+        state, cookie = sign_state(SECRET, NOW, consent_retry=True)
+
+        # The retry flag rides alongside a still-valid state token.
+        assert verify_state(SECRET, cookie, state, NOW)
+        assert state_is_consent_retry(SECRET, cookie)
+
+    def test_consent_retry_flag_survives_only_a_valid_signature(self) -> None:
+        _, cookie = sign_state(SECRET, NOW, consent_retry=True)
+
+        assert not state_is_consent_retry("x" * 32, cookie)
+        assert not state_is_consent_retry(SECRET, "garbage")
+
+
+class TestAuthorizeError:
+    def test_promptable_errors_are_the_recoverable_set(self) -> None:
+        assert "consent_required" in PROMPTABLE_AUTHORIZE_ERRORS
+        assert "login_required" in PROMPTABLE_AUTHORIZE_ERRORS
+        # A user declining consent is terminal, never retried.
+        assert "access_denied" not in PROMPTABLE_AUTHORIZE_ERRORS
+
+    def test_known_errors_pass_through_and_others_are_masked(self) -> None:
+        assert sanitize_authorize_error("consent_required") == (
+            "consent_required"
+        )
+        assert sanitize_authorize_error("access_denied") == "access_denied"
+        # An arbitrary attacker-supplied value never reaches the logs verbatim.
+        assert sanitize_authorize_error("<script>") == "other"
+
 
 class TestAuthorizeUrl:
     def test_contains_identify_scope_and_state(self) -> None:
@@ -145,6 +182,18 @@ class TestAuthorizeUrl:
         assert "scope=identify" in url
         assert "state=the-state" in url
         assert "response_type=code" in url
+
+    def test_silent_by_default_but_omits_prompt_on_retry(self) -> None:
+        silent = authorize_url("client-id", "https://c.test/cb", "s")
+        prompted = authorize_url(
+            "client-id",
+            "https://c.test/cb",
+            "s",
+            prompt_none=False,
+        )
+
+        assert "prompt=none" in silent
+        assert "prompt=" not in prompted
 
 
 class TestTokenExchange:

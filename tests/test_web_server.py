@@ -1,3 +1,5 @@
+import base64
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -115,7 +117,20 @@ async def begin_login(client: TestClient) -> str:
     assert location.startswith("https://discord.com/oauth2/authorize?")
     query = parse_qs(urlsplit(location).query)
     assert query["scope"] == ["identify"]
+    assert query["prompt"] == ["none"]
     return query["state"][0]
+
+
+def state_token(state_cookie: str) -> str:
+    """Read the opaque state token out of a signed state cookie.
+
+    The retry echoes back a fresh state, so a test that follows the retry needs
+    the token that pairs with the new cookie rather than the original one.
+    """
+    payload_b64 = state_cookie.split(".")[0]
+    padding = "=" * (-len(payload_b64) % 4)
+    raw = base64.urlsafe_b64decode(payload_b64 + padding)
+    return json.loads(raw)["state"]
 
 
 class TestAuthGate:
@@ -527,6 +542,97 @@ class TestOAuthCallback:
         )
 
         assert response.status == 502
+
+
+class TestSilentAuthorizationRetry:
+    async def test_consent_required_retries_with_a_visible_prompt(
+        self,
+        client: TestClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A first-time user is refused by the silent (prompt=none) attempt;
+        # the callback bounces them back to Discord with the prompt enabled.
+        state = await begin_login(client)
+
+        with caplog.at_level("INFO"):
+            response = await client.get(
+                "/oauth/callback",
+                params={"error": "consent_required", "state": state},
+                allow_redirects=False,
+            )
+
+        assert response.status == 302
+        location = response.headers["Location"]
+        assert location.startswith("https://discord.com/oauth2/authorize?")
+        query = parse_qs(urlsplit(location).query)
+        assert "prompt" not in query
+        # The retry rides a fresh, retry-marked state cookie.
+        retry_cookie = response.cookies[auth.STATE_COOKIE].value
+        assert auth.state_is_consent_retry(SESSION_SECRET, retry_cookie)
+        assert query["state"] == [
+            state_token(retry_cookie),
+        ]
+        assert "consent_required" in caplog.text
+
+    async def test_retry_does_not_loop_a_second_time(
+        self,
+        client: TestClient,
+    ) -> None:
+        # Follow the retry through: a consent error carrying the retry-marked
+        # state must end on the failure page, never another redirect.
+        state = await begin_login(client)
+        first = await client.get(
+            "/oauth/callback",
+            params={"error": "consent_required", "state": state},
+            allow_redirects=False,
+        )
+        retry_cookie = first.cookies[auth.STATE_COOKIE].value
+
+        second = await client.get(
+            "/oauth/callback",
+            params={
+                "error": "consent_required",
+                "state": state_token(retry_cookie),
+            },
+            allow_redirects=False,
+        )
+
+        assert second.status == 403
+        assert "Sign-in failed" in await second.text()
+        assert second.cookies[auth.STATE_COOKIE].value == ""
+
+    async def test_access_denied_is_not_retried(
+        self,
+        client: TestClient,
+    ) -> None:
+        # Declining the consent screen is a deliberate choice, not something a
+        # further prompt would fix.
+        state = await begin_login(client)
+
+        response = await client.get(
+            "/oauth/callback",
+            params={"error": "access_denied", "state": state},
+            allow_redirects=False,
+        )
+
+        assert response.status == 403
+        assert "Sign-in failed" in await response.text()
+
+    async def test_error_without_a_valid_state_is_not_retried(
+        self,
+        client: TestClient,
+    ) -> None:
+        # A crafted error with no matching state cookie must not be able to
+        # bounce a visitor onward to Discord.
+        await begin_login(client)
+
+        response = await client.get(
+            "/oauth/callback",
+            params={"error": "consent_required", "state": "wrong-state"},
+            allow_redirects=False,
+        )
+
+        assert response.status == 403
 
 
 class TestEventsApi:

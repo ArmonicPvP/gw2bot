@@ -25,6 +25,39 @@ DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
 
 _MAX_SESSION_NAME_LENGTH = 64
 
+# Authorization errors that a silent (prompt=none) attempt raises purely
+# because it was not allowed to show a screen. An interactive retry that lets
+# the user sign in and grant consent resolves every one of them, so the
+# callback re-runs the flow once with the prompt enabled instead of failing.
+PROMPTABLE_AUTHORIZE_ERRORS = frozenset(
+    {
+        "login_required",
+        "consent_required",
+        "interaction_required",
+        "account_selection_required",
+    }
+)
+
+# The OAuth2 authorization error codes worth naming in a log line. The error
+# arrives in the callback's query string, so an unrecognized value is logged
+# as "other" rather than echoed verbatim.
+_KNOWN_AUTHORIZE_ERRORS = PROMPTABLE_AUTHORIZE_ERRORS | frozenset(
+    {
+        "access_denied",
+        "invalid_request",
+        "invalid_scope",
+        "unauthorized_client",
+        "unsupported_response_type",
+        "server_error",
+        "temporarily_unavailable",
+    }
+)
+
+
+def sanitize_authorize_error(error: str) -> str:
+    """Reduce a callback error code to a bounded, log-safe label."""
+    return error if error in _KNOWN_AUTHORIZE_ERRORS else "other"
+
 
 class OAuthExchangeError(Exception):
     """Raised when Discord rejects a token exchange or identity lookup.
@@ -129,12 +162,26 @@ def verify_session(
     )
 
 
-def sign_state(secret: str, now: datetime) -> tuple[str, str]:
-    """Return an opaque state token and its signed cookie value."""
+def sign_state(
+    secret: str,
+    now: datetime,
+    *,
+    consent_retry: bool = False,
+) -> tuple[str, str]:
+    """Return an opaque state token and its signed cookie value.
+
+    ``consent_retry`` marks the state minted for the interactive retry after a
+    silent authorization failed, so the callback can tell a first prompt from
+    the retry and never bounce a user through the consent screen more than once.
+    """
     token = secrets.token_urlsafe(32)
     cookie = _sign_payload(
         secret,
-        {"state": token, "exp": int(now.timestamp()) + STATE_TTL_SECONDS},
+        {
+            "state": token,
+            "exp": int(now.timestamp()) + STATE_TTL_SECONDS,
+            "cr": consent_retry,
+        },
     )
     return token, cookie
 
@@ -161,18 +208,37 @@ def verify_state(
     return hmac.compare_digest(token.encode(), state.encode())
 
 
-def authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
-    query = urlencode(
-        {
-            "client_id": client_id,
-            "response_type": "code",
-            "scope": "identify",
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "prompt": "none",
-        }
-    )
-    return f"{DISCORD_AUTHORIZE_URL}?{query}"
+def state_is_consent_retry(secret: str, cookie_value: str) -> bool:
+    """Whether this signed state cookie was minted for the consent retry.
+
+    Only the signature is re-checked here; expiry and the state match are the
+    caller's job (via verify_state) before this is trusted.
+    """
+    payload = _verify_payload(secret, cookie_value)
+    return bool(payload is not None and payload.get("cr") is True)
+
+
+def authorize_url(
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    *,
+    prompt_none: bool = True,
+) -> str:
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "scope": "identify",
+        "redirect_uri": redirect_uri,
+        "state": state,
+    }
+    # prompt=none makes returning visits silent, but Discord then refuses a
+    # first-time or logged-out user with a *_required error instead of showing
+    # the screen. The callback retries with the prompt enabled, and that retry
+    # must omit prompt=none so Discord actually renders the consent page.
+    if prompt_none:
+        params["prompt"] = "none"
+    return f"{DISCORD_AUTHORIZE_URL}?{urlencode(params)}"
 
 
 async def exchange_code(

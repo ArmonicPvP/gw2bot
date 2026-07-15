@@ -25,11 +25,31 @@ class TestCalendarTimeGrid:
         assert 'chip.style.top = pixelsFor(item.startMin) + "px";' in (
             CALENDAR_PAGE
         )
-        assert "pixelsFor(item.endMin - item.startMin)" in CALENDAR_PAGE
+        assert "pixelsFor(item.layoutEnd - item.startMin)" in CALENDAR_PAGE
 
     def test_overlapping_events_are_placed_side_by_side(self) -> None:
         assert "function assignLanes(cluster)" in CALENDAR_PAGE
         assert 'chip.style.width = "calc(" + width + "% - 4px)";' in (
+            CALENDAR_PAGE
+        )
+
+    def test_short_events_reserve_their_clamped_height_when_packing(
+        self,
+    ) -> None:
+        # A block is never drawn shorter than the pixel floor, so two
+        # back-to-back short events overlap on screen. Clustering and
+        # lane-packing must reserve that clamped span (layoutEnd), not the raw
+        # end, or they would give both full width and draw one over the other.
+        assert (
+            "layoutEnd: Math.max(endMin, startMin + MIN_EVENT_MIN)"
+            in CALENDAR_PAGE
+        )
+        assert "var MIN_EVENT_MIN = MIN_EVENT_PX * 60 / HOUR_PX;" in (
+            CALENDAR_PAGE
+        )
+        # Both the lane occupancy and the cluster boundary read layoutEnd.
+        assert "laneEnds[lane] = item.layoutEnd;" in CALENDAR_PAGE
+        assert "clusterEnd = Math.max(clusterEnd, item.layoutEnd);" in (
             CALENDAR_PAGE
         )
 

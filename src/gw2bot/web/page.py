@@ -644,6 +644,10 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
   var MINUTES_PER_DAY = 1440;
   // A 15-minute event would otherwise be too short to read its own title.
   var MIN_EVENT_PX = 20;
+  // The same floor in minutes. A block is never drawn shorter than this, so
+  // lane-packing must treat a short event as occupying at least this span or
+  // two back-to-back short events get full width yet overlap on screen.
+  var MIN_EVENT_MIN = MIN_EVENT_PX * 60 / HOUR_PX;
   var DEFAULT_SCROLL_HOUR = 8;
 
   function minutesIntoDay(date) {
@@ -670,19 +674,24 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
       var start = new Date(entry.start_epoch * 1000);
       if (start < date || start >= next) { return; }
       var startMin = minutesIntoDay(start);
+      var endMin = Math.min(
+        MINUTES_PER_DAY,
+        startMin + Math.max(1, entry.duration_minutes));
       items.push({
         entry: entry,
         index: index,
         startMin: startMin,
-        endMin: Math.min(
-          MINUTES_PER_DAY,
-          startMin + Math.max(1, entry.duration_minutes)),
+        endMin: endMin,
+        // The extent the block actually occupies once clamped to the minimum
+        // height. Clustering, lane-packing and the rendered height all read
+        // this, so the reserved space and the drawn space stay identical.
+        layoutEnd: Math.max(endMin, startMin + MIN_EVENT_MIN),
         column: 0,
         columns: 1
       });
     });
     items.sort(function (a, b) {
-      return a.startMin - b.startMin || b.endMin - a.endMin;
+      return a.startMin - b.startMin || b.layoutEnd - a.layoutEnd;
     });
     return items;
   }
@@ -698,7 +707,7 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
       while (lane < laneEnds.length && laneEnds[lane] > item.startMin) {
         lane += 1;
       }
-      laneEnds[lane] = item.endMin;
+      laneEnds[lane] = item.layoutEnd;
       item.column = lane;
     });
     cluster.forEach(function (item) { item.columns = laneEnds.length; });
@@ -714,7 +723,7 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
         clusterEnd = -1;
       }
       cluster.push(item);
-      clusterEnd = Math.max(clusterEnd, item.endMin);
+      clusterEnd = Math.max(clusterEnd, item.layoutEnd);
     });
     if (cluster.length) { assignLanes(cluster); }
     return items;
@@ -725,8 +734,9 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
     chip.classList.add("tg-ev");
     var width = 100 / item.columns;
     chip.style.top = pixelsFor(item.startMin) + "px";
-    chip.style.height = Math.max(
-      MIN_EVENT_PX, pixelsFor(item.endMin - item.startMin)) + "px";
+    // layoutEnd already carries the minimum-height floor, so the block is
+    // drawn over exactly the interval lane-packing reserved for it.
+    chip.style.height = pixelsFor(item.layoutEnd - item.startMin) + "px";
     chip.style.left = "calc(" + (item.column * width) + "% + 2px)";
     chip.style.width = "calc(" + width + "% - 4px)";
     return chip;
