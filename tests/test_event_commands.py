@@ -34,6 +34,8 @@ from gw2bot.events.views import (
     EventScheduleModal,
     EventSignOutButton,
     EventSignUpButton,
+    RemoveSignupsSelect,
+    RemoveSignupsView,
     RolePickSelect,
     SignOutConfirmView,
     SignupFlow,
@@ -1810,3 +1812,292 @@ class TestEventDeleteConfirmView:
             "not deleted"
             in interaction.response.edit_message.await_args.kwargs["content"]
         )
+
+
+def picked_users(*discord_user_ids: int) -> Any:
+    # The member picker hands back Discord user objects; only the id is read.
+    return [SimpleNamespace(id=user_id) for user_id in discord_user_ids]
+
+
+class TestRemoveSignups:
+    def make_full_roster(self, store: EventStore) -> Any:
+        # Fractal capacity is 1 healer and 4 DPS, so this roster is full and
+        # user 6 lands on the waitlist behind it.
+        event, occurrence = make_posted_edit_event(store)
+        assignments = [
+            (1, EventRole.QUICKNESS_HEAL, False),
+            (2, EventRole.DPS, False),
+            (3, EventRole.DPS, False),
+            (4, EventRole.DPS, False),
+            (5, EventRole.DPS, False),
+            (6, EventRole.DPS, True),
+        ]
+        for user_id, role, waitlisted in assignments:
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=None if waitlisted else role,
+                flex_roles=(),
+                waitlisted=waitlisted,
+            )
+        return event, occurrence
+
+    def make_remove_view(
+        self,
+        fake_bot: Any,
+        event: Any,
+        occurrence: Any,
+        roster_size: int = 6,
+    ) -> RemoveSignupsView:
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        return RemoveSignupsView(fake_bot, draft, occurrence, roster_size)
+
+    def make_remove_interaction(self) -> Any:
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    def test_edit_preview_offers_the_remove_button(
+        self,
+        fake_bot: Any,
+    ) -> None:
+        draft = draft_from_event(
+            make_edit_event(EventStore(":memory:")),
+            ZoneInfo("UTC"),
+        )
+        view = EventEditConfirmView(fake_bot, draft)
+
+        labels = [
+            item.label
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ]
+        assert "Remove sign-ups" in labels
+
+    async def test_button_reports_an_empty_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.remove_signups.callback(interaction)
+
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once()
+        assert (
+            "Nobody is signed up"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_button_requires_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_full_roster(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.remove_signups.callback(interaction)
+
+        interaction.response.edit_message.assert_not_awaited()
+        assert (
+            "required role"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_button_opens_the_member_picker(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_full_roster(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.remove_signups.callback(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], RemoveSignupsView)
+        select = next(
+            item
+            for item in kwargs["view"].children
+            if isinstance(item, RemoveSignupsSelect)
+        )
+        # One pick per member on the roster, never more.
+        assert select.min_values == 1
+        assert select.max_values == 6
+
+    def test_picker_stays_within_the_discord_select_cap(self) -> None:
+        # A WvW roster holds 50, but a select may return at most 25 users.
+        assert RemoveSignupsSelect(50).max_values == 25
+
+    async def test_removal_frees_the_slot_and_promotes_the_waitlist(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        promoted = store.get_signup(occurrence.occurrence_id, 6)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert promoted.assigned_role is EventRole.DPS
+        # The removed member is dropped from the event thread and the public
+        # message is re-rendered against the new roster.
+        channel.thread.remove_user.assert_awaited_once()
+        channel.partial_message.edit.assert_awaited()
+        # The preview comes back with the updated roster and the edit controls.
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Removed <@2>" in kwargs["content"]
+        assert "<@6> moved up from the waitlist." in kwargs["content"]
+        assert isinstance(kwargs["view"], EventEditConfirmView)
+        assert len(kwargs["embeds"]) == 2
+
+    async def test_removal_takes_several_members_at_once(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert store.get_signup(occurrence.occurrence_id, 3) is None
+        # Only one waitlisted member existed, so only one seat is refilled.
+        remaining = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in remaining} == {1, 4, 5, 6}
+        assert not any(signup.waitlisted for signup in remaining)
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Removed <@2>, <@3>" in content
+
+    async def test_removal_reports_members_who_were_not_signed_up(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 99))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Removed <@2>" in content
+        assert "<@99> was not signed up" in content
+
+    async def test_removal_requires_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove(interaction, picked_users(2))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        interaction.edit_original_response.assert_not_awaited()
+        assert (
+            "required role"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_removal_after_the_event_ended_keeps_the_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The picker can sit open past the end of the event; a finished roster
+        # is history, and promoting off its waitlist would rewrite it.
+        event, occurrence = self.make_full_roster(store)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(hours=3),
+        )
+        refetched = store.get_occurrence(occurrence.occurrence_id)
+        assert refetched is not None
+        occurrence = refetched
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        waitlisted = store.get_signup(occurrence.occurrence_id, 6)
+        assert waitlisted is not None
+        assert waitlisted.waitlisted
+        interaction.edit_original_response.assert_not_awaited()
+        assert (
+            "already ended"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_removal_reports_a_deleted_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        store.delete_event(event.event_id)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        interaction.edit_original_response.assert_not_awaited()
+        assert (
+            "no longer exists"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_back_returns_to_the_edit_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.back.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventEditConfirmView)
