@@ -682,9 +682,11 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
         index: index,
         startMin: startMin,
         endMin: endMin,
-        // The extent the block actually occupies once clamped to the minimum
-        // height. Clustering, lane-packing and the rendered height all read
-        // this, so the reserved space and the drawn space stay identical.
+        // The extent the block occupies once clamped to the minimum height.
+        // Clustering, lane-packing and the rendered height all read this, so
+        // the reserved and drawn spans match (except that the render clips to
+        // the day boundary, which only ever reserves a little extra at the very
+        // end of the day, where nothing starts after it).
         layoutEnd: Math.max(endMin, startMin + MIN_EVENT_MIN),
         column: 0,
         columns: 1
@@ -734,9 +736,11 @@ main { flex: 1; overflow: auto; padding: 0 1rem 1rem; }
     chip.classList.add("tg-ev");
     var width = 100 / item.columns;
     chip.style.top = pixelsFor(item.startMin) + "px";
-    // layoutEnd already carries the minimum-height floor, so the block is
-    // drawn over exactly the interval lane-packing reserved for it.
-    chip.style.height = pixelsFor(item.layoutEnd - item.startMin) + "px";
+    // layoutEnd carries the minimum-height floor, but that floor can push a
+    // late event past the end of the day; clip the drawn height at the day
+    // boundary so the block never bleeds below the 24-hour column.
+    chip.style.height = pixelsFor(
+      Math.min(item.layoutEnd, MINUTES_PER_DAY) - item.startMin) + "px";
     chip.style.left = "calc(" + (item.column * width) + "% + 2px)";
     chip.style.width = "calc(" + width + "% - 4px)";
     return chip;

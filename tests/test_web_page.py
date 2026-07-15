@@ -25,7 +25,21 @@ class TestCalendarTimeGrid:
         assert 'chip.style.top = pixelsFor(item.startMin) + "px";' in (
             CALENDAR_PAGE
         )
-        assert "pixelsFor(item.layoutEnd - item.startMin)" in CALENDAR_PAGE
+        assert (
+            "Math.min(item.layoutEnd, MINUTES_PER_DAY) - item.startMin"
+            in CALENDAR_PAGE
+        )
+
+    def test_late_events_are_clipped_to_the_day_boundary(self) -> None:
+        # The minimum-height floor in layoutEnd can exceed MINUTES_PER_DAY for
+        # an event that starts in the last few minutes of the day. The rendered
+        # height must clip there so the block never bleeds below the 24-hour
+        # column into the content underneath the grid.
+        assert (
+            "chip.style.height = pixelsFor(\n"
+            "      Math.min(item.layoutEnd, MINUTES_PER_DAY) - item.startMin)"
+            in CALENDAR_PAGE
+        )
 
     def test_overlapping_events_are_placed_side_by_side(self) -> None:
         assert "function assignLanes(cluster)" in CALENDAR_PAGE
