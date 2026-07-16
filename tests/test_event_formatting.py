@@ -348,7 +348,7 @@ class TestEventEmbed:
         # seated member, marked with the hourglass, but not counted in "1/4".
         assert values["⚔️ DPS (1/4)"] == (
             f"└ {EMOJI_ALACRITY} <@12>\n"
-            f"└ {WAITLIST_EMOJI} {EMOJI_DPS} <@13>"
+            f"└ {WAITLIST_EMOJI}{EMOJI_DPS} <@13>"
         )
         assert values["Boons"] == (
             f"{EMOJI_ALACRITY} 1/1 | {EMOJI_QUICKNESS} 1/1"
@@ -384,11 +384,11 @@ class TestEventEmbed:
         assert values["💚 Healer (2/2)"] == (
             f"└ {EMOJI_QUICKNESS} <@1>\n"
             f"└ {EMOJI_ALACRITY} <@2>\n"
-            f"└ {WAITLIST_EMOJI} {EMOJI_QUICKNESS} <@4>"
+            f"└ {WAITLIST_EMOJI}{EMOJI_QUICKNESS} <@4>"
         )
         assert values["⚔️ DPS (1/8)"] == (
             f"└ {EMOJI_ALACRITY} <@3>\n"
-            f"└ {WAITLIST_EMOJI} {EMOJI_QUICKNESS} <@5>"
+            f"└ {WAITLIST_EMOJI}{EMOJI_QUICKNESS} <@5>"
         )
         # The standalone Waitlist section is kept and still lists everyone on it.
         waitlist_value = values[f"{WAITLIST_EMOJI} Waitlist"]
