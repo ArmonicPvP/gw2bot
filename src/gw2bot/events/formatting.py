@@ -275,7 +275,7 @@ def _waitlisted_member_line(signup: EventSignup) -> str:
     # members listed above without consulting the separate Waitlist section.
     role = signup.assigned_role or signup.role
     emoji = f"{ROLE_EMOJI[role]} " if role is not None else ""
-    return f"└ {WAITLIST_EMOJI} {emoji}<@{signup.discord_user_id}>"
+    return f"└ {WAITLIST_EMOJI}{emoji}<@{signup.discord_user_id}>"
 
 
 def _role_group_lines(signups: list[EventSignup]) -> list[str]:
