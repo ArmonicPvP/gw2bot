@@ -6,6 +6,7 @@ import pytest
 
 from gw2bot.events.formatting import (
     EMBED_TOTAL_LIMIT,
+    WAITLIST_EMOJI,
     compute_status,
     confirm_embed,
     describe_repeat,
@@ -343,7 +344,12 @@ class TestEventEmbed:
         assert values["⏳ Duration"] == "1h 30m"
         assert values["👑 Leader"] == "<@42>"
         assert values["💚 Healer (1/1)"] == f"└ {EMOJI_QUICKNESS} <@11>"
-        assert values["⚔️ DPS (1/4)"] == f"└ {EMOJI_ALACRITY} <@12>"
+        # The waitlisted DPS (user 13) is listed under the DPS section below the
+        # seated member, marked with the hourglass, but not counted in "1/4".
+        assert values["⚔️ DPS (1/4)"] == (
+            f"└ {EMOJI_ALACRITY} <@12>\n"
+            f"└ {WAITLIST_EMOJI} {EMOJI_DPS} <@13>"
+        )
         assert values["Boons"] == (
             f"{EMOJI_ALACRITY} 1/1 | {EMOJI_QUICKNESS} 1/1"
         )
@@ -354,6 +360,41 @@ class TestEventEmbed:
             f"<@13>\n└ DPS ({EMOJI_DPS},{EMOJI_QUICKNESS})"
         )
         assert embed.footer.text == "eventID: 7"
+
+    def test_waitlisted_members_listed_under_their_role_section(self) -> None:
+        event = make_event(EventCategory.RAID)
+        signups = [
+            make_signup(1, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+            make_signup(2, EventRole.ALACRITY_HEAL, EventRole.ALACRITY_HEAL),
+            make_signup(3, EventRole.ALACRITY_DPS, EventRole.ALACRITY_DPS),
+            # Waitlisted members have no assigned_role; they are grouped by the
+            # role they requested.
+            make_signup(4, EventRole.QUICKNESS_HEAL, None, waitlisted=True),
+            make_signup(5, EventRole.QUICKNESS_DPS, None, waitlisted=True),
+        ]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        values = {field.name: field.value for field in embed.fields}
+        # The counts only reflect seated members, not the waitlisted ones.
+        assert "💚 Healer (2/2)" in values
+        assert "⚔️ DPS (1/8)" in values
+        # Waitlisted members are appended below the seated ones, each marked
+        # with the hourglass before their boon emoji.
+        assert values["💚 Healer (2/2)"] == (
+            f"└ {EMOJI_QUICKNESS} <@1>\n"
+            f"└ {EMOJI_ALACRITY} <@2>\n"
+            f"└ {WAITLIST_EMOJI} {EMOJI_QUICKNESS} <@4>"
+        )
+        assert values["⚔️ DPS (1/8)"] == (
+            f"└ {EMOJI_ALACRITY} <@3>\n"
+            f"└ {WAITLIST_EMOJI} {EMOJI_QUICKNESS} <@5>"
+        )
+        # The standalone Waitlist section is kept and still lists everyone on it.
+        waitlist_value = values[f"{WAITLIST_EMOJI} Waitlist"]
+        assert waitlist_value is not None
+        assert "<@4>" in waitlist_value
+        assert "<@5>" in waitlist_value
 
     def test_title_with_emoji_prefix_stays_within_title_limit(self) -> None:
         # A user may enter a title at the full 256-character limit; the emoji
