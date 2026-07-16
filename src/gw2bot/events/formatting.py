@@ -32,6 +32,9 @@ EMBED_FIELD_VALUE_LIMIT = 1024
 EMBED_TOTAL_LIMIT = 6000
 EMBED_TITLE_LIMIT = 256
 EMPTY_FIELD_TEXT = "—"
+# Marks a waitlisted member, both as the Waitlist section header and as the
+# prefix on a waitlisted entry listed under its Healer/DPS section.
+WAITLIST_EMOJI = "⌛️"
 _TRUNCATION_MARKER = "…"
 
 _WEEKDAY_NAMES = (
@@ -265,6 +268,16 @@ def _member_line(signup: EventSignup) -> str:
     return f"└ {emoji}<@{signup.discord_user_id}>"
 
 
+def _waitlisted_member_line(signup: EventSignup) -> str:
+    # A waitlisted member has no assigned_role, so the boon type shown comes from
+    # the role they requested. The hourglass marks them as waitlisted and sits
+    # before that boon emoji, so a reader can tell them apart from the seated
+    # members listed above without consulting the separate Waitlist section.
+    role = signup.assigned_role or signup.role
+    emoji = f"{ROLE_EMOJI[role]} " if role is not None else ""
+    return f"└ {WAITLIST_EMOJI} {emoji}<@{signup.discord_user_id}>"
+
+
 def _role_group_lines(signups: list[EventSignup]) -> list[str]:
     lines: list[str] = []
     for signup in signups:
@@ -343,15 +356,27 @@ def event_embed(
             if signup.assigned_role is not None
             and signup.assigned_role not in HEAL_ROLES
         ]
+        # Waitlisted members carry no assigned_role, so they are grouped by the
+        # role they requested and listed under the same section, below the
+        # seated members. They are not folded into the "x/capacity" count, which
+        # only reflects seated members.
+        waitlisted_healers = [
+            signup for signup in waitlisted if signup.role in HEAL_ROLES
+        ]
+        waitlisted_dps = [
+            signup for signup in waitlisted if signup.role not in HEAL_ROLES
+        ]
         _add_chunked_field(
             embed,
             f"💚 Healer ({len(healers)}/{capacity.healers})",
-            [_member_line(signup) for signup in healers],
+            [_member_line(signup) for signup in healers]
+            + [_waitlisted_member_line(signup) for signup in waitlisted_healers],
         )
         _add_chunked_field(
             embed,
             f"⚔️ DPS ({len(dps)}/{capacity.dps})",
-            [_member_line(signup) for signup in dps],
+            [_member_line(signup) for signup in dps]
+            + [_waitlisted_member_line(signup) for signup in waitlisted_dps],
         )
         embed.add_field(
             name="Boons",
@@ -373,7 +398,7 @@ def event_embed(
         if waitlisted:
             _add_chunked_field(
                 embed,
-                "⌛️ Waitlist",
+                f"{WAITLIST_EMOJI} Waitlist",
                 _role_group_lines(waitlisted),
             )
     else:
@@ -385,7 +410,7 @@ def event_embed(
         if waitlisted:
             _add_chunked_field(
                 embed,
-                "⌛️ Waitlist",
+                f"{WAITLIST_EMOJI} Waitlist",
                 [_member_line(signup) for signup in waitlisted],
             )
 
