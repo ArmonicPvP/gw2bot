@@ -343,6 +343,51 @@ class RaffleRunWinnerRecord(Base):
     tickets_before_draw: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class PollRecord(Base):
+    __tablename__ = "polls"
+
+    poll_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    guild_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    channel_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # NULL until the poll's message has been sent. Indexed because every
+    # reaction event resolves its poll through this column.
+    message_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+    creator_discord_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    # The options are newline-joined, mirroring how EventRecord serializes its
+    # small list columns. Each option is a single line, so the join is lossless.
+    options: Mapped[str] = mapped_column(String, nullable=False)
+    allow_multiple: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    end_time: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class PollVoteRecord(Base):
+    __tablename__ = "poll_votes"
+
+    poll_id: Mapped[int] = mapped_column(
+        ForeignKey("polls.poll_id"),
+        primary_key=True,
+    )
+    option_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Records when the reaction landed so single-choice enforcement can keep the
+    # newest vote and drop the earlier ones.
+    voted_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 def create_database_engine(database_path: str) -> Engine:
     path = Path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)

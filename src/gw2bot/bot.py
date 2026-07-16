@@ -24,6 +24,14 @@ from gw2bot.events.views import (
 from gw2bot.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.poll_status import PollStatusTracker
+from gw2bot.polls import scheduler as poll_scheduler
+from gw2bot.polls.commands import PollCommands
+from gw2bot.polls.reactions import (
+    PollRenderer,
+    handle_reaction_add as handle_poll_reaction_add,
+    handle_reaction_remove as handle_poll_reaction_remove,
+)
+from gw2bot.polls.store import PollStore
 from gw2bot.raffle import (
     RaffleAudit,
     RaffleContribution,
@@ -67,6 +75,8 @@ class Gw2Bot(discord.Client):
         intents.guilds = True
         intents.guild_messages = True
         intents.message_content = True
+        # Reaction events drive poll voting. This intent is not privileged.
+        intents.guild_reactions = True
         super().__init__(intents=intents)
         self._config = config
         self._session: aiohttp.ClientSession | None = None
@@ -79,6 +89,8 @@ class Gw2Bot(discord.Client):
         )
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._event_store = EventStore(config.raffle_db_path)
+        self._poll_store = PollStore(config.raffle_db_path)
+        self._poll_renderer = PollRenderer(self)
         self._event_timezone = ZoneInfo(config.event_timezone)
         self._api: Gw2ApiClient | None = None
         self._web_server: WebServer | None = None
@@ -90,6 +102,7 @@ class Gw2Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
         self.tree.add_command(EventCommands(self))
+        self.tree.add_command(PollCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
@@ -145,6 +158,10 @@ class Gw2Bot(discord.Client):
                 self._poll_event_updates(),
                 name="gw2-event-scheduler",
             ),
+            asyncio.create_task(
+                self._run_poll_scheduler(),
+                name="gw2-poll-scheduler",
+            ),
         ]
         if self._config.web_enabled:
             # Imported lazily so the web layer only loads when enabled.
@@ -173,6 +190,7 @@ class Gw2Bot(discord.Client):
         for task in self._poll_tasks:
             task.cancel()
         await asyncio.gather(*self._poll_tasks, return_exceptions=True)
+        self._poll_renderer.cancel_all()
         if self._web_server is not None:
             await self._web_server.stop()
         if self._guild_members is not None:
@@ -181,6 +199,7 @@ class Gw2Bot(discord.Client):
             await self._session.close()
         self._raffle_store.close()
         self._event_store.close()
+        self._poll_store.close()
         await super().close()
 
     async def on_ready(self) -> None:
@@ -236,6 +255,18 @@ class Gw2Bot(discord.Client):
 
     async def on_thread_create(self, thread: discord.Thread) -> None:
         await self._apply_trial_forum_in_review_tag(thread)
+
+    async def on_raw_reaction_add(
+        self,
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        await handle_poll_reaction_add(self, payload)
+
+    async def on_raw_reaction_remove(
+        self,
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        await handle_poll_reaction_remove(self, payload)
 
     async def _apply_trial_forum_in_review_tag(
         self,
@@ -487,11 +518,22 @@ class Gw2Bot(discord.Client):
         return self._event_store
 
     @property
+    def poll_store(self) -> PollStore:
+        return self._poll_store
+
+    @property
+    def poll_renderer(self) -> PollRenderer:
+        return self._poll_renderer
+
+    @property
     def event_timezone(self) -> ZoneInfo:
         return self._event_timezone
 
     async def _poll_event_updates(self) -> None:
         await event_scheduler.poll_event_updates(self)
+
+    async def _run_poll_scheduler(self) -> None:
+        await poll_scheduler.run_poll_scheduler(self)
 
     async def _poll_guild_member_count_topic(self) -> None:
         await member_count.poll_guild_member_count_topic(self)

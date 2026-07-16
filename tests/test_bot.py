@@ -136,14 +136,16 @@ class TestBotIntent:
             )
 
             bot = Gw2Bot(config)
-            # Release the SQLite file handle so Windows can delete the
+            # Release the SQLite file handles so Windows can delete the
             # temporary directory.
             bot.event_store.close()
+            bot.poll_store.close()
 
         assert bot.intents.guilds
         assert bot.intents.guild_messages
         assert not bot.intents.members
         assert bot.intents.message_content
+        assert bot.intents.guild_reactions
         raffle_store.assert_called_once()
 
     @patch("gw2bot.bot.RaffleStore")
@@ -167,9 +169,10 @@ class TestBotIntent:
             )
             with patch.object(Gw2Bot, "add_dynamic_items") as add_dynamic_items:
                 bot = Gw2Bot(config)
-            # Release the SQLite file handle so Windows can delete the
+            # Release the SQLite file handles so Windows can delete the
             # temporary directory.
             bot.event_store.close()
+            bot.poll_store.close()
 
         add_dynamic_items.assert_any_call(RaffleAuditRangesButton)
         add_dynamic_items.assert_any_call(

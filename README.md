@@ -76,6 +76,14 @@ forum channel `1317206104727621693` so it can link Trial applications to
 Discord members. Grant `Manage Threads` in that forum channel so the bot can
 automatically tag new posts as `In Review`.
 
+Poll voting uses the (non-privileged) `Server Reactions Intent`, which is
+enabled automatically in code. In every channel a poll is posted to, grant the
+bot `Add Reactions` so it can seed the option reactions and `Manage Messages`
+so it can enforce single-choice voting (removing a voter's earlier reaction)
+and clear reactions when a poll ends. Without `Manage Messages` a poll still
+runs, but extra reactions on single-choice polls are left in place and the
+reactions are not cleared when the poll closes.
+
 ## Feast Stock Alerts
 
 The monitor tracks these fixed Guild Storage consumable IDs:
@@ -347,6 +355,33 @@ logs through the same destination as guild-leave messages:
 ```text
 @DiscordUser added 1 raffle ticket to Username.1234.
 ```
+
+## Poll Commands
+
+`/poll` creates reaction-based polls. Managing polls (`create`, `edit`,
+`delete`, `complete`) requires the same role as `/event` commands
+(`1318357141521825872`); reacting to vote is open to everyone.
+
+- `/poll create`: opens a form for the poll question (title), up to 10 options
+  (one per line), whether members may pick more than one option, the channel to
+  post in, and how long the poll runs (`HH:mm`; use a large hour count for
+  multi-day polls). A preview is shown before posting. When posted, the bot
+  sends an embed and adds the option reactions 1️⃣–9️⃣ then 0️⃣ for the tenth.
+  Each option shows its vote count and share of the total votes.
+- `/poll edit <poll id>`: change any of the poll's settings. Changing the
+  channel warns first, because the poll must be re-posted, which clears every
+  reaction and vote. Changing the number of options also resets votes.
+- `/poll delete <poll id>`: removes a running poll and its message.
+- `/poll complete <poll id>`: ends a poll immediately, locking in the current
+  results regardless of time left.
+
+Votes are counted from the message reactions, excluding the bot's own seed
+reactions. On single-choice polls, reacting to a second option removes the
+earlier reaction so only the newest choice counts. Reactions are reconciled
+against the message once a minute, so counts recover after the bot is offline.
+Running polls are stored in the same SQLite database as the rest of the bot, so
+they survive restarts; when a poll ends its results message stays in the channel
+but the poll is no longer tracked. The poll id is shown in the embed footer.
 
 ## Guild Membership Messages
 
