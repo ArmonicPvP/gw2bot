@@ -86,6 +86,18 @@ async def send_pending_raffle_notifications(bot: Gw2Bot) -> None:
     pending = bot._raffle_store.get_pending_notifications()
     LOGGER.debug("Found %s pending raffle notifications", len(pending))
     for deposit in pending:
+        # A deposit below one gold buys no tickets; suppress the public embed
+        # while still marking it sent so it does not stay pending forever.
+        if deposit.raffle_tickets <= 0:
+            LOGGER.debug(
+                "Skipping sub-gold raffle deposit embed for event %s; "
+                "coins=%s tickets=%s",
+                deposit.event_id,
+                deposit.coins_deposited,
+                deposit.raffle_tickets,
+            )
+            bot._raffle_store.mark_notification_sent(deposit.event_id)
+            continue
         if await bot._try_send_raffle_contribution_embed(
             raffle_deposit_embed(deposit)
         ):

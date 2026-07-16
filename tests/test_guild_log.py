@@ -3,6 +3,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from gw2bot.bot import Gw2Bot
+from gw2bot.raffle import RaffleDeposit
 
 
 class TestGuildLogRefresh:
@@ -90,3 +91,45 @@ class TestGuildLogRefresh:
         bot._send_pending_rank_change_notifications.assert_awaited_once()
         bot._poll_status.record_success.assert_called_once_with("Guild Log")
         sleep.assert_awaited_once_with(60)
+
+
+class TestSendPendingRaffleNotifications:
+    async def test_skips_sub_gold_deposit_embed_but_marks_sent(self) -> None:
+        deposit = RaffleDeposit(
+            event_id=101,
+            username="Jotunn.7612",
+            coins_deposited=1_000,
+            raffle_tickets=0,
+            event_time="2026-07-15T00:00:00Z",
+        )
+        store = MagicMock()
+        store.get_pending_notifications.return_value = [deposit]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_raffle_contribution_embed=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_raffle_notifications(cast(Gw2Bot, bot))
+
+        bot._try_send_raffle_contribution_embed.assert_not_awaited()
+        store.mark_notification_sent.assert_called_once_with(101)
+
+    async def test_posts_embed_for_whole_gold_deposit(self) -> None:
+        deposit = RaffleDeposit(
+            event_id=102,
+            username="Member.1234",
+            coins_deposited=30_000,
+            raffle_tickets=3,
+            event_time="2026-07-15T00:00:00Z",
+        )
+        store = MagicMock()
+        store.get_pending_notifications.return_value = [deposit]
+        bot = SimpleNamespace(
+            _raffle_store=store,
+            _try_send_raffle_contribution_embed=AsyncMock(return_value=True),
+        )
+
+        await Gw2Bot._send_pending_raffle_notifications(cast(Gw2Bot, bot))
+
+        bot._try_send_raffle_contribution_embed.assert_awaited_once()
+        store.mark_notification_sent.assert_called_once_with(102)
