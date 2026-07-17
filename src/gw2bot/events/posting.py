@@ -135,7 +135,9 @@ async def post_occurrence(
             occurrence.occurrence_id,
             type(exc).__name__,
         )
-        await _delete_orphaned_message(message, occurrence.occurrence_id)
+        await _delete_orphaned_message(
+            bot, message, thread_id, occurrence.occurrence_id
+        )
         raise
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
@@ -152,14 +154,39 @@ async def post_occurrence(
     return updated
 
 
-async def _delete_orphaned_message(message: Any, occurrence_id: int) -> None:
-    # Deleting the starter message also removes any thread anchored to it.
+async def _delete_orphaned_message(
+    bot: Gw2Bot, message: Any, thread_id: int | None, occurrence_id: int
+) -> None:
     try:
         await message.delete()
     except discord.HTTPException as exc:
         LOGGER.error(
             "Could not delete orphaned event message; occurrence_id=%s "
             "error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+    await _delete_occurrence_thread(bot, thread_id, occurrence_id)
+
+
+async def _delete_occurrence_thread(
+    bot: Gw2Bot, thread_id: int | None, occurrence_id: int
+) -> None:
+    # Discord does not delete a thread when its starter message is removed;
+    # the thread survives as an orphan unless it is deleted separately.
+    if thread_id is None:
+        return
+    try:
+        thread = await resolve_channel(bot, thread_id)
+        await thread.delete()
+    except discord.NotFound:
+        LOGGER.debug(
+            "Event thread already gone; skipping delete; occurrence_id=%s",
+            occurrence_id,
+        )
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not delete event thread; occurrence_id=%s error_type=%s",
             occurrence_id,
             type(exc).__name__,
         )
@@ -344,6 +371,7 @@ async def repost_occurrence(
     # retire a still-active occurrence. Posting first means a failed move leaves
     # the old message live and still correctly referenced.
     old_message_id = occurrence.message_id
+    old_thread_id = occurrence.thread_id
     old_channel_id = occurrence_channel_id(event, occurrence)
     reposted = await post_occurrence(bot, event, occurrence)
     if old_message_id is not None:
@@ -351,15 +379,20 @@ async def repost_occurrence(
             old_channel = await resolve_channel(bot, old_channel_id)
             await old_channel.get_partial_message(old_message_id).delete()
         except discord.HTTPException as exc:
-            # Deleting the starter message also removes its thread; if this
-            # fails the old message is left orphaned but the move still
-            # proceeds, because the new post is already live and persisted.
+            # The old message is left orphaned but the move still proceeds,
+            # because the new post is already live and persisted.
             LOGGER.error(
                 "Could not delete old event message during channel move; "
                 "occurrence_id=%s error_type=%s",
                 occurrence.occurrence_id,
                 type(exc).__name__,
             )
+        # The old thread is deleted independently of the message above: it does
+        # not disappear on its own, and a failed message delete must not also
+        # strand the thread.
+        await _delete_occurrence_thread(
+            bot, old_thread_id, occurrence.occurrence_id
+        )
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(
@@ -382,11 +415,12 @@ async def delete_event_posts(
     event: Event,
     occurrences: list[EventOccurrence],
 ) -> int:
-    # Best-effort cleanup of the public posts when an event is deleted. Deleting
-    # a starter message also removes its thread, so there is no separate thread
-    # delete. This runs after the store rows are gone, so any message that
-    # survives a failure here just has buttons that gracefully report the event
-    # is no longer available.
+    # Best-effort cleanup of the public posts (and their threads) when an event
+    # is deleted. Discord does not delete a thread when its starter message is
+    # removed, so each occurrence's thread is deleted separately below. This
+    # runs after the store rows are gone, so any message that survives a
+    # failure here just has buttons that gracefully report the event is no
+    # longer available.
     #
     # Each occurrence is deleted through the channel it was posted to, not the
     # event's current one. A channel edit only re-posts the live occurrences, so
@@ -427,6 +461,11 @@ async def delete_event_posts(
                 occurrence.occurrence_id,
                 type(exc).__name__,
             )
+        # Deleted independently of the message above: a failed message delete
+        # must not also strand the thread.
+        await _delete_occurrence_thread(
+            bot, occurrence.thread_id, occurrence.occurrence_id
+        )
     LOGGER.debug(
         "Deleted event posts; event_id=%s messages_deleted=%s",
         event.event_id,
