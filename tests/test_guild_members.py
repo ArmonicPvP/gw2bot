@@ -303,8 +303,8 @@ class TestTrialMemberReport:
         assert congrats.startswith(
             "\nCongratulations to our members who have become Sunborne!\n"
         )
-        assert "* (Alpha.1234) - <@1>" in congrats
-        assert "* (Bravo.1234) - <@2>" in congrats
+        assert "* Alpha.1234 - <@1>" in congrats
+        assert "* Bravo.1234 - <@2>" in congrats
         # Both the list and the congratulations block are alphabetically sorted.
         assert congrats.index("Alpha.1234") < congrats.index("Bravo.1234")
 
@@ -315,8 +315,9 @@ class TestTrialMemberReport:
         # A single line too long to fit under a bare header (or a bare
         # greeting) must not flush an empty header message or a code block
         # holding nothing but the greeting.
+        username = "A" * 1_990 + ".1234"
         messages = format_before_mark_trial_report(
-            [TrialMemberReportEntry("A" * 1_990 + ".1234", 1, "Sunborne")]
+            [TrialMemberReportEntry(username, 1, "Sunborne")]
         )
 
         assert messages
@@ -327,7 +328,7 @@ class TestTrialMemberReport:
         ]
         assert congrats
         for block in congrats:
-            assert "* (" in block
+            assert f"* {username}" in block
 
     def test_formats_contextual_reports_within_discord_limit(self) -> None:
         usernames = [f"Long Trial Username {index:03d}.1234" for index in range(150)]

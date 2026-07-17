@@ -474,7 +474,7 @@ def format_overdue_trial_report(
 
 
 def _format_congrats_line(entry: TrialMemberReportEntry) -> str:
-    line = f"* ({entry.username})"
+    line = f"* {entry.username}"
     if entry.discord_user_id is not None:
         line += f" - <@{entry.discord_user_id}>"
     return line

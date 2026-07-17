@@ -141,7 +141,7 @@ These users are still Trial in-game but already Sunborne in Discord:
 
 ```
 Congratulations to our members who have become Sunborne!
-* (EarlySunborne.1234) - @DiscordUser
+* EarlySunborne.1234 - @DiscordUser
 ```
 
 Trial members past the 14-day mark
