@@ -1461,6 +1461,56 @@ class TestPostingLoggingSafety:
                 (),
             )
             await remove_signup(bot, event, occurrence, 11)
+            await delete_event_posts(
+                bot,
+                event,
+                store.get_event_occurrences(event.event_id),
+            )
 
         assert title not in caplog.text
         assert description not in caplog.text
+
+    async def test_thread_cleanup_is_traceable_end_to_end(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        with caplog.at_level("DEBUG", logger="gw2bot.events.posting"):
+            await delete_event_posts(bot, event, occurrences)
+
+        # A successful thread delete is an external Discord action, so it must
+        # leave a trace rather than only being visible when it fails.
+        assert (
+            f"Deleted event thread; occurrence_id={posted.occurrence_id}"
+            in caplog.text
+        )
+
+    async def test_an_occurrence_without_a_thread_logs_the_skip(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        channel.create_thread_error = forbidden_error(50001)
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        assert posted.thread_id is None
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        with caplog.at_level("DEBUG", logger="gw2bot.events.posting"):
+            await delete_event_posts(bot, event, occurrences)
+
+        # The skip is recorded too, so a post that never got a thread is
+        # distinguishable from one whose cleanup silently did nothing.
+        assert (
+            f"No event thread to delete; skipping; "
+            f"occurrence_id={posted.occurrence_id}" in caplog.text
+        )

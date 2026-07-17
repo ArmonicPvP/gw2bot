@@ -175,6 +175,10 @@ async def _delete_occurrence_thread(
     # Discord does not delete a thread when its starter message is removed;
     # the thread survives as an orphan unless it is deleted separately.
     if thread_id is None:
+        LOGGER.debug(
+            "No event thread to delete; skipping; occurrence_id=%s",
+            occurrence_id,
+        )
         return
     try:
         thread = await resolve_channel(bot, thread_id)
@@ -184,12 +188,18 @@ async def _delete_occurrence_thread(
             "Event thread already gone; skipping delete; occurrence_id=%s",
             occurrence_id,
         )
+        return
     except discord.HTTPException as exc:
         LOGGER.error(
             "Could not delete event thread; occurrence_id=%s error_type=%s",
             occurrence_id,
             type(exc).__name__,
         )
+        return
+    LOGGER.debug(
+        "Deleted event thread; occurrence_id=%s",
+        occurrence_id,
+    )
 
 
 async def refresh_occurrence_message(
