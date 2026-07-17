@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.database import (
     FeastAlertRecord,
+    FeastStockLogRecord,
     GuildInviteRecord,
     GuildJoinRecord,
     GuildLeaveRecord,
@@ -143,6 +144,44 @@ class RaffleStore:
             if record is not None:
                 session.delete(record)
                 LOGGER.debug("Cleared feast alert %s", guild_storage_id)
+
+    def get_last_feast_counts(self) -> dict[int, int]:
+        # The latest log row per feast is its last-known count. This seeds the
+        # in-memory cache once; polls compare against that cache, not the DB.
+        latest = (
+            select(func.max(FeastStockLogRecord.log_id))
+            .group_by(FeastStockLogRecord.guild_storage_id)
+            .scalar_subquery()
+        )
+        with self._sessions() as session:
+            records = session.scalars(
+                select(FeastStockLogRecord).where(
+                    FeastStockLogRecord.log_id.in_(latest)
+                )
+            ).all()
+            results = {
+                record.guild_storage_id: record.count for record in records
+            }
+            LOGGER.debug("Loaded %s persisted feast counts", len(results))
+            return results
+
+    def record_feast_counts(
+        self,
+        counts: Mapping[int, int],
+        recorded_at: float,
+    ) -> None:
+        if not counts:
+            return
+        with self._sessions.begin() as session:
+            for guild_storage_id, count in counts.items():
+                session.add(
+                    FeastStockLogRecord(
+                        guild_storage_id=guild_storage_id,
+                        count=count,
+                        recorded_at=recorded_at,
+                    )
+                )
+        LOGGER.debug("Recorded %s feast count changes", len(counts))
 
     def initialize_cursor(self, event_id: int) -> None:
         with self._sessions.begin() as session:

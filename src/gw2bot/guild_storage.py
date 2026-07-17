@@ -9,7 +9,11 @@ import aiohttp
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.feast_stock import get_due_low_stock_alerts
+from gw2bot.feast_stock import (
+    changed_feast_counts,
+    get_due_low_stock_alerts,
+    tracked_feast_counts,
+)
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -40,19 +44,24 @@ async def poll_guild_storage(bot: Gw2Bot) -> None:
 
 async def handle_storage(bot: Gw2Bot, storage: list[dict[str, Any]]) -> None:
     now = time.time()
+    counts = tracked_feast_counts(storage)
     last_alerted_at = bot._raffle_store.get_feast_alert_times()
     alerts, currently_low = get_due_low_stock_alerts(
-        storage,
+        counts,
         last_alerted_at,
         now,
     )
     LOGGER.debug(
-        "Evaluated %s storage entries; low=%s due_alerts=%s",
+        "Evaluated %s storage entries; tracked_present=%s low=%s due_alerts=%s",
         len(storage),
+        len(counts),
         len(currently_low),
         len(alerts),
     )
-    for feast_id in last_alerted_at.keys() - currently_low:
+    # Only clear a feast's alert once we actually see it restocked above the
+    # threshold. Feasts missing from this poll are left untouched rather than
+    # being treated as restocked (or empty).
+    for feast_id in (last_alerted_at.keys() - currently_low) & counts.keys():
         bot._raffle_store.clear_feast_alert(feast_id)
     for alert in alerts:
         if await bot._try_send_feast_notification(alert.message):
@@ -60,6 +69,25 @@ async def handle_storage(bot: Gw2Bot, storage: list[dict[str, Any]]) -> None:
                 alert.guild_storage_id,
                 now,
             )
+    _record_feast_counts(bot, counts, now)
+
+
+def _record_feast_counts(
+    bot: Gw2Bot,
+    counts: dict[int, int],
+    now: float,
+) -> None:
+    # Seed the last-known counts from the database once; afterwards every poll
+    # compares against the in-memory cache so no read is needed.
+    if bot._feast_counts is None:
+        bot._feast_counts = bot._raffle_store.get_last_feast_counts()
+    changes = changed_feast_counts(counts, bot._feast_counts)
+    if changes:
+        bot._raffle_store.record_feast_counts(changes, now)
+        # Only update the cache after a successful write so a failed write is
+        # retried on the next poll instead of being silently dropped.
+        bot._feast_counts.update(changes)
+    LOGGER.debug("Recorded %s changed feast counts", len(changes))
 
 async def try_send_feast_notification(bot: Gw2Bot, message: str) -> bool:
     LOGGER.debug("Sending feast alert to notification channel")
