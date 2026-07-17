@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.discord_utils import discord_failure_reason, log_discord_failure
 from gw2bot.events.formatting import (
     compute_status,
     event_embed,
@@ -190,10 +191,12 @@ async def _delete_occurrence_thread(
         )
         return
     except discord.HTTPException as exc:
-        LOGGER.error(
-            "Could not delete event thread; occurrence_id=%s error_type=%s",
+        log_discord_failure(
+            "Could not delete event thread; reason=%s occurrence_id=%s "
+            "required_permissions=manage_threads",
+            exc,
+            discord_failure_reason(exc),
             occurrence_id,
-            type(exc).__name__,
         )
         return
     LOGGER.debug(

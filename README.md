@@ -76,6 +76,15 @@ forum channel `1317206104727621693` so it can link Trial applications to
 Discord members. Grant `Manage Threads` in that forum channel so the bot can
 automatically tag new posts as `In Review`.
 
+Any channel selected with `/event new` needs `View Channel`, `Send Messages`,
+and `Create Public Threads` so the bot can post the event and open its signup
+thread. It also needs `Manage Threads` there: moving an event to a new
+channel, pruning a superseded recurring occurrence, and deleting an event all
+delete that occurrence's thread explicitly, because Discord does not remove a
+thread on its own when its starter message is deleted. Without `Manage
+Threads` those operations still remove the message but log a `50013`
+(`missing_permissions`) error and leave the orphaned thread behind.
+
 ## Feast Stock Alerts
 
 The monitor tracks these fixed Guild Storage consumable IDs:

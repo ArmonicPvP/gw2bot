@@ -1514,3 +1514,29 @@ class TestPostingLoggingSafety:
             f"No event thread to delete; skipping; "
             f"occurrence_id={posted.occurrence_id}" in caplog.text
         )
+
+    async def test_missing_manage_threads_logs_actionable_permission_diagnostics(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        channel.thread.delete = AsyncMock(side_effect=forbidden_error(50013))
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        with caplog.at_level("ERROR", logger="gw2bot.events.posting"):
+            await delete_event_posts(bot, event, occurrences)
+
+        # Deleting a thread needs Manage Threads (README documents this for
+        # /event channels); a deployment missing it must get a log that names
+        # the permission, not just an opaque error type.
+        assert (
+            "Could not delete event thread; reason=missing_permissions "
+            f"occurrence_id={posted.occurrence_id} "
+            "required_permissions=manage_threads "
+            "(type=Forbidden status=403 code=50013)" in caplog.text
+        )
