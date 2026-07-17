@@ -44,6 +44,7 @@ class FakeThread:
         self.add_user = AsyncMock()
         self.remove_user = AsyncMock()
         self.edit = AsyncMock()
+        self.delete = AsyncMock()
 
 
 class FakeChannel:
@@ -211,8 +212,10 @@ class TestPostOccurrence:
 
         # The sent message must be removed so it is not left orphaned, and the
         # occurrence must still look unposted so a retry can re-send cleanly
-        # instead of the scheduler adding a duplicate public message.
+        # instead of the scheduler adding a duplicate public message. Its
+        # thread does not disappear on its own, so it must be deleted too.
         channel.sent[-1]["message"].delete.assert_awaited_once()
+        channel.thread.delete.assert_awaited_once()
         stored = store.get_occurrence(occurrence.occurrence_id)
         assert stored is not None
         assert stored.message_id is None
@@ -851,9 +854,10 @@ class TestRepostOccurrence:
 
         reposted = await repost_occurrence(bot, moved, posted)
 
-        # Old message deleted, fresh one sent in the new channel, and every
-        # existing signup re-added to the new thread.
+        # Old message and its thread deleted, fresh one sent in the new
+        # channel, and every existing signup re-added to the new thread.
         old_channel.partial_message.delete.assert_awaited_once()
+        old_channel.thread.delete.assert_awaited_once()
         assert len(new_channel.sent) == 1
         assert reposted.thread_id == 888
         assert new_channel.thread.add_user.await_count == 2
@@ -893,9 +897,10 @@ class TestRepostOccurrence:
         reposted = await repost_occurrence(bot, moved, posted)
 
         # A failed delete of the old post must not stop the move from posting
-        # into the new channel.
+        # into the new channel, nor stop the old thread from being cleaned up.
         assert len(new_channel.sent) == 1
         assert reposted.thread_id == 888
+        old_channel.thread.delete.assert_awaited_once()
 
 
     async def test_repost_keeps_the_old_post_when_the_new_post_fails(
@@ -932,6 +937,7 @@ class TestRepostOccurrence:
         # still referenced. Deleting it first would strand the occurrence on a
         # dead message id and cost the event its only public post.
         old_channel.partial_message.delete.assert_not_awaited()
+        old_channel.thread.delete.assert_not_awaited()
         stored = store.get_occurrence(posted.occurrence_id)
         assert stored is not None
         assert stored.message_id == posted.message_id
@@ -1132,10 +1138,12 @@ class TestDeleteEventPosts:
 
         deleted = await delete_event_posts(bot, event, occurrences)
 
-        # Only the posted occurrence has a message to remove.
+        # Only the posted occurrence has a message to remove, and its thread
+        # is deleted separately since it does not disappear on its own.
         assert deleted == 1
         assert unposted.message_id is None
         channel.partial_message.delete.assert_awaited_once()
+        channel.thread.delete.assert_awaited_once()
 
     async def test_deletes_each_post_through_the_channel_it_was_posted_to(
         self,
@@ -1176,9 +1184,12 @@ class TestDeleteEventPosts:
         # Both posts are removed, each through the channel it actually lives in.
         # Addressing the old one through the event's current channel returns
         # NotFound and would leave it visible forever once the rows are gone.
+        # Both threads are removed too, since neither disappears on its own.
         assert deleted == 2
         old_channel.partial_message.delete.assert_awaited_once()
         new_channel.partial_message.delete.assert_awaited_once()
+        old_channel.thread.delete.assert_awaited_once()
+        new_channel.thread.delete.assert_awaited_once()
 
     async def test_an_unresolvable_channel_does_not_strand_the_others(
         self,
@@ -1214,9 +1225,14 @@ class TestDeleteEventPosts:
 
         deleted = await delete_event_posts(bot, moved, occurrences)
 
-        # The post in the surviving channel is still removed.
+        # The post in the surviving channel is still removed, thread included.
+        # The old occurrence's channel could not be resolved at all, so its
+        # thread delete is never attempted (a real dead parent channel takes
+        # its threads with it on Discord's side).
         assert deleted == 1
         new_channel.partial_message.delete.assert_awaited_once()
+        new_channel.thread.delete.assert_awaited_once()
+        old_channel.thread.delete.assert_not_awaited()
 
     async def test_a_failed_message_delete_does_not_stop_the_others(
         self,
@@ -1236,9 +1252,70 @@ class TestDeleteEventPosts:
 
         deleted = await delete_event_posts(bot, event, occurrences)
 
-        # Both deletes were attempted even though they fail.
+        # Both message deletes were attempted even though they fail, and a
+        # failed message delete does not stop the thread delete either.
         assert deleted == 0
         assert channel.partial_message.delete.await_count == 2
+        assert channel.thread.delete.await_count == 2
+
+    async def test_a_failed_thread_delete_does_not_stop_the_others(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        old_channel.thread.delete = AsyncMock(side_effect=forbidden_error(50001))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        old = store.create_occurrence(event.event_id, START)
+        await post_occurrence(bot, event, old, BEFORE_START)
+        store.set_occurrence_status(old.occurrence_id, EventStatus.OVER)
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        new_start = START + timedelta(days=1)
+        new = store.create_occurrence(moved.event_id, new_start)
+        await post_occurrence(bot, moved, new, new_start - timedelta(hours=1))
+        occurrences = store.get_event_occurrences(moved.event_id)
+
+        deleted = await delete_event_posts(bot, moved, occurrences)
+
+        # The old thread's delete fails, but the message deletes (both posts)
+        # still go through and the new thread is still removed.
+        assert deleted == 2
+        old_channel.thread.delete.assert_awaited_once()
+        new_channel.thread.delete.assert_awaited_once()
+
+    async def test_a_thread_already_gone_is_skipped_without_error(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence, BEFORE_START)
+        channel.thread.delete = AsyncMock(side_effect=not_found_error())
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        deleted = await delete_event_posts(bot, event, occurrences)
+
+        # A thread already gone (deleted by a moderator, or by Discord along
+        # with its parent channel) is not a failure worth logging as an error.
+        assert deleted == 1
+        channel.thread.delete.assert_awaited_once()
 
 
 class TestPruneSupersededOccurrences:
@@ -1384,6 +1461,82 @@ class TestPostingLoggingSafety:
                 (),
             )
             await remove_signup(bot, event, occurrence, 11)
+            await delete_event_posts(
+                bot,
+                event,
+                store.get_event_occurrences(event.event_id),
+            )
 
         assert title not in caplog.text
         assert description not in caplog.text
+
+    async def test_thread_cleanup_is_traceable_end_to_end(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        with caplog.at_level("DEBUG", logger="gw2bot.events.posting"):
+            await delete_event_posts(bot, event, occurrences)
+
+        # A successful thread delete is an external Discord action, so it must
+        # leave a trace rather than only being visible when it fails.
+        assert (
+            f"Deleted event thread; occurrence_id={posted.occurrence_id}"
+            in caplog.text
+        )
+
+    async def test_an_occurrence_without_a_thread_logs_the_skip(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        channel.create_thread_error = forbidden_error(50001)
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        assert posted.thread_id is None
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        with caplog.at_level("DEBUG", logger="gw2bot.events.posting"):
+            await delete_event_posts(bot, event, occurrences)
+
+        # The skip is recorded too, so a post that never got a thread is
+        # distinguishable from one whose cleanup silently did nothing.
+        assert (
+            f"No event thread to delete; skipping; "
+            f"occurrence_id={posted.occurrence_id}" in caplog.text
+        )
+
+    async def test_missing_manage_threads_logs_actionable_permission_diagnostics(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        channel.thread.delete = AsyncMock(side_effect=forbidden_error(50013))
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        with caplog.at_level("ERROR", logger="gw2bot.events.posting"):
+            await delete_event_posts(bot, event, occurrences)
+
+        # Deleting a thread needs Manage Threads (README documents this for
+        # /event channels); a deployment missing it must get a log that names
+        # the permission, not just an opaque error type.
+        assert (
+            "Could not delete event thread; reason=missing_permissions "
+            f"occurrence_id={posted.occurrence_id} "
+            "required_permissions=manage_threads "
+            "(type=Forbidden status=403 code=50013)" in caplog.text
+        )
