@@ -96,9 +96,12 @@ The monitor tracks these fixed Guild Storage consumable IDs:
 | `1102` | Cilantro Lime Sous-Vide Steak |
 | `1112` | Spherified Cilantro Oyster Soup |
 
-A missing storage entry is treated as zero. Storage is checked every five
-minutes. When a feast is at or below 10, the configured Discord channel
-receives:
+`/v2/guild/:id/storage` reports a genuinely empty consumable as an entry with
+`count: 0`; it does not omit depleted items. A tracked feast missing from the
+response therefore means its count is unknown for that poll (e.g. a partial
+API response), not that it is empty, so missing entries are ignored rather
+than treated as zero. Storage is checked every five minutes. When a feast is
+at or below 10, the configured Discord channel receives:
 
 ```text
 Guild Storage is low on **<item>**: <count> left
@@ -112,6 +115,17 @@ repeat early.
 While a feast remains at or below 10, its alert repeats once every eight hours.
 When its count rises above 10, the reminder timer is cleared so a later drop
 triggers an immediate alert. Reminder times are persisted across restarts.
+
+### Feast Stock Count History
+
+Each poll also records a per-feast stock history: the on-hand count of each
+tracked feast is written to the database only when it changes from the last
+recorded value, and only the feasts that changed are written. Identical polls
+produce no writes. The last-known count per feast is cached in memory after
+being loaded from the database once (on the first poll, or after a restart),
+so unchanged polls require no database read either. As with the low-stock
+alerts above, a feast missing from a poll response leaves its cached count and
+history untouched rather than logging it as zero.
 
 ## Overdue Trial Member Report
 

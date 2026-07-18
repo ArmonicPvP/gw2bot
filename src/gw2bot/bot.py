@@ -74,6 +74,7 @@ class Gw2Bot(discord.Client):
         self._notification_channel: Any | None = None
         self._raffle_contribution_channel: Any | None = None
         self._feast_notification_user: Any | None = None
+        self._feast_counts: dict[int, int] | None = None
         self._poll_status = PollStatusTracker(
             (config.gw2_api_key, config.discord_token)
         )

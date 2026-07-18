@@ -1544,3 +1544,30 @@ class TestRaffleStore:
             reopened.clear_feast_alert(1078)
             assert reopened.get_feast_alert_times() == {}
             reopened.close()
+
+    def test_records_and_reads_latest_feast_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+
+            assert store.get_last_feast_counts() == {}
+
+            store.record_feast_counts({1078: 2, 1102: 3}, 100.0)
+            assert store.get_last_feast_counts() == {1078: 2, 1102: 3}
+
+            # A later write only moves the latest value for the changed feast.
+            store.record_feast_counts({1078: 0}, 200.0)
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            assert reopened.get_last_feast_counts() == {1078: 0, 1102: 3}
+            reopened.close()
+
+    def test_record_feast_counts_ignores_empty_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            store.record_feast_counts({}, 100.0)
+
+            assert store.get_last_feast_counts() == {}
+            store.close()

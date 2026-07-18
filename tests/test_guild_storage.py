@@ -1,12 +1,13 @@
 import logging
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, call
 
 import discord
 import pytest
 
 from gw2bot.bot import Gw2Bot
+from gw2bot.guild_storage import handle_storage
 
 
 class TestFeastNotification:
@@ -92,3 +93,103 @@ class TestFeastNotification:
             )
 
         assert sent
+
+
+class FakeFeastStore:
+    """Records how the feast-count cache seeds and writes are exercised."""
+
+    def __init__(self, initial_counts: dict[int, int]) -> None:
+        self._counts = dict(initial_counts)
+        self.seed_reads = 0
+        self.recorded: list[dict[int, int]] = []
+
+    def get_feast_alert_times(self) -> dict[int, float]:
+        return {}
+
+    def clear_feast_alert(self, guild_storage_id: int) -> None:
+        pass
+
+    def mark_feast_alert_sent(
+        self,
+        guild_storage_id: int,
+        notification_time: float,
+    ) -> None:
+        pass
+
+    def get_last_feast_counts(self) -> dict[int, int]:
+        self.seed_reads += 1
+        return dict(self._counts)
+
+    def record_feast_counts(
+        self,
+        counts: dict[int, int],
+        recorded_at: float,
+    ) -> None:
+        self.recorded.append(dict(counts))
+        self._counts.update(counts)
+
+
+def _storage(**counts: int) -> list[dict[str, Any]]:
+    return [
+        {"id": int(feast_id), "count": count}
+        for feast_id, count in counts.items()
+    ]
+
+
+class TestHandleStorageFeastCounts:
+    async def test_seeds_once_then_logs_only_changed_counts(self) -> None:
+        # The database already knows one feast's count; the rest are new.
+        store = FakeFeastStore({1078: 50})
+        bot = cast(
+            Gw2Bot,
+            SimpleNamespace(
+                _raffle_store=store,
+                _feast_counts=None,
+                _try_send_feast_notification=AsyncMock(return_value=True),
+            ),
+        )
+        full = _storage(**{"1078": 50, "1089": 40, "1102": 30, "1112": 20})
+
+        # First poll: seed from the DB, log every feast that differs from it.
+        await handle_storage(bot, full)
+        # Second poll with identical counts: nothing changed, nothing logged.
+        await handle_storage(bot, full)
+        # Third poll: only one feast drops, so only that feast is logged.
+        await handle_storage(
+            bot,
+            _storage(**{"1078": 0, "1089": 40, "1102": 30, "1112": 20}),
+        )
+
+        # Seeded from the database exactly once; later polls use the cache.
+        assert store.seed_reads == 1
+        assert store.recorded == [
+            {1089: 40, 1102: 30, 1112: 20},
+            {1078: 0},
+        ]
+        assert bot._feast_counts == {1078: 0, 1089: 40, 1102: 30, 1112: 20}
+
+    async def test_missing_feast_is_ignored_not_logged_as_zero(self) -> None:
+        store = FakeFeastStore({})
+        bot = cast(
+            Gw2Bot,
+            SimpleNamespace(
+                _raffle_store=store,
+                _feast_counts=None,
+                _try_send_feast_notification=AsyncMock(return_value=True),
+            ),
+        )
+
+        await handle_storage(
+            bot,
+            _storage(**{"1078": 50, "1089": 40, "1102": 30, "1112": 20}),
+        )
+        # A later poll omits one feast entirely (unknown, not empty).
+        await handle_storage(
+            bot,
+            _storage(**{"1078": 50, "1089": 40, "1102": 30}),
+        )
+
+        # The missing feast produced no new row, and its last-known count stays
+        # cached rather than being overwritten with 0.
+        assert store.recorded == [{1078: 50, 1089: 40, 1102: 30, 1112: 20}]
+        assert bot._feast_counts == {1078: 50, 1089: 40, 1102: 30, 1112: 20}

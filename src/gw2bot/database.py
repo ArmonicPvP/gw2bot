@@ -187,6 +187,19 @@ class FeastAlertRecord(Base):
     last_notification_time: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class FeastStockLogRecord(Base):
+    __tablename__ = "feast_stock_log"
+
+    log_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    guild_storage_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class RaffleRunRecord(Base):
     __tablename__ = "raffle_runs"
 

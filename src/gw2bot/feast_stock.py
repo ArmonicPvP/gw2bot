@@ -35,26 +35,63 @@ TRACKED_FEASTS = (
 )
 
 
+def tracked_feast_counts(storage: list[dict[str, Any]]) -> dict[int, int]:
+    """Return the on-hand count for each tracked feast present in ``storage``.
+
+    The guild storage endpoint reports a genuinely empty consumable as a count
+    of ``0``, so a tracked feast that is *absent* from the response means its
+    count is unknown (e.g. a partial response), not that stock is empty. Such
+    feasts are omitted here so callers ignore them rather than treating a missing
+    feast as ``0``.
+    """
+    tracked_ids = {feast.guild_storage_id for feast in TRACKED_FEASTS}
+    return {
+        int(entry["id"]): int(entry["count"])
+        for entry in storage
+        if "id" in entry
+        and "count" in entry
+        and int(entry["id"]) in tracked_ids
+    }
+
+
+def changed_feast_counts(
+    current: Mapping[int, int],
+    previous: Mapping[int, int],
+) -> dict[int, int]:
+    """Return only the ``current`` counts that differ from ``previous``.
+
+    Feasts absent from ``previous`` are treated as changed so a first
+    observation is always recorded.
+    """
+    return {
+        guild_storage_id: count
+        for guild_storage_id, count in current.items()
+        if previous.get(guild_storage_id) != count
+    }
+
+
 def get_due_low_stock_alerts(
-    storage: list[dict[str, Any]],
+    counts: Mapping[int, int],
     last_alerted_at: Mapping[int, float],
     now: float,
 ) -> tuple[list[FeastAlert], set[int]]:
-    counts = {
-        int(entry["id"]): int(entry["count"])
-        for entry in storage
-        if "id" in entry and "count" in entry
-    }
+    """Return the feast alerts that are due, plus the currently-low feast ids.
+
+    ``counts`` should hold only the tracked feasts observed in the latest poll
+    (see :func:`tracked_feast_counts`); a tracked feast missing from it is
+    ignored rather than assumed empty.
+    """
     currently_low = {
         feast.guild_storage_id
         for feast in TRACKED_FEASTS
-        if counts.get(feast.guild_storage_id, 0) <= LOW_STOCK_THRESHOLD
+        if feast.guild_storage_id in counts
+        and counts[feast.guild_storage_id] <= LOW_STOCK_THRESHOLD
     }
     alerts = [
         FeastAlert(
             guild_storage_id=feast.guild_storage_id,
             name=feast.name,
-            count=counts.get(feast.guild_storage_id, 0),
+            count=counts[feast.guild_storage_id],
         )
         for feast in TRACKED_FEASTS
         if feast.guild_storage_id in currently_low
@@ -65,8 +102,8 @@ def get_due_low_stock_alerts(
         )
     ]
     LOGGER.debug(
-        "Evaluated feast stock; storage_entries=%s tracked=%s low=%s alerts=%s",
-        len(storage),
+        "Evaluated feast stock; tracked_present=%s tracked=%s low=%s alerts=%s",
+        len(counts),
         len(TRACKED_FEASTS),
         len(currently_low),
         len(alerts),
