@@ -1571,3 +1571,40 @@ class TestRaffleStore:
 
             assert store.get_last_feast_counts() == {}
             store.close()
+
+    def test_feast_stock_series_windows_samples_and_prior_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            # Two records before the window and two inside it for feast 1078.
+            store.record_feast_counts({1078: 50}, 100.0)
+            store.record_feast_counts({1078: 44}, 150.0)
+            store.record_feast_counts({1078: 40}, 300.0)
+            store.record_feast_counts({1078: 38}, 400.0)
+
+            series = store.get_feast_stock_series(since=200.0)
+
+            # Every tracked feast is present even with no samples in the window.
+            assert set(series) == {1078, 1089, 1102, 1112}
+            feast = series[1078]
+            assert feast.prior_count == 44
+            assert [
+                (sample.recorded_at, sample.count) for sample in feast.samples
+            ] == [(300.0, 40), (400.0, 38)]
+            assert series[1089].prior_count is None
+            assert series[1089].samples == ()
+            store.close()
+
+    def test_feast_stock_series_orders_samples_by_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1102: 30}, 500.0)
+            store.record_feast_counts({1102: 25}, 300.0)
+            store.record_feast_counts({1102: 20}, 400.0)
+
+            series = store.get_feast_stock_series(since=0.0)
+
+            assert [
+                sample.recorded_at for sample in series[1102].samples
+            ] == [300.0, 400.0, 500.0]
+            assert series[1102].prior_count is None
+            store.close()

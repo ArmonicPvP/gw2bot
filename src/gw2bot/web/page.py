@@ -121,6 +121,13 @@ SERVICE_UNAVAILABLE_PAGE = _simple_page(
     _SIGN_IN_ACTION,
 )
 
+OFFICER_ONLY_PAGE = _simple_page(
+    "Officers only",
+    "Officers only",
+    "The feast usage dashboard is only available to raffle officers.",
+    '<a class="button" href="/">Back to the calendar</a>',
+)
+
 
 CALENDAR_PAGE = (
     """<!DOCTYPE html>
@@ -1028,6 +1035,466 @@ main {
 
   readHash();
   syncViewButtons();
+  refresh();
+})();
+</script>
+</body>
+</html>
+"""
+)
+
+
+FOOD_PAGE = (
+    """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Feast Usage</title>
+<style>"""
+    + _SHARED_STYLE
+    + """
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
+.ranges { display: flex; gap: 0.25rem; }
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+button:hover { background: var(--border); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.active { background: var(--accent); border-color: var(--accent); }
+.spacer { flex: 1; }
+#whoami { color: var(--muted); font-size: 0.85rem; }
+#tz { color: var(--muted); font-size: 0.78rem; }
+header a { font-size: 0.85rem; }
+header form { display: flex; }
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+}
+.card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+.legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; margin-bottom: 0.6rem; }
+.legend .item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; }
+.legend .swatch { width: 0.9rem; height: 0.9rem; border-radius: 3px; flex-shrink: 0; }
+/* The chart is a fixed-viewBox SVG that scales to its container width, so
+   every plotted coordinate is computed once against the viewBox and the
+   browser handles resizing without a re-render. */
+.chart-svg { width: 100%; height: auto; display: block; }
+.chart-svg .axis { stroke: var(--border); stroke-width: 1; }
+.chart-svg .grid { stroke: var(--border); stroke-width: 1; opacity: 0.35; }
+.chart-svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+.chart-svg .y-label { text-anchor: end; }
+.chart-svg .x-label { text-anchor: middle; }
+.chart-svg .series-line { fill: none; stroke-width: 2; }
+.chart-svg .series-dot { stroke: var(--panel); stroke-width: 1; }
+#chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
+.tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.75rem; }
+.tabs button { font-size: 0.8rem; }
+table.removals { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+table.removals th, table.removals td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+table.removals th { color: var(--muted); font-weight: 600; }
+table.removals td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.empty { color: var(--muted); padding: 0.6rem; }
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Feast Usage</h1>
+  <div class="ranges">
+    <button type="button" data-range="24h">24h</button>
+    <button type="button" data-range="7d">7d</button>
+    <button type="button" data-range="30d">30d</button>
+  </div>
+  <span id="tz"></span>
+  <span class="spacer"></span>
+  <span id="whoami"></span>
+  <a href="/">Calendar</a>
+  <form method="post" action="/logout">
+    <button type="submit">Log out</button>
+  </form>
+</header>
+<main>
+  <section class="card">
+    <h2>Stock on hand over time</h2>
+    <div id="legend" class="legend"></div>
+    <div id="chart"></div>
+    <div id="chart-status"></div>
+  </section>
+  <section class="card">
+    <h2>Removals</h2>
+    <div id="tabs" class="tabs"></div>
+    <div id="table"></div>
+    <div id="pager" class="pager"></div>
+  </section>
+</main>
+<script>
+"use strict";
+(function () {
+  // Okabe-Ito colourblind-safe categorical palette, one hue per tracked feast.
+  var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
+  var Y_MAX = 50;
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var VB_W = 960;
+  var VB_H = 380;
+  var PAD_TOP = 16;
+  var PAD_RIGHT = 16;
+  var PAD_BOTTOM = 32;
+  var PAD_LEFT = 34;
+  var PLOT_W = VB_W - PAD_LEFT - PAD_RIGHT;
+  var PLOT_H = VB_H - PAD_TOP - PAD_BOTTOM;
+  var X_TICKS = 6;
+  var TABLE_PAGE_SIZE = 5;
+
+  var state = { range: "24h", data: null, activeFeast: 0, tablePage: 0 };
+
+  var legend = document.getElementById("legend");
+  var chart = document.getElementById("chart");
+  var chartStatus = document.getElementById("chart-status");
+  var tabs = document.getElementById("tabs");
+  var tableBox = document.getElementById("table");
+  var pager = document.getElementById("pager");
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) { node.className = className; }
+    if (text !== undefined) { node.textContent = text; }
+    return node;
+  }
+  function svg(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (key) {
+        node.setAttribute(key, attrs[key]);
+      });
+    }
+    return node;
+  }
+
+  function feasts() {
+    return (state.data && state.data.feasts) || [];
+  }
+  function activeFeast() {
+    return feasts()[state.activeFeast] || null;
+  }
+
+  function scaleX(t) {
+    var since = state.data.since;
+    var now = state.data.now;
+    var span = now - since;
+    var frac = span > 0 ? (t - since) / span : 0;
+    if (frac < 0) { frac = 0; }
+    if (frac > 1) { frac = 1; }
+    return PAD_LEFT + frac * PLOT_W;
+  }
+  function scaleY(count) {
+    var value = count;
+    if (value < 0) { value = 0; }
+    if (value > Y_MAX) { value = Y_MAX; }
+    return PAD_TOP + (1 - value / Y_MAX) * PLOT_H;
+  }
+
+  function formatTick(t) {
+    var date = new Date(t * 1000);
+    if (state.range === "24h") {
+      return date.toLocaleTimeString(
+        undefined, { hour: "numeric", minute: "2-digit" });
+    }
+    return date.toLocaleDateString(
+      undefined, { month: "numeric", day: "numeric" });
+  }
+  function formatMoment(t) {
+    return new Date(t * 1000).toLocaleString(
+      undefined,
+      {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+  }
+
+  function renderChart() {
+    chart.replaceChildren();
+    var canvas = svg("svg", {
+      "class": "chart-svg",
+      viewBox: "0 0 " + VB_W + " " + VB_H,
+      role: "img"
+    });
+
+    // Horizontal gridlines and y labels every ten counts, 0 through Y_MAX.
+    for (var value = 0; value <= Y_MAX; value += 10) {
+      var y = scaleY(value);
+      canvas.appendChild(svg("line", {
+        "class": value === 0 ? "axis" : "grid",
+        x1: PAD_LEFT, y1: y, x2: PAD_LEFT + PLOT_W, y2: y
+      }));
+      var yLabel = svg("text", {
+        "class": "y-label", x: PAD_LEFT - 6, y: y + 4
+      });
+      yLabel.textContent = String(value);
+      canvas.appendChild(yLabel);
+    }
+
+    // Left axis, plus x labels spaced evenly across the whole window so the
+    // range spans the full width even when few points were recorded.
+    canvas.appendChild(svg("line", {
+      "class": "axis",
+      x1: PAD_LEFT, y1: PAD_TOP, x2: PAD_LEFT, y2: PAD_TOP + PLOT_H
+    }));
+    for (var i = 0; i <= X_TICKS; i += 1) {
+      var t = state.data.since +
+        (state.data.now - state.data.since) * (i / X_TICKS);
+      var x = scaleX(t);
+      var xLabel = svg("text", {
+        "class": "x-label", x: x, y: PAD_TOP + PLOT_H + 18
+      });
+      xLabel.textContent = formatTick(t);
+      canvas.appendChild(xLabel);
+    }
+
+    // One polyline plus point markers per feast, each in its own colour. Every
+    // recorded sample is drawn; the series is never downsampled.
+    feasts().forEach(function (feast, index) {
+      var color = COLORS[index % COLORS.length];
+      var points = feast.points || [];
+      if (points.length > 1) {
+        var coords = points.map(function (point) {
+          return scaleX(point.t).toFixed(1) + "," +
+            scaleY(point.count).toFixed(1);
+        }).join(" ");
+        canvas.appendChild(svg("polyline", {
+          "class": "series-line", stroke: color, points: coords
+        }));
+      }
+      points.forEach(function (point) {
+        var dot = svg("circle", {
+          "class": "series-dot",
+          cx: scaleX(point.t).toFixed(1),
+          cy: scaleY(point.count).toFixed(1),
+          r: 3,
+          fill: color
+        });
+        var title = svg("title");
+        title.textContent = feast.name + ": " + point.count +
+          " at " + formatMoment(point.t);
+        dot.appendChild(title);
+        canvas.appendChild(dot);
+      });
+    });
+
+    chart.appendChild(canvas);
+
+    var total = feasts().reduce(function (sum, feast) {
+      return sum + (feast.points ? feast.points.length : 0);
+    }, 0);
+    chartStatus.textContent = total
+      ? ""
+      : "No feast counts were recorded in this period.";
+  }
+
+  function renderLegend() {
+    legend.replaceChildren();
+    feasts().forEach(function (feast, index) {
+      var item = el("span", "item");
+      var swatch = el("span", "swatch");
+      swatch.style.background = COLORS[index % COLORS.length];
+      item.appendChild(swatch);
+      item.appendChild(el("span", null, feast.name));
+      legend.appendChild(item);
+    });
+  }
+
+  function renderTabs() {
+    tabs.replaceChildren();
+    feasts().forEach(function (feast, index) {
+      var button = el("button", null, feast.name);
+      button.type = "button";
+      if (index === state.activeFeast) { button.classList.add("active"); }
+      button.addEventListener("click", function () {
+        state.activeFeast = index;
+        state.tablePage = 0;
+        renderTabs();
+        renderTable();
+      });
+      tabs.appendChild(button);
+    });
+  }
+
+  function renderTable() {
+    tableBox.replaceChildren();
+    pager.replaceChildren();
+    var feast = activeFeast();
+    var removals = (feast && feast.removals) || [];
+    if (!removals.length) {
+      tableBox.appendChild(
+        el("div", "empty", "No removals were recorded in this period."));
+      return;
+    }
+    var pageCount = Math.ceil(removals.length / TABLE_PAGE_SIZE);
+    if (state.tablePage > pageCount - 1) { state.tablePage = pageCount - 1; }
+    var start = state.tablePage * TABLE_PAGE_SIZE;
+    var pageRows = removals.slice(start, start + TABLE_PAGE_SIZE);
+
+    var table = el("table", "removals");
+    var head = el("tr");
+    head.appendChild(el("th", null, "Time"));
+    head.appendChild(el("th", null, "Removed"));
+    head.appendChild(el("th", null, "Remaining"));
+    table.appendChild(head);
+    pageRows.forEach(function (row) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, formatMoment(row.t)));
+      tr.appendChild(el("td", "num", String(row.amount)));
+      tr.appendChild(el("td", "num", String(row.remaining)));
+      table.appendChild(tr);
+    });
+    tableBox.appendChild(table);
+
+    var prev = el("button", null, "Prev");
+    prev.type = "button";
+    prev.disabled = state.tablePage <= 0;
+    prev.addEventListener("click", function () {
+      if (state.tablePage > 0) { state.tablePage -= 1; renderTable(); }
+    });
+    var next = el("button", null, "Next");
+    next.type = "button";
+    next.disabled = state.tablePage >= pageCount - 1;
+    next.addEventListener("click", function () {
+      if (state.tablePage < pageCount - 1) {
+        state.tablePage += 1;
+        renderTable();
+      }
+    });
+    pager.appendChild(prev);
+    pager.appendChild(next);
+    pager.appendChild(el("span", null,
+      "Page " + (state.tablePage + 1) + " of " + pageCount +
+      " (" + removals.length + " removals)"));
+  }
+
+  function render() {
+    renderLegend();
+    renderChart();
+    renderTabs();
+    renderTable();
+  }
+
+  function syncRangeButtons() {
+    document.querySelectorAll("[data-range]").forEach(function (button) {
+      button.classList.toggle(
+        "active", button.getAttribute("data-range") === state.range);
+    });
+  }
+
+  function refresh() {
+    chartStatus.textContent = "Loading\\u2026";
+    fetch("/api/food?range=" + encodeURIComponent(state.range))
+      .then(function (response) {
+        if (response.status === 401) {
+          location.href = "/login";
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) { throw new Error("failed"); }
+        return response.json();
+      })
+      .then(function (payload) {
+        state.data = payload;
+        if (state.activeFeast >= (payload.feasts || []).length) {
+          state.activeFeast = 0;
+        }
+        state.tablePage = 0;
+        render();
+      })
+      .catch(function () {
+        if (chartStatus.textContent === "Loading\\u2026") {
+          chartStatus.textContent = "Could not load feast usage.";
+        }
+      });
+  }
+
+  document.querySelectorAll("[data-range]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      state.range = button.getAttribute("data-range");
+      syncRangeButtons();
+      refresh();
+    });
+  });
+
+  fetch("/api/me")
+    .then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login";
+        throw new Error("unauthorized");
+      }
+      return response.json();
+    })
+    .then(function (payload) {
+      document.getElementById("whoami").textContent = payload.name || "";
+    })
+    .catch(function () {});
+
+  // Every time on this page is rendered from an absolute instant through the
+  // browser's own clock, so name the zone that produced them.
+  function timezoneLabel() {
+    var zone = "";
+    try {
+      zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    } catch (error) {
+      zone = "";
+    }
+    return zone ? "Times in " + zone : "Times in your local time zone";
+  }
+  document.getElementById("tz").textContent = timezoneLabel();
+
+  syncRangeButtons();
   refresh();
 })();
 </script>

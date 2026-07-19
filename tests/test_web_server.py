@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,9 +17,10 @@ from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.events.models import EventCategory, RepeatFrequency
 from gw2bot.events.store import EventStore
+from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
 from gw2bot.web import server as server_module
-from gw2bot.web.server import WebServer
+from gw2bot.web.server import FOOD_PAGE_ROLE_ID, WebServer
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,6 +28,11 @@ GUILD_ID = 5678
 CLIENT_SECRET = "client-secret-value"
 SESSION_SECRET = "session-secret-value-0123456789abcdef"
 SESSION_USER_ID = 1
+
+
+def member(display_name: str = "Kitty", *, officer: bool = False) -> object:
+    roles = [SimpleNamespace(id=FOOD_PAGE_ROLE_ID)] if officer else []
+    return SimpleNamespace(display_name=display_name, roles=roles)
 
 
 def make_config() -> Config:
@@ -55,9 +62,15 @@ class FakeGuild:
 
 
 class FakeBot:
-    def __init__(self, store: EventStore, guild: FakeGuild | None):
+    def __init__(
+        self,
+        store: EventStore,
+        guild: FakeGuild | None,
+        raffle_store: RaffleStore | None = None,
+    ):
         self.event_store = store
         self.event_timezone = ZoneInfo("UTC")
+        self.raffle_store = raffle_store
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
 
@@ -74,17 +87,28 @@ def store(tmp_path: Path):
 
 
 @pytest.fixture
+def raffle_store(tmp_path: Path):
+    store = RaffleStore(str(tmp_path / "raffle.db"), "guild-id")
+    yield store
+    store.close()
+
+
+@pytest.fixture
 def guild() -> FakeGuild:
     guild = FakeGuild()
     # The holder of the default session cookie is a current guild member;
     # every request re-checks that, not just the sign-in.
-    guild.members[SESSION_USER_ID] = SimpleNamespace(display_name="Kitty")
+    guild.members[SESSION_USER_ID] = member("Kitty")
     return guild
 
 
 @pytest.fixture
-def bot(store: EventStore, guild: FakeGuild) -> FakeBot:
-    return FakeBot(store, guild)
+def bot(
+    store: EventStore,
+    guild: FakeGuild,
+    raffle_store: RaffleStore,
+) -> FakeBot:
+    return FakeBot(store, guild, raffle_store)
 
 
 @pytest.fixture
@@ -751,3 +775,179 @@ class TestEventsApi:
         )
 
         assert response.status == 400
+
+
+class TestFoodPageGate:
+    async def test_unauthenticated_page_shows_sign_in(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/food")
+
+        assert response.status == 401
+        assert "Sign in with Discord" in await response.text()
+
+    async def test_member_without_role_gets_officers_only(
+        self,
+        client: TestClient,
+    ) -> None:
+        # The default session member is a plain guild member with no roles, so
+        # the officer-gated dashboard must turn them away.
+        response = await client.get(
+            "/food",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert "Officers only" in await response.text()
+
+    async def test_officer_reaches_food_page(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+
+        response = await client.get(
+            "/food",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 200
+        assert "Feast Usage" in await response.text()
+
+    async def test_officer_role_is_cached_between_requests(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        # Neither membership nor the role is in the gateway cache, so the first
+        # request fetches for each check; both answers are then cached, so a
+        # second request costs no further lookups.
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(return_value=member(officer=True))
+        headers = {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+        assert (await client.get("/food", headers=headers)).status == 200
+        assert guild.fetch_member.await_count == 2
+
+        assert (await client.get("/food", headers=headers)).status == 200
+        assert guild.fetch_member.await_count == 2
+
+    async def test_unreachable_discord_returns_503(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        # An unknown role state is not evidence the member lacks the role, so
+        # the page reports a temporary outage rather than a hard denial.
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/food",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+
+
+class TestFoodApi:
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    async def test_member_without_role_is_forbidden(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/api/food",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert await response.json() == {"error": "forbidden"}
+
+    async def test_rejects_unknown_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/food",
+            params={"range": "90d"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_returns_points_and_removals_for_each_feast(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        # Three counts inside the 24h window: 50 -> 44 -> 40, i.e. two drops.
+        raffle_store.record_feast_counts({1078: 50}, now - 3000)
+        raffle_store.record_feast_counts({1078: 44}, now - 2000)
+        raffle_store.record_feast_counts({1078: 40}, now - 1000)
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "24h"
+        # All four tracked feasts appear, keyed by their guild storage id.
+        assert [feast["id"] for feast in payload["feasts"]] == [
+            1078,
+            1089,
+            1102,
+            1112,
+        ]
+        tracked = payload["feasts"][0]
+        assert tracked["name"] == "Bowl of Fruit Salad with Mint Garnish"
+        assert [point["count"] for point in tracked["points"]] == [50, 44, 40]
+        # Removals are newest first, each carrying the drop and what was left.
+        assert [
+            (removal["amount"], removal["remaining"])
+            for removal in tracked["removals"]
+        ] == [(4, 40), (6, 44)]
+        # A feast with no records still appears with empty series.
+        assert payload["feasts"][1]["points"] == []
+        assert payload["feasts"][1]["removals"] == []
+
+    async def test_defaults_to_the_24h_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/food",
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        assert (await response.json())["range"] == "24h"
+
+    async def test_unreachable_discord_returns_503_json(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/api/food",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+        assert await response.json() == {"error": "unavailable"}

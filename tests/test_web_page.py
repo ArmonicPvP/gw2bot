@@ -1,6 +1,6 @@
 import re
 
-from gw2bot.web.page import CALENDAR_PAGE
+from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE
 
 
 class TestCalendarMarkdown:
@@ -92,3 +92,37 @@ class TestCalendarBrowserTime:
         )
         assert '"Times in " + zone' in CALENDAR_PAGE
         assert '<span id="tz"></span>' in CALENDAR_PAGE
+
+
+class TestFoodPage:
+    def test_offers_all_three_ranges(self) -> None:
+        assert 'data-range="24h"' in FOOD_PAGE
+        assert 'data-range="7d"' in FOOD_PAGE
+        assert 'data-range="30d"' in FOOD_PAGE
+
+    def test_chart_y_axis_is_fixed_zero_to_fifty(self) -> None:
+        assert "var Y_MAX = 50;" in FOOD_PAGE
+        # Gridlines and labels step through the whole 0..Y_MAX axis.
+        assert "for (var value = 0; value <= Y_MAX; value += 10)" in FOOD_PAGE
+
+    def test_chart_times_come_from_the_browser_clock(self) -> None:
+        # Every timestamp is an absolute instant rendered through the browser's
+        # own clock and locale.
+        assert "new Date(t * 1000)" in FOOD_PAGE
+        assert "toLocaleString(" in FOOD_PAGE
+        assert "toLocaleTimeString(" in FOOD_PAGE
+        assert '<span id="tz"></span>' in FOOD_PAGE
+
+    def test_every_recorded_sample_is_plotted(self) -> None:
+        # A point is drawn for every sample; the series is never downsampled,
+        # so even the 30d window keeps all of its points.
+        assert "points.forEach(function (point) {" in FOOD_PAGE
+        assert '"class": "series-dot"' in FOOD_PAGE
+
+    def test_table_pages_five_removals_at_a_time(self) -> None:
+        assert "var TABLE_PAGE_SIZE = 5;" in FOOD_PAGE
+
+    def test_dynamic_values_never_become_markup(self) -> None:
+        # Like the calendar, feast names and rows are only ever set through
+        # textContent or attributes, never innerHTML.
+        assert "innerHTML" not in FOOD_PAGE

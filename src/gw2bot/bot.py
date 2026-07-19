@@ -488,6 +488,10 @@ class Gw2Bot(discord.Client):
         return self._event_store
 
     @property
+    def raffle_store(self) -> RaffleStore:
+        return self._raffle_store
+
+    @property
     def event_timezone(self) -> ZoneInfo:
         return self._event_timezone
 

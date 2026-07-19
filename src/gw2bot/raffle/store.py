@@ -30,6 +30,11 @@ from gw2bot.database import (
     create_database_engine,
     initialize_database,
 )
+from gw2bot.feast_stock import (
+    TRACKED_FEASTS,
+    FeastStockSample,
+    FeastStockSeries,
+)
 from gw2bot.raffle.events import (
     event_in_window,
     parse_gold_deposit,
@@ -182,6 +187,62 @@ class RaffleStore:
                     )
                 )
         LOGGER.debug("Recorded %s feast count changes", len(counts))
+
+    def get_feast_stock_series(
+        self,
+        since: float,
+    ) -> dict[int, FeastStockSeries]:
+        """Return each tracked feast's recorded counts at or after ``since``.
+
+        Every tracked feast is present in the result even when it has no
+        samples in the window. Each series also carries ``prior_count``: the
+        last count recorded strictly before ``since``, so a decrease straddling
+        the window's start edge stays visible to callers computing removals.
+        """
+        series: dict[int, FeastStockSeries] = {}
+        with self._sessions() as session:
+            for feast in TRACKED_FEASTS:
+                feast_id = feast.guild_storage_id
+                rows = session.scalars(
+                    select(FeastStockLogRecord)
+                    .where(
+                        FeastStockLogRecord.guild_storage_id == feast_id,
+                        FeastStockLogRecord.recorded_at >= since,
+                    )
+                    .order_by(
+                        FeastStockLogRecord.recorded_at,
+                        FeastStockLogRecord.log_id,
+                    )
+                ).all()
+                prior = session.scalars(
+                    select(FeastStockLogRecord)
+                    .where(
+                        FeastStockLogRecord.guild_storage_id == feast_id,
+                        FeastStockLogRecord.recorded_at < since,
+                    )
+                    .order_by(
+                        FeastStockLogRecord.recorded_at.desc(),
+                        FeastStockLogRecord.log_id.desc(),
+                    )
+                    .limit(1)
+                ).first()
+                series[feast_id] = FeastStockSeries(
+                    guild_storage_id=feast_id,
+                    prior_count=prior.count if prior is not None else None,
+                    samples=tuple(
+                        FeastStockSample(
+                            recorded_at=row.recorded_at,
+                            count=row.count,
+                        )
+                        for row in rows
+                    ),
+                )
+        LOGGER.debug(
+            "Loaded feast stock series; feasts=%s samples=%s",
+            len(series),
+            sum(len(item.samples) for item in series.values()),
+        )
+        return series
 
     def initialize_cursor(self, event_id: int) -> None:
         with self._sessions.begin() as session:
