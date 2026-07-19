@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
@@ -26,6 +27,7 @@ from gw2bot.events.models import (
     EventStatus,
     PreferenceMode,
     RepeatFrequency,
+    RosterAssignment,
     SignupPreference,
 )
 
@@ -101,6 +103,12 @@ def _signup_from_record(record: EventSignupRecord) -> EventSignup:
         flex_roles=_parse_roles(record.flex_roles),
         signed_up_at=_parse_time(record.signed_up_at),
         waitlisted=record.waitlisted,
+        edit_tokens=record.edit_tokens,
+        edit_tokens_updated_at=(
+            _parse_time(record.edit_tokens_updated_at)
+            if record.edit_tokens_updated_at is not None
+            else None
+        ),
     )
 
 
@@ -425,7 +433,10 @@ class EventStore:
                     EventOccurrenceRecord.start_time < _serialize_time(end)
                 )
                 .where(EventRecord.cancelled.is_(False))
-                .order_by(EventSignupRecord.signed_up_at)
+                .order_by(
+                    EventSignupRecord.signed_up_at,
+                    EventSignupRecord.discord_user_id,
+                )
             ).all()
             signups: dict[int, list[EventSignup]] = {}
             for record in records:
@@ -541,7 +552,13 @@ class EventStore:
             records = session.scalars(
                 select(EventSignupRecord)
                 .where(EventSignupRecord.occurrence_id == occurrence_id)
-                .order_by(EventSignupRecord.signed_up_at)
+                # The user id tiebreak keeps FCFS ordering deterministic when
+                # two signups share a timestamp; seating priority depends on
+                # this order.
+                .order_by(
+                    EventSignupRecord.signed_up_at,
+                    EventSignupRecord.discord_user_id,
+                )
             ).all()
             return [_signup_from_record(record) for record in records]
 
@@ -624,11 +641,12 @@ class EventStore:
         )
         return removed
 
-    def promote_signup(
+    def set_signup_edit_tokens(
         self,
         occurrence_id: int,
         discord_user_id: int,
-        assigned_role: EventRole | None,
+        tokens: float,
+        now: datetime,
     ) -> None:
         with self._sessions() as session:
             record = session.get(
@@ -636,52 +654,98 @@ class EventStore:
                 (occurrence_id, discord_user_id),
             )
             if record is None:
-                raise ValueError("The signup to promote no longer exists.")
-            record.waitlisted = False
-            record.assigned_role = (
-                assigned_role.value if assigned_role is not None else None
-            )
+                raise ValueError("You are not signed up for this event.")
+            record.edit_tokens = tokens
+            record.edit_tokens_updated_at = _serialize_time(now)
             session.commit()
         LOGGER.debug(
-            "Promoted event signup from waitlist; occurrence_id=%s "
-            "user_id=%s assigned_role=%s",
+            "Set signup edit tokens; occurrence_id=%s user_id=%s tokens=%.2f",
             occurrence_id,
             discord_user_id,
-            assigned_role.value if assigned_role is not None else None,
+            tokens,
         )
 
-    def set_signup_assignment(
+    def update_signup_roles(
         self,
         occurrence_id: int,
         discord_user_id: int,
         *,
-        role: EventRole | None,
+        role: EventRole,
+        flex_roles: tuple[EventRole, ...],
         assigned_role: EventRole | None,
         waitlisted: bool,
     ) -> None:
-        # Unlike promote_signup, this can move a signup in either direction,
-        # because re-seating a roster against a new capacity can also push an
-        # admitted signup onto the waitlist.
+        # An "edit my signup" rewrites the member's declared roles in place.
+        # signed_up_at is deliberately left untouched: the whole point of
+        # editing over sign-out-and-rejoin is keeping the member's original
+        # seat and queue priority.
         with self._sessions() as session:
             record = session.get(
                 EventSignupRecord,
                 (occurrence_id, discord_user_id),
             )
             if record is None:
-                raise ValueError("The signup to reassign no longer exists.")
-            record.role = role.value if role is not None else None
+                raise ValueError("You are not signed up for this event.")
+            record.role = role.value
+            record.flex_roles = _serialize_roles(flex_roles)
             record.assigned_role = (
                 assigned_role.value if assigned_role is not None else None
             )
             record.waitlisted = waitlisted
             session.commit()
         LOGGER.debug(
-            "Reassigned event signup; occurrence_id=%s user_id=%s "
-            "assigned_role=%s waitlisted=%s",
+            "Updated event signup roles; occurrence_id=%s user_id=%s "
+            "role=%s flex_count=%s assigned_role=%s waitlisted=%s",
             occurrence_id,
             discord_user_id,
+            role.value,
+            len(flex_roles),
             assigned_role.value if assigned_role is not None else None,
             waitlisted,
+        )
+
+    def apply_roster_assignments(
+        self,
+        occurrence_id: int,
+        assignments: Sequence[RosterAssignment],
+    ) -> None:
+        # One mutation can move several signups at once (a reshuffle to admit
+        # a new member, waitlist promotions, a category rebalance), so all
+        # rows are written in a single transaction: a missing row raises
+        # before the commit and rolls the whole batch back, leaving no
+        # half-reshuffled roster behind.
+        if not assignments:
+            LOGGER.debug(
+                "No roster assignments to apply; occurrence_id=%s",
+                occurrence_id,
+            )
+            return
+        with self._sessions() as session:
+            for assignment in assignments:
+                record = session.get(
+                    EventSignupRecord,
+                    (occurrence_id, assignment.discord_user_id),
+                )
+                if record is None:
+                    raise ValueError(
+                        "The signup to reassign no longer exists."
+                    )
+                record.role = (
+                    assignment.role.value
+                    if assignment.role is not None
+                    else None
+                )
+                record.assigned_role = (
+                    assignment.assigned_role.value
+                    if assignment.assigned_role is not None
+                    else None
+                )
+                record.waitlisted = assignment.waitlisted
+            session.commit()
+        LOGGER.debug(
+            "Applied roster assignments; occurrence_id=%s changed=%s",
+            occurrence_id,
+            len(assignments),
         )
 
     def get_signup_preference(

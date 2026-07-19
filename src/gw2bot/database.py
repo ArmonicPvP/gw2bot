@@ -319,6 +319,17 @@ class EventSignupRecord(Base):
         nullable=False,
         default=False,
     )
+    # "Edit my signup" token bucket. edit_tokens_updated_at is NULL until the
+    # first edit, which reads as a full bucket.
+    edit_tokens: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=3.0,
+    )
+    edit_tokens_updated_at: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+    )
 
 
 class EventSignupPreferenceRecord(Base):
@@ -469,6 +480,30 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("delete_previous_on_repeat")
+
+        signup_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                EventSignupRecord.__tablename__
+            )
+        }
+        if "edit_tokens" not in signup_columns:
+            operations.add_column(
+                EventSignupRecord.__tablename__,
+                Column(
+                    "edit_tokens",
+                    Float,
+                    nullable=False,
+                    server_default="3.0",
+                ),
+            )
+            added_columns.add("edit_tokens")
+        if "edit_tokens_updated_at" not in signup_columns:
+            operations.add_column(
+                EventSignupRecord.__tablename__,
+                Column("edit_tokens_updated_at", String, nullable=True),
+            )
+            added_columns.add("edit_tokens_updated_at")
 
         guild_leave_columns = {
             column["name"]

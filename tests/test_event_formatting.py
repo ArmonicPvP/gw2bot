@@ -18,6 +18,8 @@ from gw2bot.events.formatting import (
     parse_event_datetime,
     parse_event_duration,
     parse_repeat_days,
+    roster_update_message,
+    signup_edit_limit_message,
 )
 from gw2bot.events.models import (
     CATEGORY_EMOJI,
@@ -30,6 +32,8 @@ from gw2bot.events.models import (
     EventSignup,
     EventStatus,
     RepeatFrequency,
+    RoleChange,
+    RosterUpdate,
 )
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -294,6 +298,60 @@ class TestFormatRoleGroups:
 
     def test_empty_roles_produce_empty_text(self) -> None:
         assert format_role_groups(()) == ""
+
+
+class TestRosterUpdateMessage:
+    def test_reassignments_and_promotions_share_one_message(self) -> None:
+        update = RosterUpdate(
+            reassigned=(
+                RoleChange(
+                    discord_user_id=11,
+                    old_role=EventRole.QUICKNESS_DPS,
+                    new_role=EventRole.DPS,
+                ),
+            ),
+            promoted=(
+                make_signup(
+                    12,
+                    role=EventRole.QUICKNESS_HEAL,
+                    assigned_role=EventRole.QUICKNESS_HEAL,
+                ),
+            ),
+        )
+
+        message = roster_update_message(update)
+
+        assert message is not None
+        lines = message.splitlines()
+        assert lines[0] == "🔀 **Roster update**"
+        assert "<@11>" in lines[1]
+        assert EventRole.QUICKNESS_DPS.value in lines[1]
+        assert EventRole.DPS.value in lines[1]
+        assert EMOJI_QUICKNESS in lines[1]
+        assert EMOJI_DPS in lines[1]
+        assert "<@12>" in lines[2]
+        assert "moved up from the waitlist" in lines[2]
+        assert EventRole.QUICKNESS_HEAL.value in lines[2]
+
+    def test_role_less_promotion_omits_the_seat(self) -> None:
+        update = RosterUpdate(promoted=(make_signup(12),))
+
+        message = roster_update_message(update)
+
+        assert message is not None
+        assert "<@12> moved up from the waitlist" in message
+        assert " as " not in message
+
+    def test_empty_update_produces_no_message(self) -> None:
+        assert roster_update_message(RosterUpdate()) is None
+
+
+class TestSignupEditLimitMessage:
+    def test_reports_time_until_the_next_token(self) -> None:
+        # One token refills every three hours, so an empty bucket waits the
+        # full period and a half-refilled one waits the remainder.
+        assert "3h" in signup_edit_limit_message(0.0)
+        assert "1h 30m" in signup_edit_limit_message(0.5)
 
 
 class TestEventEmbed:
