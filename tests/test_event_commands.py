@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,12 +19,15 @@ from gw2bot.events.models import (
     EventCategory,
     EventRole,
     EventStatus,
+    PreferenceMode,
     RepeatFrequency,
 )
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     AutoSignupChoiceView,
     ChannelMoveConfirmView,
+    EditSignupFlow,
+    EditWaitlistConfirmView,
     EventConfirmView,
     EventDeleteConfirmView,
     EventDetailsModal,
@@ -37,8 +41,11 @@ from gw2bot.events.views import (
     RemoveSignupsSelect,
     RemoveSignupsView,
     RolePickSelect,
+    RolePickView,
     SignOutConfirmView,
     SignupFlow,
+    SignupSettingsView,
+    UpdateRememberedRolesView,
     _signup_summary,
     build_signup_view,
     draft_from_event,
@@ -555,6 +562,45 @@ class TestRolePickSelect:
         assert labels[EventRole.ALACRITY_HEAL.value] == "Alacrity Heal"
         assert labels[EventRole.DPS.value] == "Just DPS"
 
+    def test_boon_seat_held_by_a_flexer_is_not_labelled_full(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.RAID,
+            title="Flexible quickness",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        # Both quickness seats are occupied, but one holder can move to plain
+        # DPS, so a rigid quickness signup would still be admitted.
+        for user_id, role, flex_roles in (
+            (1, EventRole.QUICKNESS_HEAL, ()),
+            (2, EventRole.QUICKNESS_DPS, (EventRole.DPS,)),
+        ):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=role,
+                flex_roles=flex_roles,
+                waitlisted=False,
+            )
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+
+        select = RolePickSelect(flow)
+        labels = {option.value: option.label for option in select.options}
+
+        assert labels[EventRole.QUICKNESS_DPS.value] == "Quickness DPS"
+        assert labels[EventRole.QUICKNESS_HEAL.value] == "Quickness Heal"
+
     def test_labels_all_roles_as_waitlist_when_roster_full(
         self,
         fake_bot: Any,
@@ -802,6 +848,414 @@ class TestAutoSignupPrompt:
         kwargs = await self.finalize_and_get_kwargs(flow)
 
         assert "automatically" not in kwargs["content"]
+        assert kwargs["view"] is None
+
+
+class TestEditSignupFlow:
+    def make_signed_up_event(
+        self,
+        store: EventStore,
+        *,
+        user_id: int = 42,
+        role: EventRole = EventRole.QUICKNESS_DPS,
+        flex_roles: tuple[EventRole, ...] = (),
+    ) -> Any:
+        event, occurrence = make_posted_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=user_id,
+            role=role,
+            assigned_role=role,
+            flex_roles=flex_roles,
+            waitlisted=False,
+        )
+        return event, occurrence
+
+    def settings_buttons(
+        self,
+        view: SignupSettingsView,
+    ) -> dict[str, discord.ui.Button[Any]]:
+        return {
+            item.label: item
+            for item in view.children
+            if isinstance(item, discord.ui.Button) and item.label is not None
+        }
+
+    def make_flow_interaction(self) -> Any:
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    def test_settings_offer_edit_only_when_signed_up(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+
+        without_signup = SignupSettingsView(fake_bot, event, occurrence, 42)
+        assert "Edit my signup" not in self.settings_buttons(without_signup)
+
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        with_signup = SignupSettingsView(fake_bot, event, occurrence, 42)
+        assert "Edit my signup" in self.settings_buttons(with_signup)
+
+    def test_settings_never_offer_edit_for_role_less_events(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border brawl",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+
+        # A role-less roster has nothing to edit.
+        assert "Edit my signup" not in self.settings_buttons(view)
+
+    async def test_edit_button_opens_the_role_picker(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+        button = self.settings_buttons(view)["Edit my signup"]
+        interaction = make_interaction(message=ephemeral_message())
+
+        await button.callback(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "Pick your new role" in kwargs["content"]
+        assert isinstance(kwargs["view"], RolePickView)
+
+    async def test_edit_button_reports_a_signed_out_member(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+        # The settings message sat open while the member signed out.
+        store.remove_signup(occurrence.occurrence_id, 42)
+        button = self.settings_buttons(view)["Edit my signup"]
+        interaction = make_interaction(message=ephemeral_message())
+
+        await button.callback(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "no longer signed up" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_edit_flow_applies_without_extra_prompts(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        original = store.get_signup(occurrence.occurrence_id, 42)
+        assert original is not None
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        flow.flex_roles = (EventRole.DPS,)
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        # Straight to applying: no remember-my-roles or auto-signup prompts.
+        first = interaction.response.edit_message.await_args
+        assert first is not None
+        assert "Updating your signup" in first.kwargs["content"]
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Your signup was updated" in kwargs["content"]
+        assert kwargs["view"] is None
+        updated = store.get_signup(occurrence.occurrence_id, 42)
+        assert updated is not None
+        assert updated.role is EventRole.ALACRITY_DPS
+        assert updated.flex_roles == (EventRole.DPS,)
+        assert updated.assigned_role is EventRole.ALACRITY_DPS
+        assert not updated.waitlisted
+        assert updated.signed_up_at == original.signed_up_at
+
+    async def test_edit_that_would_waitlist_confirms_then_applies(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_HEAL
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "waitlist" in kwargs["content"]
+        confirm = kwargs["view"]
+        assert isinstance(confirm, EditWaitlistConfirmView)
+        # Nothing is applied until the member consents.
+        pending = store.get_signup(occurrence.occurrence_id, 42)
+        assert pending is not None
+        assert pending.role is EventRole.DPS
+        assert not pending.waitlisted
+
+        second = self.make_flow_interaction()
+        await confirm.apply_anyway.callback(second)
+
+        moved = store.get_signup(occurrence.occurrence_id, 42)
+        assert moved is not None
+        assert moved.waitlisted
+        assert moved.role is EventRole.QUICKNESS_HEAL
+        assert moved.assigned_role is None
+        summary = second.edit_original_response.await_args.kwargs
+        assert "waitlist" in summary["content"]
+
+    def test_edit_flow_labels_ignore_the_editors_own_seat(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.QUICKNESS_HEAL,
+        )
+
+        # For anyone else, the seated healer makes both heal roles read full.
+        other = SignupFlow(fake_bot, event, occurrence, 99)
+        other_labels = {
+            option.value: option.label
+            for option in RolePickSelect(other).options
+        }
+        assert (
+            other_labels[EventRole.ALACRITY_HEAL.value]
+            == "Alacrity Heal (full)"
+        )
+
+        # The editor is re-picking their own seat, so it must not count
+        # against them: every heal role is freely selectable.
+        editing = EditSignupFlow(fake_bot, event, occurrence, 42)
+        edit_labels = {
+            option.value: option.label
+            for option in RolePickSelect(editing).options
+        }
+        assert edit_labels[EventRole.ALACRITY_HEAL.value] == "Alacrity Heal"
+        assert edit_labels[EventRole.QUICKNESS_HEAL.value] == "Quickness Heal"
+
+    async def test_edit_button_blocks_when_out_of_tokens(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        store.set_signup_edit_tokens(
+            occurrence.occurrence_id,
+            42,
+            0.0,
+            datetime.now(UTC),
+        )
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+        button = self.settings_buttons(view)["Edit my signup"]
+        interaction = make_interaction(message=ephemeral_message())
+
+        await button.callback(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "used all your signup edits" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_edit_offers_to_update_remembered_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        store.set_signup_preference(
+            42,
+            EventRole.QUICKNESS_DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "remembered roles" in kwargs["content"]
+        prompt = kwargs["view"]
+        assert isinstance(prompt, UpdateRememberedRolesView)
+
+        second = make_interaction(message=ephemeral_message())
+        await prompt.update.callback(second)
+
+        preference = store.get_signup_preference(42)
+        assert preference is not None
+        assert preference.mode is PreferenceMode.REMEMBER
+        assert preference.role is EventRole.ALACRITY_DPS
+        assert (
+            "updated"
+            in second.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_remembered_roles_can_be_kept_as_they_were(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        store.set_signup_preference(
+            42,
+            EventRole.QUICKNESS_DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        interaction = self.make_flow_interaction()
+        await flow.continue_after_roles(interaction)
+        prompt = interaction.edit_original_response.await_args.kwargs["view"]
+        assert isinstance(prompt, UpdateRememberedRolesView)
+
+        second = make_interaction(message=ephemeral_message())
+        await prompt.keep.callback(second)
+
+        preference = store.get_signup_preference(42)
+        assert preference is not None
+        assert preference.role is EventRole.QUICKNESS_DPS
+        assert (
+            "left unchanged"
+            in second.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_no_remember_prompt_when_the_selection_matches(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        store.set_signup_preference(
+            42,
+            EventRole.ALACRITY_DPS,
+            (EventRole.DPS,),
+            PreferenceMode.REMEMBER,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        flow.flex_roles = (EventRole.DPS,)
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        # The memory already matches the new selection; asking would be
+        # noise.
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+
+    async def test_keep_button_leaves_the_signup_unchanged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_DPS
+        confirm = EditWaitlistConfirmView(flow)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await confirm.keep.callback(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "left unchanged" in kwargs["content"]
+        untouched = store.get_signup(occurrence.occurrence_id, 42)
+        assert untouched is not None
+        assert untouched.role is EventRole.DPS
+        assert not untouched.waitlisted
+
+    async def test_apply_reloads_event_state_before_applying(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.DPS
+        # Simulate a leader changing the category while the flow sat open: the
+        # flow still holds the pre-change event, which is now a role-less WvW.
+        # If apply used that stale copy it would reject with "no roles to
+        # edit"; reloading by id sees the live Fractal event and applies.
+        flow.event = replace(event, category=EventCategory.WVW)
+        interaction = self.make_flow_interaction()
+
+        await flow.apply(interaction, allow_waitlist=False)
+
+        updated = store.get_signup(occurrence.occurrence_id, 42)
+        assert updated is not None
+        assert updated.role is EventRole.DPS
+        assert updated.assigned_role is EventRole.DPS
+
+    async def test_apply_reports_when_the_occurrence_is_gone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(store)
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.DPS
+        # The occurrence the flow was opened against no longer exists at apply
+        # time (deleted, or the id never resolves after a series change).
+        flow.occurrence = replace(occurrence, occurrence_id=999_999)
+        interaction = self.make_flow_interaction()
+
+        await flow.apply(interaction, allow_waitlist=False)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "no longer exists" in kwargs["content"]
         assert kwargs["view"] is None
 
 
@@ -1633,6 +2087,80 @@ class TestEventEditConfirmView:
             in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
+    async def test_category_and_channel_move_pings_the_new_thread(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = store.create_event(
+            category=EventCategory.RAID,
+            title="Wing run",
+            description="Bring food.",
+            channel_id=old_channel.id,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence)
+        # Shrinking a raid to a fractal reseats the roster: the seated
+        # Quickness DPS loses its boon slot and is flexed to plain DPS, so the
+        # reseat produces a role change to announce.
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=2,
+            role=EventRole.QUICKNESS_DPS,
+            assigned_role=EventRole.QUICKNESS_DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        for user_id in range(3, 6):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.channel_id = new_channel.id
+        draft.category = EventCategory.FRACTAL
+        view = ChannelMoveConfirmView(bot, draft, old_channel.id)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.move.callback(interaction)
+
+        # The reseat ping must reach members in the new thread; the old thread
+        # was deleted by the repost, so a ping sent there would vanish.
+        new_channel.thread.send.assert_awaited_once()
+        old_channel.thread.send.assert_not_awaited()
+        send = new_channel.thread.send.await_args
+        assert send is not None
+        assert "<@2>" in send.args[0]
+
     async def test_channel_move_keep_reverts_and_returns_to_preview(
         self,
         fake_bot: Any,
@@ -2035,6 +2563,43 @@ class TestRemoveSignups:
         ]
         assert "Removed <@2>, <@6>" in content
         assert "moved up from the waitlist" not in content
+
+    async def test_multiple_removals_send_one_merged_thread_ping(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        # Each removal resettles the roster separately, but the leader made
+        # one edit, so the thread hears one merged announcement.
+        channel.thread.send.assert_awaited_once()
+        send = channel.thread.send.await_args
+        assert send is not None
+        content = send.args[0]
+        assert "<@6>" in content
+        assert "moved up from the waitlist" in content
+
+    async def test_promoted_then_removed_member_is_not_pinged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 6))
+
+        # 6 was promoted by 2's removal and then removed themselves; nothing
+        # about the net result is worth announcing.
+        channel.thread.send.assert_not_awaited()
 
     async def test_removal_reports_members_who_were_not_signed_up(
         self,

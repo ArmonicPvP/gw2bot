@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -13,17 +15,29 @@ from gw2bot.events.formatting import (
     event_embed,
     event_thread_name,
     next_occurrence_start,
+    roster_update_message,
+    signup_edit_limit_message,
 )
 from gw2bot.events.models import (
+    AutoSignupChoice,
     Event,
     EventOccurrence,
     EventRole,
     EventSignup,
     EventStatus,
     RepeatFrequency,
-    choose_assigned_role,
+    RoleChange,
+    RosterAssignment,
+    RosterCandidate,
+    RosterUpdate,
+    available_edit_tokens,
+    can_admit,
     is_roster_full,
+    preferred_role_order,
     rebalance_signups,
+    roster_feasible,
+    seated_candidates,
+    solve_roster,
 )
 
 if TYPE_CHECKING:
@@ -606,18 +620,50 @@ async def complete_signup(
         )
     assigned_role: EventRole | None = None
     waitlisted: bool
+    update = RosterUpdate()
     if event.capacity.has_roles:
         if role is None:
             raise ValueError("This event requires picking a role.")
-        assigned_role = choose_assigned_role(
-            event.capacity,
-            signups,
-            role,
-            flex_roles,
+        # The newcomer is appended after the seated members rather than
+        # re-sorted: their signup time is "now", so they carry the lowest
+        # seating priority. Seated members keep their full acceptable sets,
+        # so admission may flex them to another of their roles but can never
+        # unseat them; when even that cannot fit the newcomer, they are
+        # waitlisted.
+        candidates = seated_candidates(signups)
+        candidates.append(
+            RosterCandidate(
+                discord_user_id=discord_user_id,
+                preferences=preferred_role_order(role, flex_roles),
+            )
         )
-        waitlisted = assigned_role is None
+        solution = solve_roster(event.capacity, candidates)
+        waitlisted = solution is None
+        if solution is not None:
+            assigned_role = solution[discord_user_id]
+            assignments, changes = _seated_reassignments(signups, solution)
+            # Persist the reshuffle before the new row, and keep both writes
+            # synchronous and adjacent: no concurrent interaction can observe
+            # the half-applied roster, and a crash between the two commits
+            # leaves a roster that still respects every cap (the movers
+            # vacated the contested seats before the newcomer exists) and is
+            # re-canonicalised by the next mutation.
+            bot.event_store.apply_roster_assignments(
+                occurrence.occurrence_id,
+                assignments,
+            )
+            update = RosterUpdate(reassigned=tuple(changes))
     else:
         waitlisted = is_roster_full(event.capacity, signups)
+    LOGGER.debug(
+        "Resolved signup seating; occurrence_id=%s user_id=%s "
+        "waitlisted=%s assigned_role=%s reassigned=%s",
+        occurrence.occurrence_id,
+        discord_user_id,
+        waitlisted,
+        assigned_role.value if assigned_role is not None else None,
+        len(update.reassigned),
+    )
     signup = bot.event_store.add_signup(
         occurrence_id=occurrence.occurrence_id,
         discord_user_id=discord_user_id,
@@ -632,6 +678,7 @@ async def complete_signup(
         discord_user_id,
         add=True,
     )
+    await notify_roster_update(bot, occurrence, update)
     await refresh_occurrence_message(bot, event, occurrence)
     return signup
 
@@ -641,44 +688,52 @@ async def remove_signup(
     event: Event,
     occurrence: EventOccurrence,
     discord_user_id: int,
-) -> tuple[EventSignup | None, EventSignup | None]:
+    *,
+    notify: bool = True,
+) -> tuple[EventSignup | None, RosterUpdate]:
     removed = bot.event_store.remove_signup(
         occurrence.occurrence_id,
         discord_user_id,
     )
     if removed is None:
-        return None, None
-    # Promote a waitlisted user into the freed slot before yielding to any
-    # awaited Discord I/O. Both the removal and promotion are synchronous store
+        return None, RosterUpdate()
+    # Resettle the roster into the freed capacity before yielding to any
+    # awaited Discord I/O. The removal and the resettle are synchronous store
     # writes, so keeping them adjacent makes the mutation atomic: a concurrent
     # complete_signup cannot observe the freed slot and claim it ahead of the
-    # existing waitlist while we await the thread update below.
-    promoted: EventSignup | None = None
+    # existing waitlist while we await the thread update below. A waitlisted
+    # departure frees nothing, so the roster is left untouched.
+    update = RosterUpdate()
     if not removed.waitlisted:
-        promoted = _promote_first_fitting_waitlisted(bot, event, occurrence)
+        update = _resettle_roster(bot, event, occurrence)
     await update_thread_membership(
         bot,
         occurrence,
         discord_user_id,
         add=False,
     )
+    if notify:
+        await notify_roster_update(bot, occurrence, update)
     await refresh_occurrence_message(bot, event, occurrence)
-    return removed, promoted
+    return removed, update
 
 
 def rebalance_occurrence_roster(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
-) -> int:
+) -> tuple[int, RosterUpdate]:
     # Call this after an edit changes an event's category: the stored
     # assignments were seated against the old category's capacity and no longer
-    # describe a valid roster. Returns how many signups actually moved.
+    # describe a valid roster. Returns how many signups actually moved and the
+    # role changes to announce.
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not signups:
-        return 0
+        return 0, RosterUpdate()
     reseated = rebalance_signups(event.capacity, signups)
-    changed = 0
+    assignments: list[RosterAssignment] = []
+    reassigned: list[RoleChange] = []
+    promoted: list[EventSignup] = []
     for before, after in zip(signups, reseated, strict=True):
         if (
             before.role is after.role
@@ -686,64 +741,470 @@ def rebalance_occurrence_roster(
             and before.waitlisted == after.waitlisted
         ):
             continue
-        bot.event_store.set_signup_assignment(
-            occurrence.occurrence_id,
-            after.discord_user_id,
-            role=after.role,
-            assigned_role=after.assigned_role,
-            waitlisted=after.waitlisted,
+        assignments.append(
+            RosterAssignment(
+                discord_user_id=after.discord_user_id,
+                role=after.role,
+                assigned_role=after.assigned_role,
+                waitlisted=after.waitlisted,
+            )
         )
-        changed += 1
+        if before.waitlisted and not after.waitlisted:
+            promoted.append(after)
+        elif (
+            not before.waitlisted
+            and not after.waitlisted
+            and before.assigned_role is not None
+            and after.assigned_role is not None
+        ):
+            reassigned.append(
+                RoleChange(
+                    discord_user_id=after.discord_user_id,
+                    old_role=before.assigned_role,
+                    new_role=after.assigned_role,
+                )
+            )
+    bot.event_store.apply_roster_assignments(
+        occurrence.occurrence_id,
+        assignments,
+    )
     LOGGER.debug(
         "Rebalanced event roster for a new category; occurrence_id=%s "
         "category=%s signups=%s changed=%s",
         occurrence.occurrence_id,
         event.category.value,
         len(signups),
-        changed,
+        len(assignments),
     )
-    return changed
+    return len(assignments), RosterUpdate(
+        reassigned=tuple(reassigned),
+        promoted=tuple(promoted),
+    )
 
 
-def _promote_first_fitting_waitlisted(
+def _seated_reassignments(
+    signups: Sequence[EventSignup],
+    solution: dict[int, EventRole],
+) -> tuple[list[RosterAssignment], list[RoleChange]]:
+    # Diff the solver's canonical assignment against the stored seated rows.
+    # Rows the solution does not cover (the newcomer being admitted) and rows
+    # it leaves in place produce no write.
+    assignments: list[RosterAssignment] = []
+    changes: list[RoleChange] = []
+    for signup in signups:
+        if signup.waitlisted:
+            continue
+        target = solution.get(signup.discord_user_id)
+        if target is None or signup.assigned_role is target:
+            continue
+        assignments.append(
+            RosterAssignment(
+                discord_user_id=signup.discord_user_id,
+                role=signup.role,
+                assigned_role=target,
+                waitlisted=False,
+            )
+        )
+        if signup.assigned_role is not None:
+            changes.append(
+                RoleChange(
+                    discord_user_id=signup.discord_user_id,
+                    old_role=signup.assigned_role,
+                    new_role=target,
+                )
+            )
+    return assignments, changes
+
+
+def _resettle_roster(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
-) -> EventSignup | None:
+) -> RosterUpdate:
+    """Promote fitting waitlisted members and re-canonicalise assignments.
+
+    Runs after a seated member departs. Fully synchronous - callers rely on
+    the store read and every write landing without an intervening await. The
+    waitlist is swept once in FCFS order and each candidate whose addition is
+    feasible (counting seated flexers moving aside) is admitted; one pass is
+    complete because admitting a member never makes another candidate newly
+    feasible. The final solve then snaps every seated flexer back to the best
+    role their seniority allows, so a member flexed away from their primary
+    pick recovers it as soon as the roster permits.
+    """
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
-    waitlisted = [signup for signup in signups if signup.waitlisted]
-    for candidate in waitlisted:
-        if event.capacity.has_roles:
-            if candidate.role is None:
+    if not event.capacity.has_roles:
+        assignments: list[RosterAssignment] = []
+        promoted: list[EventSignup] = []
+        active = sum(1 for signup in signups if not signup.waitlisted)
+        for signup in signups:
+            if not signup.waitlisted:
                 continue
-            assigned_role = choose_assigned_role(
-                event.capacity,
-                signups,
-                candidate.role,
-                candidate.flex_roles,
-            )
-            if assigned_role is None:
-                continue
-        else:
-            if is_roster_full(event.capacity, signups):
+            if active >= event.capacity.total:
                 break
-            assigned_role = None
-        bot.event_store.promote_signup(
+            assignments.append(
+                RosterAssignment(
+                    discord_user_id=signup.discord_user_id,
+                    role=signup.role,
+                    assigned_role=None,
+                    waitlisted=False,
+                )
+            )
+            promoted.append(replace(signup, waitlisted=False))
+            active += 1
+        bot.event_store.apply_roster_assignments(
             occurrence.occurrence_id,
-            candidate.discord_user_id,
-            assigned_role,
+            assignments,
         )
         LOGGER.debug(
-            "Auto-promoted waitlisted event signup; occurrence_id=%s "
-            "user_id=%s",
+            "Resettled role-less event roster; occurrence_id=%s promoted=%s",
             occurrence.occurrence_id,
-            candidate.discord_user_id,
+            len(promoted),
         )
-        return bot.event_store.get_signup(
+        return RosterUpdate(promoted=tuple(promoted))
+    seated = [signup for signup in signups if not signup.waitlisted]
+    waitlisted = sorted(
+        (signup for signup in signups if signup.waitlisted),
+        key=lambda signup: (signup.signed_up_at, signup.discord_user_id),
+    )
+    admitted_ids: set[int] = set()
+    skipped = 0
+    for candidate in waitlisted:
+        if candidate.role is None:
+            # A role-less signup cannot hold a seat in a role-based roster;
+            # left waitlisted, exactly as the pre-solver promotion did.
+            continue
+        if can_admit(
+            event.capacity,
+            seated,
+            candidate.role,
+            candidate.flex_roles,
+        ):
+            seated.append(replace(candidate, waitlisted=False))
+            admitted_ids.add(candidate.discord_user_id)
+        else:
+            skipped += 1
+    solution = solve_roster(event.capacity, seated_candidates(seated))
+    if solution is None:
+        # Unreachable with well-formed data: the seated set was feasible when
+        # each member was admitted. Never unseat anyone over corrupt state;
+        # leave the stored roster untouched.
+        LOGGER.error(
+            "Roster resettle found seated members infeasible; leaving the "
+            "stored roster untouched; occurrence_id=%s seated=%s",
             occurrence.occurrence_id,
-            candidate.discord_user_id,
+            len(seated),
         )
-    return None
+        return RosterUpdate()
+    assignments, changes = _seated_reassignments(
+        [
+            signup
+            for signup in seated
+            if signup.discord_user_id not in admitted_ids
+        ],
+        solution,
+    )
+    promoted_signups: list[EventSignup] = []
+    for signup in seated:
+        if signup.discord_user_id not in admitted_ids:
+            continue
+        promoted_signup = replace(
+            signup,
+            assigned_role=solution[signup.discord_user_id],
+            waitlisted=False,
+        )
+        assignments.append(
+            RosterAssignment(
+                discord_user_id=signup.discord_user_id,
+                role=signup.role,
+                assigned_role=promoted_signup.assigned_role,
+                waitlisted=False,
+            )
+        )
+        promoted_signups.append(promoted_signup)
+    bot.event_store.apply_roster_assignments(
+        occurrence.occurrence_id,
+        assignments,
+    )
+    LOGGER.debug(
+        "Resettled event roster; occurrence_id=%s seated=%s "
+        "waitlist_skipped=%s promoted=%s reassigned=%s",
+        occurrence.occurrence_id,
+        len(seated),
+        skipped,
+        len(promoted_signups),
+        len(changes),
+    )
+    return RosterUpdate(
+        reassigned=tuple(changes),
+        promoted=tuple(promoted_signups),
+    )
+
+
+async def notify_roster_update(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+    update: RosterUpdate,
+) -> None:
+    # A failure here must never fail the signup or removal that produced the
+    # update: the roster is already persisted and the embed refresh that
+    # follows does not depend on this message landing.
+    content = roster_update_message(update)
+    if content is None:
+        return
+    if occurrence.thread_id is None:
+        LOGGER.debug(
+            "Skipped roster update notification without a thread; "
+            "occurrence_id=%s reassigned=%s promoted=%s",
+            occurrence.occurrence_id,
+            len(update.reassigned),
+            len(update.promoted),
+        )
+        return
+    try:
+        thread = await resolve_channel(bot, occurrence.thread_id)
+        await thread.send(content)
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not send roster update notification; occurrence_id=%s "
+            "reassigned=%s promoted=%s error_type=%s",
+            occurrence.occurrence_id,
+            len(update.reassigned),
+            len(update.promoted),
+            type(exc).__name__,
+        )
+    else:
+        LOGGER.debug(
+            "Sent roster update notification; occurrence_id=%s reassigned=%s "
+            "promoted=%s",
+            occurrence.occurrence_id,
+            len(update.reassigned),
+            len(update.promoted),
+        )
+
+
+def merge_roster_updates(
+    updates: Sequence[RosterUpdate],
+    removed_user_ids: Sequence[int] = (),
+) -> RosterUpdate:
+    """Fold sequential roster updates into one announcement.
+
+    A leader removing several members produces one update per removal; the
+    merged result reads as a single change. Per-user reassignments chain into
+    first-old to last-new (dropped when they end where they started), a
+    promotion followed by later reassignments folds into one promotion line
+    at the final seat, and users removed later in the same batch are dropped
+    entirely - they are off the roster, so reporting a move or promotion for
+    them would be wrong.
+    """
+    removed = set(removed_user_ids)
+    chains: dict[int, RoleChange] = {}
+    promoted: dict[int, EventSignup] = {}
+    for update in updates:
+        for signup in update.promoted:
+            promoted[signup.discord_user_id] = signup
+        for change in update.reassigned:
+            promoted_signup = promoted.get(change.discord_user_id)
+            if promoted_signup is not None:
+                promoted[change.discord_user_id] = replace(
+                    promoted_signup,
+                    assigned_role=change.new_role,
+                )
+                continue
+            existing = chains.get(change.discord_user_id)
+            chains[change.discord_user_id] = RoleChange(
+                discord_user_id=change.discord_user_id,
+                old_role=(
+                    existing.old_role
+                    if existing is not None
+                    else change.old_role
+                ),
+                new_role=change.new_role,
+            )
+    return RosterUpdate(
+        reassigned=tuple(
+            change
+            for change in chains.values()
+            if change.discord_user_id not in removed
+            and change.old_role is not change.new_role
+        ),
+        promoted=tuple(
+            signup
+            for user_id, signup in promoted.items()
+            if user_id not in removed
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SignupEditResult:
+    # The edited row after the roster settled, or None when nothing was
+    # applied because the member must first confirm losing their seat.
+    signup: EventSignup | None
+    update: RosterUpdate
+    needs_waitlist_confirmation: bool = False
+
+
+def _without_member(update: RosterUpdate, discord_user_id: int) -> RosterUpdate:
+    return RosterUpdate(
+        reassigned=tuple(
+            change
+            for change in update.reassigned
+            if change.discord_user_id != discord_user_id
+        ),
+        promoted=tuple(
+            signup
+            for signup in update.promoted
+            if signup.discord_user_id != discord_user_id
+        ),
+    )
+
+
+async def apply_signup_edit(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+    *,
+    allow_waitlist: bool = False,
+    now: datetime | None = None,
+) -> SignupEditResult:
+    """Replace a member's declared roles without costing them their place.
+
+    Unlike sign-out-and-rejoin, the signup row (and its signed_up_at, which
+    decides seating priority) survives, so the member keeps their seat when
+    the new roles still fit and keeps their queue position when they do not.
+    A seated member whose new selection cannot fit alongside the other seated
+    members is only moved to the waitlist after opting in via
+    ``allow_waitlist`` - callers get ``needs_waitlist_confirmation`` back and
+    nothing is mutated until the member confirms.
+    """
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    # The edit views can linger like the signup views; refuse to mutate a
+    # historical roster.
+    if occurrence_status(event, occurrence, signups, now) is EventStatus.OVER:
+        raise ValueError(
+            "This event has already ended, so your signup can no longer be "
+            "changed."
+        )
+    if not event.capacity.has_roles:
+        raise ValueError("This event has no roles to edit.")
+    current = next(
+        (
+            signup
+            for signup in signups
+            if signup.discord_user_id == discord_user_id
+        ),
+        None,
+    )
+    if current is None:
+        raise ValueError("You are not signed up for this event.")
+    # Rate limit: a token bucket per signup (three edits, refilling one per
+    # three hours) keeps a member from churning the roster and pinging the
+    # thread over and over. Checked before anything mutates; consumed only
+    # when an edit actually applies.
+    current_time = now if now is not None else datetime.now(UTC)
+    tokens = available_edit_tokens(current, current_time)
+    if tokens < 1.0:
+        LOGGER.debug(
+            "Rejected signup edit over the rate limit; occurrence_id=%s "
+            "user_id=%s tokens=%.2f",
+            occurrence.occurrence_id,
+            discord_user_id,
+            tokens,
+        )
+        raise ValueError(signup_edit_limit_message(tokens))
+    keeps_seat = current.waitlisted is False
+    if keeps_seat:
+        others = [
+            candidate.preferences
+            for candidate in seated_candidates(signups)
+            if candidate.discord_user_id != discord_user_id
+        ]
+        keeps_seat = roster_feasible(
+            event.capacity,
+            [*others, preferred_role_order(role, flex_roles)],
+        )
+        if not keeps_seat and not allow_waitlist:
+            LOGGER.debug(
+                "Signup edit would waitlist the member; awaiting "
+                "confirmation; occurrence_id=%s user_id=%s role=%s "
+                "flex_count=%s",
+                occurrence.occurrence_id,
+                discord_user_id,
+                role.value,
+                len(flex_roles),
+            )
+            return SignupEditResult(
+                signup=None,
+                update=RosterUpdate(),
+                needs_waitlist_confirmation=True,
+            )
+    bot.event_store.set_signup_edit_tokens(
+        occurrence.occurrence_id,
+        discord_user_id,
+        tokens - 1.0,
+        current_time,
+    )
+    # Write the new declaration, then resettle, both synchronously: the
+    # resettle re-solves the seated set (fixing an assigned role the new
+    # declaration no longer covers), seats a waitlisted editor whose new
+    # roles now fit, and offers capacity the editor vacated to the waitlist.
+    bot.event_store.update_signup_roles(
+        occurrence.occurrence_id,
+        discord_user_id,
+        role=role,
+        flex_roles=flex_roles,
+        assigned_role=current.assigned_role if keeps_seat else None,
+        waitlisted=not keeps_seat,
+    )
+    update = _resettle_roster(bot, event, occurrence)
+    updated = bot.event_store.get_signup(
+        occurrence.occurrence_id,
+        discord_user_id,
+    )
+    if updated is None:
+        raise ValueError("You are not signed up for this event.")
+    # A stored auto sign-up snapshots the roles it will use for future
+    # occurrences, so an enabled one must follow the edit or next week's
+    # roster would resurrect the old selection.
+    auto = bot.event_store.get_auto_signup(event.event_id, discord_user_id)
+    if auto is not None and auto.choice is AutoSignupChoice.YES:
+        bot.event_store.set_auto_signup(
+            event.event_id,
+            discord_user_id,
+            AutoSignupChoice.YES,
+            role,
+            flex_roles,
+        )
+    LOGGER.debug(
+        "Applied signup edit; occurrence_id=%s user_id=%s role=%s "
+        "flex_count=%s waitlisted=%s assigned_role=%s reassigned=%s "
+        "promoted=%s",
+        occurrence.occurrence_id,
+        discord_user_id,
+        role.value,
+        len(flex_roles),
+        updated.waitlisted,
+        (
+            updated.assigned_role.value
+            if updated.assigned_role is not None
+            else None
+        ),
+        len(update.reassigned),
+        len(update.promoted),
+    )
+    # The editor sees their own outcome in the ephemeral summary; the thread
+    # only hears about the members their edit moved.
+    await notify_roster_update(
+        bot,
+        occurrence,
+        _without_member(update, discord_user_id),
+    )
+    await refresh_occurrence_message(bot, event, occurrence)
+    return SignupEditResult(signup=updated, update=update)
 
 
 def apply_auto_signups(
@@ -769,13 +1230,28 @@ def apply_auto_signups(
                     entry.discord_user_id,
                 )
                 continue
-            assigned_role = choose_assigned_role(
-                event.capacity,
-                signups,
-                entry.role,
-                entry.flex_roles,
+            # Same admission as a live signup: earlier entries may be flexed
+            # aside to fit this one, but are never unseated. The roster is
+            # freshly seeded and unseen, so the reshuffle happens silently.
+            candidates = seated_candidates(signups)
+            candidates.append(
+                RosterCandidate(
+                    discord_user_id=entry.discord_user_id,
+                    preferences=preferred_role_order(
+                        entry.role,
+                        entry.flex_roles,
+                    ),
+                )
             )
-            waitlisted = assigned_role is None
+            solution = solve_roster(event.capacity, candidates)
+            waitlisted = solution is None
+            if solution is not None:
+                assigned_role = solution[entry.discord_user_id]
+                assignments, _ = _seated_reassignments(signups, solution)
+                bot.event_store.apply_roster_assignments(
+                    occurrence.occurrence_id,
+                    assignments,
+                )
         else:
             waitlisted = is_roster_full(event.capacity, signups)
         bot.event_store.add_signup(

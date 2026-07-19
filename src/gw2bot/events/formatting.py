@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import re
 from datetime import UTC, date, datetime, timedelta
+from math import ceil
 from zoneinfo import ZoneInfo
 
 import discord
@@ -13,6 +14,7 @@ from gw2bot.events.models import (
     EMOJI_QUICKNESS,
     HEAL_ROLES,
     ROLE_EMOJI,
+    SIGNUP_EDIT_REFILL_SECONDS,
     STATUS_COLORS,
     STATUS_EMOJI,
     Event,
@@ -21,6 +23,7 @@ from gw2bot.events.models import (
     EventSignup,
     EventStatus,
     RepeatFrequency,
+    RosterUpdate,
     count_roster,
     is_roster_full,
 )
@@ -90,6 +93,19 @@ def format_duration_input(minutes: int) -> str:
     # unlike format_duration's "1h 30m" display form.
     hours, mins = divmod(minutes, 60)
     return f"{hours}:{mins:02d}"
+
+
+def signup_edit_limit_message(tokens: float) -> str:
+    # Shared by the settings-gear pre-check and the authoritative check in
+    # apply_signup_edit, so a member sees one consistent explanation of the
+    # edit rate limit wherever they hit it.
+    wait_minutes = ceil(
+        (1.0 - tokens) * SIGNUP_EDIT_REFILL_SECONDS / 60
+    )
+    return (
+        "You have used all your signup edits for now. You can edit your "
+        f"signup again in about {format_duration(wait_minutes)}."
+    )
 
 
 def parse_repeat_days(frequency: RepeatFrequency, text: str) -> tuple[int, ...]:
@@ -232,6 +248,35 @@ def format_role_groups(roles: tuple[EventRole, ...]) -> str:
     if dps_emoji:
         parts.append(f"DPS ({','.join(dps_emoji)})")
     return " | ".join(parts)
+
+
+def roster_update_message(update: RosterUpdate) -> str | None:
+    # One batched thread message per roster mutation: every reassigned member
+    # and waitlist promotion is listed once, so a single signup or departure
+    # never produces more than one ping. A roster holds at most ten members
+    # plus a handful of promotions, so the message cannot approach Discord's
+    # length limit.
+    if not update.has_changes:
+        return None
+    lines = ["🔀 **Roster update**"]
+    for change in update.reassigned:
+        lines.append(
+            f"└ <@{change.discord_user_id}>: "
+            f"{ROLE_EMOJI[change.old_role]} {change.old_role.value} → "
+            f"{ROLE_EMOJI[change.new_role]} {change.new_role.value}"
+        )
+    for signup in update.promoted:
+        if signup.assigned_role is not None:
+            seat = (
+                f" as {ROLE_EMOJI[signup.assigned_role]} "
+                f"{signup.assigned_role.value}"
+            )
+        else:
+            seat = ""
+        lines.append(
+            f"└ <@{signup.discord_user_id}> moved up from the waitlist{seat}"
+        )
+    return "\n".join(lines)
 
 
 def _chunk_lines(lines: list[str]) -> list[str]:

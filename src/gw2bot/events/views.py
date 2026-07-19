@@ -23,6 +23,7 @@ from gw2bot.events.formatting import (
     parse_event_datetime,
     parse_event_duration,
     parse_repeat_days,
+    signup_edit_limit_message,
 )
 from gw2bot.events.models import (
     AutoSignupChoice,
@@ -36,6 +37,8 @@ from gw2bot.events.models import (
     PreferenceMode,
     ROLE_EMOJI,
     RepeatFrequency,
+    RosterUpdate,
+    available_edit_tokens,
     fitting_roles,
 )
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
@@ -1015,7 +1018,11 @@ class RemoveSignupsView(discord.ui.View):
         interaction: discord.Interaction,
         users: list[discord.Member | discord.User],
     ) -> None:
-        from gw2bot.events.posting import remove_signup
+        from gw2bot.events.posting import (
+            merge_roster_updates,
+            notify_roster_update,
+            remove_signup,
+        )
 
         editing_event_id = self._draft.editing_event_id
         # The picker can sit open for minutes, so re-check the role and re-read
@@ -1075,7 +1082,7 @@ class RemoveSignupsView(discord.ui.View):
         )
         removed: list[int] = []
         skipped: list[int] = []
-        promoted: list[int] = []
+        updates: list[RosterUpdate] = []
         kept_after_end: list[int] = []
         for index, user in enumerate(users):
             # The picker holds several members and remove_signup awaits Discord
@@ -1093,27 +1100,30 @@ class RemoveSignupsView(discord.ui.View):
                     len(kept_after_end),
                 )
                 break
-            signup, promotion = await remove_signup(
+            # Notification is deferred to a single merged announcement after
+            # the loop: per-removal pings would post one thread message per
+            # member for what the leader sees as a single edit.
+            signup, update = await remove_signup(
                 self._bot,
                 event,
                 occurrence,
                 user.id,
+                notify=False,
             )
             if signup is None:
                 skipped.append(user.id)
                 continue
             removed.append(user.id)
-            if promotion is not None:
-                promoted.append(promotion.discord_user_id)
-        # Removing a seated member promotes the first fitting waitlisted one, so
+            updates.append(update)
+        # Each removal can promote waitlisted members and flex seated ones, and
         # a member picked alongside their own promoter can be promoted by an
-        # earlier iteration and then removed by a later one. They are off the
-        # roster, so drop them from the promotions before reporting, or the
-        # summary would claim they both left and moved up.
-        removed_set = set(removed)
-        promoted = [
-            user_id for user_id in promoted if user_id not in removed_set
-        ]
+        # earlier iteration and then removed by a later one. Merging collapses
+        # each user's changes into one line and drops the ones who ended up off
+        # the roster, so the announcement and the summary below both describe
+        # the net result.
+        merged = merge_roster_updates(updates, removed)
+        await notify_roster_update(self._bot, occurrence, merged)
+        promoted = [signup.discord_user_id for signup in merged.promoted]
         LOGGER.debug(
             "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
             "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s",
@@ -1243,6 +1253,7 @@ async def apply_event_edit(
     repost: bool,
 ) -> None:
     from gw2bot.events.posting import (
+        notify_roster_update,
         rebalance_occurrence_roster,
         refresh_occurrence_message,
         repost_occurrence,
@@ -1348,6 +1359,7 @@ async def apply_event_edit(
     refreshed = 0
     for occurrence in occurrences:
         current = occurrence
+        roster_update = RosterUpdate()
         if (
             primary is not None
             and occurrence.occurrence_id == primary.occurrence_id
@@ -1370,9 +1382,12 @@ async def apply_event_edit(
             # The category picks the capacity the roster was seated against, so
             # changing it invalidates every stored assignment. Re-seat the roster
             # before the message is re-rendered, so the embed and the capacity
-            # checks both describe the new category.
+            # checks both describe the new category, and announce the moves in
+            # the occurrence's thread so members learn their new seat.
             try:
-                rebalance_occurrence_roster(bot, updated, current)
+                _, roster_update = rebalance_occurrence_roster(
+                    bot, updated, current
+                )
             except (SQLAlchemyError, ValueError) as exc:
                 # A stale roster must not block the rest of the edit.
                 LOGGER.error(
@@ -1381,6 +1396,14 @@ async def apply_event_edit(
                     current.occurrence_id,
                     type(exc).__name__,
                 )
+                roster_update = RosterUpdate()
+            else:
+                if not moving:
+                    # For an in-place refresh the thread is stable, so announce
+                    # the reseat now. A channel move deletes this thread and
+                    # opens a new one, so its ping is deferred to after the
+                    # repost below and re-targeted at the new thread.
+                    await notify_roster_update(bot, current, roster_update)
         if current.message_id is None:
             # Unposted (e.g. a recurring series' next occurrence): the
             # reschedule above is persisted and the scheduler will post it with
@@ -1391,8 +1414,12 @@ async def apply_event_edit(
             if moving:
                 # The old message is addressed through the channel the
                 # occurrence was actually posted to, which repost_occurrence
-                # reads off the occurrence itself.
-                await repost_occurrence(bot, updated, current)
+                # reads off the occurrence itself. It deletes the old thread and
+                # returns the occurrence carrying the new one, so the deferred
+                # roster ping goes there - the old thread the members were
+                # notified in no longer exists.
+                reposted = await repost_occurrence(bot, updated, current)
+                await notify_roster_update(bot, reposted, roster_update)
             else:
                 await refresh_occurrence_message(
                     bot,
@@ -2068,7 +2095,7 @@ class EventSettingsButton(
         event, occurrence = context
         await interaction.response.send_message(
             _describe_signup_settings(bot, event, interaction.user.id),
-            view=SignupSettingsView(bot, event, occurrence),
+            view=SignupSettingsView(bot, event, occurrence, interaction.user.id),
             ephemeral=True,
         )
 
@@ -2115,7 +2142,9 @@ class _SignupSettingsButton(discord.ui.Button["SignupSettingsView"]):
         view = self.view
         if view is None:
             return
-        if self._action == "enable_auto":
+        if self._action == "edit_signup":
+            await view._edit_signup(interaction)
+        elif self._action == "enable_auto":
             await view._enable_auto(interaction)
         elif self._action == "disable_auto":
             await view._disable_auto(interaction)
@@ -2124,11 +2153,34 @@ class _SignupSettingsButton(discord.ui.Button["SignupSettingsView"]):
 
 
 class SignupSettingsView(discord.ui.View):
-    def __init__(self, bot: Gw2Bot, event: Event, occurrence: EventOccurrence):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        event: Event,
+        occurrence: EventOccurrence,
+        discord_user_id: int,
+    ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._event = event
         self._occurrence = occurrence
+        # The settings message is ephemeral to the clicking member, so the
+        # view can be tailored to them: editing a signup only makes sense for
+        # someone who has one, and only role-based events have roles to edit.
+        if event.capacity.has_roles and (
+            bot.event_store.get_signup(
+                occurrence.occurrence_id,
+                discord_user_id,
+            )
+            is not None
+        ):
+            self.add_item(
+                _SignupSettingsButton(
+                    "Edit my signup",
+                    discord.ButtonStyle.primary,
+                    "edit_signup",
+                )
+            )
         if event.repeat_frequency is not RepeatFrequency.NONE:
             self.add_item(
                 _SignupSettingsButton(
@@ -2150,6 +2202,63 @@ class SignupSettingsView(discord.ui.View):
                 discord.ButtonStyle.secondary,
                 "reset_preference",
             )
+        )
+
+    async def _edit_signup(self, interaction: discord.Interaction) -> None:
+        # The settings message can sit open, so re-check the signup and the
+        # event's end before opening the pickers.
+        signup = self._bot.event_store.get_signup(
+            self._occurrence.occurrence_id,
+            interaction.user.id,
+        )
+        if signup is None:
+            await interaction.response.edit_message(
+                content="You are no longer signed up for this event.",
+                view=None,
+            )
+            return
+        if _occurrence_has_ended(
+            self._event, self._occurrence, datetime.now(UTC)
+        ):
+            await interaction.response.edit_message(
+                content=(
+                    "This event has already ended, so your signup can no "
+                    "longer be changed."
+                ),
+                view=None,
+            )
+            return
+        # Pre-check the edit rate limit so a member out of tokens is told
+        # before walking through the pickers. apply_signup_edit re-checks
+        # authoritatively when the edit lands.
+        tokens = available_edit_tokens(signup, datetime.now(UTC))
+        if tokens < 1.0:
+            LOGGER.debug(
+                "Refused signup edit flow over the rate limit; "
+                "occurrence_id=%s user_id=%s tokens=%.2f",
+                self._occurrence.occurrence_id,
+                interaction.user.id,
+                tokens,
+            )
+            await interaction.response.edit_message(
+                content=signup_edit_limit_message(tokens),
+                view=None,
+            )
+            return
+        LOGGER.debug(
+            "Opened signup edit flow; occurrence_id=%s user_id=%s",
+            self._occurrence.occurrence_id,
+            interaction.user.id,
+        )
+        flow = EditSignupFlow(
+            self._bot,
+            self._event,
+            self._occurrence,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content="Pick your new role for this event.",
+            view=RolePickView(flow),
         )
 
     async def _enable_auto(self, interaction: discord.Interaction) -> None:
@@ -2291,7 +2400,7 @@ class SignOutConfirmView(discord.ui.View):
             content="Removing you from the event…",
             view=None,
         )
-        removed, promoted = await remove_signup(
+        removed, update = await remove_signup(
             self._bot,
             self._event,
             self._occurrence,
@@ -2303,11 +2412,12 @@ class SignOutConfirmView(discord.ui.View):
             content = "You were removed from the event."
         LOGGER.debug(
             "Sign out completed; occurrence_id=%s user_id=%s removed=%s "
-            "promoted_user=%s",
+            "promoted=%s reassigned=%s",
             self._occurrence.occurrence_id,
             interaction.user.id,
             removed is not None,
-            promoted.discord_user_id if promoted is not None else None,
+            len(update.promoted),
+            len(update.reassigned),
         )
         await interaction.edit_original_response(content=content, view=None)
 
@@ -2397,6 +2507,13 @@ class SignupFlow:
         self.flex_roles: tuple[EventRole, ...] = ()
         self.skip_remember_prompt = False
 
+    def roster_for_labels(self) -> list[EventSignup]:
+        # The signups the role-picker labels are computed against; an edit
+        # flow narrows this (see EditSignupFlow).
+        return self.bot.event_store.get_signups(
+            self.occurrence.occurrence_id
+        )
+
     async def continue_after_roles(
         self,
         interaction: discord.Interaction,
@@ -2479,6 +2596,238 @@ def _signup_summary(signup: EventSignup) -> str:
     return "You signed up for the event."
 
 
+class EditSignupFlow(SignupFlow):
+    # Drives the same role and flex pickers as a fresh signup, but ends in
+    # apply_signup_edit: the member's signup row (and its signed_up_at, which
+    # decides seating priority) survives, so editing never costs the seat or
+    # queue position that signing out and rejoining would.
+
+    def roster_for_labels(self) -> list[EventSignup]:
+        # The editor's own seat is being re-picked, so it must not count
+        # against the labels: a role that reads "(full)" only because the
+        # editor currently holds (or blocks) it is one they can freely pick.
+        return [
+            signup
+            for signup in super().roster_for_labels()
+            if signup.discord_user_id != self.discord_user_id
+        ]
+
+    async def continue_after_roles(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        # No remember-my-roles or auto-signup prompts on an edit; those
+        # belong to the first-time signup flow.
+        await self.finalize(interaction)
+
+    async def finalize(self, interaction: discord.Interaction) -> None:
+        await self.apply(interaction, allow_waitlist=False)
+
+    async def apply(
+        self,
+        interaction: discord.Interaction,
+        *,
+        allow_waitlist: bool,
+    ) -> None:
+        from gw2bot.events.posting import apply_signup_edit
+
+        if interaction.response.is_done():
+            edit = interaction.edit_original_response
+        elif _is_ephemeral_component_interaction(interaction):
+            await interaction.response.edit_message(
+                content="Updating your signup…",
+                view=None,
+            )
+            edit = interaction.edit_original_response
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            edit = interaction.edit_original_response
+        if self.role is None:
+            # The pickers always set a role before finalize; a missing one
+            # means the flow was driven out of order.
+            await edit(
+                content="Pick a role first, then apply the change.",
+                view=None,
+            )
+            return
+        # A leader can move or edit the event while this flow sits open, which
+        # repoints the occurrence at a new message and thread (a channel move)
+        # or changes the capacity the roster is seated against (a category
+        # change). Re-load both by their stable ids so the edit lands on live
+        # state rather than, say, refreshing a message that was already deleted
+        # - which refresh_occurrence_message handles by retiring the live
+        # occurrence as gone.
+        event = self.bot.event_store.get_event(self.event.event_id)
+        occurrence = self.bot.event_store.get_occurrence(
+            self.occurrence.occurrence_id
+        )
+        if event is None or occurrence is None:
+            await edit(content="This event no longer exists.", view=None)
+            return
+        self.event = event
+        self.occurrence = occurrence
+        try:
+            result = await apply_signup_edit(
+                self.bot,
+                event,
+                occurrence,
+                self.discord_user_id,
+                self.role,
+                self.flex_roles,
+                allow_waitlist=allow_waitlist,
+            )
+        except ValueError as error:
+            await edit(content=str(error), view=None)
+            return
+        if result.needs_waitlist_confirmation:
+            await edit(
+                content=(
+                    "Your new selection does not fit the current roster, so "
+                    "applying it would move you from your seat to the "
+                    "**waitlist**. Apply it anyway?"
+                ),
+                view=EditWaitlistConfirmView(self),
+            )
+            return
+        signup = result.signup
+        if signup is None:
+            # apply_signup_edit returns a row whenever it applied; this
+            # branch only exists to satisfy the optional type.
+            await edit(content="Your signup was updated.", view=None)
+            return
+        content = _signup_edit_summary(signup)
+        preference = self.bot.event_store.get_signup_preference(
+            self.discord_user_id
+        )
+        # A member with remembered roles just declared a different
+        # selection; offer to bring the memory along so their next signup
+        # does not resurrect the old roles.
+        if (
+            preference is not None
+            and preference.mode is PreferenceMode.REMEMBER
+            and (
+                preference.role is not self.role
+                or set(preference.flex_roles) != set(self.flex_roles)
+            )
+        ):
+            await edit(
+                content=(
+                    f"{content}\n\nYour remembered roles still hold your "
+                    "old selection. Update them to this new one?"
+                ),
+                view=UpdateRememberedRolesView(self),
+            )
+            return
+        await edit(content=content, view=None)
+
+
+class EditWaitlistConfirmView(discord.ui.View):
+    def __init__(self, flow: EditSignupFlow):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._flow = flow
+
+    @discord.ui.button(
+        label="Apply and join the waitlist",
+        style=discord.ButtonStyle.danger,
+    )
+    async def apply_anyway(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EditWaitlistConfirmView],
+    ) -> None:
+        # The roster may have changed while this confirmation sat open;
+        # apply re-reads it, so a selection that fits by now keeps the seat.
+        await self._flow.apply(interaction, allow_waitlist=True)
+
+    @discord.ui.button(
+        label="Keep my current signup",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EditWaitlistConfirmView],
+    ) -> None:
+        LOGGER.debug(
+            "Signup edit abandoned at the waitlist confirmation; "
+            "occurrence_id=%s user_id=%s",
+            self._flow.occurrence.occurrence_id,
+            self._flow.discord_user_id,
+        )
+        await interaction.response.edit_message(
+            content="Your signup was left unchanged.",
+            view=None,
+        )
+
+
+class UpdateRememberedRolesView(discord.ui.View):
+    def __init__(self, flow: EditSignupFlow):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._flow = flow
+
+    @discord.ui.button(
+        label="Yes, remember these roles",
+        style=discord.ButtonStyle.success,
+    )
+    async def update(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[UpdateRememberedRolesView],
+    ) -> None:
+        self._flow.bot.event_store.set_signup_preference(
+            self._flow.discord_user_id,
+            self._flow.role,
+            self._flow.flex_roles,
+            PreferenceMode.REMEMBER,
+        )
+        LOGGER.debug(
+            "Updated remembered roles after a signup edit; user_id=%s "
+            "role=%s flex_count=%s",
+            self._flow.discord_user_id,
+            self._flow.role.value if self._flow.role is not None else None,
+            len(self._flow.flex_roles),
+        )
+        await interaction.response.edit_message(
+            content="Your remembered roles were updated.",
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="No, keep the old ones",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[UpdateRememberedRolesView],
+    ) -> None:
+        await interaction.response.edit_message(
+            content="Your remembered roles were left unchanged.",
+            view=None,
+        )
+
+
+def _signup_edit_summary(signup: EventSignup) -> str:
+    if signup.waitlisted:
+        return (
+            "Your signup was updated. Your new selection does not currently "
+            "fit, so you are on the **waitlist** - you keep your original "
+            "sign-up priority."
+        )
+    if signup.assigned_role is not None:
+        summary = (
+            "Your signup was updated. You are seated as "
+            f"**{signup.assigned_role.value}**."
+        )
+        if signup.role is not None and signup.assigned_role != signup.role:
+            summary += (
+                f" Your preferred role **{signup.role.value}** is taken, so "
+                "one of your flex roles is used."
+            )
+        return summary
+    return "Your signup was updated."
+
+
 def _role_pick_label(
     role: EventRole,
     fits: bool,
@@ -2498,9 +2847,7 @@ def _role_pick_label(
 
 class RolePickSelect(discord.ui.Select["RolePickView"]):
     def __init__(self, flow: SignupFlow):
-        signups = flow.bot.event_store.get_signups(
-            flow.occurrence.occurrence_id
-        )
+        signups = flow.roster_for_labels()
         available = set(fitting_roles(flow.event.capacity, signups))
         waitlist_only = not available
         options = [

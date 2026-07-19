@@ -12,6 +12,7 @@ from gw2bot.events.models import (
     EventStatus,
     PreferenceMode,
     RepeatFrequency,
+    RosterAssignment,
 )
 from gw2bot.events.store import EventStore
 
@@ -61,6 +62,51 @@ def test_migration_adds_delete_previous_on_repeat_to_existing_db(
         assert legacy is not None
         # The backfilled column defaults to False for pre-existing rows.
         assert legacy.delete_previous_on_repeat is False
+    finally:
+        store.close()
+
+
+def test_migration_adds_edit_token_columns_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before the
+    # edit rate limit existed by dropping its columns and inserting a legacy
+    # signup row.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_event_signups DROP COLUMN edit_tokens")
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE gw2_event_signups "
+                "DROP COLUMN edit_tokens_updated_at"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_event_signups (occurrence_id, "
+                "discord_user_id, role, assigned_role, flex_roles, "
+                "signed_up_at, waitlisted) VALUES "
+                "(1, 2, 'Just DPS', 'Just DPS', '', "
+                "'2027-01-01T00:00:00+00:00', 0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "edit_tokens" in added
+    assert "edit_tokens_updated_at" in added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_signup(1, 2)
+        assert legacy is not None
+        # Pre-existing signups start with a full, never-spent bucket.
+        assert legacy.edit_tokens == 3.0
+        assert legacy.edit_tokens_updated_at is None
     finally:
         store.close()
 
@@ -568,7 +614,42 @@ class TestEventStoreSignups:
         assert store.get_signup(occurrence.occurrence_id, 1) is None
         assert store.remove_signup(occurrence.occurrence_id, 1) is None
 
-    def test_promote_signup_clears_waitlist_flag(
+    def test_update_signup_roles_preserves_the_signup_time(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        signed_up_at = datetime(2027, 1, 1, 10, 0, tzinfo=UTC)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.QUICKNESS_DPS,
+            assigned_role=EventRole.QUICKNESS_DPS,
+            flex_roles=(),
+            waitlisted=False,
+            now=signed_up_at,
+        )
+
+        store.update_signup_roles(
+            occurrence.occurrence_id,
+            1,
+            role=EventRole.ALACRITY_DPS,
+            flex_roles=(EventRole.DPS,),
+            assigned_role=EventRole.ALACRITY_DPS,
+            waitlisted=False,
+        )
+
+        updated = store.get_signup(occurrence.occurrence_id, 1)
+        assert updated is not None
+        assert updated.role is EventRole.ALACRITY_DPS
+        assert updated.flex_roles == (EventRole.DPS,)
+        assert updated.assigned_role is EventRole.ALACRITY_DPS
+        assert not updated.waitlisted
+        # Queue priority rides on this timestamp; an edit must never reset it.
+        assert updated.signed_up_at == signed_up_at
+
+    def test_set_signup_edit_tokens_round_trips(
         self,
         store: EventStore,
     ) -> None:
@@ -578,25 +659,166 @@ class TestEventStoreSignups:
             occurrence_id=occurrence.occurrence_id,
             discord_user_id=1,
             role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        spent_at = datetime(2027, 1, 1, 10, 0, tzinfo=UTC)
+
+        store.set_signup_edit_tokens(occurrence.occurrence_id, 1, 2.0, spent_at)
+
+        updated = store.get_signup(occurrence.occurrence_id, 1)
+        assert updated is not None
+        assert updated.edit_tokens == 2.0
+        assert updated.edit_tokens_updated_at == spent_at
+
+    def test_set_signup_edit_tokens_missing_row_raises(
+        self,
+        store: EventStore,
+    ) -> None:
+        with pytest.raises(ValueError, match="not signed up"):
+            store.set_signup_edit_tokens(
+                1,
+                1,
+                2.0,
+                datetime(2027, 1, 1, tzinfo=UTC),
+            )
+
+    def test_update_signup_roles_missing_row_raises(
+        self,
+        store: EventStore,
+    ) -> None:
+        with pytest.raises(ValueError, match="not signed up"):
+            store.update_signup_roles(
+                1,
+                1,
+                role=EventRole.DPS,
+                flex_roles=(),
+                assigned_role=None,
+                waitlisted=True,
+            )
+
+    def test_apply_roster_assignments_updates_all_rows_at_once(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.QUICKNESS_DPS,
+            assigned_role=EventRole.QUICKNESS_DPS,
+            flex_roles=(EventRole.DPS,),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=2,
+            role=EventRole.QUICKNESS_DPS,
             assigned_role=None,
-            flex_roles=(EventRole.QUICKNESS_DPS,),
+            flex_roles=(),
             waitlisted=True,
         )
 
-        store.promote_signup(
+        # One reshuffle plus one promotion, exactly what admitting a rigid
+        # signup over a seated flexer produces.
+        store.apply_roster_assignments(
             occurrence.occurrence_id,
-            1,
-            EventRole.QUICKNESS_DPS,
+            [
+                RosterAssignment(
+                    discord_user_id=1,
+                    role=EventRole.QUICKNESS_DPS,
+                    assigned_role=EventRole.DPS,
+                    waitlisted=False,
+                ),
+                RosterAssignment(
+                    discord_user_id=2,
+                    role=EventRole.QUICKNESS_DPS,
+                    assigned_role=EventRole.QUICKNESS_DPS,
+                    waitlisted=False,
+                ),
+            ],
         )
 
-        promoted = store.get_signup(occurrence.occurrence_id, 1)
+        moved = store.get_signup(occurrence.occurrence_id, 1)
+        assert moved is not None
+        assert moved.assigned_role is EventRole.DPS
+        assert not moved.waitlisted
+        promoted = store.get_signup(occurrence.occurrence_id, 2)
         assert promoted is not None
-        assert not promoted.waitlisted
         assert promoted.assigned_role is EventRole.QUICKNESS_DPS
+        assert not promoted.waitlisted
 
-    def test_promote_missing_signup_raises(self, store: EventStore) -> None:
-        with pytest.raises(ValueError):
-            store.promote_signup(1, 1, None)
+    def test_apply_roster_assignments_missing_row_rolls_back_the_batch(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.QUICKNESS_DPS,
+            assigned_role=EventRole.QUICKNESS_DPS,
+            flex_roles=(EventRole.DPS,),
+            waitlisted=False,
+        )
+
+        with pytest.raises(ValueError, match="no longer exists"):
+            store.apply_roster_assignments(
+                occurrence.occurrence_id,
+                [
+                    RosterAssignment(
+                        discord_user_id=1,
+                        role=EventRole.QUICKNESS_DPS,
+                        assigned_role=EventRole.DPS,
+                        waitlisted=False,
+                    ),
+                    RosterAssignment(
+                        discord_user_id=99,
+                        role=EventRole.DPS,
+                        assigned_role=EventRole.DPS,
+                        waitlisted=False,
+                    ),
+                ],
+            )
+
+        # The existing row's change must not survive a partial batch, or a
+        # half-reshuffled roster would be left behind.
+        untouched = store.get_signup(occurrence.occurrence_id, 1)
+        assert untouched is not None
+        assert untouched.assigned_role is EventRole.QUICKNESS_DPS
+
+    def test_apply_roster_assignments_empty_batch_is_a_no_op(
+        self,
+        store: EventStore,
+    ) -> None:
+        store.apply_roster_assignments(1, [])
+
+    def test_get_signups_breaks_signup_time_ties_by_user_id(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        shared_time = datetime(2027, 1, 1, 10, 0, tzinfo=UTC)
+        for user_id in (7, 3, 5):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+                now=shared_time,
+            )
+
+        signups = store.get_signups(occurrence.occurrence_id)
+
+        # Seating priority is decided by this order, so a timestamp collision
+        # must not fall back to unspecified row order.
+        assert [signup.discord_user_id for signup in signups] == [3, 5, 7]
 
 
 class TestEventStorePreferences:
