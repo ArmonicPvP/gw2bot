@@ -34,6 +34,70 @@ TRACKED_FEASTS = (
     Feast(1112, "Spherified Cilantro Oyster Soup"),
 )
 
+# Time windows the feast usage dashboard offers, mapped to their length in
+# seconds. The keys are the values the ``/api/food?range=`` query accepts.
+FEAST_USAGE_RANGES: dict[str, int] = {
+    "24h": 24 * 60 * 60,
+    "7d": 7 * 24 * 60 * 60,
+    "30d": 30 * 24 * 60 * 60,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class FeastStockSample:
+    """One recorded count for a tracked feast at a point in time."""
+
+    recorded_at: float
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class FeastStockSeries:
+    """A tracked feast's recorded counts within a window.
+
+    ``samples`` are the counts logged inside the window, oldest first.
+    ``prior_count`` is the last count recorded strictly before the window,
+    or ``None`` when the feast has no earlier record, so a decrease that
+    straddles the window's start edge is still attributable.
+    """
+
+    guild_storage_id: int
+    prior_count: int | None
+    samples: tuple[FeastStockSample, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FeastRemoval:
+    """A single observed drop in a tracked feast's on-hand count."""
+
+    recorded_at: float
+    amount: int
+    remaining: int
+
+
+def feast_removals(series: FeastStockSeries) -> list[FeastRemoval]:
+    """Return each in-window count decrease as a removal, oldest first.
+
+    A removal is a sample whose count fell below the previous recorded count;
+    ``amount`` is how far it fell and ``remaining`` is the new on-hand count.
+    The comparison spans ``series.prior_count`` so a decrease across the
+    window's start edge is still reported. Restocks (increases) and unchanged
+    samples produce no removal.
+    """
+    removals: list[FeastRemoval] = []
+    previous = series.prior_count
+    for sample in series.samples:
+        if previous is not None and sample.count < previous:
+            removals.append(
+                FeastRemoval(
+                    recorded_at=sample.recorded_at,
+                    amount=previous - sample.count,
+                    remaining=sample.count,
+                )
+            )
+        previous = sample.count
+    return removals
+
 
 def tracked_feast_counts(storage: list[dict[str, Any]]) -> dict[int, int]:
     """Return the on-hand count for each tracked feast present in ``storage``.

@@ -11,12 +11,23 @@ import discord
 from aiohttp import web
 
 from gw2bot.config import Config
+from gw2bot.discord_utils import user_has_role
+from gw2bot.feast_stock import (
+    FEAST_USAGE_RANGES,
+    TRACKED_FEASTS,
+    Feast,
+    FeastStockSeries,
+    feast_removals,
+)
+from gw2bot.raffle.roles import RAFFLE_DRAW_ROLE_ID
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
 from gw2bot.web.page import (
     CALENDAR_PAGE,
+    FOOD_PAGE,
     LOGIN_FAILED_PAGE,
     MEMBERS_ONLY_PAGE,
+    OFFICER_ONLY_PAGE,
     SERVICE_UNAVAILABLE_PAGE,
     SIGN_IN_PAGE,
     SIGNED_OUT_PAGE,
@@ -43,6 +54,11 @@ MEMBERSHIP_CACHE_TTL_SECONDS = 300
 MEMBERSHIP_FAILURE_BACKOFF_SECONDS = 60
 
 UNKNOWN_NAME = "Unknown"
+
+# The feast usage dashboard is gated behind the same role that gates the
+# /raffle removetickets command. Change this single constant to move the page
+# to a different role.
+FOOD_PAGE_ROLE_ID = RAFFLE_DRAW_ROLE_ID
 
 # Every response this server sends is scoped to one signed-in member, so none
 # of it may be kept by the reverse proxy the README asks operators to run, by a
@@ -96,6 +112,9 @@ class WebServer:
         self._names: dict[int, tuple[str, float]] = {}
         # user id -> (is_member, monotonic time the answer stops being trusted)
         self._members: dict[int, tuple[bool, float]] = {}
+        # user id -> (holds FOOD_PAGE_ROLE_ID, monotonic expiry). Cached with
+        # the same TTL and outage backoff as _members.
+        self._role_members: dict[int, tuple[bool, float]] = {}
         self.app = web.Application(
             middlewares=[self._log_middleware, self._auth_middleware]
         )
@@ -111,6 +130,8 @@ class WebServer:
                 web.post("/logout", self._logout),
                 web.get("/api/me", self._me),
                 web.get("/api/events", self._events),
+                web.get("/food", self._food),
+                web.get("/api/food", self._food_data),
             ]
         )
 
@@ -451,6 +472,91 @@ class WebServer:
             return None
         return True
 
+    async def _cached_role(self, user_id: int) -> bool | None:
+        """Whether a signed-in user holds the gated role, cached for a TTL."""
+        cached = self._role_members.get(user_id)
+        if cached is not None and time.monotonic() < cached[1]:
+            return cached[0]
+        has_role = await self._check_role(user_id)
+        if has_role is None:
+            if cached is None:
+                return None
+            # Discord is unreachable. Ride the last known answer rather than
+            # bouncing an officer off the page, and re-arm the entry for a
+            # short backoff so the outage costs one lookup per window instead
+            # of one per request (the bot runs without the members intent, so
+            # every cache miss is a rate-limited fetch_member call).
+            self._role_members[user_id] = (
+                cached[0],
+                time.monotonic() + MEMBERSHIP_FAILURE_BACKOFF_SECONDS,
+            )
+            return cached[0]
+        return has_role
+
+    async def _check_role(self, user_id: int) -> bool | None:
+        """Return role membership, or None when Discord cannot be checked."""
+        has_role = await self._member_holds_role(user_id, FOOD_PAGE_ROLE_ID)
+        if has_role is not None:
+            self._role_members[user_id] = (
+                has_role,
+                time.monotonic() + MEMBERSHIP_CACHE_TTL_SECONDS,
+            )
+        return has_role
+
+    async def _member_holds_role(
+        self,
+        user_id: int,
+        role_id: int,
+    ) -> bool | None:
+        """Whether the member holds ``role_id``, or None when unreachable."""
+        guild = self._bot.get_guild(self._config.discord_command_guild_id)
+        if guild is None:
+            LOGGER.warning("Role check skipped; guild unavailable")
+            return None
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.NotFound:
+                return False
+            except discord.HTTPException as exc:
+                LOGGER.warning(
+                    "Role check failed; error_type=%s",
+                    type(exc).__name__,
+                )
+                return None
+        return user_has_role(member, role_id)
+
+    async def _require_food_access(
+        self,
+        request: web.Request,
+    ) -> web.Response | None:
+        """Return a denial response, or None when the caller may proceed.
+
+        The auth middleware has already proven a valid session and current
+        guild membership; this only adds the officer-role check on top.
+        """
+        session = request[SESSION_KEY]
+        authorized = await self._cached_role(session.user_id)
+        if authorized is None:
+            LOGGER.info(
+                "Feast usage authorization unavailable; Discord unreachable; "
+                "user_id=%s",
+                session.user_id,
+            )
+            if request.path.startswith("/api/"):
+                return self._json({"error": "unavailable"}, status=503)
+            return self._html(SERVICE_UNAVAILABLE_PAGE, status=503)
+        if not authorized:
+            LOGGER.info(
+                "Rejected feast usage request; missing role; user_id=%s",
+                session.user_id,
+            )
+            if request.path.startswith("/api/"):
+                return self._json({"error": "forbidden"}, status=403)
+            return self._html(OFFICER_ONLY_PAGE, status=403)
+        return None
+
     async def _logout(self, request: web.Request) -> web.StreamResponse:
         response = self._html(SIGNED_OUT_PAGE)
         response.del_cookie(auth.SESSION_COOKIE, path="/")
@@ -460,6 +566,79 @@ class WebServer:
     async def _me(self, request: web.Request) -> web.StreamResponse:
         session = request[SESSION_KEY]
         return self._json({"name": session.name})
+
+    async def _food(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_food_access(request)
+        if denied is not None:
+            return denied
+        return self._html(FOOD_PAGE)
+
+    async def _food_data(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_food_access(request)
+        if denied is not None:
+            return denied
+        range_key = request.query.get("range", "24h")
+        window = FEAST_USAGE_RANGES.get(range_key)
+        if window is None:
+            LOGGER.debug("Rejected feast usage request; reason=range")
+            return self._json({"error": "invalid range"}, status=400)
+
+        now = datetime.now(UTC).timestamp()
+        since = now - window
+        # get_feast_stock_series is synchronous SQLite sharing the Discord
+        # client's event loop, so run it off-loop like the calendar query.
+        series = await asyncio.to_thread(
+            self._bot.raffle_store.get_feast_stock_series,
+            since,
+        )
+        payload = [
+            self._serialize_feast(feast, series) for feast in TRACKED_FEASTS
+        ]
+        LOGGER.debug(
+            "Served feast usage; range=%s feasts=%s samples=%s removals=%s",
+            range_key,
+            len(payload),
+            sum(len(item.samples) for item in series.values()),
+            sum(len(feast_removals(item)) for item in series.values()),
+        )
+        return self._json(
+            {
+                "range": range_key,
+                "since": since,
+                "now": now,
+                "feasts": payload,
+            }
+        )
+
+    @staticmethod
+    def _serialize_feast(
+        feast: Feast,
+        series: dict[int, FeastStockSeries],
+    ) -> dict[str, object]:
+        item = series.get(feast.guild_storage_id)
+        if item is None:
+            points: list[dict[str, object]] = []
+            removals: list[dict[str, object]] = []
+        else:
+            points = [
+                {"t": sample.recorded_at, "count": sample.count}
+                for sample in item.samples
+            ]
+            # feast_removals returns oldest first; the table shows newest first.
+            removals = [
+                {
+                    "t": removal.recorded_at,
+                    "amount": removal.amount,
+                    "remaining": removal.remaining,
+                }
+                for removal in reversed(feast_removals(item))
+            ]
+        return {
+            "id": feast.guild_storage_id,
+            "name": feast.name,
+            "points": points,
+            "removals": removals,
+        }
 
     async def _events(self, request: web.Request) -> web.StreamResponse:
         try:
