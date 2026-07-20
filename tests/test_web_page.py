@@ -12,8 +12,9 @@ class TestCalendarMarkdown:
 
 class TestCalendarTimeGrid:
     def test_day_and_week_render_an_hour_gutter(self) -> None:
-        assert 'renderTimeGrid(range, state.view === "day" ? 1 : 7)' in (
-            CALENDAR_PAGE
+        assert (
+            'renderTimeGrid(range, state.view === "day" ? 1 : weekSpan())'
+            in CALENDAR_PAGE
         )
         assert "function hourGutter()" in CALENDAR_PAGE
         assert "#grid.timegrid.day" in CALENDAR_PAGE
@@ -86,12 +87,73 @@ class TestCalendarBrowserTime:
             CALENDAR_PAGE
         )
 
-    def test_the_viewer_is_told_which_time_zone_they_are_seeing(self) -> None:
-        assert "Intl.DateTimeFormat().resolvedOptions().timeZone" in (
+    def test_the_time_zone_banner_is_not_shown(self) -> None:
+        # The "Times in ..." banner was removed from both the mobile and the
+        # regular layout; times are still rendered in the browser's own zone.
+        assert "Intl.DateTimeFormat().resolvedOptions().timeZone" not in (
             CALENDAR_PAGE
         )
-        assert '"Times in " + zone' in CALENDAR_PAGE
-        assert '<span id="tz"></span>' in CALENDAR_PAGE
+        assert "Times in " not in CALENDAR_PAGE
+        assert 'id="tz"' not in CALENDAR_PAGE
+
+
+class TestCalendarMobile:
+    def test_a_single_breakpoint_drives_mobile_behaviour(self) -> None:
+        assert 'window.matchMedia("(max-width: 640px)")' in CALENDAR_PAGE
+        assert "function isMobile()" in CALENDAR_PAGE
+        assert "@media (max-width: 640px)" in CALENDAR_PAGE
+
+    def test_week_collapses_to_three_days_on_mobile(self) -> None:
+        # The week view spans three days on mobile so it never scrolls sideways,
+        # and the button is relabelled to match.
+        assert "function weekSpan() { return isMobile() ? 3 : 7; }" in (
+            CALENDAR_PAGE
+        )
+        assert 'isMobile() ? "3 Day" : "Week"' in CALENDAR_PAGE
+        assert (
+            "#grid.timegrid.week {\n"
+            "    grid-template-columns: var(--gutter) repeat(3, minmax(0, 1fr));"
+            in CALENDAR_PAGE
+        )
+
+    def test_month_fits_a_single_page_with_single_letter_headings(
+        self,
+    ) -> None:
+        assert 'var dayInitials = ["S", "M", "T", "W", "T", "F", "S"];' in (
+            CALENDAR_PAGE
+        )
+        assert "mobile ? dayInitials[index] : name" in CALENDAR_PAGE
+        # Six week rows share the height instead of forcing a scroll.
+        assert (
+            "grid-template-rows: auto repeat(6, minmax(0, 1fr));"
+            in CALENDAR_PAGE
+        )
+
+    def test_month_hides_times_and_opens_the_day_on_tap(self) -> None:
+        # chipFor drops the time span on mobile month cells, and tapping a cell
+        # opens that day.
+        assert "chipFor(entry, index, mobile)" in CALENDAR_PAGE
+        assert "if (!hideTime) {" in CALENDAR_PAGE
+        assert "function openDay(date)" in CALENDAR_PAGE
+        assert 'cell.setAttribute("role", "button");' in CALENDAR_PAGE
+
+    def test_horizontal_swipes_step_the_period(self) -> None:
+        assert 'scroller.addEventListener("touchstart"' in CALENDAR_PAGE
+        assert 'scroller.addEventListener("touchend"' in CALENDAR_PAGE
+        assert "step(dx < 0 ? 1 : -1);" in CALENDAR_PAGE
+        # A swipe is only claimed when it is clearly horizontal, so the day and
+        # 3-day time grids keep scrolling vertically.
+        assert "Math.abs(dx) < Math.abs(dy) * 1.5" in CALENDAR_PAGE
+
+    def test_top_bar_uses_a_sign_out_icon_button(self) -> None:
+        assert '<button type="submit" class="signout" aria-label="Sign out">' in (
+            CALENDAR_PAGE
+        )
+        assert 'class="signout-icon"' in CALENDAR_PAGE
+        # The stepper, period label and username are hidden on mobile.
+        assert ".controls, #period, #whoami { display: none; }" in (
+            CALENDAR_PAGE
+        )
 
 
 class TestFoodPage:
@@ -111,7 +173,33 @@ class TestFoodPage:
         assert "new Date(t * 1000)" in FOOD_PAGE
         assert "toLocaleString(" in FOOD_PAGE
         assert "toLocaleTimeString(" in FOOD_PAGE
-        assert '<span id="tz"></span>' in FOOD_PAGE
+
+    def test_the_time_zone_banner_is_not_shown(self) -> None:
+        assert 'id="tz"' not in FOOD_PAGE
+        assert "Times in " not in FOOD_PAGE
+
+    def test_calendar_link_is_removed(self) -> None:
+        # The cross-link back to the calendar is dropped from every layout.
+        assert '<a href="/">Calendar</a>' not in FOOD_PAGE
+
+    def test_graph_is_taller_on_mobile(self) -> None:
+        # A taller viewBox on mobile makes the graph read large on a phone,
+        # where the SVG scales to the narrow screen width.
+        assert "function metrics()" in FOOD_PAGE
+        assert "w: 480, h: 620" in FOOD_PAGE
+        assert "w: 960, h: 380" in FOOD_PAGE
+
+    def test_legend_sits_below_the_chart_as_tappable_swatches(self) -> None:
+        # The legend follows the chart in the DOM and each entry is a button
+        # that reveals its feast name when tapped.
+        chart_index = FOOD_PAGE.index('<div id="chart">')
+        legend_index = FOOD_PAGE.index('<div id="legend"')
+        assert chart_index < legend_index
+        assert 'var item = el("button", "item");' in FOOD_PAGE
+        assert 'item.classList.toggle("show-name");' in FOOD_PAGE
+        assert ".legend .item.show-name .legend-name { display: inline; }" in (
+            FOOD_PAGE
+        )
 
     def test_every_recorded_sample_is_plotted(self) -> None:
         # A point is drawn for every sample; the series is never downsampled,

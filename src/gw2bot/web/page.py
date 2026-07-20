@@ -174,9 +174,11 @@ button.active { background: var(--accent); border-color: var(--accent); }
 #period { font-weight: 600; font-size: 0.95rem; min-width: 11rem; }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
-#tz { color: var(--muted); font-size: 0.78rem; }
 header a { font-size: 0.85rem; }
 header form { display: flex; }
+.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
+.signout-icon { display: none; }
+.signout-icon, .signout-icon * { pointer-events: none; }
 main {
   /* min-height:0 lets this flex child shrink to the viewport so its own
      overflow scrolls, instead of pushing the page past 100vh. A column flex
@@ -213,6 +215,11 @@ main {
 #grid.timegrid.week {
   grid-template-columns: var(--gutter) repeat(7, minmax(4.5rem, 1fr));
 }
+/* In day view a single column is offset by the hour gutter, which pushes its
+   header off-centre. Drop the empty corner and let the header span the whole
+   width so the date sits centred over the view. */
+#grid.timegrid.day .tg-corner { display: none; }
+#grid.timegrid.day .tg-head { grid-column: 1 / -1; }
 /* The day headers stay put while the 24-hour body scrolls under them. */
 .tg-corner, .tg-head {
   position: sticky;
@@ -403,32 +410,91 @@ main {
 .badge.over { background: var(--over); }
 .badge.scheduled { background: var(--scheduled); }
 #status { color: var(--muted); font-size: 0.85rem; padding: 0.5rem 0.2rem; }
+button:focus-visible, .cell:focus-visible, .chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 640px) {
+  /* Two-row header: the title is centred with the sign-out control pinned to
+     the right, and the view switch sits on its own row beneath. */
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    row-gap: 0.4rem;
+    column-gap: 0.4rem;
+    padding: 0.5rem 0.6rem;
+  }
+  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
+  header form { grid-column: 3; grid-row: 1; justify-self: end; }
+  .views { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  /* Navigation is by swipe on mobile, and the date already shows in the grid,
+     so the stepper, period label and username are all dropped. */
+  .controls, #period, #whoami { display: none; }
+  .signout-icon { display: inline-block; }
+  .signout-label { display: none; }
+  .signout { padding: 0.35rem 0.5rem; }
+  main { padding: 0 0.3rem; overflow-x: hidden; }
+  #grid.month {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-rows: auto repeat(6, minmax(0, 1fr));
+    gap: 2px;
+    margin: 0.4rem 0;
+    min-height: 0;
+    /* The whole month fits the viewport, so nothing scrolls. */
+    overflow: hidden;
+  }
+  #grid.timegrid { --gutter: 2.5rem; }
+  #grid.timegrid.day {
+    grid-template-columns: var(--gutter) minmax(0, 1fr);
+  }
+  #grid.timegrid.week {
+    grid-template-columns: var(--gutter) repeat(3, minmax(0, 1fr));
+  }
+  .cell { padding: 0.1rem; border-radius: 5px; overflow: hidden; }
+  .daynum { font-size: 0.72rem; padding: 0 0.15rem 0.1rem; }
+  .dow { font-size: 0.72rem; padding: 0.15rem 0; }
+  .cell.tappable { cursor: pointer; }
+  #grid.month .chip {
+    font-size: 0.62rem;
+    padding: 0.05rem 0.2rem;
+    margin-bottom: 0.1rem;
+  }
+}
 </style>
 </head>
 <body>
 <header>
-  <h1>Guild Events</h1>
-  <div class="views">
+  <h1 id="brand">Guild Events</h1>
+  <nav class="views" aria-label="Calendar view">
     <button type="button" data-view="day">Day</button>
-    <button type="button" data-view="week">Week</button>
+    <button type="button" data-view="week" id="week-view">Week</button>
     <button type="button" data-view="month">Month</button>
-  </div>
+  </nav>
   <div class="controls">
-    <button type="button" id="prev" aria-label="Previous">&lsaquo;</button>
+    <button type="button" id="prev" aria-label="Previous period">&lsaquo;</button>
     <button type="button" id="today">Today</button>
-    <button type="button" id="next" aria-label="Next">&rsaquo;</button>
+    <button type="button" id="next" aria-label="Next period">&rsaquo;</button>
   </div>
-  <span id="period"></span>
-  <span id="tz"></span>
+  <span id="period" aria-live="polite"></span>
   <span class="spacer"></span>
   <span id="whoami"></span>
   <form method="post" action="/logout">
-    <button type="submit">Log out</button>
+    <button type="submit" class="signout" aria-label="Sign out">
+      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
+        fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>
+      <span class="signout-label">Log out</span>
+    </button>
   </form>
 </header>
 <main>
-  <div id="grid" class="month"></div>
-  <div id="status"></div>
+  <div id="grid" class="month" aria-label="Guild event calendar"></div>
+  <div id="status" role="status" aria-live="polite"></div>
 </main>
 <div id="tooltip" role="tooltip"></div>
 <script>
@@ -441,6 +507,14 @@ main {
   var statusLine = document.getElementById("status");
   var state = { view: "month", anchor: startOfDay(new Date()) };
   var entries = [];
+
+  // A single breakpoint drives every behavioural difference on small screens:
+  // the 3-day week, single-letter month, tap-to-open days and swipe steps.
+  var mobileQuery = window.matchMedia("(max-width: 640px)");
+  function isMobile() { return mobileQuery.matches; }
+  // The week view collapses to three days on mobile so it never scrolls
+  // sideways; the step size follows the same span.
+  function weekSpan() { return isMobile() ? 3 : 7; }
 
   function startOfDay(date) {
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -470,6 +544,10 @@ main {
       return { start: dayStart, end: addDays(dayStart, 1) };
     }
     if (state.view === "week") {
+      if (isMobile()) {
+        var base = startOfDay(state.anchor);
+        return { start: base, end: addDays(base, weekSpan()) };
+      }
       var weekStart = startOfWeek(state.anchor);
       return { start: weekStart, end: addDays(weekStart, 7) };
     }
@@ -501,7 +579,7 @@ main {
     if (state.view === "day") {
       state.anchor = addDays(state.anchor, direction);
     } else if (state.view === "week") {
-      state.anchor = addDays(state.anchor, 7 * direction);
+      state.anchor = addDays(state.anchor, weekSpan() * direction);
     } else {
       state.anchor = new Date(
         state.anchor.getFullYear(),
@@ -632,7 +710,7 @@ main {
     }
   }
 
-  function chipFor(entry, index) {
+  function chipFor(entry, index, hideTime) {
     var start = new Date(entry.start_epoch * 1000);
     var chip = el("div",
       "chip " + (statusClasses[entry.status] || "st-scheduled"));
@@ -640,27 +718,64 @@ main {
     if (entry.projected) { chip.classList.add("projected"); }
     chip.setAttribute("data-i", String(index));
     chip.setAttribute("tabindex", "0");
-    chip.appendChild(el("span", "time", formatTime(start)));
+    if (!hideTime) {
+      chip.appendChild(el("span", "time", formatTime(start)));
+    }
     chip.appendChild(el("span", "name", entry.title));
     return chip;
+  }
+
+  // On mobile the whole month cell is the tap target: tapping it opens that
+  // day, where the full breakdown lives. Times are dropped and the chips
+  // become plain labels so a whole month fits without scrolling.
+  function openDay(date) {
+    state.view = "day";
+    state.anchor = startOfDay(date);
+    syncViewButtons();
+    refresh();
   }
 
   function buildCell(date, monthIndex) {
     var cell = el("div", "cell");
     if (date.getMonth() !== monthIndex) { cell.classList.add("outside"); }
     if (sameDay(date, new Date())) { cell.classList.add("today"); }
+    var mobile = isMobile();
+    if (mobile) {
+      cell.classList.add("tappable");
+      cell.setAttribute("role", "button");
+      cell.setAttribute("tabindex", "0");
+      cell.setAttribute("aria-label", date.toLocaleDateString(
+        undefined, { weekday: "long", month: "long", day: "numeric" }));
+      var target = date;
+      cell.addEventListener("click", function () { openDay(target); });
+      cell.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openDay(target);
+        }
+      });
+    }
     cell.appendChild(el("div", "daynum", String(date.getDate())));
     var next = addDays(date, 1);
     entries.forEach(function (entry, index) {
       var start = new Date(entry.start_epoch * 1000);
       if (start >= date && start < next) {
-        cell.appendChild(chipFor(entry, index));
+        var chip = chipFor(entry, index, mobile);
+        // The cell itself handles the tap on mobile, so the chip is not a
+        // separate focus stop there.
+        if (mobile) { chip.removeAttribute("tabindex"); }
+        cell.appendChild(chip);
       }
     });
     return cell;
   }
 
   var dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var dayInitials = ["S", "M", "T", "W", "T", "F", "S"];
+  var dayFull = [
+    "Sunday", "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday"
+  ];
 
   // Must match --hour-h in the stylesheet: an event's offset and height are
   // computed in pixels against the hour rows drawn from it.
@@ -841,15 +956,19 @@ main {
     hideTooltip();
     var range = rangeFor();
     if (state.view === "month") {
-      dayNames.forEach(function (name) {
-        grid.appendChild(el("div", "dow", name));
+      var mobile = isMobile();
+      dayNames.forEach(function (name, index) {
+        var cell = el("div", "dow", mobile ? dayInitials[index] : name);
+        // The single-letter mobile heading stays legible to assistive tech.
+        cell.setAttribute("aria-label", dayFull[index]);
+        grid.appendChild(cell);
       });
       for (var offset = 0; offset < 42; offset += 1) {
         grid.appendChild(buildCell(
           addDays(range.start, offset), state.anchor.getMonth()));
       }
     } else {
-      renderTimeGrid(range, state.view === "day" ? 1 : 7);
+      renderTimeGrid(range, state.view === "day" ? 1 : weekSpan());
     }
     renderPeriodLabel(range);
     statusLine.textContent = entries.length
@@ -862,7 +981,7 @@ main {
       periodLabel.textContent = state.anchor.toLocaleDateString(
         undefined, { month: "long", year: "numeric" });
     } else if (state.view === "week") {
-      var last = addDays(range.start, 6);
+      var last = addDays(range.start, weekSpan() - 1);
       periodLabel.textContent = range.start.toLocaleDateString(
         undefined, { month: "short", day: "numeric" }) + " \\u2013 " +
         last.toLocaleDateString(
@@ -952,6 +1071,34 @@ main {
     if (event.target.closest(".chip")) { hideTooltip(); }
   });
 
+  // A horizontal swipe steps to the previous or next set of events. The
+  // gesture is only claimed when it is clearly horizontal, so vertical
+  // scrolling of the day and 3-day time grids is left untouched.
+  var swipeStartX = 0;
+  var swipeStartY = 0;
+  var swipeStartTime = 0;
+  var swipeTracking = false;
+  scroller.addEventListener("touchstart", function (event) {
+    if (event.touches.length !== 1) { swipeTracking = false; return; }
+    var touch = event.touches[0];
+    swipeStartX = touch.clientX;
+    swipeStartY = touch.clientY;
+    swipeStartTime = Date.now();
+    swipeTracking = true;
+  }, { passive: true });
+  scroller.addEventListener("touchend", function (event) {
+    if (!swipeTracking) { return; }
+    swipeTracking = false;
+    var touch = event.changedTouches[0];
+    var dx = touch.clientX - swipeStartX;
+    var dy = touch.clientY - swipeStartY;
+    if (Date.now() - swipeStartTime > 700) { return; }
+    if (Math.abs(dx) < 60) { return; }
+    if (Math.abs(dx) < Math.abs(dy) * 1.5) { return; }
+    hideTooltip();
+    step(dx < 0 ? 1 : -1);
+  }, { passive: true });
+
   function refresh() {
     writeHash();
     var range = rangeFor();
@@ -987,9 +1134,14 @@ main {
   });
   function syncViewButtons() {
     document.querySelectorAll("[data-view]").forEach(function (button) {
-      button.classList.toggle(
-        "active", button.getAttribute("data-view") === state.view);
+      var active = button.getAttribute("data-view") === state.view;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
     });
+    var weekButton = document.getElementById("week-view");
+    if (weekButton) {
+      weekButton.textContent = isMobile() ? "3 Day" : "Week";
+    }
   }
   document.getElementById("prev").addEventListener("click", function () {
     step(-1);
@@ -1006,6 +1158,12 @@ main {
     syncViewButtons();
     refresh();
   });
+  // Crossing the breakpoint changes the week span, the month layout and the
+  // view labels, so re-sync and reload whenever it flips.
+  mobileQuery.addEventListener("change", function () {
+    syncViewButtons();
+    refresh();
+  });
 
   fetch("/api/me")
     .then(function (response) {
@@ -1019,19 +1177,6 @@ main {
       document.getElementById("whoami").textContent = payload.name || "";
     })
     .catch(function () {});
-
-  // Every time on this page is rendered from the event's absolute instant
-  // through the browser's own clock, so name the zone that produced them.
-  function timezoneLabel() {
-    var zone = "";
-    try {
-      zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-    } catch (error) {
-      zone = "";
-    }
-    return zone ? "Times in " + zone : "Times in your local time zone";
-  }
-  document.getElementById("tz").textContent = timezoneLabel();
 
   readHash();
   syncViewButtons();
@@ -1086,9 +1231,11 @@ button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
-#tz { color: var(--muted); font-size: 0.78rem; }
 header a { font-size: 0.85rem; }
 header form { display: flex; }
+.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
+.signout-icon { display: none; }
+.signout-icon, .signout-icon * { pointer-events: none; }
 main {
   flex: 1;
   width: 100%;
@@ -1106,9 +1253,28 @@ main {
   padding: 1rem;
 }
 .card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
-.legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; margin-bottom: 0.6rem; }
-.legend .item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; }
+/* The legend sits under the chart as a row of colour swatches. Each swatch is
+   a button so a tap can reveal the feast it stands for. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem 1.25rem;
+  margin-top: 0.6rem;
+}
+.legend .item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  background: none;
+  border: none;
+  padding: 0.2rem 0.25rem;
+  color: var(--text);
+  cursor: pointer;
+}
 .legend .swatch { width: 0.9rem; height: 0.9rem; border-radius: 3px; flex-shrink: 0; }
+.legend .legend-name { display: inline; }
 /* The chart is a fixed-viewBox SVG that scales to its container width, so
    every plotted coordinate is computed once against the viewBox and the
    browser handles resizing without a re-render. */
@@ -1143,30 +1309,63 @@ table.removals td.num {
   color: var(--muted);
   font-size: 0.85rem;
 }
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 640px) {
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    row-gap: 0.4rem;
+    column-gap: 0.4rem;
+    padding: 0.5rem 0.6rem;
+  }
+  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
+  header form { grid-column: 3; grid-row: 1; justify-self: end; }
+  .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  #whoami { display: none; }
+  .signout-icon { display: inline-block; }
+  .signout-label { display: none; }
+  .signout { padding: 0.35rem 0.5rem; }
+  main { padding: 0.6rem 0.5rem; }
+  .card { padding: 0.6rem; }
+  /* Names are hidden until a swatch is tapped, leaving a compact colour key. */
+  .legend .legend-name { display: none; }
+  .legend .item.show-name .legend-name { display: inline; }
+}
 </style>
 </head>
 <body>
 <header>
-  <h1>Feast Usage</h1>
-  <div class="ranges">
+  <h1 id="brand">Feast Usage</h1>
+  <nav class="ranges" aria-label="Time range">
     <button type="button" data-range="24h">24h</button>
     <button type="button" data-range="7d">7d</button>
     <button type="button" data-range="30d">30d</button>
-  </div>
-  <span id="tz"></span>
+  </nav>
   <span class="spacer"></span>
   <span id="whoami"></span>
-  <a href="/">Calendar</a>
   <form method="post" action="/logout">
-    <button type="submit">Log out</button>
+    <button type="submit" class="signout" aria-label="Sign out">
+      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
+        fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>
+      <span class="signout-label">Log out</span>
+    </button>
   </form>
 </header>
 <main>
   <section class="card">
     <h2>Stock on hand over time</h2>
-    <div id="legend" class="legend"></div>
     <div id="chart"></div>
-    <div id="chart-status"></div>
+    <div id="legend" class="legend" role="list" aria-label="Feast colours"></div>
+    <div id="chart-status" role="status" aria-live="polite"></div>
   </section>
   <section class="card">
     <h2>Removals</h2>
@@ -1182,16 +1381,28 @@ table.removals td.num {
   var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
   var Y_MAX = 50;
   var SVG_NS = "http://www.w3.org/2000/svg";
-  var VB_W = 960;
-  var VB_H = 380;
-  var PAD_TOP = 16;
-  var PAD_RIGHT = 16;
-  var PAD_BOTTOM = 32;
-  var PAD_LEFT = 34;
-  var PLOT_W = VB_W - PAD_LEFT - PAD_RIGHT;
-  var PLOT_H = VB_H - PAD_TOP - PAD_BOTTOM;
-  var X_TICKS = 6;
   var TABLE_PAGE_SIZE = 5;
+
+  var mobileQuery = window.matchMedia("(max-width: 640px)");
+  function isMobile() { return mobileQuery.matches; }
+
+  // The chart uses a wide viewBox on desktop and a taller one on mobile, where
+  // it scales to the narrow screen width; the extra height makes the graph
+  // read large on a phone. Coordinates are computed against whichever set is
+  // active, so M is refreshed at the start of every chart render.
+  function metrics() {
+    if (isMobile()) {
+      return {
+        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 34, ticks: 4
+      };
+    }
+    return {
+      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 34, ticks: 6
+    };
+  }
+  var M = metrics();
+  function plotW() { return M.w - M.left - M.right; }
+  function plotH() { return M.h - M.top - M.bottom; }
 
   var state = { range: "24h", data: null, activeFeast: 0, tablePage: 0 };
 
@@ -1232,13 +1443,13 @@ table.removals td.num {
     var frac = span > 0 ? (t - since) / span : 0;
     if (frac < 0) { frac = 0; }
     if (frac > 1) { frac = 1; }
-    return PAD_LEFT + frac * PLOT_W;
+    return M.left + frac * plotW();
   }
   function scaleY(count) {
     var value = count;
     if (value < 0) { value = 0; }
     if (value > Y_MAX) { value = Y_MAX; }
-    return PAD_TOP + (1 - value / Y_MAX) * PLOT_H;
+    return M.top + (1 - value / Y_MAX) * plotH();
   }
 
   function formatTick(t) {
@@ -1262,11 +1473,13 @@ table.removals td.num {
   }
 
   function renderChart() {
+    M = metrics();
     chart.replaceChildren();
     var canvas = svg("svg", {
       "class": "chart-svg",
-      viewBox: "0 0 " + VB_W + " " + VB_H,
-      role: "img"
+      viewBox: "0 0 " + M.w + " " + M.h,
+      role: "img",
+      "aria-label": "Stock on hand over time, one line per feast"
     });
 
     // Horizontal gridlines and y labels every ten counts, 0 through Y_MAX.
@@ -1274,10 +1487,10 @@ table.removals td.num {
       var y = scaleY(value);
       canvas.appendChild(svg("line", {
         "class": value === 0 ? "axis" : "grid",
-        x1: PAD_LEFT, y1: y, x2: PAD_LEFT + PLOT_W, y2: y
+        x1: M.left, y1: y, x2: M.left + plotW(), y2: y
       }));
       var yLabel = svg("text", {
-        "class": "y-label", x: PAD_LEFT - 6, y: y + 4
+        "class": "y-label", x: M.left - 6, y: y + 4
       });
       yLabel.textContent = String(value);
       canvas.appendChild(yLabel);
@@ -1287,14 +1500,14 @@ table.removals td.num {
     // range spans the full width even when few points were recorded.
     canvas.appendChild(svg("line", {
       "class": "axis",
-      x1: PAD_LEFT, y1: PAD_TOP, x2: PAD_LEFT, y2: PAD_TOP + PLOT_H
+      x1: M.left, y1: M.top, x2: M.left, y2: M.top + plotH()
     }));
-    for (var i = 0; i <= X_TICKS; i += 1) {
+    for (var i = 0; i <= M.ticks; i += 1) {
       var t = state.data.since +
-        (state.data.now - state.data.since) * (i / X_TICKS);
+        (state.data.now - state.data.since) * (i / M.ticks);
       var x = scaleX(t);
       var xLabel = svg("text", {
-        "class": "x-label", x: x, y: PAD_TOP + PLOT_H + 18
+        "class": "x-label", x: x, y: M.top + plotH() + 18
       });
       xLabel.textContent = formatTick(t);
       canvas.appendChild(xLabel);
@@ -1343,11 +1556,19 @@ table.removals td.num {
   function renderLegend() {
     legend.replaceChildren();
     feasts().forEach(function (feast, index) {
-      var item = el("span", "item");
+      // Each entry is a button so a tap can reveal which feast a colour is
+      // for; the name is always exposed to assistive tech through aria-label.
+      var item = el("button", "item");
+      item.type = "button";
+      item.setAttribute("aria-label", feast.name);
+      item.title = feast.name;
       var swatch = el("span", "swatch");
       swatch.style.background = COLORS[index % COLORS.length];
       item.appendChild(swatch);
-      item.appendChild(el("span", null, feast.name));
+      item.appendChild(el("span", "legend-name", feast.name));
+      item.addEventListener("click", function () {
+        item.classList.toggle("show-name");
+      });
       legend.appendChild(item);
     });
   }
@@ -1357,7 +1578,9 @@ table.removals td.num {
     feasts().forEach(function (feast, index) {
       var button = el("button", null, feast.name);
       button.type = "button";
-      if (index === state.activeFeast) { button.classList.add("active"); }
+      var active = index === state.activeFeast;
+      if (active) { button.classList.add("active"); }
+      button.setAttribute("aria-pressed", active ? "true" : "false");
       button.addEventListener("click", function () {
         state.activeFeast = index;
         state.tablePage = 0;
@@ -1429,8 +1652,9 @@ table.removals td.num {
 
   function syncRangeButtons() {
     document.querySelectorAll("[data-range]").forEach(function (button) {
-      button.classList.toggle(
-        "active", button.getAttribute("data-range") === state.range);
+      var active = button.getAttribute("data-range") === state.range;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
     });
   }
 
@@ -1467,6 +1691,11 @@ table.removals td.num {
       refresh();
     });
   });
+  // Redraw when the breakpoint flips so the chart adopts the layout for the
+  // new width.
+  mobileQuery.addEventListener("change", function () {
+    if (state.data) { render(); }
+  });
 
   fetch("/api/me")
     .then(function (response) {
@@ -1480,19 +1709,6 @@ table.removals td.num {
       document.getElementById("whoami").textContent = payload.name || "";
     })
     .catch(function () {});
-
-  // Every time on this page is rendered from an absolute instant through the
-  // browser's own clock, so name the zone that produced them.
-  function timezoneLabel() {
-    var zone = "";
-    try {
-      zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-    } catch (error) {
-      zone = "";
-    }
-    return zone ? "Times in " + zone : "Times in your local time zone";
-  }
-  document.getElementById("tz").textContent = timezoneLabel();
 
   syncRangeButtons();
   refresh();
