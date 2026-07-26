@@ -4,13 +4,19 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import user_has_role
+from gw2bot.discord_utils import (
+    resolve_display_names,
+    safe_int,
+    send_direct_message,
+    user_has_role,
+)
 from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
     confirm_embed,
@@ -61,8 +67,14 @@ ONGOING_EDIT_REJECTION = (
 )
 PREVIEW_EVENT_ID_TEXT = "—"
 
-# Discord's hard cap on how many users one select may return.
-REMOVE_SELECT_MAX_VALUES = 25
+# Discord's hard cap on how many options one select may hold, which is also the
+# most it may return. A WvW roster seats 50 plus a waitlist, so the removal
+# picker pages the roster at this size.
+REMOVE_SELECT_PAGE_SIZE = 25
+
+# Discord's cap on a select option's label; a longer display name is truncated
+# rather than rejected by the API.
+REMOVE_OPTION_LABEL_MAX_LENGTH = 100
 
 
 @dataclass
@@ -945,50 +957,132 @@ class EventEditConfirmView(_PreviewConfirmView):
             interaction.user.id,
             len(signups),
         )
-        # Keep the roster embed on screen while the picker is open: the picker
-        # is a guild-wide member search, not a list of the signed-up members,
-        # so without the embed the commander would have to pick from memory.
-        # Mirror how build_event_preview renders the editing preview so the two
-        # views show the same roster.
+        # The picker lists the roster by name, and the bot runs without the
+        # members intent, so every name is a Discord fetch. That cannot finish
+        # inside the three-second interaction window on a large roster, so
+        # acknowledge first and fill the picker in on the follow-up edit.
+        await interaction.response.edit_message(
+            content="Loading the roster…",
+            embeds=[],
+            view=None,
+        )
+        names = await resolve_display_names(
+            self._bot,
+            interaction.guild,
+            [signup.discord_user_id for signup in signups],
+        )
+        LOGGER.debug(
+            "Resolved removal picker names; occurrence_id=%s roster=%s "
+            "resolved=%s",
+            occurrence.occurrence_id,
+            len(signups),
+            sum(1 for name in names.values() if name is not None),
+        )
+        # Keep the roster embed on screen while the picker is open: it shows
+        # the seating the picker's one-line descriptions cannot. Mirror how
+        # build_event_preview renders the editing preview so the two views show
+        # the same roster.
         roster = event_embed(
             self._draft.to_event(editing_event_id),
             signups,
             EventStatus.OPEN,
             event_id_text=str(editing_event_id),
         )
-        await interaction.response.edit_message(
-            content=(
-                "Pick the members to remove from this event's roster. The "
-                "roster above lists everyone who is signed up."
-            ),
+        view = RemoveSignupsView(
+            self._bot,
+            self._draft,
+            occurrence,
+            signups,
+            names,
+        )
+        await interaction.edit_original_response(
+            content=view.prompt(),
             embeds=[roster],
-            view=RemoveSignupsView(
-                self._bot,
-                self._draft,
-                occurrence,
-                len(signups),
-            ),
+            view=view,
         )
 
 
-class RemoveSignupsSelect(discord.ui.UserSelect["RemoveSignupsView"]):
-    def __init__(self, roster_size: int):
-        # A member picker rather than a select built from the roster: the bot
-        # runs without the members intent, so turning signup ids into names
-        # would cost one Discord fetch per member, and a select is capped at 25
-        # options while a WvW roster holds 50. Discord resolves the names
-        # client-side instead; a pick that is not on the roster is refused
-        # below.
+def _removal_option_label(
+    discord_user_id: int,
+    display_name: str | None,
+) -> str:
+    # Discord could not be reached for this member, so fall back to the id:
+    # an unnamed row is still removable, which a dropped option would not be.
+    # An empty label is rejected by the API, so it takes the fallback too.
+    if not display_name:
+        return f"Member {discord_user_id}"
+    return display_name[:REMOVE_OPTION_LABEL_MAX_LENGTH]
+
+
+def _removal_option_description(signup: EventSignup) -> str:
+    if signup.waitlisted:
+        return "Waitlisted"
+    role = signup.assigned_role or signup.role
+    if role is None:
+        return "Signed up"
+    return f"Signed up as {role.value}"
+
+
+class RemoveSignupsSelect(discord.ui.Select["RemoveSignupsView"]):
+    def __init__(
+        self,
+        signups: list[EventSignup],
+        names: dict[int, str | None],
+    ):
+        # Built from the roster rather than the guild, so the commander can
+        # only pick members who are actually signed up. Discord caps a select
+        # at 25 options while a WvW roster holds 50 plus a waitlist, so the
+        # caller pages the roster and passes one page at a time.
+        options = [
+            discord.SelectOption(
+                label=_removal_option_label(
+                    signup.discord_user_id,
+                    names.get(signup.discord_user_id),
+                ),
+                value=str(signup.discord_user_id),
+                description=_removal_option_description(signup),
+            )
+            for signup in signups
+        ]
         super().__init__(
-            placeholder="Search for the members to remove",
+            placeholder="Select the members to remove",
             min_values=1,
-            max_values=min(roster_size, REMOVE_SELECT_MAX_VALUES),
+            # Discord refuses max_values below one, so an empty page (which
+            # the roster checks upstream already rule out) stays constructible.
+            max_values=max(1, len(options)),
+            options=options,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
-        if view is not None:
-            await view.remove(interaction, list(self.values))
+        if view is None:
+            return
+        # Option values are the ids this view put there, so they parse; a
+        # malformed one is dropped rather than failing the whole removal.
+        user_ids = [
+            user_id
+            for user_id in (safe_int(value) for value in self.values)
+            if user_id is not None
+        ]
+        await view.remove(interaction, user_ids)
+
+
+class _RemoveNavButton(discord.ui.Button["RemoveSignupsView"]):
+    def __init__(self, label: str, action: str):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        self._action = action
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is None:
+            return
+        if self._action == "back":
+            await view.back(interaction)
+        else:
+            await view.show_page(
+                interaction,
+                view.page + (1 if self._action == "next" else -1),
+            )
 
 
 class RemoveSignupsView(discord.ui.View):
@@ -997,26 +1091,111 @@ class RemoveSignupsView(discord.ui.View):
         bot: Gw2Bot,
         draft: EventDraft,
         occurrence: EventOccurrence,
-        roster_size: int,
+        signups: list[EventSignup],
+        names: dict[int, str | None],
+        page: int = 0,
     ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._draft = draft
         self._occurrence = occurrence
-        self.add_item(RemoveSignupsSelect(roster_size))
+        self._signups = signups
+        self._names = names
+        self.page = max(0, min(page, self.page_count - 1))
+        self.add_item(RemoveSignupsSelect(self.page_signups(), names))
+        if self.page_count > 1:
+            previous = _RemoveNavButton("Previous", "previous")
+            previous.disabled = self.page == 0
+            self.add_item(previous)
+            following = _RemoveNavButton("Next", "next")
+            following.disabled = self.page >= self.page_count - 1
+            self.add_item(following)
+        self.add_item(_RemoveNavButton("Back", "back"))
 
-    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
-    async def back(
+    @property
+    def page_count(self) -> int:
+        return max(1, ceil(len(self._signups) / REMOVE_SELECT_PAGE_SIZE))
+
+    def page_signups(self) -> list[EventSignup]:
+        start = self.page * REMOVE_SELECT_PAGE_SIZE
+        return self._signups[start : start + REMOVE_SELECT_PAGE_SIZE]
+
+    def prompt(self) -> str:
+        lines = ["Select the members to remove from this event's roster."]
+        if self.page_count > 1:
+            lines.append(
+                f"Showing {len(self.page_signups())} of "
+                f"{len(self._signups)} members "
+                f"(page {self.page + 1} of {self.page_count}). "
+                "Removals apply to the members selected on this page."
+            )
+        return "\n".join(lines)
+
+    async def show_page(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button[RemoveSignupsView],
+        page: int,
     ) -> None:
+        view = RemoveSignupsView(
+            self._bot,
+            self._draft,
+            self._occurrence,
+            self._signups,
+            self._names,
+            page,
+        )
+        LOGGER.debug(
+            "Rendered removal picker page; occurrence_id=%s page=%s pages=%s "
+            "options=%s",
+            self._occurrence.occurrence_id,
+            view.page + 1,
+            view.page_count,
+            len(view.page_signups()),
+        )
+        await interaction.response.edit_message(
+            content=view.prompt(),
+            view=view,
+        )
+
+    async def back(self, interaction: discord.Interaction) -> None:
         await send_event_preview(self._bot, interaction, self._draft)
+
+    async def _notify_removed_member(
+        self,
+        event: Event,
+        occurrence: EventOccurrence,
+        discord_user_id: int,
+    ) -> bool:
+        """Disable auto sign-up and DM the member; report whether it landed.
+
+        A removal the member never hears about looks like a bug to them, and
+        leaving automatic sign-up on would put them straight back onto the next
+        occurrence of a recurring event.
+        """
+        auto_disabled = _auto_signup_enabled(self._bot, event, discord_user_id)
+        if auto_disabled:
+            self._bot.event_store.set_auto_signup(
+                event.event_id,
+                discord_user_id,
+                AutoSignupChoice.NO,
+                None,
+                (),
+            )
+            LOGGER.debug(
+                "Disabled auto signup on removal; event_id=%s user_id=%s",
+                event.event_id,
+                discord_user_id,
+            )
+        return await send_direct_message(
+            self._bot,
+            discord_user_id,
+            _removal_dm_content(event, occurrence, auto_disabled),
+        )
 
     async def remove(
         self,
         interaction: discord.Interaction,
-        users: list[discord.Member | discord.User],
+        user_ids: list[int],
     ) -> None:
         from gw2bot.events.posting import (
             merge_roster_updates,
@@ -1084,14 +1263,15 @@ class RemoveSignupsView(discord.ui.View):
         skipped: list[int] = []
         updates: list[RosterUpdate] = []
         kept_after_end: list[int] = []
-        for index, user in enumerate(users):
+        undelivered: list[int] = []
+        for index, user_id in enumerate(user_ids):
             # The picker holds several members and remove_signup awaits Discord
             # I/O between each, so the event can cross its end partway through
             # the loop even though the pre-loop check passed. Re-check every
             # iteration and stop the moment it has ended, so no removal (and no
             # waitlist promotion behind it) ever lands on a finished roster.
             if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
-                kept_after_end = [pending.id for pending in users[index:]]
+                kept_after_end = list(user_ids[index:])
                 LOGGER.debug(
                     "Event ended mid-removal; stopping; occurrence_id=%s "
                     "user_id=%s kept=%s",
@@ -1107,14 +1287,24 @@ class RemoveSignupsView(discord.ui.View):
                 self._bot,
                 event,
                 occurrence,
-                user.id,
+                user_id,
                 notify=False,
             )
             if signup is None:
-                skipped.append(user.id)
+                skipped.append(user_id)
                 continue
-            removed.append(user.id)
+            removed.append(user_id)
             updates.append(update)
+            # The thread announcement below never reaches this member: the
+            # removal already took them out of the event thread. One member
+            # with closed DMs must not stop the rest of the removals, so a
+            # failed delivery is only recorded for the summary.
+            if not await self._notify_removed_member(
+                event,
+                occurrence,
+                user_id,
+            ):
+                undelivered.append(user_id)
         # Each removal can promote waitlisted members and flex seated ones, and
         # a member picked alongside their own promoter can be promoted by an
         # earlier iteration and then removed by a later one. Merging collapses
@@ -1126,17 +1316,25 @@ class RemoveSignupsView(discord.ui.View):
         promoted = [signup.discord_user_id for signup in merged.promoted]
         LOGGER.debug(
             "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
-            "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s",
+            "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s "
+            "undelivered=%s",
             event.event_id,
             occurrence.occurrence_id,
             interaction.user.id,
-            len(users),
+            len(user_ids),
             len(removed),
             len(skipped),
             len(promoted),
             len(kept_after_end),
+            len(undelivered),
         )
-        summary = _removal_summary(removed, skipped, promoted, kept_after_end)
+        summary = _removal_summary(
+            removed,
+            skipped,
+            promoted,
+            kept_after_end,
+            undelivered,
+        )
         if kept_after_end:
             # The event ended partway through, so the edit session is no longer
             # valid (an ended event cannot be edited). Report what was applied
@@ -1164,11 +1362,33 @@ def _mention_list(discord_user_ids: list[int]) -> str:
     return ", ".join(f"<@{user_id}>" for user_id in discord_user_ids)
 
 
+def _removal_dm_content(
+    event: Event,
+    occurrence: EventOccurrence,
+    auto_signup_disabled: bool,
+) -> str:
+    # A Discord timestamp rather than a formatted time: the DM is read outside
+    # the event channel, so it renders in the member's own timezone.
+    start_epoch = int(occurrence.start_time.timestamp())
+    lines = [
+        f"An event leader removed you from **{event.title}**, which starts "
+        f"on <t:{start_epoch}:F>."
+    ]
+    if auto_signup_disabled:
+        lines.append(
+            "Automatic sign-up for this event has been turned off as well, "
+            "so you will not be signed up again for its next occurrence. You "
+            "can turn it back on with the ⚙️ button on the event message."
+        )
+    return "\n\n".join(lines)
+
+
 def _removal_summary(
     removed: list[int],
     skipped: list[int],
     promoted: list[int],
     kept_after_end: list[int] | None = None,
+    undelivered: list[int] | None = None,
 ) -> str:
     lines: list[str] = []
     if removed:
@@ -1188,6 +1408,14 @@ def _removal_summary(
             "The event ended before the rest could be removed, so "
             + _mention_list(kept_after_end)
             + (" was kept." if len(kept_after_end) == 1 else " were kept.")
+        )
+    if undelivered:
+        # The removal itself went through; only the courtesy DM did not, which
+        # the commander needs to know so they can pass the word along.
+        lines.append(
+            "Could not send a direct message to "
+            + _mention_list(undelivered)
+            + ", so they were not notified."
         )
     return "\n".join(lines)
 
@@ -2361,6 +2589,86 @@ class SignUpOfferView(discord.ui.View):
         self.add_item(SignUpOfferButton())
 
 
+def _auto_signup_enabled(
+    bot: Gw2Bot,
+    event: Event,
+    discord_user_id: int,
+) -> bool:
+    # Only a repeating event has future occurrences to be signed up for, so a
+    # stored choice on a one-off event is inert. NEVER_ASK and NO both leave
+    # automatic sign-up off, and there is nothing to disable in either case.
+    if event.repeat_frequency is RepeatFrequency.NONE:
+        return False
+    auto = bot.event_store.get_auto_signup(event.event_id, discord_user_id)
+    return auto is not None and auto.choice is AutoSignupChoice.YES
+
+
+class DisableAutoSignupView(discord.ui.View):
+    """Offers to switch off automatic sign-up after a member signs out.
+
+    Without this, signing out of a recurring event looks like it did nothing:
+    apply_auto_signups seats the member again as soon as the next occurrence is
+    seeded, and the only way to stop it is the settings gear.
+    """
+
+    def __init__(self, bot: Gw2Bot, event: Event, discord_user_id: int):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event = event
+        self._discord_user_id = discord_user_id
+
+    @discord.ui.button(
+        label="Yes, turn it off",
+        style=discord.ButtonStyle.primary,
+    )
+    async def disable_auto(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[DisableAutoSignupView],
+    ) -> None:
+        self._bot.event_store.set_auto_signup(
+            self._event.event_id,
+            self._discord_user_id,
+            AutoSignupChoice.NO,
+            None,
+            (),
+        )
+        LOGGER.debug(
+            "Disabled auto signup after sign out; event_id=%s user_id=%s",
+            self._event.event_id,
+            self._discord_user_id,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "Automatic sign-up is off for this event. You can turn it "
+                "back on with the ⚙️ button on the event message."
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="No, keep it on",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep_auto(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[DisableAutoSignupView],
+    ) -> None:
+        LOGGER.debug(
+            "Kept auto signup after sign out; event_id=%s user_id=%s",
+            self._event.event_id,
+            self._discord_user_id,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "Automatic sign-up stays on, so you will be signed up again "
+                "for the next occurrence of this event."
+            ),
+            view=None,
+        )
+
+
 class SignOutConfirmView(discord.ui.View):
     def __init__(self, bot: Gw2Bot, event: Event, occurrence: EventOccurrence):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
@@ -2419,7 +2727,33 @@ class SignOutConfirmView(discord.ui.View):
             len(update.promoted),
             len(update.reassigned),
         )
-        await interaction.edit_original_response(content=content, view=None)
+        # Signing out only clears this occurrence. Leaving automatic sign-up on
+        # would quietly re-seat the member on the next one, so offer to switch
+        # it off while they are still looking at the confirmation.
+        prompt: DisableAutoSignupView | None = None
+        if removed is not None and _auto_signup_enabled(
+            self._bot,
+            self._event,
+            interaction.user.id,
+        ):
+            prompt = DisableAutoSignupView(
+                self._bot,
+                self._event,
+                interaction.user.id,
+            )
+            content += (
+                "\n\nAutomatic sign-up is still on for this event, so you "
+                "will be signed up again for its next occurrence. Would you "
+                "like to turn it off?"
+            )
+            LOGGER.debug(
+                "Offered auto signup disable after sign out; event_id=%s "
+                "occurrence_id=%s user_id=%s",
+                self._event.event_id,
+                self._occurrence.occurrence_id,
+                interaction.user.id,
+            )
+        await interaction.edit_original_response(content=content, view=prompt)
 
     @discord.ui.button(label="Keep me signed up", style=discord.ButtonStyle.secondary)
     async def keep_me(

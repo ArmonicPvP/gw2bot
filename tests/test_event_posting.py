@@ -92,6 +92,13 @@ class FakeChannel:
         return self.partial_message
 
 
+class FakeUser:
+    def __init__(self, user_id: int, display_name: str):
+        self.id = user_id
+        self.display_name = display_name
+        self.send = AsyncMock()
+
+
 class FakeBot:
     def __init__(self, store: EventStore, channel: FakeChannel):
         self.event_store = store
@@ -100,6 +107,28 @@ class FakeBot:
             channel.id: channel,
             channel.thread.id: channel.thread,
         }
+        # Users are created on demand and kept, so a test can read back the
+        # direct messages the bot sent to any of them.
+        self.users: dict[int, FakeUser] = {}
+        self.fetch_user_errors: dict[int, Exception] = {}
+        self.dm_errors: dict[int, Exception] = {}
+
+    def get_guild(self, guild_id: int) -> Any:
+        # The bot runs without the members intent, so a guild is never cached.
+        return None
+
+    async def fetch_user(self, user_id: int) -> Any:
+        error = self.fetch_user_errors.get(user_id)
+        if error is not None:
+            raise error
+        user = self.users.get(user_id)
+        if user is None:
+            user = FakeUser(user_id, f"User {user_id}")
+            dm_error = self.dm_errors.get(user_id)
+            if dm_error is not None:
+                user.send = AsyncMock(side_effect=dm_error)
+            self.users[user_id] = user
+        return user
 
     def get_channel(self, channel_id: int) -> Any:
         return self._channels.get(channel_id)
