@@ -119,6 +119,15 @@ class TestFoodPage:
         assert "points.forEach(function (point) {" in FOOD_PAGE
         assert '"class": "series-dot"' in FOOD_PAGE
 
+    def test_hover_draws_a_crosshair_and_shows_point_values(self) -> None:
+        # Hovering snaps a thin translucent vertical line to the nearest sample
+        # and shows that column's values in an HTML tooltip.
+        assert '"class": "crosshair"' in FOOD_PAGE
+        assert "rgba(128, 128, 128, 0.45)" in FOOD_PAGE
+        assert 'addEventListener("pointermove"' in FOOD_PAGE
+        assert 'addEventListener("pointerleave"' in FOOD_PAGE
+        assert '"chart-tooltip"' in FOOD_PAGE
+
     def test_table_pages_five_removals_at_a_time(self) -> None:
         assert "var TABLE_PAGE_SIZE = 5;" in FOOD_PAGE
 

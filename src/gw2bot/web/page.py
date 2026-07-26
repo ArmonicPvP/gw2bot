@@ -1120,6 +1120,44 @@ main {
 .chart-svg .x-label { text-anchor: middle; }
 .chart-svg .series-line { fill: none; stroke-width: 2; }
 .chart-svg .series-dot { stroke: var(--panel); stroke-width: 1; }
+.chart-svg .overlay { fill: transparent; }
+/* A thin, translucent gray line the hover snaps to the nearest sample. */
+.chart-svg .crosshair {
+  stroke: rgba(128, 128, 128, 0.45);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.chart-svg .hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
+/* #chart is the positioning context for the hover tooltip, which is an HTML
+   box overlaid on the SVG so its text wraps and inherits page styling. */
+#chart { position: relative; }
+.chart-tooltip {
+  position: absolute;
+  z-index: 2;
+  min-width: 8rem;
+  padding: 0.45rem 0.55rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
+.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
+.chart-tooltip .tip-row .swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.chart-tooltip .tip-row .val {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.chart-tooltip .tip-row.em { font-weight: 600; }
 #chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.75rem; }
 .tabs button { font-size: 0.8rem; }
@@ -1301,7 +1339,9 @@ table.removals td.num {
     }
 
     // One polyline plus point markers per feast, each in its own colour. Every
-    // recorded sample is drawn; the series is never downsampled.
+    // recorded sample is drawn; the series is never downsampled. Each plotted
+    // marker is also collected so the hover can snap to it.
+    var plotted = [];
     feasts().forEach(function (feast, index) {
       var color = COLORS[index % COLORS.length];
       var points = feast.points || [];
@@ -1315,29 +1355,156 @@ table.removals td.num {
         }));
       }
       points.forEach(function (point) {
-        var dot = svg("circle", {
+        var px = scaleX(point.t);
+        var py = scaleY(point.count);
+        canvas.appendChild(svg("circle", {
           "class": "series-dot",
-          cx: scaleX(point.t).toFixed(1),
-          cy: scaleY(point.count).toFixed(1),
+          cx: px.toFixed(1),
+          cy: py.toFixed(1),
           r: 3,
           fill: color
+        }));
+        plotted.push({
+          x: px,
+          y: py,
+          t: point.t,
+          count: point.count,
+          name: feast.name,
+          color: color,
+          feast: index
         });
-        var title = svg("title");
-        title.textContent = feast.name + ": " + point.count +
-          " at " + formatMoment(point.t);
-        dot.appendChild(title);
-        canvas.appendChild(dot);
       });
     });
 
+    attachHover(canvas, plotted);
     chart.appendChild(canvas);
 
-    var total = feasts().reduce(function (sum, feast) {
-      return sum + (feast.points ? feast.points.length : 0);
-    }, 0);
+    var total = plotted.length;
     chartStatus.textContent = total
       ? ""
       : "No feast counts were recorded in this period.";
+  }
+
+  // Samples that share a timestamp (one storage poll can log several feasts at
+  // once) form a single column, so the crosshair snaps to one x and the
+  // tooltip lists every value recorded there.
+  function groupColumns(plotted) {
+    var byTime = {};
+    var columns = [];
+    plotted.forEach(function (point) {
+      var key = String(point.t);
+      var column = byTime[key];
+      if (!column) {
+        column = { t: point.t, x: point.x, points: [] };
+        byTime[key] = column;
+        columns.push(column);
+      }
+      column.points.push(point);
+    });
+    columns.forEach(function (column) {
+      column.points.sort(function (a, b) { return a.feast - b.feast; });
+    });
+    return columns;
+  }
+
+  function attachHover(canvas, plotted) {
+    var columns = groupColumns(plotted);
+
+    var crosshair = svg("line", {
+      "class": "crosshair",
+      y1: PAD_TOP,
+      y2: PAD_TOP + PLOT_H
+    });
+    crosshair.style.visibility = "hidden";
+    var rings = svg("g");
+    var overlay = svg("rect", {
+      "class": "overlay",
+      x: PAD_LEFT,
+      y: PAD_TOP,
+      width: PLOT_W,
+      height: PLOT_H
+    });
+    overlay.style.cursor = "crosshair";
+    canvas.appendChild(crosshair);
+    canvas.appendChild(rings);
+    canvas.appendChild(overlay);
+
+    var tooltip = el("div", "chart-tooltip");
+    tooltip.style.visibility = "hidden";
+    chart.appendChild(tooltip);
+
+    function nearestColumn(vbX) {
+      var best = null;
+      var bestDist = Infinity;
+      columns.forEach(function (column) {
+        var dist = Math.abs(column.x - vbX);
+        if (dist < bestDist) { bestDist = dist; best = column; }
+      });
+      return best;
+    }
+
+    function showTooltip(column, emphasized) {
+      tooltip.replaceChildren();
+      tooltip.appendChild(el("div", "tip-time", formatMoment(column.t)));
+      column.points.forEach(function (point) {
+        var row = el("div",
+          "tip-row" + (point === emphasized ? " em" : ""));
+        var swatch = el("span", "swatch");
+        swatch.style.background = point.color;
+        row.appendChild(swatch);
+        row.appendChild(el("span", "name", point.name));
+        row.appendChild(el("span", "val", String(point.count)));
+        tooltip.appendChild(row);
+      });
+      // Anchor to the point nearest the cursor and flip below the axis top
+      // when there is no room to sit above it.
+      var leftPct = Math.max(10, Math.min(90, emphasized.x / VB_W * 100));
+      var topPct = emphasized.y / VB_H * 100;
+      tooltip.style.left = leftPct + "%";
+      tooltip.style.top = topPct + "%";
+      tooltip.style.transform = topPct < 32
+        ? "translate(-50%, 14px)"
+        : "translate(-50%, calc(-100% - 14px))";
+      tooltip.style.visibility = "visible";
+    }
+
+    function showHover(column, vbY) {
+      crosshair.setAttribute("x1", column.x);
+      crosshair.setAttribute("x2", column.x);
+      crosshair.style.visibility = "visible";
+      rings.replaceChildren();
+      var emphasized = column.points[0];
+      var bestDy = Infinity;
+      column.points.forEach(function (point) {
+        rings.appendChild(svg("circle", {
+          "class": "hover-ring",
+          cx: point.x,
+          cy: point.y,
+          r: 5,
+          stroke: point.color
+        }));
+        var dy = Math.abs(point.y - vbY);
+        if (dy < bestDy) { bestDy = dy; emphasized = point; }
+      });
+      showTooltip(column, emphasized);
+    }
+
+    function hideHover() {
+      crosshair.style.visibility = "hidden";
+      rings.replaceChildren();
+      tooltip.style.visibility = "hidden";
+    }
+
+    overlay.addEventListener("pointermove", function (event) {
+      if (!columns.length) { return; }
+      var rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) { return; }
+      var vbX = (event.clientX - rect.left) / rect.width * VB_W;
+      var vbY = (event.clientY - rect.top) / rect.height * VB_H;
+      var column = nearestColumn(vbX);
+      if (column) { showHover(column, vbY); }
+    });
+    overlay.addEventListener("pointerleave", hideHover);
   }
 
   function renderLegend() {
