@@ -878,7 +878,7 @@ class TestSignOutFlow:
         fake_bot: Any,
         store: EventStore,
     ) -> None:
-        event, _ = self._make_live_occurrence(store)
+        event, occurrence = self._make_live_occurrence(store)
         store.set_auto_signup(
             event.event_id,
             42,
@@ -886,7 +886,7 @@ class TestSignOutFlow:
             None,
             (),
         )
-        view = DisableAutoSignupView(fake_bot, event, 42)
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
         interaction = make_interaction(message=ephemeral_message())
 
         await view.disable_auto.callback(interaction)
@@ -897,12 +897,16 @@ class TestSignOutFlow:
         content = interaction.response.edit_message.await_args.kwargs["content"]
         assert "Automatic sign-up is off" in content
 
-    async def test_keep_button_leaves_auto_signup_on(
+    async def test_disable_button_withdraws_a_seat_seeded_meanwhile(
         self,
         fake_bot: Any,
         store: EventStore,
     ) -> None:
-        event, _ = self._make_live_occurrence(store)
+        # This prompt can sit open until the scheduler seeds the next
+        # occurrence, and the sign-out that opened it can seed one itself by
+        # crossing this occurrence's end. Storing the choice alone would
+        # confirm automatic sign-up is off while leaving the member seated.
+        event, occurrence = self._make_live_occurrence(store)
         store.set_auto_signup(
             event.event_id,
             42,
@@ -910,7 +914,77 @@ class TestSignOutFlow:
             None,
             (),
         )
-        view = DisableAutoSignupView(fake_bot, event, 42)
+        following = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=1),
+        )
+        store.add_signup(
+            occurrence_id=following.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.disable_auto.callback(interaction)
+
+        assert store.get_signup(following.occurrence_id, 42) is None
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "Automatic sign-up is off" in content
+        assert "taken off it too" in content
+
+    async def test_disable_button_names_a_seat_it_will_not_withdraw(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        following = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=1),
+        )
+        store.set_occurrence_message(following.occurrence_id, 1234, 556, 778)
+        store.add_signup(
+            occurrence_id=following.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.disable_auto.callback(interaction)
+
+        assert store.get_signup(following.occurrence_id, 42) is not None
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "still signed up for the next occurrence" in content
+
+    async def test_keep_button_leaves_auto_signup_on(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
         interaction = make_interaction(message=ephemeral_message())
 
         await view.keep_auto.callback(interaction)
@@ -3254,6 +3328,83 @@ class TestRemoveSignups:
         ]
         assert "Removed <@2>, <@3>" in content
         assert "Could not send a direct message to <@2>" in content
+
+    async def test_an_occurrence_seeded_during_the_removal_is_reconciled(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # remove_signup refreshes the public message, and a refresh that finds
+        # the message gone (or that crosses the occurrence's end) seeds the
+        # next occurrence from the preference that is still enabled at that
+        # point. The DM promises the member will not be signed up again, so
+        # that seat has to go with the preference.
+        event, occurrence = self.make_repeating_roster(store)
+        for user_id in (2, 5):
+            store.set_auto_signup(
+                event.event_id,
+                user_id,
+                AutoSignupChoice.YES,
+                EventRole.DPS,
+                (),
+            )
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        seeded = [
+            following
+            for following in store.get_event_occurrences(event.event_id)
+            if following.start_time > occurrence.start_time
+        ]
+        assert len(seeded) == 1
+        # User 5 keeps their automatic seat, which is what proves the seeding
+        # (and its auto sign-ups) really ran during the removal.
+        assert store.get_signup(seeded[0].occurrence_id, 5) is not None
+        assert store.get_signup(seeded[0].occurrence_id, 2) is None
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "Automatic sign-up for this event has been turned off" in content
+
+    async def test_a_seat_on_a_posted_next_occurrence_is_named_in_the_dm(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A posted roster may hold a deliberate signup, so the seat stands -
+        # but the DM must not claim the member is off every future roster.
+        event, occurrence = self.make_repeating_roster(store)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        following = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=1),
+        )
+        store.set_occurrence_message(following.occurrence_id, 1234, 556, 778)
+        store.add_signup(
+            occurrence_id=following.occurrence_id,
+            discord_user_id=2,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        assert store.get_signup(following.occurrence_id, 2) is not None
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "still signed up for the next occurrence" in content
+        assert f"<t:{int(following.start_time.timestamp())}:F>" in content
 
     async def test_a_closed_dm_still_disables_auto_signup(
         self,

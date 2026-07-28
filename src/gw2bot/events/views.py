@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import ceil
@@ -51,6 +52,7 @@ from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
+    from gw2bot.events.posting import AutoSignupDisableResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1171,25 +1173,44 @@ class RemoveSignupsView(discord.ui.View):
         A removal the member never hears about looks like a bug to them, and
         leaving automatic sign-up on would put them straight back onto the next
         occurrence of a recurring event.
+
+        The preceding remove_signup refreshes the public message, which seeds
+        the next occurrence when the removal crosses the occurrence's end or
+        finds the message gone - seating this member from the preference that
+        is still enabled at that point. disable_auto_signup withdraws that
+        seat, so the DM's promise holds however the two interleave.
         """
+        from gw2bot.events.posting import (
+            AutoSignupDisableResult,
+            disable_auto_signup,
+        )
+
         auto_disabled = _auto_signup_enabled(self._bot, event, discord_user_id)
+        auto_result = AutoSignupDisableResult()
         if auto_disabled:
-            self._bot.event_store.set_auto_signup(
-                event.event_id,
+            auto_result = disable_auto_signup(
+                self._bot,
+                event,
+                occurrence,
                 discord_user_id,
-                AutoSignupChoice.NO,
-                None,
-                (),
             )
             LOGGER.debug(
-                "Disabled auto signup on removal; event_id=%s user_id=%s",
+                "Disabled auto signup on removal; event_id=%s user_id=%s "
+                "withdrawn=%s still_seated=%s",
                 event.event_id,
                 discord_user_id,
+                len(auto_result.withdrawn),
+                len(auto_result.still_seated),
             )
         return await send_direct_message(
             self._bot,
             discord_user_id,
-            _removal_dm_content(event, occurrence, auto_disabled),
+            _removal_dm_content(
+                event,
+                occurrence,
+                auto_disabled,
+                auto_result,
+            ),
         )
 
     async def remove(
@@ -1362,10 +1383,42 @@ def _mention_list(discord_user_ids: list[int]) -> str:
     return ", ".join(f"<@{user_id}>" for user_id in discord_user_ids)
 
 
+def _still_seated_note(
+    still_seated: Sequence[EventOccurrence],
+) -> str | None:
+    """Name the already-posted occurrences that keep the member seated.
+
+    disable_auto_signup will not unseat a member from an occurrence that has
+    already been posted, because that seat may have been taken deliberately.
+    Saying nothing would leave the member believing they are off every future
+    roster, so point them at the sign-out button on those posts instead.
+    """
+    if not still_seated:
+        return None
+    # Discord timestamps rather than formatted times: these lines are read
+    # outside the event channel, so they render in the member's own timezone.
+    starts = ", ".join(
+        f"<t:{int(occurrence.start_time.timestamp())}:F>"
+        for occurrence in still_seated
+    )
+    if len(still_seated) == 1:
+        return (
+            "You are still signed up for the next occurrence on "
+            f"{starts}, which had already been posted. Use the sign-out "
+            "button on its event message if you do not want that spot."
+        )
+    return (
+        f"You are still signed up for later occurrences on {starts}, which "
+        "had already been posted. Use the sign-out button on their event "
+        "messages if you do not want those spots."
+    )
+
+
 def _removal_dm_content(
     event: Event,
     occurrence: EventOccurrence,
     auto_signup_disabled: bool,
+    auto_result: AutoSignupDisableResult | None = None,
 ) -> str:
     # A Discord timestamp rather than a formatted time: the DM is read outside
     # the event channel, so it renders in the member's own timezone.
@@ -1380,6 +1433,11 @@ def _removal_dm_content(
             "so you will not be signed up again for its next occurrence. You "
             "can turn it back on with the ⚙️ button on the event message."
         )
+        seated = _still_seated_note(
+            auto_result.still_seated if auto_result is not None else ()
+        )
+        if seated is not None:
+            lines.append(seated)
     return "\n\n".join(lines)
 
 
@@ -2531,12 +2589,26 @@ class SignupSettingsView(discord.ui.View):
         )
 
     async def _disable_auto(self, interaction: discord.Interaction) -> None:
-        self._bot.event_store.set_auto_signup(
-            self._event.event_id,
+        # Same reconciliation as the sign-out prompt: the next occurrence may
+        # already have been seeded with an automatic signup for this member,
+        # and the settings panel would otherwise report automatic sign-up as
+        # off while that seat stands.
+        from gw2bot.events.posting import disable_auto_signup
+
+        result = disable_auto_signup(
+            self._bot,
+            self._event,
+            self._occurrence,
             interaction.user.id,
-            AutoSignupChoice.NO,
-            None,
-            (),
+        )
+        LOGGER.debug(
+            "Disabled auto signup from settings; event_id=%s "
+            "occurrence_id=%s user_id=%s withdrawn=%s still_seated=%s",
+            self._event.event_id,
+            self._occurrence.occurrence_id,
+            interaction.user.id,
+            len(result.withdrawn),
+            len(result.still_seated),
         )
         await interaction.response.edit_message(
             content=_describe_signup_settings(
@@ -2611,10 +2683,17 @@ class DisableAutoSignupView(discord.ui.View):
     seeded, and the only way to stop it is the settings gear.
     """
 
-    def __init__(self, bot: Gw2Bot, event: Event, discord_user_id: int):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        event: Event,
+        occurrence: EventOccurrence,
+        discord_user_id: int,
+    ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._event = event
+        self._occurrence = occurrence
         self._discord_user_id = discord_user_id
 
     @discord.ui.button(
@@ -2626,23 +2705,43 @@ class DisableAutoSignupView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[DisableAutoSignupView],
     ) -> None:
-        self._bot.event_store.set_auto_signup(
-            self._event.event_id,
+        # This prompt can sit open long enough for the scheduler to seed the
+        # next occurrence, and the sign-out that opened it can itself have
+        # seeded one by crossing this occurrence's end. Either way the next
+        # roster already holds the automatic signup this button is meant to
+        # prevent, so storing the choice alone would confirm something untrue.
+        # disable_auto_signup reconciles those occurrences with the choice.
+        from gw2bot.events.posting import disable_auto_signup
+
+        result = disable_auto_signup(
+            self._bot,
+            self._event,
+            self._occurrence,
             self._discord_user_id,
-            AutoSignupChoice.NO,
-            None,
-            (),
         )
         LOGGER.debug(
-            "Disabled auto signup after sign out; event_id=%s user_id=%s",
+            "Disabled auto signup after sign out; event_id=%s "
+            "occurrence_id=%s user_id=%s withdrawn=%s still_seated=%s",
             self._event.event_id,
+            self._occurrence.occurrence_id,
             self._discord_user_id,
+            len(result.withdrawn),
+            len(result.still_seated),
         )
+        lines = [
+            "Automatic sign-up is off for this event. You can turn it "
+            "back on with the ⚙️ button on the event message."
+        ]
+        if result.withdrawn:
+            lines.append(
+                "The next occurrence had already been created and had signed "
+                "you up automatically, so you were taken off it too."
+            )
+        seated = _still_seated_note(result.still_seated)
+        if seated is not None:
+            lines.append(seated)
         await interaction.response.edit_message(
-            content=(
-                "Automatic sign-up is off for this event. You can turn it "
-                "back on with the ⚙️ button on the event message."
-            ),
+            content="\n\n".join(lines),
             view=None,
         )
 
@@ -2739,6 +2838,7 @@ class SignOutConfirmView(discord.ui.View):
             prompt = DisableAutoSignupView(
                 self._bot,
                 self._event,
+                self._occurrence,
                 interaction.user.id,
             )
             content += (

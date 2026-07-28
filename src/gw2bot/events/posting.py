@@ -1272,6 +1272,90 @@ def apply_auto_signups(
     return applied
 
 
+@dataclass(frozen=True, slots=True)
+class AutoSignupDisableResult:
+    """What turning automatic sign-up off did beyond storing the choice."""
+
+    # Occurrences the member's automatic seat was pulled out of.
+    withdrawn: tuple[EventOccurrence, ...] = ()
+    # Later occurrences that still seat the member because they are already
+    # posted, so the seat may have been taken deliberately. The caller has to
+    # say so rather than promise the member is off every future roster.
+    still_seated: tuple[EventOccurrence, ...] = ()
+
+
+def disable_auto_signup(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+) -> AutoSignupDisableResult:
+    """Store the "no automatic sign-up" choice and undo the seats it took.
+
+    Storing the choice only stops future seeding, and by the time a caller
+    gets here the next occurrence can already hold this member: any roster
+    change that crosses the occurrence's end (or finds its message gone) seeds
+    the next one from inside refresh_occurrence_message, and the scheduler
+    seeds it while a sign-out prompt sits open. Telling the member they will
+    not be signed up again while that seat stands would be false, so drop it.
+
+    Only occurrences that have not been posted are withdrawn from. A member
+    can only sign themselves up from a posted message and apply_auto_signups
+    runs only on a freshly created occurrence, so a signup on an unposted
+    occurrence can only be automatic. A seat on a posted occurrence may well
+    have been taken on purpose, and removing that - unseating the member and
+    promoting someone in their place - would be the worse mistake, so those
+    are reported back for the caller to mention instead.
+    """
+    bot.event_store.set_auto_signup(
+        event.event_id,
+        discord_user_id,
+        AutoSignupChoice.NO,
+        None,
+        (),
+    )
+    withdrawn: list[EventOccurrence] = []
+    still_seated: list[EventOccurrence] = []
+    for later in bot.event_store.get_event_occurrences(event.event_id):
+        if later.start_time <= occurrence.start_time:
+            continue
+        if later.message_id is not None:
+            if (
+                bot.event_store.get_signup(
+                    later.occurrence_id,
+                    discord_user_id,
+                )
+                is not None
+            ):
+                still_seated.append(later)
+            continue
+        removed = bot.event_store.remove_signup(
+            later.occurrence_id,
+            discord_user_id,
+        )
+        if removed is None:
+            continue
+        withdrawn.append(later)
+        if not removed.waitlisted:
+            # The seeded roster was solved with this member on it, so hand the
+            # freed seat to the waitlist. The occurrence has not been posted,
+            # so there is no message to refresh and nobody to notify.
+            _resettle_roster(bot, event, later)
+    LOGGER.debug(
+        "Disabled auto signup; event_id=%s occurrence_id=%s user_id=%s "
+        "withdrawn=%s still_seated=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        discord_user_id,
+        len(withdrawn),
+        len(still_seated),
+    )
+    return AutoSignupDisableResult(
+        withdrawn=tuple(withdrawn),
+        still_seated=tuple(still_seated),
+    )
+
+
 def ensure_next_recurring_occurrence(
     bot: Gw2Bot,
     event: Event,
