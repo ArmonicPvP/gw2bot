@@ -428,9 +428,24 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   #brand { grid-column: 2; grid-row: 1; justify-self: center; }
   header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .views { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
-  /* Navigation is by swipe on mobile, and the date already shows in the grid,
-     so the stepper, period label and username are all dropped. */
-  .controls, #period, #whoami { display: none; }
+  /* Swiping changes the period with no other cue in the month grid, which
+     shows bare day numbers, so the period label keeps the top-left corner in
+     a compact form. It must not widen past its column or it would push the
+     centred title off centre. */
+  #period {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: start;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Navigation is by swipe on mobile and the username adds nothing on a
+     narrow screen, so the stepper and username are dropped. */
+  .controls, #whoami { display: none; }
   .signout-icon { display: inline-block; }
   .signout-label { display: none; }
   .signout { padding: 0.35rem 0.5rem; }
@@ -1002,7 +1017,9 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   }
 
   function renderPeriodLabel(range) {
-    if (state.view === "month") {
+    if (isMobile()) {
+      renderMobilePeriodLabel(range);
+    } else if (state.view === "month") {
       periodLabel.textContent = state.anchor.toLocaleDateString(
         undefined, { month: "long", year: "numeric" });
     } else if (state.view === "week") {
@@ -1016,6 +1033,32 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
         undefined,
         { weekday: "long", month: "long", day: "numeric", year: "numeric" });
     }
+    // The mobile label is ellipsised when the column is too narrow, so the
+    // full text stays reachable on a long press. Reassigning on every render
+    // keeps a desktop label from holding a stale mobile tooltip.
+    periodLabel.title = periodLabel.textContent;
+  }
+
+  // The mobile label shares row one with the title and the sign-out button, so
+  // it is abbreviated to fit: the month always shows, and the year is dropped
+  // from the day and week views where the grid already carries the dates.
+  function renderMobilePeriodLabel(range) {
+    var text;
+    if (state.view === "month") {
+      text = state.anchor.toLocaleDateString(
+        undefined, { month: "short", year: "numeric" });
+    } else if (state.view === "week") {
+      var last = addDays(range.start, weekSpan() - 1);
+      var tail = last.getMonth() === range.start.getMonth()
+        ? String(last.getDate())
+        : last.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      text = range.start.toLocaleDateString(
+        undefined, { month: "short", day: "numeric" }) + " \\u2013 " + tail;
+    } else {
+      text = state.anchor.toLocaleDateString(
+        undefined, { weekday: "short", month: "short", day: "numeric" });
+    }
+    periodLabel.textContent = text;
   }
 
   function tooltipContent(entry) {
@@ -1647,20 +1690,26 @@ button:focus-visible {
 
   function attachHover(canvas, plotted) {
     var columns = groupColumns(plotted);
+    // The viewBox differs between the mobile and desktop layouts, so the hover
+    // is pinned to the metrics this canvas was drawn with rather than to
+    // whichever set is current when a pointer event arrives.
+    var m = M;
+    var innerW = m.w - m.left - m.right;
+    var innerH = m.h - m.top - m.bottom;
 
     var crosshair = svg("line", {
       "class": "crosshair",
-      y1: PAD_TOP,
-      y2: PAD_TOP + PLOT_H
+      y1: m.top,
+      y2: m.top + innerH
     });
     crosshair.style.visibility = "hidden";
     var rings = svg("g");
     var overlay = svg("rect", {
       "class": "overlay",
-      x: PAD_LEFT,
-      y: PAD_TOP,
-      width: PLOT_W,
-      height: PLOT_H
+      x: m.left,
+      y: m.top,
+      width: innerW,
+      height: innerH
     });
     overlay.style.cursor = "crosshair";
     canvas.appendChild(crosshair);
@@ -1696,8 +1745,8 @@ button:focus-visible {
       });
       // Anchor to the point nearest the cursor and flip below the axis top
       // when there is no room to sit above it.
-      var leftPct = Math.max(10, Math.min(90, emphasized.x / VB_W * 100));
-      var topPct = emphasized.y / VB_H * 100;
+      var leftPct = Math.max(10, Math.min(90, emphasized.x / m.w * 100));
+      var topPct = emphasized.y / m.h * 100;
       tooltip.style.left = leftPct + "%";
       tooltip.style.top = topPct + "%";
       tooltip.style.transform = topPct < 32
@@ -1737,8 +1786,8 @@ button:focus-visible {
       if (!columns.length) { return; }
       var rect = canvas.getBoundingClientRect();
       if (!rect.width || !rect.height) { return; }
-      var vbX = (event.clientX - rect.left) / rect.width * VB_W;
-      var vbY = (event.clientY - rect.top) / rect.height * VB_H;
+      var vbX = (event.clientX - rect.left) / rect.width * m.w;
+      var vbY = (event.clientY - rect.top) / rect.height * m.h;
       var column = nearestColumn(vbX);
       if (column) { showHover(column, vbY); }
     });
@@ -1869,7 +1918,14 @@ button:focus-visible {
         state.tablePage = 0;
         render();
       })
-      .catch(function () {
+      .catch(function (error) {
+        // render() runs inside this chain, so a drawing fault lands here and
+        // otherwise reads as a failed request with nothing in the console to
+        // trace. Only the error's type and message are logged; no request,
+        // response or payload is ever passed through.
+        console.error(
+          "feast usage load failed:",
+          error && error.name, error && error.message);
         if (chartStatus.textContent === "Loading\\u2026") {
           chartStatus.textContent = "Could not load feast usage.";
         }

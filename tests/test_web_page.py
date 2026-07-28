@@ -150,8 +150,29 @@ class TestCalendarMobile:
             CALENDAR_PAGE
         )
         assert 'class="signout-icon"' in CALENDAR_PAGE
-        # The stepper, period label and username are hidden on mobile.
-        assert ".controls, #period, #whoami { display: none; }" in (
+        # The stepper and username are hidden on mobile; the period label is
+        # not, so the month stays on screen.
+        assert ".controls, #whoami { display: none; }" in CALENDAR_PAGE
+
+    def test_period_label_keeps_the_top_left_corner_on_mobile(self) -> None:
+        # Swiping changes the period and the month grid shows bare day numbers,
+        # so the label is the only thing naming the month on a phone. It sits
+        # in the first header column, opposite the sign-out button.
+        assert (
+            "#period {\n"
+            "    grid-column: 1;\n"
+            "    grid-row: 1;\n"
+            "    justify-self: start;" in CALENDAR_PAGE
+        )
+        # It must not widen its column, or the centred title drifts off centre.
+        assert "text-overflow: ellipsis;" in CALENDAR_PAGE
+
+    def test_period_label_is_abbreviated_on_mobile(self) -> None:
+        # The label shares a row with the title and sign-out button, so it is
+        # rendered in a shorter form there while still naming the month.
+        assert "function renderMobilePeriodLabel(range)" in CALENDAR_PAGE
+        assert "renderMobilePeriodLabel(range);" in CALENDAR_PAGE
+        assert 'undefined, { month: "short", year: "numeric" });' in (
             CALENDAR_PAGE
         )
 
@@ -215,6 +236,35 @@ class TestFoodPage:
         assert 'addEventListener("pointermove"' in FOOD_PAGE
         assert 'addEventListener("pointerleave"' in FOOD_PAGE
         assert '"chart-tooltip"' in FOOD_PAGE
+
+    def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:
+        # The hover was written against fixed chart constants that the mobile
+        # layout replaced with metrics(). Any survivor is an undefined global
+        # that throws inside renderChart and blanks the page, so none may
+        # remain.
+        for dead in (
+            "VB_W",
+            "VB_H",
+            "PAD_TOP",
+            "PAD_LEFT",
+            "PAD_RIGHT",
+            "PAD_BOTTOM",
+            "PLOT_W",
+            "PLOT_H",
+        ):
+            assert dead not in FOOD_PAGE
+        # The hover reads the metrics its canvas was drawn with, so a
+        # breakpoint flip cannot leave it measuring against the other layout.
+        assert "var m = M;" in FOOD_PAGE
+
+    def test_a_render_fault_is_reported_to_the_console(self) -> None:
+        # render() runs inside the fetch chain, so a drawing fault surfaces as
+        # the same generic message as a failed request. Logging the error type
+        # keeps it traceable; no request, response or payload is logged.
+        assert 'console.error(\n          "feast usage load failed:",' in (
+            FOOD_PAGE
+        )
+        assert "error && error.name, error && error.message);" in FOOD_PAGE
 
     def test_table_pages_five_removals_at_a_time(self) -> None:
         assert "var TABLE_PAGE_SIZE = 5;" in FOOD_PAGE
