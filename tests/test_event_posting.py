@@ -32,6 +32,7 @@ from gw2bot.events.posting import (
     apply_signup_edit,
     complete_signup,
     delete_event_posts,
+    disable_auto_signup,
     merge_roster_updates,
     occurrence_status,
     post_occurrence,
@@ -92,6 +93,13 @@ class FakeChannel:
         return self.partial_message
 
 
+class FakeUser:
+    def __init__(self, user_id: int, display_name: str):
+        self.id = user_id
+        self.display_name = display_name
+        self.send = AsyncMock()
+
+
 class FakeBot:
     def __init__(self, store: EventStore, channel: FakeChannel):
         self.event_store = store
@@ -100,6 +108,28 @@ class FakeBot:
             channel.id: channel,
             channel.thread.id: channel.thread,
         }
+        # Users are created on demand and kept, so a test can read back the
+        # direct messages the bot sent to any of them.
+        self.users: dict[int, FakeUser] = {}
+        self.fetch_user_errors: dict[int, Exception] = {}
+        self.dm_errors: dict[int, Exception] = {}
+
+    def get_guild(self, guild_id: int) -> Any:
+        # The bot runs without the members intent, so a guild is never cached.
+        return None
+
+    async def fetch_user(self, user_id: int) -> Any:
+        error = self.fetch_user_errors.get(user_id)
+        if error is not None:
+            raise error
+        user = self.users.get(user_id)
+        if user is None:
+            user = FakeUser(user_id, f"User {user_id}")
+            dm_error = self.dm_errors.get(user_id)
+            if dm_error is not None:
+                user.send = AsyncMock(side_effect=dm_error)
+            self.users[user_id] = user
+        return user
 
     def get_channel(self, channel_id: int) -> Any:
         return self._channels.get(channel_id)
@@ -1918,6 +1948,132 @@ class TestApplyAutoSignups:
         assert not by_user[11].waitlisted
         assert by_user[12].waitlisted
         assert by_user[12].assigned_role is None
+
+
+class TestDisableAutoSignup:
+    async def _seed_next(
+        self,
+        bot: Any,
+        store: EventStore,
+        user_ids: tuple[int, ...] = (11,),
+    ) -> Any:
+        # Mirrors what _create_next_occurrence leaves behind: a later, unposted
+        # occurrence whose roster came entirely from apply_auto_signups.
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        for user_id in user_ids:
+            store.set_auto_signup(
+                event.event_id,
+                user_id,
+                AutoSignupChoice.YES,
+                EventRole.QUICKNESS_HEAL,
+                (),
+            )
+        following = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        apply_auto_signups(bot, event, following)
+        return event, occurrence, following
+
+    async def test_stores_the_choice(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence, _ = await self._seed_next(bot, store)
+
+        disable_auto_signup(bot, event, occurrence, 11)
+
+        stored = store.get_auto_signup(event.event_id, 11)
+        assert stored is not None
+        assert stored.choice is AutoSignupChoice.NO
+
+    async def test_withdraws_the_seat_on_an_unposted_next_occurrence(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The regression: the next occurrence can be seeded from the still
+        # enabled preference before the choice lands, leaving the member on a
+        # roster they were just told they would not be on.
+        event, occurrence, following = await self._seed_next(bot, store)
+
+        result = disable_auto_signup(bot, event, occurrence, 11)
+
+        assert store.get_signup(following.occurrence_id, 11) is None
+        assert [
+            withdrawn.occurrence_id for withdrawn in result.withdrawn
+        ] == [following.occurrence_id]
+        assert result.still_seated == ()
+
+    async def test_withdrawing_promotes_the_seeded_waitlist(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Both entries want the only quickness heal seat, so the second is
+        # waitlisted; freeing the seat has to hand it over.
+        event, occurrence, following = await self._seed_next(
+            bot,
+            store,
+            (11, 12),
+        )
+        assert store.get_signups(following.occurrence_id)[1].waitlisted
+
+        disable_auto_signup(bot, event, occurrence, 11)
+
+        remaining = store.get_signups(following.occurrence_id)
+        assert [signup.discord_user_id for signup in remaining] == [12]
+        assert not remaining[0].waitlisted
+        assert remaining[0].assigned_role is EventRole.QUICKNESS_HEAL
+
+    async def test_keeps_and_reports_a_seat_on_a_posted_occurrence(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A posted occurrence's roster can hold deliberate signups, so the seat
+        # stands and the caller is told about it rather than the member being
+        # unseated on a guess.
+        event, occurrence, following = await self._seed_next(bot, store)
+        posted = await post_occurrence(bot, event, following, BEFORE_START)
+
+        result = disable_auto_signup(bot, event, occurrence, 11)
+
+        assert store.get_signup(posted.occurrence_id, 11) is not None
+        assert result.withdrawn == ()
+        assert [
+            seated.occurrence_id for seated in result.still_seated
+        ] == [posted.occurrence_id]
+
+    async def test_leaves_the_current_occurrence_alone(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        await complete_signup(bot, event, occurrence, 11, EventRole.DPS, ())
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        result = disable_auto_signup(bot, event, occurrence, 11)
+
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        assert result.withdrawn == ()
+        assert result.still_seated == ()
 
 
 class TestRefreshOccurrenceMessage:

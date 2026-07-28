@@ -11,7 +11,7 @@ import discord
 from aiohttp import web
 
 from gw2bot.config import Config
-from gw2bot.discord_utils import user_has_role
+from gw2bot.discord_utils import resolve_display_name, user_has_role
 from gw2bot.feast_stock import (
     FEAST_USAGE_RANGES,
     TRACKED_FEASTS,
@@ -748,24 +748,8 @@ class WebServer:
 
     async def _resolve_display_name(self, user_id: int) -> str | None:
         """Return the display name, or None when Discord cannot be reached."""
-        guild = self._bot.get_guild(self._config.discord_command_guild_id)
-        if guild is not None:
-            member = guild.get_member(user_id)
-            if member is not None:
-                return member.display_name
-            try:
-                member = await guild.fetch_member(user_id)
-            except discord.HTTPException:
-                member = None
-            if member is not None:
-                return member.display_name
-        try:
-            user = await self._bot.fetch_user(user_id)
-        except discord.HTTPException as exc:
-            LOGGER.debug(
-                "Display name lookup failed; user_id=%s error_type=%s",
-                user_id,
-                type(exc).__name__,
-            )
-            return None
-        return user.display_name
+        return await resolve_display_name(
+            self._bot,
+            self._bot.get_guild(self._config.discord_command_guild_id),
+            user_id,
+        )

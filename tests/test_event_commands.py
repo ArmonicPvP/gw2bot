@@ -26,6 +26,7 @@ from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     AutoSignupChoiceView,
     ChannelMoveConfirmView,
+    DisableAutoSignupView,
     EditSignupFlow,
     EditWaitlistConfirmView,
     EventConfirmView,
@@ -51,7 +52,7 @@ from gw2bot.events.views import (
     draft_from_event,
 )
 
-from factories import forbidden_error
+from factories import forbidden_error, not_found_error
 from test_event_posting import FakeBot, FakeChannel, FakeThread
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
@@ -68,6 +69,7 @@ def make_interaction(
     *,
     role_ids: tuple[int, ...] = (),
     message: Any = None,
+    guild: Any = None,
 ) -> Any:
     interaction = MagicMock()
     interaction.user = SimpleNamespace(
@@ -75,6 +77,9 @@ def make_interaction(
         roles=[SimpleNamespace(id=role_id) for role_id in role_ids],
     )
     interaction.message = message
+    # Explicitly None rather than a MagicMock: display-name resolution reads
+    # the guild, and an auto-created mock would answer every member lookup.
+    interaction.guild = guild
     interaction.response.send_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
     interaction.response.edit_message = AsyncMock()
@@ -730,6 +735,265 @@ class TestSignOutFlow:
             "already ended"
             in interaction.response.send_message.await_args.args[0]
         )
+
+    def _make_live_occurrence(
+        self,
+        store: EventStore,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.DAILY,
+    ) -> Any:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=7,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=repeat_frequency,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        return event, occurrence
+
+    async def _sign_out(self, fake_bot: Any, event: Any, occurrence: Any) -> Any:
+        view = SignOutConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+        await view.remove_me.callback(interaction)
+        return interaction
+
+    async def test_sign_out_offers_to_disable_auto_signup(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Signing out only clears this occurrence, so a member with automatic
+        # sign-up left on would be seated again on the next one.
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert isinstance(kwargs["view"], DisableAutoSignupView)
+        assert "You were removed from the event." in kwargs["content"]
+        assert "Automatic sign-up is still on" in kwargs["content"]
+
+    async def test_sign_out_does_not_prompt_without_auto_signup(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "Automatic sign-up" not in kwargs["content"]
+
+    @pytest.mark.parametrize(
+        "choice",
+        [AutoSignupChoice.NO, AutoSignupChoice.NEVER_ASK],
+    )
+    async def test_sign_out_does_not_prompt_when_auto_signup_is_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        choice: AutoSignupChoice,
+    ) -> None:
+        # Both choices already leave automatic sign-up off, and NEVER_ASK is an
+        # explicit request to stop being asked about this event.
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(event.event_id, 42, choice, None, ())
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+
+    async def test_sign_out_does_not_prompt_for_a_one_off_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A stored choice on a non-repeating event is inert: there is no next
+        # occurrence to be signed up for.
+        event, occurrence = self._make_live_occurrence(
+            store,
+            RepeatFrequency.NONE,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+
+    async def test_sign_out_does_not_prompt_a_member_who_was_not_signed_up(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.remove_signup(occurrence.occurrence_id, 42)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "not signed up" in kwargs["content"]
+
+    async def test_disable_button_turns_auto_signup_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.disable_auto.callback(interaction)
+
+        stored = store.get_auto_signup(event.event_id, 42)
+        assert stored is not None
+        assert stored.choice is AutoSignupChoice.NO
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "Automatic sign-up is off" in content
+
+    async def test_disable_button_withdraws_a_seat_seeded_meanwhile(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # This prompt can sit open until the scheduler seeds the next
+        # occurrence, and the sign-out that opened it can seed one itself by
+        # crossing this occurrence's end. Storing the choice alone would
+        # confirm automatic sign-up is off while leaving the member seated.
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        following = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=1),
+        )
+        store.add_signup(
+            occurrence_id=following.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.disable_auto.callback(interaction)
+
+        assert store.get_signup(following.occurrence_id, 42) is None
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "Automatic sign-up is off" in content
+        assert "taken off it too" in content
+
+    async def test_disable_button_names_a_seat_it_will_not_withdraw(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        following = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=1),
+        )
+        store.set_occurrence_message(following.occurrence_id, 1234, 556, 778)
+        store.add_signup(
+            occurrence_id=following.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.disable_auto.callback(interaction)
+
+        assert store.get_signup(following.occurrence_id, 42) is not None
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "still signed up for the next occurrence" in content
+
+    async def test_keep_button_leaves_auto_signup_on(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.keep_auto.callback(interaction)
+
+        stored = store.get_auto_signup(event.event_id, 42)
+        assert stored is not None
+        assert stored.choice is AutoSignupChoice.YES
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        assert "stays on" in content
 
 
 class TestAutoSignupPrompt:
@@ -2342,12 +2606,67 @@ class TestEventDeleteConfirmView:
         )
 
 
-def picked_users(*discord_user_ids: int) -> Any:
-    # The member picker hands back Discord user objects; only the id is read.
-    return [SimpleNamespace(id=user_id) for user_id in discord_user_ids]
+def picked_users(*discord_user_ids: int) -> list[int]:
+    # The roster picker hands back the ids it put in its option values.
+    return list(discord_user_ids)
+
+
+def select_option_values(view: RemoveSignupsView) -> list[str]:
+    select = next(
+        item
+        for item in view.children
+        if isinstance(item, RemoveSignupsSelect)
+    )
+    return [option.value for option in select.options]
+
+
+def nav_button(view: RemoveSignupsView, label: str) -> Any:
+    return next(
+        item
+        for item in view.children
+        if isinstance(item, discord.ui.Button) and item.label == label
+    )
 
 
 class TestRemoveSignups:
+    def make_repeating_roster(self, store: EventStore) -> Any:
+        # Same roster as make_full_roster, on a series that has a next
+        # occurrence for automatic sign-up to act on.
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Original Title",
+            description="Original description.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        self.seat_roster(store, occurrence)
+        return event, occurrence
+
+    def seat_roster(self, store: EventStore, occurrence: Any) -> None:
+        assignments = [
+            (1, EventRole.QUICKNESS_HEAL, False),
+            (2, EventRole.DPS, False),
+            (3, EventRole.DPS, False),
+            (4, EventRole.DPS, False),
+            (5, EventRole.DPS, False),
+            (6, EventRole.DPS, True),
+        ]
+        for user_id, role, waitlisted in assignments:
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=None if waitlisted else role,
+                flex_roles=(),
+                waitlisted=waitlisted,
+            )
+
     def make_full_roster(self, store: EventStore) -> Any:
         # Fractal capacity is 1 healer and 4 DPS, so this roster is full and
         # user 6 lands on the waitlist behind it.
@@ -2376,14 +2695,28 @@ class TestRemoveSignups:
         fake_bot: Any,
         event: Any,
         occurrence: Any,
-        roster_size: int = 6,
+        names: dict[int, str | None] | None = None,
+        page: int = 0,
     ) -> RemoveSignupsView:
         draft = draft_from_event(
             event,
             ZoneInfo("UTC"),
             start_time_override=occurrence.start_time,
         )
-        return RemoveSignupsView(fake_bot, draft, occurrence, roster_size)
+        signups = fake_bot.event_store.get_signups(occurrence.occurrence_id)
+        if names is None:
+            names = {
+                signup.discord_user_id: f"User {signup.discord_user_id}"
+                for signup in signups
+            }
+        return RemoveSignupsView(
+            fake_bot,
+            draft,
+            occurrence,
+            signups,
+            names,
+            page,
+        )
 
     def make_remove_interaction(self) -> Any:
         interaction = make_interaction(
@@ -2458,25 +2791,40 @@ class TestRemoveSignups:
         event, _ = self.make_full_roster(store)
         draft = draft_from_event(event, ZoneInfo("UTC"))
         view = EventEditConfirmView(fake_bot, draft)
-        interaction = make_interaction(
-            role_ids=(EVENT_CREATE_ROLE_ID,),
-            message=ephemeral_message(),
-        )
+        interaction = self.make_remove_interaction()
 
         await view.remove_signups.callback(interaction)
 
-        kwargs = interaction.response.edit_message.await_args.kwargs
-        assert isinstance(kwargs["view"], RemoveSignupsView)
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        picker = kwargs["view"]
+        assert isinstance(picker, RemoveSignupsView)
         select = next(
             item
-            for item in kwargs["view"].children
+            for item in picker.children
             if isinstance(item, RemoveSignupsSelect)
         )
-        # One pick per member on the roster, never more.
+        # Only the roster, never the rest of the guild, and one pick per
+        # member on it.
+        assert [option.value for option in select.options] == [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+        ]
         assert select.min_values == 1
         assert select.max_values == 6
-        # The picker is a guild-wide member search, so the roster embed must
-        # stay on screen; otherwise the commander picks from memory.
+        # Names are resolved through Discord because the bot has no member
+        # cache, and the seating each member holds rides along as the
+        # description.
+        assert [option.label for option in select.options] == [
+            f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)
+        ]
+        assert select.options[0].description == "Signed up as Quickness Heal"
+        assert select.options[5].description == "Waitlisted"
+        # The roster embed stays on screen: it shows the seating that the
+        # picker's one-line descriptions cannot.
         embeds = kwargs["embeds"]
         assert len(embeds) == 1
         rendered = "\n".join(
@@ -2485,9 +2833,121 @@ class TestRemoveSignups:
         for user_id in (1, 2, 3, 4, 5, 6):
             assert f"<@{user_id}>" in rendered
 
-    def test_picker_stays_within_the_discord_select_cap(self) -> None:
-        # A WvW roster holds 50, but a select may return at most 25 users.
-        assert RemoveSignupsSelect(50).max_values == 25
+    async def test_picker_only_lists_members_who_are_signed_up(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The whole point of the roster-derived picker: a member of the guild
+        # who never signed up must not be selectable.
+        event, _ = self.make_full_roster(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = self.make_remove_interaction()
+
+        await view.remove_signups.callback(interaction)
+
+        picker = interaction.edit_original_response.await_args.kwargs["view"]
+        assert "99" not in select_option_values(picker)
+
+    async def test_picker_falls_back_to_the_id_when_a_name_is_unavailable(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A failed lookup must not drop the option: an unnamed member is still
+        # removable, a missing one is not.
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.fetch_user_errors[3] = not_found_error()
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = self.make_remove_interaction()
+
+        await view.remove_signups.callback(interaction)
+
+        picker = interaction.edit_original_response.await_args.kwargs["view"]
+        select = next(
+            item
+            for item in picker.children
+            if isinstance(item, RemoveSignupsSelect)
+        )
+        labels = {option.value: option.label for option in select.options}
+        assert labels["3"] == "Member 3"
+        assert labels["2"] == "User 2"
+
+    def test_picker_pages_a_roster_past_the_select_cap(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A WvW roster seats 50, but a select holds at most 25 options.
+        event, occurrence = make_posted_edit_event(store)
+        for user_id in range(1, 31):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+
+        assert view.page_count == 2
+        assert len(select_option_values(view)) == 25
+        assert select_option_values(view) == [
+            str(user_id) for user_id in range(1, 26)
+        ]
+        assert nav_button(view, "Previous").disabled
+        assert not nav_button(view, "Next").disabled
+        assert "page 1 of 2" in view.prompt()
+
+    def test_picker_hides_navigation_for_a_single_page(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+
+        labels = [
+            item.label
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ]
+        assert labels == ["Back"]
+        assert "page 1 of" not in view.prompt()
+
+    async def test_next_page_renders_the_rest_of_the_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        for user_id in range(1, 31):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await nav_button(view, "Next").callback(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        following = kwargs["view"]
+        assert isinstance(following, RemoveSignupsView)
+        assert following.page == 1
+        assert select_option_values(following) == [
+            str(user_id) for user_id in range(26, 31)
+        ]
+        assert not nav_button(following, "Previous").disabled
+        assert nav_button(following, "Next").disabled
+        assert "page 2 of 2" in kwargs["content"]
 
     async def test_removal_frees_the_slot_and_promotes_the_waitlist(
         self,
@@ -2736,8 +3196,283 @@ class TestRemoveSignups:
         view = self.make_remove_view(fake_bot, event, occurrence)
         interaction = self.make_remove_interaction()
 
-        await view.back.callback(interaction)
+        await nav_button(view, "Back").callback(interaction)
 
         assert store.get_signup(occurrence.occurrence_id, 2) is not None
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert isinstance(kwargs["view"], EventEditConfirmView)
+
+    async def test_removed_members_are_told_by_direct_message(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The thread announcement never reaches them: the removal already took
+        # them out of the event thread.
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        fake_bot.users[2].send.assert_awaited_once()
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "Original Title" in content
+        assert f"<t:{int(occurrence.start_time.timestamp())}:F>" in content
+
+    async def test_members_who_were_not_signed_up_are_not_messaged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(99))
+
+        assert 99 not in fake_bot.users
+
+    async def test_removal_disables_auto_signup_and_says_so(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Without this the member is seated again as soon as the next
+        # occurrence of the series is seeded.
+        event, occurrence = self.make_repeating_roster(store)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        stored = store.get_auto_signup(event.event_id, 2)
+        assert stored is not None
+        assert stored.choice is AutoSignupChoice.NO
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "Automatic sign-up for this event has been turned off" in content
+
+    async def test_removal_leaves_a_declined_auto_signup_alone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # NEVER_ASK already means automatic sign-up is off; overwriting it with
+        # NO would quietly re-enable the prompt the member switched off.
+        event, occurrence = self.make_repeating_roster(store)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.NEVER_ASK,
+            None,
+            (),
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        stored = store.get_auto_signup(event.event_id, 2)
+        assert stored is not None
+        assert stored.choice is AutoSignupChoice.NEVER_ASK
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "Automatic sign-up" not in content
+
+    async def test_removal_dm_omits_auto_signup_for_a_one_off_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "Automatic sign-up" not in content
+
+    async def test_a_closed_dm_is_reported_and_the_rest_still_go_out(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A member can block the bot or close their DMs. That must not abort
+        # the removal or the notices behind it.
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.dm_errors[2] = forbidden_error(50007)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert store.get_signup(occurrence.occurrence_id, 3) is None
+        fake_bot.users[3].send.assert_awaited_once()
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Removed <@2>, <@3>" in content
+        assert "Could not send a direct message to <@2>" in content
+
+    async def test_an_occurrence_seeded_during_the_removal_is_reconciled(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # remove_signup refreshes the public message, and a refresh that finds
+        # the message gone (or that crosses the occurrence's end) seeds the
+        # next occurrence from the preference that is still enabled at that
+        # point. The DM promises the member will not be signed up again, so
+        # that seat has to go with the preference.
+        event, occurrence = self.make_repeating_roster(store)
+        for user_id in (2, 5):
+            store.set_auto_signup(
+                event.event_id,
+                user_id,
+                AutoSignupChoice.YES,
+                EventRole.DPS,
+                (),
+            )
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        seeded = [
+            following
+            for following in store.get_event_occurrences(event.event_id)
+            if following.start_time > occurrence.start_time
+        ]
+        assert len(seeded) == 1
+        # User 5 keeps their automatic seat, which is what proves the seeding
+        # (and its auto sign-ups) really ran during the removal.
+        assert store.get_signup(seeded[0].occurrence_id, 5) is not None
+        assert store.get_signup(seeded[0].occurrence_id, 2) is None
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "Automatic sign-up for this event has been turned off" in content
+
+    async def test_a_seat_on_a_posted_next_occurrence_is_named_in_the_dm(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A posted roster may hold a deliberate signup, so the seat stands -
+        # but the DM must not claim the member is off every future roster.
+        event, occurrence = self.make_repeating_roster(store)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        following = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=1),
+        )
+        store.set_occurrence_message(following.occurrence_id, 1234, 556, 778)
+        store.add_signup(
+            occurrence_id=following.occurrence_id,
+            discord_user_id=2,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        assert store.get_signup(following.occurrence_id, 2) is not None
+        content = fake_bot.users[2].send.await_args.args[0]
+        assert "still signed up for the next occurrence" in content
+        assert f"<t:{int(following.start_time.timestamp())}:F>" in content
+
+    async def test_a_closed_dm_still_disables_auto_signup(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_repeating_roster(store)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        fake_bot.dm_errors[2] = forbidden_error(50007)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        stored = store.get_auto_signup(event.event_id, 2)
+        assert stored is not None
+        assert stored.choice is AutoSignupChoice.NO
+
+    async def test_removal_logging_keeps_the_event_out_of_the_log(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description=description,
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        self.seat_roster(store, occurrence)
+        store.set_auto_signup(
+            event.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        fake_bot.dm_errors[3] = forbidden_error(50007)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await view.remove(interaction, picked_users(2, 3))
+
+        # The direct message carries the event title, so neither the event nor
+        # the message body may reach the log.
+        assert title not in caplog.text
+        assert description not in caplog.text
+        assert "turned off" not in caplog.text
+        # The workflow still has to be traceable end to end.
+        assert "Disabled auto signup on removal" in caplog.text
+        assert "Sending direct message" in caplog.text
+        assert "Delivered direct message" in caplog.text
+        assert "Could not deliver a direct message" in caplog.text
+        assert "Applied roster removal" in caplog.text

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
 import discord
@@ -51,6 +53,104 @@ def discord_failure_signature(error: discord.DiscordException) -> str:
         f"{getattr(error, 'status', 'unknown')}:"
         f"{getattr(error, 'code', 'unknown')}"
     )
+
+
+async def resolve_display_name(
+    bot: Any,
+    guild: discord.Guild | None,
+    user_id: int,
+) -> str | None:
+    """Return the display name, or None when Discord cannot be reached.
+
+    The bot runs without the members intent, so the guild member cache is
+    almost always empty and the name has to be fetched. The guild member is
+    preferred over the global user so a server nickname wins.
+    """
+    if guild is not None:
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member.display_name
+        try:
+            member = await guild.fetch_member(user_id)
+        except discord.HTTPException as exc:
+            # The global lookup below can still succeed and hide this from the
+            # aggregate counts, so record the guild failure on its own: a
+            # roster that silently loses every nickname is otherwise
+            # indistinguishable from one that has none. The sanitized failure
+            # signature only, never the response body.
+            LOGGER.debug(
+                "Guild member lookup failed; falling back to the global user; "
+                "user_id=%s failure=%s",
+                user_id,
+                discord_failure_signature(exc),
+            )
+            member = None
+        if member is not None:
+            return member.display_name
+    try:
+        user = await bot.fetch_user(user_id)
+    except discord.HTTPException as exc:
+        LOGGER.debug(
+            "Display name lookup failed; user_id=%s failure=%s",
+            user_id,
+            discord_failure_signature(exc),
+        )
+        return None
+    return user.display_name
+
+
+async def resolve_display_names(
+    bot: Any,
+    guild: discord.Guild | None,
+    user_ids: Sequence[int],
+) -> dict[int, str | None]:
+    """Resolve several display names at once.
+
+    Lookups run concurrently so a whole roster costs one round trip rather
+    than one per member. An entry is None when Discord could not be reached
+    for that member; callers substitute their own placeholder.
+    """
+    unique = list(dict.fromkeys(user_ids))
+    if not unique:
+        return {}
+    names = await asyncio.gather(
+        *(resolve_display_name(bot, guild, user_id) for user_id in unique)
+    )
+    resolved = dict(zip(unique, names, strict=True))
+    LOGGER.debug(
+        "Resolved display names; requested=%s resolved=%s failed=%s",
+        len(unique),
+        sum(1 for name in names if name is not None),
+        sum(1 for name in names if name is None),
+    )
+    return resolved
+
+
+async def send_direct_message(bot: Any, user_id: int, content: str) -> bool:
+    """Direct-message a member, reporting whether delivery succeeded.
+
+    Members can block the bot or close their DMs, which raises Forbidden. That
+    is an expected outcome rather than a bug, so it is logged and reported to
+    the caller instead of propagating: a single unreachable member must never
+    abort a bulk notification.
+    """
+    LOGGER.debug(
+        "Sending direct message; user_id=%s characters=%s",
+        user_id,
+        len(content),
+    )
+    try:
+        user = await bot.fetch_user(user_id)
+        await user.send(content)
+    except discord.DiscordException as error:
+        log_discord_failure(
+            "Could not deliver a direct message; user_id=%s",
+            error,
+            user_id,
+        )
+        return False
+    LOGGER.debug("Delivered direct message; user_id=%s", user_id)
+    return True
 
 
 def safe_int(value: object) -> int | None:
