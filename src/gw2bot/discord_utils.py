@@ -72,7 +72,18 @@ async def resolve_display_name(
             return member.display_name
         try:
             member = await guild.fetch_member(user_id)
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            # The global lookup below can still succeed and hide this from the
+            # aggregate counts, so record the guild failure on its own: a
+            # roster that silently loses every nickname is otherwise
+            # indistinguishable from one that has none. The sanitized failure
+            # signature only, never the response body.
+            LOGGER.debug(
+                "Guild member lookup failed; falling back to the global user; "
+                "user_id=%s failure=%s",
+                user_id,
+                discord_failure_signature(exc),
+            )
             member = None
         if member is not None:
             return member.display_name
@@ -80,9 +91,9 @@ async def resolve_display_name(
         user = await bot.fetch_user(user_id)
     except discord.HTTPException as exc:
         LOGGER.debug(
-            "Display name lookup failed; user_id=%s error_type=%s",
+            "Display name lookup failed; user_id=%s failure=%s",
             user_id,
-            type(exc).__name__,
+            discord_failure_signature(exc),
         )
         return None
     return user.display_name

@@ -112,6 +112,42 @@ class TestResolveDisplayName:
 
         assert name is None
 
+    async def test_a_failed_guild_lookup_is_logged_before_the_fallback(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The global lookup succeeds here, so the aggregate counts report a
+        # clean resolution; without this entry the failed guild fetch - and
+        # the lost nickname - would leave no trace at all.
+        bot = FakeBot({7: "SECRETNAME"})
+        guild = FakeGuild()
+
+        with caplog.at_level("DEBUG"):
+            name = await resolve_display_name(
+                cast(Any, bot),
+                cast(Any, guild),
+                7,
+            )
+
+        assert name == "SECRETNAME"
+        assert "Guild member lookup failed" in caplog.text
+        assert "NotFound" in caplog.text
+        assert "SECRETNAME" not in caplog.text
+
+    async def test_a_failed_global_lookup_logs_the_failure_type(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = FakeBot()
+        bot.fetch_errors[7] = forbidden_error(50001)
+
+        with caplog.at_level("DEBUG"):
+            name = await resolve_display_name(cast(Any, bot), None, 7)
+
+        assert name is None
+        assert "Display name lookup failed" in caplog.text
+        assert "Forbidden" in caplog.text
+
 
 class TestResolveDisplayNames:
     async def test_resolves_every_id(self) -> None:
