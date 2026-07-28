@@ -735,17 +735,39 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     refresh();
   }
 
+  // On mobile the cell's explicit aria-label overrides its subtree, so the
+  // chips' titles never reach assistive tech. The day's events therefore have
+  // to ride along in the label itself, or a screen-reader user would hear only
+  // the date for every one of the 42 cells and could not tell which days hold
+  // events without opening each one.
+  function monthCellLabel(date, dayEntries) {
+    var dateName = date.toLocaleDateString(
+      undefined, { weekday: "long", month: "long", day: "numeric" });
+    if (dayEntries.length === 0) {
+      return dateName + ", no events";
+    }
+    var count = dayEntries.length === 1
+      ? "1 event"
+      : dayEntries.length + " events";
+    var titles = dayEntries.map(function (entry) { return entry.title; });
+    return dateName + ", " + count + ": " + titles.join(", ");
+  }
+
   function buildCell(date, monthIndex) {
     var cell = el("div", "cell");
     if (date.getMonth() !== monthIndex) { cell.classList.add("outside"); }
     if (sameDay(date, new Date())) { cell.classList.add("today"); }
     var mobile = isMobile();
+    var next = addDays(date, 1);
+    var dayEntries = entries.filter(function (entry) {
+      var start = new Date(entry.start_epoch * 1000);
+      return start >= date && start < next;
+    });
     if (mobile) {
       cell.classList.add("tappable");
       cell.setAttribute("role", "button");
       cell.setAttribute("tabindex", "0");
-      cell.setAttribute("aria-label", date.toLocaleDateString(
-        undefined, { weekday: "long", month: "long", day: "numeric" }));
+      cell.setAttribute("aria-label", monthCellLabel(date, dayEntries));
       var target = date;
       cell.addEventListener("click", function () { openDay(target); });
       cell.addEventListener("keydown", function (event) {
@@ -756,14 +778,17 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
       });
     }
     cell.appendChild(el("div", "daynum", String(date.getDate())));
-    var next = addDays(date, 1);
     entries.forEach(function (entry, index) {
       var start = new Date(entry.start_epoch * 1000);
       if (start >= date && start < next) {
         var chip = chipFor(entry, index, mobile);
-        // The cell itself handles the tap on mobile, so the chip is not a
-        // separate focus stop there.
-        if (mobile) { chip.removeAttribute("tabindex"); }
+        // The cell handles the tap on mobile and its aria-label already names
+        // these events, so on mobile the chip is neither a focus stop nor a
+        // separate node exposed to assistive tech.
+        if (mobile) {
+          chip.removeAttribute("tabindex");
+          chip.setAttribute("aria-hidden", "true");
+        }
         cell.appendChild(chip);
       }
     });
