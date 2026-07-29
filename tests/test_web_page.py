@@ -237,6 +237,62 @@ class TestFoodPage:
         assert 'addEventListener("pointerleave"' in FOOD_PAGE
         assert '"chart-tooltip"' in FOOD_PAGE
 
+    def test_a_tap_selects_a_point_instead_of_hovering_it(self) -> None:
+        # A finger gets one pointermove at the tap point and then a
+        # pointerleave as it lifts, which made the crosshair flash and vanish.
+        # Touch and pen are routed to a pointerdown selection instead and are
+        # filtered out of the move and leave handlers.
+        assert "function isHoverPointer(event) {" in FOOD_PAGE
+        assert (
+            'return !event.pointerType || event.pointerType === "mouse";'
+            in FOOD_PAGE
+        )
+        assert 'overlay.addEventListener("pointerdown", function (event) {' in (
+            FOOD_PAGE
+        )
+        assert "if (isHoverPointer(event)) { return; }" in FOOD_PAGE
+        # The leave that ends a mouse hover must not end a touch selection.
+        assert "if (isHoverPointer(event)) { hideHover(); }" in FOOD_PAGE
+
+    def test_a_tapped_selection_stays_until_the_next_interaction(self) -> None:
+        # While a selection is pinned the page is watched for anything else the
+        # reader does, and each of those listeners is dropped again on release
+        # so a hover from a mouse never leaves one behind.
+        for event_name in ("pointerdown", "wheel", "keydown"):
+            assert (
+                'document.addEventListener("%s", dismiss, true);' % event_name
+                in FOOD_PAGE
+            )
+            assert (
+                'document.removeEventListener("%s", dismiss, true);'
+                % event_name in FOOD_PAGE
+            )
+        assert 'window.addEventListener("blur", dismiss);' in FOOD_PAGE
+        assert 'window.removeEventListener("blur", dismiss);' in FOOD_PAGE
+        # A tap on another point reaches the overlay after the page-level
+        # listener, so the overlay's own handler is left to move the selection
+        # rather than the dismissal wiping it first.
+        assert "if (event && event.target === overlay) { return; }" in FOOD_PAGE
+
+    def test_a_scrolling_finger_drops_the_selection(self) -> None:
+        # A touch that travels past the tap slop, or that the browser claims
+        # for a scroll outright, is not a point selection.
+        assert "var TAP_SLOP = 12;" in FOOD_PAGE
+        assert (
+            "if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { hideHover(); }"
+            in FOOD_PAGE
+        )
+        assert 'overlay.addEventListener("pointercancel"' in FOOD_PAGE
+
+    def test_a_redraw_releases_the_previous_charts_listeners(self) -> None:
+        # attachHover hands back its teardown so the page-level listeners of a
+        # pinned selection cannot outlive the canvas that opened them.
+        assert "detachHover = attachHover(canvas, plotted);" in FOOD_PAGE
+        assert "if (detachHover) { detachHover(); detachHover = null; }" in (
+            FOOD_PAGE
+        )
+        assert "return hideHover;" in FOOD_PAGE
+
     def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:
         # The hover was written against fixed chart constants that the mobile
         # layout replaced with metrics(). Any survivor is an undefined global

@@ -1512,6 +1512,10 @@ button:focus-visible {
 
   var state = { range: "24h", data: null, activeFeast: 0, tablePage: 0 };
 
+  // A pinned touch selection listens on the whole page, so the chart it
+  // belongs to is torn down before another one is drawn.
+  var detachHover = null;
+
   var legend = document.getElementById("legend");
   var chart = document.getElementById("chart");
   var chartStatus = document.getElementById("chart-status");
@@ -1580,6 +1584,7 @@ button:focus-visible {
 
   function renderChart() {
     M = metrics();
+    if (detachHover) { detachHover(); detachHover = null; }
     chart.replaceChildren();
     var canvas = svg("svg", {
       "class": "chart-svg",
@@ -1657,7 +1662,7 @@ button:focus-visible {
       });
     });
 
-    attachHover(canvas, plotted);
+    detachHover = attachHover(canvas, plotted);
     chart.appendChild(canvas);
 
     var total = plotted.length;
@@ -1688,6 +1693,19 @@ button:focus-visible {
     return columns;
   }
 
+  // Tells a hovering pointer from a finger or a pen. A touch has no hover
+  // state: the browser sends one pointermove at the tap point and then a
+  // pointerleave as the finger lifts, which is why a tap used to flash the
+  // crosshair and lose it again. Touch selects by tapping instead and never
+  // reaches the move or leave handlers.
+  function isHoverPointer(event) {
+    return !event.pointerType || event.pointerType === "mouse";
+  }
+
+  // How far a finger may travel from where it landed and still count as a tap
+  // rather than the start of a scroll, in CSS pixels.
+  var TAP_SLOP = 12;
+
   function attachHover(canvas, plotted) {
     var columns = groupColumns(plotted);
     // The viewBox differs between the mobile and desktop layouts, so the hover
@@ -1696,6 +1714,10 @@ button:focus-visible {
     var m = M;
     var innerW = m.w - m.left - m.right;
     var innerH = m.h - m.top - m.bottom;
+    // Set while a tap holds a column open, together with the page listeners
+    // that dismiss it. A mouse hover never arms them.
+    var pinned = false;
+    var pinOrigin = null;
 
     var crosshair = svg("line", {
       "class": "crosshair",
@@ -1780,18 +1802,92 @@ button:focus-visible {
       crosshair.style.visibility = "hidden";
       rings.replaceChildren();
       tooltip.style.visibility = "hidden";
+      unpin();
+    }
+
+    // Translates a pointer position into viewBox coordinates, or null while
+    // the canvas has no laid-out size to measure against.
+    function pointFromEvent(event) {
+      var rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) { return null; }
+      return {
+        x: (event.clientX - rect.left) / rect.width * m.w,
+        y: (event.clientY - rect.top) / rect.height * m.h
+      };
+    }
+
+    // Anything other than another tap on the plot clears a pinned selection: a
+    // tap elsewhere on the page, a wheel, a key, or the window losing focus.
+    function dismiss(event) {
+      // A tap that moves the selection to another column reaches the overlay
+      // after this capture listener has already run, so an event aimed at the
+      // overlay is left to the overlay's own handler to act on.
+      if (event && event.target === overlay) { return; }
+      hideHover();
+    }
+
+    function pin(event) {
+      pinOrigin = { x: event.clientX, y: event.clientY };
+      if (pinned) { return; }
+      pinned = true;
+      document.addEventListener("pointerdown", dismiss, true);
+      document.addEventListener("wheel", dismiss, true);
+      document.addEventListener("keydown", dismiss, true);
+      window.addEventListener("blur", dismiss);
+    }
+
+    function unpin() {
+      if (!pinned) { return; }
+      pinned = false;
+      pinOrigin = null;
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("wheel", dismiss, true);
+      document.removeEventListener("keydown", dismiss, true);
+      window.removeEventListener("blur", dismiss);
+    }
+
+    function selectAt(event) {
+      if (!columns.length) { return null; }
+      var at = pointFromEvent(event);
+      if (!at) { return null; }
+      var column = nearestColumn(at.x);
+      if (!column) { return null; }
+      showHover(column, at.y);
+      return column;
     }
 
     overlay.addEventListener("pointermove", function (event) {
-      if (!columns.length) { return; }
-      var rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) { return; }
-      var vbX = (event.clientX - rect.left) / rect.width * m.w;
-      var vbY = (event.clientY - rect.top) / rect.height * m.h;
-      var column = nearestColumn(vbX);
-      if (column) { showHover(column, vbY); }
+      if (!isHoverPointer(event)) {
+        // A finger that travels past the tap slop is scrolling the page, not
+        // picking a point, so the selection it opened is dropped.
+        if (pinned && pinOrigin) {
+          var dx = event.clientX - pinOrigin.x;
+          var dy = event.clientY - pinOrigin.y;
+          if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { hideHover(); }
+        }
+        return;
+      }
+      selectAt(event);
     });
-    overlay.addEventListener("pointerleave", hideHover);
+    overlay.addEventListener("pointerleave", function (event) {
+      // A finger's pointerleave arrives as it lifts off the glass; only a
+      // mouse leaving the plot means its hover is over.
+      if (isHoverPointer(event)) { hideHover(); }
+    });
+    // Touch and pen select by tapping: the nearest column opens and stays up
+    // until the next interaction, and a tap on another point moves it there.
+    overlay.addEventListener("pointerdown", function (event) {
+      if (isHoverPointer(event)) { return; }
+      pin(event);
+      if (!selectAt(event)) { hideHover(); }
+    });
+    // The browser claims the gesture once it decides a touch is a scroll.
+    overlay.addEventListener("pointercancel", function (event) {
+      if (!isHoverPointer(event)) { hideHover(); }
+    });
+
+    // Lets a re-render drop this canvas's page-level listeners with it.
+    return hideHover;
   }
 
   function renderLegend() {
