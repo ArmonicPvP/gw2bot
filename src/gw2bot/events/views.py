@@ -70,19 +70,31 @@ ONGOING_EDIT_REJECTION = (
 PREVIEW_EVENT_ID_TEXT = "—"
 
 # Where an event may be posted. A text channel takes the event as a message with
-# a signup thread under it. A thread that already exists - a forum post, or a
-# thread under a text channel - takes the event as a message inside it, and
-# stands in for that signup thread. Forum channels themselves are deliberately
-# absent: the bot posts into existing forum posts and never opens new ones.
+# a signup thread under it. A forum post takes the event as a message inside the
+# post, which stands in for that signup thread because a forum post cannot hold
+# threads of its own. Forum *channels* are deliberately absent: the bot posts
+# into posts that already exist and never opens new ones.
+#
+# A forum post is a public thread, and Discord's picker cannot narrow that to
+# posts alone, so a thread under a text channel can be picked here too and is
+# rejected on submission by _destination_error.
 EVENT_CHANNEL_TYPES = [
     discord.ChannelType.text,
     discord.ChannelType.public_thread,
-    discord.ChannelType.private_thread,
 ]
+# The parents that make a picked thread a forum post.
+FORUM_CHANNEL_TYPES = (
+    discord.ChannelType.forum,
+    discord.ChannelType.media,
+)
 # Discord caps a Label's text at 45 characters, so the forum hint rides along in
 # the Label description instead of the prompt itself.
 EVENT_CHANNEL_PROMPT = "Where should your event be posted?"
-EVENT_CHANNEL_HINT = "A channel, or an existing forum post or thread."
+EVENT_CHANNEL_HINT = "A text channel, or an existing forum post."
+EVENT_CHANNEL_REJECTION = (
+    "Events can only be posted in a text channel or an existing forum post. "
+    "A thread under a channel is not supported."
+)
 
 # Discord's hard cap on how many options one select may hold, which is also the
 # most it may return. A WvW roster seats 50 plus a waitlist, so the removal
@@ -354,6 +366,44 @@ async def send_event_preview(
         )
 
 
+async def _destination_error(bot: Gw2Bot, channel: Any) -> str | None:
+    """Reject a picked destination the bot will not post an event to.
+
+    Returns the message to show the commander, or None when the destination is
+    allowed. Only a thread can be wrong here: the picker offers text channels
+    and public threads, and a public thread is only a forum post when its parent
+    is a forum. A parent the bot cannot resolve is accepted rather than refused,
+    because posting there works either way and a lookup failure must not block a
+    legitimate forum post.
+    """
+    from gw2bot.events.posting import is_thread_channel, resolve_channel
+
+    if not is_thread_channel(channel):
+        return None
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id is None:
+        LOGGER.debug("Picked thread reports no parent; accepting it")
+        return None
+    try:
+        parent = await resolve_channel(bot, parent_id)
+    except discord.DiscordException as exc:
+        LOGGER.debug(
+            "Could not resolve the parent of a picked thread; accepting it; "
+            "error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+    parent_type = getattr(parent, "type", None)
+    if parent_type in FORUM_CHANNEL_TYPES:
+        return None
+    LOGGER.debug(
+        "Rejected an event destination that is a thread under a channel; "
+        "parent_type=%s",
+        parent_type,
+    )
+    return EVENT_CHANNEL_REJECTION
+
+
 async def _send_validation_error(
     interaction: discord.Interaction,
     error: ValueError,
@@ -488,7 +538,19 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
         self._draft.category = EventCategory(self.category.values[0])
         self._draft.title = self.title_input.value.strip()
         self._draft.description = self.description_input.value.strip()
-        self._draft.channel_id = self.channel.values[0].id
+        destination = self.channel.values[0]
+        rejection = await _destination_error(self._bot, destination)
+        if rejection is not None:
+            # The title, description and category are already on the draft, so
+            # the retry modal opens pre-filled and only the destination has to be
+            # picked again.
+            await _send_validation_error(
+                interaction,
+                ValueError(rejection),
+                RetryDetailsView(self._bot, self._draft),
+            )
+            return
+        self._draft.channel_id = destination.id
         LOGGER.debug(
             "Event details step submitted; user_id=%s category=%s "
             "title_characters=%s description_characters=%s",
@@ -502,6 +564,14 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
             view=ContinueToScheduleView(self._bot, self._draft),
             ephemeral=True,
         )
+
+
+class RetryDetailsView(_ModalOpenView):
+    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+        super().__init__(bot, draft, "Try again")
+
+    def build_modal(self) -> discord.ui.Modal:
+        return EventDetailsModal(self._bot, self._draft)
 
 
 class EventScheduleModal(discord.ui.Modal, title="Create new event"):
@@ -900,10 +970,9 @@ class EventEditConfirmView(_PreviewConfirmView):
                 content=(
                     "Changing the channel will **delete the current event "
                     "message**, along with any signup thread the bot opened "
-                    "for it and every message in that thread. A forum post or "
-                    "thread the event was posted into is left in place. The "
-                    "roster is kept and re-posted at the new destination. "
-                    "Continue?"
+                    "for it and every message in that thread. A forum post the "
+                    "event was posted into is left in place. The roster is kept "
+                    "and re-posted at the new destination. Continue?"
                 ),
                 embeds=[],
                 view=ChannelMoveConfirmView(
@@ -2129,7 +2198,7 @@ class ChannelPickSelect(discord.ui.ChannelSelect["ChannelPickView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if view is not None:
-            await view.pick(interaction, self.values[0].id)
+            await view.pick(interaction, self.values[0])
 
 
 class ChannelPickView(discord.ui.View):
@@ -2142,9 +2211,16 @@ class ChannelPickView(discord.ui.View):
     async def pick(
         self,
         interaction: discord.Interaction,
-        channel_id: int,
+        channel: Any,
     ) -> None:
-        self._draft.channel_id = channel_id
+        rejection = await _destination_error(self._bot, channel)
+        if rejection is not None:
+            await interaction.response.edit_message(
+                content=f"{rejection} Pick somewhere else.",
+                view=ChannelPickView(self._bot, self._draft),
+            )
+            return
+        self._draft.channel_id = channel.id
         await send_event_preview(self._bot, interaction, self._draft)
 
 

@@ -45,9 +45,11 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-# An event can be posted into a thread that already exists - a forum post, or a
-# thread under a text channel. The bot never opens one of its own there: the
-# thread belongs to whoever created it, so the event is only a message inside it.
+# An event can be posted into a forum post, which Discord models as a thread.
+# The bot never opens one: the post belongs to whoever created it, so the event
+# is only a message inside it. Every thread type is listed because this answers
+# the mechanical question "does the message live in the thread itself?" - the
+# picker in views.py is what limits the choice to forum posts.
 THREAD_CHANNEL_TYPES = frozenset(
     {
         discord.ChannelType.public_thread,
@@ -69,12 +71,12 @@ def is_thread_channel(channel: Any) -> bool:
 
 
 def occurrence_posted_in_thread(occurrence: EventOccurrence) -> bool:
-    # True when the event was posted into an existing thread rather than into a
-    # channel: the thread is then both the channel the message was sent to and
-    # the thread members discuss it in, so the two stored ids are the same. An
+    # True when the event was posted into a forum post rather than into a
+    # channel: the post is then both the channel the message was sent to and the
+    # thread members discuss it in, so the two stored ids are the same. An
     # occurrence posted to a text channel has its message in the channel and a
-    # signup thread the bot opened under it, so they differ. Such a thread is
-    # the bot's to rename and delete; a thread it was merely posted into is not.
+    # signup thread the bot opened under it, so they differ. Such a thread is the
+    # bot's to rename and delete; a post it was merely posted into is not.
     # Rows written before either id was tracked read as a plain channel message.
     return (
         occurrence.thread_id is not None
@@ -148,11 +150,11 @@ async def post_occurrence(
         await _reopen_thread(channel, occurrence.occurrence_id)
     message = await channel.send(embed=embed, view=view)
     if in_thread:
-        # The event went into a thread that already exists - typically a forum
-        # post. Nothing is created there: the message lives in the thread rather
-        # than in its parent channel, so the thread is what every later edit and
-        # delete has to address, and it stands in for the signup thread the
-        # branch below opens for a channel.
+        # The event went into a forum post that already exists. Nothing is
+        # created there - a forum post cannot hold threads of its own - and the
+        # message lives in the post rather than in its parent forum, so the post
+        # is what every later edit and delete has to address, and it stands in
+        # for the signup thread the branch below opens for a channel.
         message_channel_id = channel.id
         thread_id = channel.id
     else:
@@ -439,8 +441,8 @@ async def _reopen_occurrence_thread(
     bot: Gw2Bot,
     occurrence: EventOccurrence,
 ) -> None:
-    # Only an occurrence posted into an existing thread needs this: its message
-    # lives in that thread, so an archived thread blocks every update to it.
+    # Only an occurrence posted into a forum post needs this: its message lives
+    # in that post, so an archived post blocks every update to it.
     thread_id = occurrence.thread_id
     if thread_id is None or not occurrence_posted_in_thread(occurrence):
         return
@@ -711,6 +713,21 @@ async def update_thread_membership(
     add: bool,
 ) -> None:
     if occurrence.thread_id is None:
+        return
+    if not add and occurrence_posted_in_thread(occurrence):
+        # The event was posted into a thread that already existed, so its members
+        # are not this event's roster: the same forum post can hold several
+        # events, and members join it to read it. Removing someone who signed out
+        # of one event would drop them from every other event in that post, and
+        # in a private thread it would take away their access to it. Adding is
+        # kept - it only subscribes them - so membership is one-way here and the
+        # member leaves the post themselves when they are done with it.
+        LOGGER.debug(
+            "Event thread was not created for the event; keeping its members; "
+            "occurrence_id=%s user_id=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+        )
         return
     # An archived thread refuses both the membership change here and the roster
     # announcement that follows it, so reopen it first. This is the first thread

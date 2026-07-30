@@ -688,13 +688,48 @@ class TestPostingIntoAnExistingForumPost:
         await remove_signup(bot, event, posted, 12)
 
         assert post.add_user.await_count == 2
-        assert post.remove_user.await_count == 1
         announcements = [
             entry["content"] for entry in post.sent if entry["content"]
         ]
         assert len(announcements) == 2
         assert "<@11>" in announcements[0]
         assert post.partial_message.edit.await_count == 3
+
+    async def test_signing_out_leaves_the_shared_post_membership_alone(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        first_event, first = await self.post_event_in_post(bot, store, post)
+        second_event, second = await self.post_event_in_post(bot, store, post)
+        await complete_signup(bot, first_event, first, 11, EventRole.DPS, ())
+        await complete_signup(bot, second_event, second, 11, EventRole.DPS, ())
+
+        await remove_signup(bot, first_event, first, 11)
+
+        # Both events live in the same post, so its members are not either
+        # event's roster. Removing the member here would drop them from the
+        # event they are still signed up to - and in a private thread, take away
+        # their access to it.
+        post.remove_user.assert_not_awaited()
+        assert post.add_user.await_count == 2
+        assert store.get_signups(second.occurrence_id)[0].discord_user_id == 11
+
+    async def test_signing_out_still_leaves_a_signup_thread(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The thread under a text-channel message belongs to the event, so the
+        # roster and the thread membership stay in step there.
+        event, posted = await post_new_event(bot, store)
+        await complete_signup(bot, event, posted, 11, EventRole.DPS, ())
+
+        await remove_signup(bot, event, posted, 11)
+
+        channel.thread.remove_user.assert_awaited_once()
 
     async def test_signup_reopens_an_archived_post_before_using_it(
         self,

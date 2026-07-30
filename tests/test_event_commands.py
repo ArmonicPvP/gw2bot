@@ -28,6 +28,7 @@ from gw2bot.events.views import (
     AutoSignupChoiceView,
     ChannelMoveConfirmView,
     ChannelPickSelect,
+    ChannelPickView,
     DisableAutoSignupView,
     EditSignupFlow,
     EditWaitlistConfirmView,
@@ -155,26 +156,125 @@ class TestEventDraft:
         assert event.repeat_days == (6,)
 
 
-class TestEventChannelChoices:
-    """An event goes to a text channel or into a thread that already exists."""
+def make_forum_post(post_id: int = 901, parent_id: int = 4321) -> Any:
+    return SimpleNamespace(
+        id=post_id,
+        type=discord.ChannelType.public_thread,
+        parent_id=parent_id,
+    )
 
-    def test_details_modal_offers_channels_and_existing_threads(self) -> None:
+
+def make_channel_thread(thread_id: int = 902, parent_id: int = 1234) -> Any:
+    return SimpleNamespace(
+        id=thread_id,
+        type=discord.ChannelType.public_thread,
+        parent_id=parent_id,
+    )
+
+
+def make_destination_bot() -> Any:
+    # A forum and a text channel, so a picked thread's parent decides whether it
+    # is a forum post or a thread under a channel.
+    channels = {
+        4321: SimpleNamespace(id=4321, type=discord.ChannelType.forum),
+        1234: SimpleNamespace(id=1234, type=discord.ChannelType.text),
+    }
+    return cast(
+        Any,
+        SimpleNamespace(
+            event_timezone=ZoneInfo("UTC"),
+            event_store=None,
+            get_channel=channels.get,
+            fetch_channel=AsyncMock(side_effect=not_found_error()),
+        ),
+    )
+
+
+class TestEventChannelChoices:
+    """An event goes to a text channel or into a forum post that exists."""
+
+    def test_details_modal_offers_channels_and_forum_posts(self) -> None:
         modal = EventDetailsModal(make_bot(), EventDraft(leader_discord_id=42))
 
         assert discord.ChannelType.text in modal.channel.channel_types
+        # A forum post is a public thread; Discord's picker has no narrower type.
         assert discord.ChannelType.public_thread in modal.channel.channel_types
 
-    def test_change_channel_picker_offers_existing_threads(self) -> None:
+    def test_change_channel_picker_offers_the_same_choices(self) -> None:
         select = ChannelPickSelect()
 
         assert set(select.channel_types) == set(EVENT_CHANNEL_TYPES)
-        assert discord.ChannelType.public_thread in select.channel_types
 
-    def test_forum_channels_are_never_offered(self) -> None:
-        # Posting to a forum channel would open a new post; events may only be
-        # posted into forum posts that already exist.
+    def test_forum_and_private_thread_types_are_never_offered(self) -> None:
+        # Posting to a forum channel would open a new post, and a private thread
+        # is never a forum post; events go to a channel or an existing post.
         assert discord.ChannelType.forum not in EVENT_CHANNEL_TYPES
         assert discord.ChannelType.media not in EVENT_CHANNEL_TYPES
+        assert discord.ChannelType.private_thread not in EVENT_CHANNEL_TYPES
+
+    async def test_details_modal_accepts_a_forum_post(self) -> None:
+        draft = EventDraft(leader_discord_id=42)
+        modal = EventDetailsModal(make_destination_bot(), draft)
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [make_forum_post()]
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.channel_id == 901
+        assert "Step 2" in interaction.response.send_message.await_args.args[0]
+
+    async def test_details_modal_rejects_a_thread_under_a_channel(self) -> None:
+        draft = EventDraft(leader_discord_id=42)
+        modal = EventDetailsModal(make_destination_bot(), draft)
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [make_channel_thread()]
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        # Only forum posts are supported, and the retry keeps the rest of the
+        # details so just the destination has to be picked again.
+        assert draft.channel_id is None
+        assert draft.title == "Kitty Cleanup"
+        text = interaction.response.send_message.await_args.args[0]
+        assert "forum post" in text
+        assert "Try again" in text
+
+    async def test_change_channel_picker_rejects_a_thread_under_a_channel(
+        self,
+    ) -> None:
+        draft = EventDraft(leader_discord_id=42, channel_id=1234)
+        view = ChannelPickView(make_destination_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.pick(interaction, make_channel_thread())
+
+        assert draft.channel_id == 1234
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "forum post" in kwargs["content"]
+        assert isinstance(kwargs["view"], ChannelPickView)
+
+    async def test_change_channel_picker_accepts_a_forum_post(self) -> None:
+        draft = EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+        )
+        view = ChannelPickView(make_destination_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.pick(interaction, make_forum_post())
+
+        assert draft.channel_id == 901
 
 
 class TestEventDetailsModal:
