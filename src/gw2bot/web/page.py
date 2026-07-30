@@ -1512,6 +1512,10 @@ button:focus-visible {
 
   var state = { range: "24h", data: null, activeFeast: 0, tablePage: 0 };
 
+  // A pinned touch selection listens on the whole page, so the chart it
+  // belongs to is torn down before another one is drawn.
+  var detachHover = null;
+
   var legend = document.getElementById("legend");
   var chart = document.getElementById("chart");
   var chartStatus = document.getElementById("chart-status");
@@ -1580,6 +1584,7 @@ button:focus-visible {
 
   function renderChart() {
     M = metrics();
+    if (detachHover) { detachHover(); detachHover = null; }
     chart.replaceChildren();
     var canvas = svg("svg", {
       "class": "chart-svg",
@@ -1657,7 +1662,7 @@ button:focus-visible {
       });
     });
 
-    attachHover(canvas, plotted);
+    detachHover = attachHover(canvas, plotted);
     chart.appendChild(canvas);
 
     var total = plotted.length;
@@ -1688,6 +1693,47 @@ button:focus-visible {
     return columns;
   }
 
+  // Tells a hovering pointer from a finger or a pen. A touch has no hover
+  // state: the browser sends one pointermove at the tap point and then a
+  // pointerleave as the finger lifts, which is why a tap used to flash the
+  // crosshair and lose it again. Touch selects by tapping instead and never
+  // reaches the move or leave handlers.
+  function isHoverPointer(event) {
+    return !event.pointerType || event.pointerType === "mouse";
+  }
+
+  // How far a finger may travel from where it landed and still count as a tap
+  // rather than the start of a scroll, in CSS pixels.
+  var TAP_SLOP = 12;
+
+  // Pointer and event types are narrowed to the names the spec defines before
+  // they are traced, so an exotic value cannot ride into the console.
+  function pointerKind(event) {
+    var kind = event && event.pointerType;
+    if (kind === "mouse" || kind === "pen" || kind === "touch") {
+      return kind;
+    }
+    return "other";
+  }
+  function eventKind(event) {
+    var name = event && event.type;
+    if (name === "pointerdown" || name === "wheel" ||
+        name === "keydown" || name === "blur") {
+      return name;
+    }
+    return "other";
+  }
+
+  // Sanitized tracing for the tap selection lifecycle, so a console trace can
+  // explain why a selection opened, moved or went away. Every call passes a
+  // fixed action name, one of the narrowed reason names above, and a count of
+  // drawn elements. Coordinates, timestamps, stock values and feast names are
+  // never passed, so no part of the payload or of the reader's gesture reaches
+  // the console. debug keeps it out of the default console view.
+  function traceSelection(action, reason, count) {
+    console.debug("feast chart selection:", action, reason, count);
+  }
+
   function attachHover(canvas, plotted) {
     var columns = groupColumns(plotted);
     // The viewBox differs between the mobile and desktop layouts, so the hover
@@ -1696,6 +1742,10 @@ button:focus-visible {
     var m = M;
     var innerW = m.w - m.left - m.right;
     var innerH = m.h - m.top - m.bottom;
+    // Set while a tap holds a column open, together with the page listeners
+    // that dismiss it. A mouse hover never arms them.
+    var pinned = false;
+    var pinOrigin = null;
 
     var crosshair = svg("line", {
       "class": "crosshair",
@@ -1780,18 +1830,132 @@ button:focus-visible {
       crosshair.style.visibility = "hidden";
       rings.replaceChildren();
       tooltip.style.visibility = "hidden";
+      unpin();
+    }
+
+    // Translates a pointer position into viewBox coordinates, or null while
+    // the canvas has no laid-out size to measure against.
+    function pointFromEvent(event) {
+      var rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) { return null; }
+      return {
+        x: (event.clientX - rect.left) / rect.width * m.w,
+        y: (event.clientY - rect.top) / rect.height * m.h
+      };
+    }
+
+    // Clears the selection and traces why it went away, but only when a tap
+    // was holding it open. A mouse hover follows the pointer continuously, so
+    // tracing every move that ends one would bury the trace it exists to give.
+    function release(reason) {
+      var wasPinned = pinned;
+      hideHover();
+      if (wasPinned) { traceSelection("release", reason, columns.length); }
+    }
+
+    // Anything other than another tap on the plot clears a pinned selection: a
+    // tap elsewhere on the page, a wheel, a key, or the window losing focus.
+    function dismiss(event) {
+      // A tap that moves the selection to another column reaches the overlay
+      // after this capture listener has already run, so it is left to the
+      // overlay's own handler. Only a tap earns that exemption: a wheel over
+      // the plot, or a mouse press on it, is aimed at the overlay too, but the
+      // handler there acts on neither, so waving those through would strand
+      // the selection on screen with nothing left to clear it.
+      if (isRetargetingTap(event)) {
+        traceSelection("keep", "retarget-on-plot", columns.length);
+        return;
+      }
+      release("page-" + eventKind(event));
+    }
+
+    // True only for the events the overlay's pointerdown handler will act on,
+    // which is what makes leaving them to it safe.
+    function isRetargetingTap(event) {
+      return !!event && event.type === "pointerdown" &&
+        event.target === overlay && !isHoverPointer(event);
+    }
+
+    function pin(event, kind) {
+      pinOrigin = { x: event.clientX, y: event.clientY };
+      if (pinned) { return; }
+      pinned = true;
+      document.addEventListener("pointerdown", dismiss, true);
+      document.addEventListener("wheel", dismiss, true);
+      document.addEventListener("keydown", dismiss, true);
+      window.addEventListener("blur", dismiss);
+      traceSelection("pin", kind, columns.length);
+    }
+
+    function unpin() {
+      if (!pinned) { return; }
+      pinned = false;
+      pinOrigin = null;
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("wheel", dismiss, true);
+      document.removeEventListener("keydown", dismiss, true);
+      window.removeEventListener("blur", dismiss);
+    }
+
+    // Resolves the column a pointer is over. When there is nothing to show,
+    // reason names why so the caller can trace the skip; the names are fixed
+    // strings, never anything read off the event or the payload.
+    function resolveColumn(event) {
+      if (!columns.length) { return { column: null, reason: "no-samples" }; }
+      var at = pointFromEvent(event);
+      if (!at) { return { column: null, reason: "unsized-canvas" }; }
+      var column = nearestColumn(at.x);
+      if (!column) { return { column: null, reason: "no-nearest" }; }
+      return { column: column, at: at, reason: "ok" };
     }
 
     overlay.addEventListener("pointermove", function (event) {
-      if (!columns.length) { return; }
-      var rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) { return; }
-      var vbX = (event.clientX - rect.left) / rect.width * m.w;
-      var vbY = (event.clientY - rect.top) / rect.height * m.h;
-      var column = nearestColumn(vbX);
-      if (column) { showHover(column, vbY); }
+      if (!isHoverPointer(event)) {
+        // A finger that travels past the tap slop is scrolling the page, not
+        // picking a point, so the selection it opened is dropped.
+        if (pinned && pinOrigin) {
+          var dx = event.clientX - pinOrigin.x;
+          var dy = event.clientY - pinOrigin.y;
+          if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { release("drag"); }
+        }
+        return;
+      }
+      var hovered = resolveColumn(event);
+      if (hovered.column) { showHover(hovered.column, hovered.at.y); }
     });
-    overlay.addEventListener("pointerleave", hideHover);
+    overlay.addEventListener("pointerleave", function (event) {
+      // A finger's pointerleave arrives as it lifts off the glass; only a
+      // mouse leaving the plot means its hover is over.
+      if (isHoverPointer(event)) { release("pointer-leave"); }
+    });
+    // Touch and pen select by tapping: the nearest column opens and stays up
+    // until the next interaction, and a tap on another point moves it there.
+    overlay.addEventListener("pointerdown", function (event) {
+      if (isHoverPointer(event)) { return; }
+      var kind = pointerKind(event);
+      var tapped = resolveColumn(event);
+      if (!tapped.column) {
+        // Nothing to open, so the tap is reported and any selection already
+        // showing is cleared rather than left behind as a stale reading.
+        traceSelection("skip", tapped.reason, columns.length);
+        release("skipped-tap");
+        return;
+      }
+      // Tracing the move apart from the open is what shows a trace reader that
+      // a second tap replaced the first selection instead of adding to it.
+      var moved = pinned;
+      pin(event, kind);
+      showHover(tapped.column, tapped.at.y);
+      traceSelection(
+        moved ? "move" : "open", kind, tapped.column.points.length);
+    });
+    // The browser claims the gesture once it decides a touch is a scroll.
+    overlay.addEventListener("pointercancel", function (event) {
+      if (!isHoverPointer(event)) { release("pointer-cancel"); }
+    });
+
+    // Lets a re-render drop this canvas's page-level listeners with it.
+    return function () { release("redraw"); };
   }
 
   function renderLegend() {

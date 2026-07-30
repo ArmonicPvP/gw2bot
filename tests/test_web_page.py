@@ -3,6 +3,44 @@ import re
 from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE
 
 
+def _call_arguments(source: str, name: str) -> list[list[str]]:
+    """Return the argument list of every ``name(...)`` call in ``source``.
+
+    Arguments are split on top-level commas with runs of whitespace collapsed,
+    so a call spread over several lines reads the same as an inline one.
+    """
+    calls: list[list[str]] = []
+    for match in re.finditer(r"\b" + re.escape(name) + r"\(", source):
+        if source[:match.start()].rstrip().endswith("function"):
+            continue  # the declaration's parameter list, not a call
+        depth = 1
+        index = match.end()
+        while depth and index < len(source):
+            if source[index] == "(":
+                depth += 1
+            elif source[index] == ")":
+                depth -= 1
+            index += 1
+        assert not depth, "unbalanced call to %s" % name
+        inner = source[match.end():index - 1]
+        args: list[str] = []
+        depth = 0
+        current = ""
+        for char in inner:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            if char == "," and not depth:
+                args.append(current)
+                current = ""
+            else:
+                current += char
+        args.append(current)
+        calls.append([" ".join(arg.split()) for arg in args])
+    return calls
+
+
 class TestCalendarMarkdown:
     def test_renders_discord_subtext_lines(self) -> None:
         assert 'var subtext = /^-#\\s+(.*)$/.exec(line);' in CALENDAR_PAGE
@@ -236,6 +274,166 @@ class TestFoodPage:
         assert 'addEventListener("pointermove"' in FOOD_PAGE
         assert 'addEventListener("pointerleave"' in FOOD_PAGE
         assert '"chart-tooltip"' in FOOD_PAGE
+
+    def test_a_tap_selects_a_point_instead_of_hovering_it(self) -> None:
+        # A finger gets one pointermove at the tap point and then a
+        # pointerleave as it lifts, which made the crosshair flash and vanish.
+        # Touch and pen are routed to a pointerdown selection instead and are
+        # filtered out of the move and leave handlers.
+        assert "function isHoverPointer(event) {" in FOOD_PAGE
+        assert (
+            'return !event.pointerType || event.pointerType === "mouse";'
+            in FOOD_PAGE
+        )
+        assert 'overlay.addEventListener("pointerdown", function (event) {' in (
+            FOOD_PAGE
+        )
+        assert "if (isHoverPointer(event)) { return; }" in FOOD_PAGE
+        # The leave that ends a mouse hover must not end a touch selection.
+        assert 'if (isHoverPointer(event)) { release("pointer-leave"); }' in (
+            FOOD_PAGE
+        )
+
+    def test_a_tapped_selection_stays_until_the_next_interaction(self) -> None:
+        # While a selection is pinned the page is watched for anything else the
+        # reader does, and each of those listeners is dropped again on release
+        # so a hover from a mouse never leaves one behind.
+        for event_name in ("pointerdown", "wheel", "keydown"):
+            assert (
+                'document.addEventListener("%s", dismiss, true);' % event_name
+                in FOOD_PAGE
+            )
+            assert (
+                'document.removeEventListener("%s", dismiss, true);'
+                % event_name in FOOD_PAGE
+            )
+        assert 'window.addEventListener("blur", dismiss);' in FOOD_PAGE
+        assert 'window.removeEventListener("blur", dismiss);' in FOOD_PAGE
+        # A tap on another point reaches the overlay after the page-level
+        # listener, so the overlay's own handler is left to move the selection
+        # rather than the dismissal wiping it first.
+        assert "if (isRetargetingTap(event)) {" in FOOD_PAGE
+
+    def test_only_a_tap_is_exempt_from_dismissing_the_selection(self) -> None:
+        # The exemption is what keeps a second tap from clearing the selection
+        # it is meant to move. It must cover nothing else: a wheel over the
+        # plot and a mouse press on it are aimed at the overlay too, but the
+        # overlay's pointerdown handler ignores both, so exempting them would
+        # strand the selection on screen with nothing left to clear it.
+        assert "function isRetargetingTap(event) {" in FOOD_PAGE
+        body = FOOD_PAGE.split("function isRetargetingTap(event) {", 1)[1]
+        body = body.split("\n    }", 1)[0]
+        # A wheel carries no pointerType, so the hover test alone rejects it;
+        # the type test is what rejects a press from a mouse.
+        assert 'event.type === "pointerdown"' in body
+        assert "event.target === overlay" in body
+        assert "!isHoverPointer(event)" in body
+
+    def test_a_scrolling_finger_drops_the_selection(self) -> None:
+        # A touch that travels past the tap slop, or that the browser claims
+        # for a scroll outright, is not a point selection.
+        assert "var TAP_SLOP = 12;" in FOOD_PAGE
+        assert (
+            'if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { release("drag"); }'
+            in FOOD_PAGE
+        )
+        assert 'overlay.addEventListener("pointercancel"' in FOOD_PAGE
+        assert 'if (!isHoverPointer(event)) { release("pointer-cancel"); }' in (
+            FOOD_PAGE
+        )
+
+    def test_a_redraw_releases_the_previous_charts_listeners(self) -> None:
+        # attachHover hands back its teardown so the page-level listeners of a
+        # pinned selection cannot outlive the canvas that opened them.
+        assert "detachHover = attachHover(canvas, plotted);" in FOOD_PAGE
+        assert "if (detachHover) { detachHover(); detachHover = null; }" in (
+            FOOD_PAGE
+        )
+        assert 'return function () { release("redraw"); };' in FOOD_PAGE
+
+    def test_every_touch_selection_outcome_is_traced(self) -> None:
+        # A tap can pin, open, move, skip or release a selection, and each
+        # outcome names itself in the console so a trace explains why a chart
+        # selection appeared or went away.
+        assert "function traceSelection(action, reason, count) {" in FOOD_PAGE
+        traced = _call_arguments(FOOD_PAGE, "traceSelection")
+        actions = {call[0] for call in traced}
+        assert actions == {
+            '"release"',
+            '"keep"',
+            '"pin"',
+            '"skip"',
+            'moved ? "move" : "open"',
+        }
+        # Every way a pinned selection can end reaches release() with a fixed
+        # reason name, so none of them can clear the chart untraced.
+        released = {call[0] for call in _call_arguments(FOOD_PAGE, "release")}
+        assert released == {
+            '"drag"',
+            '"pointer-leave"',
+            '"pointer-cancel"',
+            '"skipped-tap"',
+            '"redraw"',
+            '"page-" + eventKind(event)',
+        }
+        # Each skip a tap can take has its own reason rather than a shared
+        # "nothing happened".
+        assert '{ column: null, reason: "no-samples" }' in FOOD_PAGE
+        assert '{ column: null, reason: "unsized-canvas" }' in FOOD_PAGE
+        assert '{ column: null, reason: "no-nearest" }' in FOOD_PAGE
+
+    def test_selection_traces_carry_no_payload_or_coordinates(self) -> None:
+        # The trace must stay sanitized: fixed action and reason names plus a
+        # count of drawn elements. A pointer coordinate, a sample timestamp, a
+        # stock value or a feast name must never be passed to it.
+        allowed = re.compile(
+            r"""^(
+                "[a-z-]+"                        # fixed action or reason name
+                | moved\ \?\ "move"\ :\ "open"   # which of the two a tap was
+                | kind | reason | action | count # narrowed or forwarded names
+                | tapped\.reason                 # fixed name from resolveColumn
+                | columns\.length                # count of drawn columns
+                | tapped\.column\.points\.length # count of dots in the column
+            )$""",
+            re.X,
+        )
+        for call in _call_arguments(FOOD_PAGE, "traceSelection"):
+            assert len(call) == 3, call
+            for arg in call:
+                assert allowed.match(arg), arg
+        for call in _call_arguments(FOOD_PAGE, "release"):
+            assert len(call) == 1, call
+            assert allowed.match(call[0]) or call[0] == (
+                '"page-" + eventKind(event)'
+            ), call
+
+    def test_traced_pointer_and_event_names_are_narrowed(self) -> None:
+        # pointerType and type are reflected into the console, so both are
+        # mapped onto a closed set of spec names first.
+        assert "function pointerKind(event) {" in FOOD_PAGE
+        assert "function eventKind(event) {" in FOOD_PAGE
+        for helper in ("pointerKind", "eventKind"):
+            body = FOOD_PAGE.split("function %s(event) {" % helper, 1)[1]
+            body = body.split("\n  }", 1)[0]
+            assert 'return "other";' in body
+        assert (
+            'if (kind === "mouse" || kind === "pen" || kind === "touch") {'
+            in FOOD_PAGE
+        )
+        assert 'if (name === "pointerdown" || name === "wheel" ||' in FOOD_PAGE
+        assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
+
+    def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
+        # Two console calls exist on this page and no others: the sanitized
+        # selection trace, and the load failure that logs an error's type and
+        # message. Anything else would be an unreviewed path to the console.
+        assert re.findall(r"console\.\w+", FOOD_PAGE) == [
+            "console.debug",
+            "console.error",
+        ]
+        assert _call_arguments(FOOD_PAGE, "console.debug") == [
+            ['"feast chart selection:"', "action", "reason", "count"]
+        ]
 
     def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:
         # The hover was written against fixed chart constants that the mobile
