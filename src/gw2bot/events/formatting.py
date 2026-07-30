@@ -34,6 +34,8 @@ EVENT_DURATION_PATTERN = re.compile(r"^(\d{1,3}):([0-5]\d)$")
 EMBED_FIELD_VALUE_LIMIT = 1024
 EMBED_TOTAL_LIMIT = 6000
 EMBED_TITLE_LIMIT = 256
+# Discord's cap on a thread (and therefore forum post) name.
+THREAD_NAME_LIMIT = 100
 EMPTY_FIELD_TEXT = "—"
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
@@ -237,6 +239,28 @@ def event_thread_name(
         f"{STATUS_EMOJI[status]} | {start_local:%m.%d.%Y} | "
         f"{start_local:%H:%M}"
     )
+
+
+def event_post_name(
+    status: EventStatus,
+    title: str,
+    start_time: datetime,
+    timezone: ZoneInfo,
+) -> str:
+    # A forum post's name is the event's public heading in the forum listing,
+    # where the surrounding message is not visible, so it carries the event
+    # title as well as the status and start that event_thread_name shows for a
+    # thread hanging under a readable message. A user-entered title can be far
+    # longer than Discord's 100-character thread name limit, so the title is
+    # truncated rather than letting the API reject the whole post.
+    start_local = start_time.astimezone(timezone)
+    suffix = f" | {start_local:%m.%d.%Y} | {start_local:%H:%M}"
+    prefix = f"{STATUS_EMOJI[status]} | "
+    budget = THREAD_NAME_LIMIT - len(prefix) - len(suffix)
+    if len(title) > budget:
+        keep = budget - len(_TRUNCATION_MARKER)
+        title = title[:keep].rstrip() + _TRUNCATION_MARKER
+    return f"{prefix}{title}{suffix}"
 
 
 def format_role_groups(roles: tuple[EventRole, ...]) -> str:

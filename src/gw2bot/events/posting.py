@@ -13,6 +13,7 @@ from gw2bot.discord_utils import discord_failure_reason, log_discord_failure
 from gw2bot.events.formatting import (
     compute_status,
     event_embed,
+    event_post_name,
     event_thread_name,
     next_occurrence_start,
     roster_update_message,
@@ -45,12 +46,41 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# Forum and media channels hold posts instead of messages: a message can only be
+# sent to one by opening a post (a thread) for it, so an event targeting one is
+# published as its own post rather than as a message with a thread hanging off
+# it. Both channel types create posts the same way.
+POST_CHANNEL_TYPES = frozenset(
+    {discord.ChannelType.forum, discord.ChannelType.media}
+)
+# Discord's longest auto-archive window (7 days). An event's post is opened as
+# soon as the event is created, which can be days before it starts, and an
+# archived post rejects the message edits that keep the embed and the roster
+# current, so the post is given the longest window Discord allows.
+POST_AUTO_ARCHIVE_MINUTES = 10080
+
 
 async def resolve_channel(bot: Gw2Bot, channel_id: int) -> Any:
     channel = bot.get_channel(channel_id)
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
     return channel
+
+
+def is_post_channel(channel: Any) -> bool:
+    return getattr(channel, "type", None) in POST_CHANNEL_TYPES
+
+
+def occurrence_is_post(occurrence: EventOccurrence) -> bool:
+    # An occurrence posted to a forum lives *in* its own post: the post is both
+    # the channel its message was sent to and the thread members discuss it in,
+    # so the two stored ids are the same. An occurrence posted to a text channel
+    # has a message in the channel and a separate thread under it, so they
+    # differ. Rows written before either id was tracked read as a plain message.
+    return (
+        occurrence.thread_id is not None
+        and occurrence.channel_id == occurrence.thread_id
+    )
 
 
 def occurrence_channel_id(event: Event, occurrence: EventOccurrence) -> int:
@@ -109,26 +139,65 @@ async def post_occurrence(
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
     channel = await resolve_channel(bot, event.channel_id)
-    message = await channel.send(
-        embed=occurrence_embed(event, occurrence, signups, now),
-        view=build_signup_view(occurrence.occurrence_id),
-    )
+    embed = occurrence_embed(event, occurrence, signups, now)
+    view = build_signup_view(occurrence.occurrence_id)
+    is_forum = is_post_channel(channel)
     thread_id: int | None = None
-    try:
-        thread = await message.create_thread(
-            name=event_thread_name(
-                status,
-                occurrence.start_time,
-                bot.event_timezone,
-            ),
-        )
-        thread_id = thread.id
-    except discord.HTTPException as exc:
-        LOGGER.error(
-            "Could not create event thread; occurrence_id=%s error_type=%s",
-            occurrence.occurrence_id,
-            type(exc).__name__,
-        )
+    if is_forum:
+        # A forum takes no plain messages, so the event is published by opening
+        # a post whose starter message carries the embed and the signup buttons.
+        # Unlike the thread below, that post is the message: a failure here is a
+        # failed post and must propagate to the caller.
+        try:
+            created = await channel.create_thread(
+                name=event_post_name(
+                    status,
+                    event.title,
+                    occurrence.start_time,
+                    bot.event_timezone,
+                ),
+                embed=embed,
+                view=view,
+                auto_archive_duration=POST_AUTO_ARCHIVE_MINUTES,
+                reason="Post a GW2 guild event",
+            )
+        except discord.HTTPException as exc:
+            # Record the sanitized Discord status and code before re-raising:
+            # a forum refuses a post for reasons a plain send never hits, such
+            # as a forum that requires a tag on every new post (400), and the
+            # caller only reports that the post failed.
+            log_discord_failure(
+                "Could not open the event forum post; reason=%s "
+                "occurrence_id=%s required_permissions="
+                "view_channel,send_messages,create_public_threads",
+                exc,
+                discord_failure_reason(exc),
+                occurrence.occurrence_id,
+            )
+            raise
+        message = created.message
+        thread_id = created.thread.id
+        # The starter message lives in the post, not in the forum, so that is
+        # the channel every later edit and delete has to address.
+        message_channel_id = created.thread.id
+    else:
+        message = await channel.send(embed=embed, view=view)
+        message_channel_id = event.channel_id
+        try:
+            thread = await message.create_thread(
+                name=event_thread_name(
+                    status,
+                    occurrence.start_time,
+                    bot.event_timezone,
+                ),
+            )
+            thread_id = thread.id
+        except discord.HTTPException as exc:
+            LOGGER.error(
+                "Could not create event thread; occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
     try:
         # Write the status before the message id. The message id marks the
         # occurrence as posted, so persisting it last keeps the sequence
@@ -139,7 +208,7 @@ async def post_occurrence(
         bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
         bot.event_store.set_occurrence_message(
             occurrence.occurrence_id,
-            event.channel_id,
+            message_channel_id,
             message.id,
             thread_id,
         )
@@ -156,10 +225,11 @@ async def post_occurrence(
         raise
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
-        "thread_created=%s signups=%s",
+        "forum_post=%s thread_created=%s signups=%s",
         event.event_id,
         occurrence.occurrence_id,
         status.value,
+        is_forum,
         thread_id is not None,
         len(signups),
     )
@@ -231,6 +301,10 @@ async def refresh_occurrence_message(
     status = occurrence_status(event, occurrence, signups, now)
     message_refreshed = True
     if occurrence.message_id is not None:
+        # Discord rejects edits inside an archived post, so reopen it first;
+        # otherwise every refresh would fail and the occurrence would sit dirty
+        # with a stale embed until it was retired.
+        await _reopen_occurrence_post(bot, occurrence)
         try:
             channel = await resolve_channel(
                 bot,
@@ -292,6 +366,7 @@ async def refresh_occurrence_message(
     ):
         thread_renamed = await _rename_occurrence_thread(
             bot,
+            event,
             occurrence,
             status,
         )
@@ -340,17 +415,81 @@ async def refresh_occurrence_message(
     return status
 
 
+async def _reopen_occurrence_post(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+) -> None:
+    # Only a forum post can hold the occurrence's message, and Discord archives
+    # a post after a stretch of inactivity - an event created a week ahead can
+    # reach its start with nobody having spoken in it. Editing a message in an
+    # archived post is refused, so unarchive it before the refresh. A failure
+    # here is only logged: the edit that follows reports the real outcome and
+    # marks the occurrence dirty for the next pass.
+    thread_id = occurrence.thread_id
+    if thread_id is None or not occurrence_is_post(occurrence):
+        return
+    try:
+        post = await resolve_channel(bot, thread_id)
+    except discord.NotFound:
+        # The post was deleted. The caller's own edit reports the same thing and
+        # retires the occurrence, so this is expected rather than a failure.
+        LOGGER.debug(
+            "Event forum post is gone; skipping reopen; occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not resolve event forum post before a refresh; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return
+    if not getattr(post, "archived", False):
+        return
+    try:
+        await post.edit(archived=False, reason="Refresh a GW2 guild event")
+    except discord.HTTPException as exc:
+        log_discord_failure(
+            "Could not reopen archived event forum post; reason=%s "
+            "occurrence_id=%s required_permissions=manage_threads",
+            exc,
+            discord_failure_reason(exc),
+            occurrence.occurrence_id,
+        )
+        return
+    LOGGER.debug(
+        "Reopened archived event forum post; occurrence_id=%s",
+        occurrence.occurrence_id,
+    )
+
+
 async def _rename_occurrence_thread(
     bot: Gw2Bot,
+    event: Event,
     occurrence: EventOccurrence,
     status: EventStatus,
 ) -> bool:
     if occurrence.thread_id is None:
         return True
-    name = event_thread_name(
-        status,
-        occurrence.start_time,
-        bot.event_timezone,
+    # A forum post's name is the event's heading in the forum listing, so it
+    # carries the title too; a thread hangs under a message that already shows
+    # it. Both encode the status and start, which is why either is renamed
+    # whenever the status changes or the occurrence is rescheduled.
+    name = (
+        event_post_name(
+            status,
+            event.title,
+            occurrence.start_time,
+            bot.event_timezone,
+        )
+        if occurrence_is_post(occurrence)
+        else event_thread_name(
+            status,
+            occurrence.start_time,
+            bot.event_timezone,
+        )
     )
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
@@ -574,6 +713,11 @@ async def update_thread_membership(
 ) -> None:
     if occurrence.thread_id is None:
         return
+    # An archived forum post refuses both the membership change here and the
+    # roster announcement that follows it, so reopen it first. This is the first
+    # thread call of every signup flow; the refresh at the end of the flow relies
+    # on the same reopen.
+    await _reopen_occurrence_post(bot, occurrence)
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         member = discord.Object(id=discord_user_id)

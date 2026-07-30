@@ -24,8 +24,10 @@ from gw2bot.events.models import (
 )
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
+    EVENT_CHANNEL_TYPES,
     AutoSignupChoiceView,
     ChannelMoveConfirmView,
+    ChannelPickSelect,
     DisableAutoSignupView,
     EditSignupFlow,
     EditWaitlistConfirmView,
@@ -151,6 +153,23 @@ class TestEventDraft:
         assert event.event_id == 9
         assert event.category is EventCategory.RAID
         assert event.repeat_days == (6,)
+
+
+class TestEventChannelChoices:
+    """An event may be posted to a text channel or to a forum as its own post."""
+
+    def test_details_modal_offers_forum_channels(self) -> None:
+        modal = EventDetailsModal(make_bot(), EventDraft(leader_discord_id=42))
+
+        assert discord.ChannelType.text in modal.channel.channel_types
+        assert discord.ChannelType.forum in modal.channel.channel_types
+        assert discord.ChannelType.media in modal.channel.channel_types
+
+    def test_change_channel_picker_offers_forum_channels(self) -> None:
+        select = ChannelPickSelect()
+
+        assert set(select.channel_types) == set(EVENT_CHANNEL_TYPES)
+        assert discord.ChannelType.forum in select.channel_types
 
 
 class TestEventDetailsModal:

@@ -69,6 +69,19 @@ ONGOING_EDIT_REJECTION = (
 )
 PREVIEW_EVENT_ID_TEXT = "—"
 
+# Where an event may be posted. A text channel takes the event as a message with
+# a signup thread under it; a forum or media channel takes it as its own post,
+# which doubles as that thread.
+EVENT_CHANNEL_TYPES = [
+    discord.ChannelType.text,
+    discord.ChannelType.forum,
+    discord.ChannelType.media,
+]
+# Discord caps a Label's text at 45 characters, so the forum hint rides along in
+# the Label description instead of the prompt itself.
+EVENT_CHANNEL_PROMPT = "What channel should your event be posted in?"
+EVENT_CHANNEL_HINT = "A forum or media channel gets its own event post."
+
 # Discord's hard cap on how many options one select may hold, which is also the
 # most it may return. A WvW roster seats 50 plus a waitlist, so the removal
 # picker pages the roster at this size.
@@ -458,12 +471,13 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
             )
         )
         self.channel = discord.ui.ChannelSelect["EventDetailsModal"](
-            channel_types=[discord.ChannelType.text],
+            channel_types=EVENT_CHANNEL_TYPES,
             required=True,
         )
         self.add_item(
             discord.ui.Label(
-                text="What channel should your event be posted in?",
+                text=EVENT_CHANNEL_PROMPT,
+                description=EVENT_CHANNEL_HINT,
                 component=self.channel,
             )
         )
@@ -883,9 +897,9 @@ class EventEditConfirmView(_PreviewConfirmView):
             await interaction.response.edit_message(
                 content=(
                     "Changing the channel will **delete the current event "
-                    "message and its thread**, including every message posted "
-                    "in that thread. The roster is kept and re-posted in the "
-                    "new channel. Continue?"
+                    "message and its thread** — in a forum, the whole event "
+                    "post — including every message posted there. The roster "
+                    "is kept and re-posted in the new channel. Continue?"
                 ),
                 embeds=[],
                 view=ChannelMoveConfirmView(
@@ -1983,7 +1997,7 @@ class ChangeFieldView(discord.ui.View):
             return
         if choice == "channel":
             await interaction.response.edit_message(
-                content="What channel should your event be posted in?",
+                content=f"{EVENT_CHANNEL_PROMPT} {EVENT_CHANNEL_HINT}",
                 view=ChannelPickView(self._bot, self._draft),
             )
             return
@@ -2106,7 +2120,7 @@ class CategoryPickView(discord.ui.View):
 
 class ChannelPickSelect(discord.ui.ChannelSelect["ChannelPickView"]):
     def __init__(self):
-        super().__init__(channel_types=[discord.ChannelType.text])
+        super().__init__(channel_types=EVENT_CHANNEL_TYPES)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view

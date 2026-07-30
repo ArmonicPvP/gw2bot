@@ -76,14 +76,45 @@ forum channel `1317206104727621693` so it can link Trial applications to
 Discord members. Grant `Manage Threads` in that forum channel so the bot can
 automatically tag new posts as `In Review`.
 
-Any channel selected with `/event new` needs `View Channel`, `Send Messages`,
-and `Create Public Threads` so the bot can post the event and open its signup
-thread. It also needs `Manage Threads` there: moving an event to a new
-channel, pruning a superseded recurring occurrence, and deleting an event all
-delete that occurrence's thread explicitly, because Discord does not remove a
-thread on its own when its starter message is deleted. Without `Manage
-Threads` those operations still remove the message but log a `50013`
-(`missing_permissions`) error and leave the orphaned thread behind.
+## Guild Event Destinations
+
+`/event new` (and **Change something → Channel** on an existing event) can post
+an event to a text channel or to a forum or media channel:
+
+- **Text channel** — the event is sent as a message and the bot opens a signup
+  thread under it, named `<status> | MM.dd.yyyy | HH:mm`.
+- **Forum or media channel** — the event becomes its own post. The post's
+  starter message carries the event embed and the sign-up buttons, and the post
+  itself is the signup thread, so roster changes are announced in it and members
+  who sign up are added to it. The post is named
+  `<status> | <title> | MM.dd.yyyy | HH:mm`, with the title truncated to fit
+  Discord's 100-character thread name limit.
+
+Either way the name is refreshed whenever the status changes or the occurrence is
+rescheduled, and moving an event between a channel and a forum is supported: the
+current message (in a forum, the whole post) is deleted and the roster is
+re-posted at the new destination.
+
+A forum post is opened with the longest auto-archive window Discord allows
+(7 days), because an event can be created well before it starts. A post that
+Discord archives anyway is reopened before each refresh, since an archived post
+rejects the message edits that keep the embed and roster current; reopening
+needs `Manage Threads`.
+
+A forum that requires a tag on every new post is not supported. The bot applies
+no tags, so Discord refuses the post: the event reports that it could not be
+posted, and the failure is logged with the Discord status and error code.
+
+Any channel selected for an event needs `View Channel`, `Send Messages`, and
+`Create Public Threads` so the bot can post the event and open its signup thread
+(in a forum, Discord presents `Send Messages` as `Create Posts`), plus
+`Send Messages in Threads` so it can announce roster changes there. It also
+needs `Manage Threads`: moving an event to a new channel, pruning a superseded
+recurring occurrence, and deleting an event all delete that occurrence's thread
+explicitly, because Discord does not remove a thread on its own when its starter
+message is deleted. Without `Manage Threads` those operations still remove the
+message but log a `50013` (`missing_permissions`) error and leave the orphaned
+thread behind.
 
 ## Feast Stock Alerts
 
