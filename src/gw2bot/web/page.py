@@ -1857,13 +1857,23 @@ button:focus-visible {
     // tap elsewhere on the page, a wheel, a key, or the window losing focus.
     function dismiss(event) {
       // A tap that moves the selection to another column reaches the overlay
-      // after this capture listener has already run, so an event aimed at the
-      // overlay is left to the overlay's own handler to act on.
-      if (event && event.target === overlay) {
+      // after this capture listener has already run, so it is left to the
+      // overlay's own handler. Only a tap earns that exemption: a wheel over
+      // the plot, or a mouse press on it, is aimed at the overlay too, but the
+      // handler there acts on neither, so waving those through would strand
+      // the selection on screen with nothing left to clear it.
+      if (isRetargetingTap(event)) {
         traceSelection("keep", "retarget-on-plot", columns.length);
         return;
       }
       release("page-" + eventKind(event));
+    }
+
+    // True only for the events the overlay's pointerdown handler will act on,
+    // which is what makes leaving them to it safe.
+    function isRetargetingTap(event) {
+      return !!event && event.type === "pointerdown" &&
+        event.target === overlay && !isHoverPointer(event);
     }
 
     function pin(event, kind) {

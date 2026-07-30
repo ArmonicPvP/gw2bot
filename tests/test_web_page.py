@@ -312,7 +312,22 @@ class TestFoodPage:
         # A tap on another point reaches the overlay after the page-level
         # listener, so the overlay's own handler is left to move the selection
         # rather than the dismissal wiping it first.
-        assert "if (event && event.target === overlay) {" in FOOD_PAGE
+        assert "if (isRetargetingTap(event)) {" in FOOD_PAGE
+
+    def test_only_a_tap_is_exempt_from_dismissing_the_selection(self) -> None:
+        # The exemption is what keeps a second tap from clearing the selection
+        # it is meant to move. It must cover nothing else: a wheel over the
+        # plot and a mouse press on it are aimed at the overlay too, but the
+        # overlay's pointerdown handler ignores both, so exempting them would
+        # strand the selection on screen with nothing left to clear it.
+        assert "function isRetargetingTap(event) {" in FOOD_PAGE
+        body = FOOD_PAGE.split("function isRetargetingTap(event) {", 1)[1]
+        body = body.split("\n    }", 1)[0]
+        # A wheel carries no pointerType, so the hover test alone rejects it;
+        # the type test is what rejects a press from a mouse.
+        assert 'event.type === "pointerdown"' in body
+        assert "event.target === overlay" in body
+        assert "!isHoverPointer(event)" in body
 
     def test_a_scrolling_finger_drops_the_selection(self) -> None:
         # A touch that travels past the tap slop, or that the browser claims
