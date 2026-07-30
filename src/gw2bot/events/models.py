@@ -13,6 +13,7 @@ EMOJI_RAID = "<:raid:1525431773498970172>"
 EMOJI_STRIKE = "<:strike:1525431254340866171>"
 EMOJI_WVW = "<:wvw:1525431137982353428>"
 EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
+EMOJI_OPEN_WORLD = "🌍"
 
 
 class EventCategory(StrEnum):
@@ -20,6 +21,7 @@ class EventCategory(StrEnum):
     STRIKE = "Strike"
     FRACTAL = "Fractal"
     WVW = "World vs. World"
+    OPEN_WORLD = "Open World"
 
 
 CATEGORY_EMOJI: dict[EventCategory, str] = {
@@ -27,6 +29,7 @@ CATEGORY_EMOJI: dict[EventCategory, str] = {
     EventCategory.STRIKE: EMOJI_STRIKE,
     EventCategory.FRACTAL: EMOJI_FRACTAL,
     EventCategory.WVW: EMOJI_WVW,
+    EventCategory.OPEN_WORLD: EMOJI_OPEN_WORLD,
 }
 
 
@@ -147,6 +150,9 @@ CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
         required_boon_dps=1,
     ),
     EventCategory.WVW: CategoryCapacity(50, None, None, None, None),
+    # Open world squads are the same shape as WvW: a plain 50-seat headcount
+    # with no role or boon requirements.
+    EventCategory.OPEN_WORLD: CategoryCapacity(50, None, None, None, None),
 }
 
 
@@ -544,9 +550,9 @@ def rebalance_signups(
     A signup's assigned_role and waitlisted flag only mean anything relative to
     the capacity it was seated against, so changing an event's category
     invalidates every stored assignment. The worst case is a role-less category
-    (WvW), whose signups carry no assigned_role at all: a role-based capacity
-    reads that roster as zero healers and zero DPS and keeps admitting on top of
-    it, so the roster overfills and the embed shows seats nobody holds.
+    (WvW, Open World), whose signups carry no assigned_role at all: a role-based
+    capacity reads that roster as zero healers and zero DPS and keeps admitting
+    on top of it, so the roster overfills and the embed shows seats nobody holds.
 
     Signups are re-seated in sign-up order, so seats stay first come, first
     served. Each is offered its own role and flex roles, widened with a plain
