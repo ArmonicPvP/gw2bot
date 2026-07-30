@@ -76,14 +76,54 @@ forum channel `1317206104727621693` so it can link Trial applications to
 Discord members. Grant `Manage Threads` in that forum channel so the bot can
 automatically tag new posts as `In Review`.
 
-Any channel selected with `/event new` needs `View Channel`, `Send Messages`,
-and `Create Public Threads` so the bot can post the event and open its signup
-thread. It also needs `Manage Threads` there: moving an event to a new
-channel, pruning a superseded recurring occurrence, and deleting an event all
-delete that occurrence's thread explicitly, because Discord does not remove a
-thread on its own when its starter message is deleted. Without `Manage
-Threads` those operations still remove the message but log a `50013`
-(`missing_permissions`) error and leave the orphaned thread behind.
+## Guild Event Destinations
+
+`/event new` (and **Change something → Channel** on an existing event) can post
+an event to a text channel or into a forum post that already exists:
+
+- **Text channel** — the event is sent as a message and the bot opens a signup
+  thread under it, named `<status> | MM.dd.yyyy | HH:mm` and renamed whenever the
+  status changes or the occurrence is rescheduled.
+- **Existing forum post** — the event is sent as a message inside the post,
+  which stands in for the signup thread, since a forum post cannot hold threads
+  of its own. Roster changes are announced in the post, and members who sign up
+  are added to it. Nobody is ever removed from it, because its members are not
+  one event's roster — the same post can hold several events, and members join
+  it just to read it. Removing someone who signed out of one event would drop
+  them from the others. Members leave the post themselves when they are done
+  with it.
+
+Forum *channels* are not offered, so the bot never opens a forum post of its own.
+Threads under a text channel are not supported either: Discord's picker cannot
+narrow public threads down to forum posts, so a thread picked from a text channel
+is refused on submission and the picker reopens. An archived forum post may not
+appear in the picker at all until someone reopens it.
+
+A post the event was only sent into is never renamed and never deleted:
+`/event delete`, a channel move, and a superseded recurring occurrence each
+remove only the event's own message and leave the post (and everything else in
+it) standing. Each event in a shared post therefore manages just its own message.
+
+Moving an event between a channel and a post works in both directions. Because
+the roster is keyed to the occurrence rather than to the message, the message is
+re-sent at the new destination and the roster carries over.
+
+Discord archives a quiet post and then refuses messages and message edits in it,
+so a dormant post is reopened before the bot posts an event, announces a roster
+change, or refreshes an embed in it. Reopening needs `Manage Threads`; without it
+the update is logged as a `50013` (`missing_permissions`) failure and retried on
+the next maintenance pass.
+
+Any destination selected for an event needs `View Channel` and `Send Messages`.
+A text channel also needs `Create Public Threads` for the signup thread, and
+`Manage Threads`: moving an event to a new channel, pruning a superseded
+recurring occurrence, and deleting an event all delete that occurrence's signup
+thread explicitly, because Discord does not remove a thread on its own when its
+starter message is deleted. Without `Manage Threads` those operations still
+remove the message but log a `50013` (`missing_permissions`) error and leave the
+orphaned thread behind. A forum post destination needs `Send Messages in Threads`
+instead of `Send Messages`, and `Manage Threads` only to reopen it once Discord
+has archived it.
 
 ## Feast Stock Alerts
 

@@ -45,12 +45,43 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# An event can be posted into a forum post, which Discord models as a thread.
+# The bot never opens one: the post belongs to whoever created it, so the event
+# is only a message inside it. Every thread type is listed because this answers
+# the mechanical question "does the message live in the thread itself?" - the
+# picker in views.py is what limits the choice to forum posts.
+THREAD_CHANNEL_TYPES = frozenset(
+    {
+        discord.ChannelType.public_thread,
+        discord.ChannelType.private_thread,
+        discord.ChannelType.news_thread,
+    }
+)
+
 
 async def resolve_channel(bot: Gw2Bot, channel_id: int) -> Any:
     channel = bot.get_channel(channel_id)
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
     return channel
+
+
+def is_thread_channel(channel: Any) -> bool:
+    return getattr(channel, "type", None) in THREAD_CHANNEL_TYPES
+
+
+def occurrence_posted_in_thread(occurrence: EventOccurrence) -> bool:
+    # True when the event was posted into a forum post rather than into a
+    # channel: the post is then both the channel the message was sent to and the
+    # thread members discuss it in, so the two stored ids are the same. An
+    # occurrence posted to a text channel has its message in the channel and a
+    # signup thread the bot opened under it, so they differ. Such a thread is the
+    # bot's to rename and delete; a post it was merely posted into is not.
+    # Rows written before either id was tracked read as a plain channel message.
+    return (
+        occurrence.thread_id is not None
+        and occurrence.channel_id == occurrence.thread_id
+    )
 
 
 def occurrence_channel_id(event: Event, occurrence: EventOccurrence) -> int:
@@ -109,26 +140,40 @@ async def post_occurrence(
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
     channel = await resolve_channel(bot, event.channel_id)
-    message = await channel.send(
-        embed=occurrence_embed(event, occurrence, signups, now),
-        view=build_signup_view(occurrence.occurrence_id),
-    )
+    embed = occurrence_embed(event, occurrence, signups, now)
+    view = build_signup_view(occurrence.occurrence_id)
+    in_thread = is_thread_channel(channel)
     thread_id: int | None = None
-    try:
-        thread = await message.create_thread(
-            name=event_thread_name(
-                status,
-                occurrence.start_time,
-                bot.event_timezone,
-            ),
-        )
-        thread_id = thread.id
-    except discord.HTTPException as exc:
-        LOGGER.error(
-            "Could not create event thread; occurrence_id=%s error_type=%s",
-            occurrence.occurrence_id,
-            type(exc).__name__,
-        )
+    if in_thread:
+        # Discord refuses messages in an archived thread, and a forum post can
+        # have been dormant for weeks before an event is posted into it.
+        await _reopen_thread(channel, occurrence.occurrence_id)
+    message = await channel.send(embed=embed, view=view)
+    if in_thread:
+        # The event went into a forum post that already exists. Nothing is
+        # created there - a forum post cannot hold threads of its own - and the
+        # message lives in the post rather than in its parent forum, so the post
+        # is what every later edit and delete has to address, and it stands in
+        # for the signup thread the branch below opens for a channel.
+        message_channel_id = channel.id
+        thread_id = channel.id
+    else:
+        message_channel_id = event.channel_id
+        try:
+            thread = await message.create_thread(
+                name=event_thread_name(
+                    status,
+                    occurrence.start_time,
+                    bot.event_timezone,
+                ),
+            )
+            thread_id = thread.id
+        except discord.HTTPException as exc:
+            LOGGER.error(
+                "Could not create event thread; occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
     try:
         # Write the status before the message id. The message id marks the
         # occurrence as posted, so persisting it last keeps the sequence
@@ -139,7 +184,7 @@ async def post_occurrence(
         bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
         bot.event_store.set_occurrence_message(
             occurrence.occurrence_id,
-            event.channel_id,
+            message_channel_id,
             message.id,
             thread_id,
         )
@@ -151,16 +196,21 @@ async def post_occurrence(
             type(exc).__name__,
         )
         await _delete_orphaned_message(
-            bot, message, thread_id, occurrence.occurrence_id
+            bot,
+            message,
+            message_channel_id,
+            thread_id,
+            occurrence.occurrence_id,
         )
         raise
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
-        "thread_created=%s signups=%s",
+        "in_existing_thread=%s thread_created=%s signups=%s",
         event.event_id,
         occurrence.occurrence_id,
         status.value,
-        thread_id is not None,
+        in_thread,
+        thread_id is not None and not in_thread,
         len(signups),
     )
     updated = bot.event_store.get_occurrence(occurrence.occurrence_id)
@@ -170,7 +220,11 @@ async def post_occurrence(
 
 
 async def _delete_orphaned_message(
-    bot: Gw2Bot, message: Any, thread_id: int | None, occurrence_id: int
+    bot: Gw2Bot,
+    message: Any,
+    channel_id: int,
+    thread_id: int | None,
+    occurrence_id: int,
 ) -> None:
     try:
         await message.delete()
@@ -181,17 +235,30 @@ async def _delete_orphaned_message(
             occurrence_id,
             type(exc).__name__,
         )
-    await _delete_occurrence_thread(bot, thread_id, occurrence_id)
+    await _delete_occurrence_thread(bot, channel_id, thread_id, occurrence_id)
 
 
 async def _delete_occurrence_thread(
-    bot: Gw2Bot, thread_id: int | None, occurrence_id: int
+    bot: Gw2Bot,
+    channel_id: int | None,
+    thread_id: int | None,
+    occurrence_id: int,
 ) -> None:
     # Discord does not delete a thread when its starter message is removed;
     # the thread survives as an orphan unless it is deleted separately.
     if thread_id is None:
         LOGGER.debug(
             "No event thread to delete; skipping; occurrence_id=%s",
+            occurrence_id,
+        )
+        return
+    if thread_id == channel_id:
+        # The event was posted into a thread that already existed, so the thread
+        # is not the bot's to remove: deleting it would take the forum post and
+        # everything else in it with the event's message.
+        LOGGER.debug(
+            "Event thread was not created for the event; keeping it; "
+            "occurrence_id=%s",
             occurrence_id,
         )
         return
@@ -231,6 +298,10 @@ async def refresh_occurrence_message(
     status = occurrence_status(event, occurrence, signups, now)
     message_refreshed = True
     if occurrence.message_id is not None:
+        # Discord rejects edits inside an archived thread, so an event posted
+        # into one is reopened first; otherwise every refresh would fail and the
+        # occurrence would sit dirty with a stale embed until it was retired.
+        await _reopen_occurrence_thread(bot, occurrence)
         try:
             channel = await resolve_channel(
                 bot,
@@ -340,12 +411,80 @@ async def refresh_occurrence_message(
     return status
 
 
+async def _reopen_thread(thread: Any, occurrence_id: int) -> None:
+    # Discord archives a thread after a stretch of inactivity, and refuses both
+    # messages and message edits inside an archived one. An event's own signup
+    # thread stays open through the event's updates, but a forum post the event
+    # was posted into can be dormant for weeks, so it is reopened before the bot
+    # writes in it. A failure here is only logged: the send or edit that follows
+    # reports the real outcome to its own caller.
+    if not getattr(thread, "archived", False):
+        return
+    try:
+        await thread.edit(archived=False, reason="Post a GW2 guild event update")
+    except discord.HTTPException as exc:
+        log_discord_failure(
+            "Could not reopen the archived thread holding an event; reason=%s "
+            "occurrence_id=%s required_permissions=manage_threads",
+            exc,
+            discord_failure_reason(exc),
+            occurrence_id,
+        )
+        return
+    LOGGER.debug(
+        "Reopened the archived thread holding an event; occurrence_id=%s",
+        occurrence_id,
+    )
+
+
+async def _reopen_occurrence_thread(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+) -> None:
+    # Only an occurrence posted into a forum post needs this: its message lives
+    # in that post, so an archived post blocks every update to it.
+    thread_id = occurrence.thread_id
+    if thread_id is None or not occurrence_posted_in_thread(occurrence):
+        return
+    try:
+        thread = await resolve_channel(bot, thread_id)
+    except discord.NotFound:
+        # The thread was deleted. The caller's own send or edit reports the same
+        # thing, so this is expected rather than a failure.
+        LOGGER.debug(
+            "Thread holding an event is gone; skipping reopen; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not resolve the thread holding an event; occurrence_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return
+    await _reopen_thread(thread, occurrence.occurrence_id)
+
+
 async def _rename_occurrence_thread(
     bot: Gw2Bot,
     occurrence: EventOccurrence,
     status: EventStatus,
 ) -> bool:
     if occurrence.thread_id is None:
+        return True
+    if occurrence_posted_in_thread(occurrence):
+        # The event was posted into a thread that already existed, so its name
+        # describes whatever that thread is for - not this event's status. Report
+        # success: there is nothing to rename, and returning False would keep the
+        # occurrence dirty and block its status from ever being persisted.
+        LOGGER.debug(
+            "Event thread was not created for the event; keeping its name; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
         return True
     name = event_thread_name(
         status,
@@ -416,9 +555,9 @@ async def repost_occurrence(
             )
         # The old thread is deleted independently of the message above: it does
         # not disappear on its own, and a failed message delete must not also
-        # strand the thread.
+        # strand the thread. A thread the event was only posted into is kept.
         await _delete_occurrence_thread(
-            bot, old_thread_id, occurrence.occurrence_id
+            bot, old_channel_id, old_thread_id, occurrence.occurrence_id
         )
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
@@ -489,9 +628,10 @@ async def delete_event_posts(
                 type(exc).__name__,
             )
         # Deleted independently of the message above: a failed message delete
-        # must not also strand the thread.
+        # must not also strand the thread. A thread the event was only posted
+        # into is kept; only the event's own message is removed from it.
         await _delete_occurrence_thread(
-            bot, occurrence.thread_id, occurrence.occurrence_id
+            bot, channel_id, occurrence.thread_id, occurrence.occurrence_id
         )
     LOGGER.debug(
         "Deleted event posts; event_id=%s messages_deleted=%s",
@@ -574,6 +714,26 @@ async def update_thread_membership(
 ) -> None:
     if occurrence.thread_id is None:
         return
+    if not add and occurrence_posted_in_thread(occurrence):
+        # The event was posted into a thread that already existed, so its members
+        # are not this event's roster: the same forum post can hold several
+        # events, and members join it to read it. Removing someone who signed out
+        # of one event would drop them from every other event in that post, and
+        # in a private thread it would take away their access to it. Adding is
+        # kept - it only subscribes them - so membership is one-way here and the
+        # member leaves the post themselves when they are done with it.
+        LOGGER.debug(
+            "Event thread was not created for the event; keeping its members; "
+            "occurrence_id=%s user_id=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+        )
+        return
+    # An archived thread refuses both the membership change here and the roster
+    # announcement that follows it, so reopen it first. This is the first thread
+    # call of every signup flow; the refresh at the end of the flow relies on the
+    # same reopen.
+    await _reopen_occurrence_thread(bot, occurrence)
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         member = discord.Object(id=discord_user_id)
@@ -961,6 +1121,10 @@ async def notify_roster_update(
             len(update.promoted),
         )
         return
+    # An event posted into a dormant forum post has to reopen it before the
+    # announcement can land; a signup flow has usually done so already, and this
+    # no-ops when the thread is open.
+    await _reopen_occurrence_thread(bot, occurrence)
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         await thread.send(content)
