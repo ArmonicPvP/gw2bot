@@ -22,6 +22,7 @@ from gw2bot.events.formatting import (
     signup_edit_limit_message,
 )
 from gw2bot.events.models import (
+    CATEGORY_CAPACITIES,
     CATEGORY_EMOJI,
     EMOJI_ALACRITY,
     EMOJI_DPS,
@@ -80,6 +81,22 @@ def make_signup(
         signed_up_at=datetime(2027, 1, 1, tzinfo=UTC),
         waitlisted=waitlisted,
     )
+
+
+class TestEventCategories:
+    def test_every_category_has_an_emoji_and_a_capacity(self) -> None:
+        # The pickers and the embed title index both maps by category, so a
+        # category added without an entry raises a KeyError at render time.
+        for category in EventCategory:
+            assert category in CATEGORY_EMOJI
+            assert category in CATEGORY_CAPACITIES
+
+    def test_open_world_shares_the_role_less_wvw_capacity(self) -> None:
+        capacity = CATEGORY_CAPACITIES[EventCategory.OPEN_WORLD]
+
+        assert capacity == CATEGORY_CAPACITIES[EventCategory.WVW]
+        assert not capacity.has_roles
+        assert capacity.total == 50
 
 
 class TestParseEventDatetime:
@@ -487,6 +504,22 @@ class TestEventEmbed:
 
         embed = event_embed(event, signups, EventStatus.OPEN)
 
+        names = [field.name or "" for field in embed.fields]
+        assert "👥 Participants (3/50)" in names
+        assert not any("Healer" in name for name in names)
+        assert not any(name.startswith("Boons") for name in names)
+        values = {field.name: field.value for field in embed.fields}
+        assert values["👥 Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+
+    def test_open_world_embed_matches_the_role_less_wvw_layout(self) -> None:
+        event = make_event(EventCategory.OPEN_WORLD)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert embed.title == (
+            f"{CATEGORY_EMOJI[EventCategory.OPEN_WORLD]} Kitty Cleanup"
+        )
         names = [field.name or "" for field in embed.fields]
         assert "👥 Participants (3/50)" in names
         assert not any("Healer" in name for name in names)

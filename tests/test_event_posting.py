@@ -556,6 +556,32 @@ class TestCompleteSignup:
 
         assert overflow.waitlisted
 
+    async def test_open_world_signs_up_without_roles_like_wvw(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.OPEN_WORLD,
+        )
+        for user_id in range(1, 51):
+            signup = await complete_signup(
+                bot,
+                event,
+                occurrence,
+                user_id,
+                None,
+                (),
+            )
+            assert not signup.waitlisted
+            assert signup.assigned_role is None
+
+        overflow = await complete_signup(bot, event, occurrence, 51, None, ())
+
+        assert overflow.waitlisted
+
     async def test_instanced_event_requires_a_role(
         self,
         bot: Any,
