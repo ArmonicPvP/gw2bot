@@ -70,17 +70,19 @@ ONGOING_EDIT_REJECTION = (
 PREVIEW_EVENT_ID_TEXT = "—"
 
 # Where an event may be posted. A text channel takes the event as a message with
-# a signup thread under it; a forum or media channel takes it as its own post,
-# which doubles as that thread.
+# a signup thread under it. A thread that already exists - a forum post, or a
+# thread under a text channel - takes the event as a message inside it, and
+# stands in for that signup thread. Forum channels themselves are deliberately
+# absent: the bot posts into existing forum posts and never opens new ones.
 EVENT_CHANNEL_TYPES = [
     discord.ChannelType.text,
-    discord.ChannelType.forum,
-    discord.ChannelType.media,
+    discord.ChannelType.public_thread,
+    discord.ChannelType.private_thread,
 ]
 # Discord caps a Label's text at 45 characters, so the forum hint rides along in
 # the Label description instead of the prompt itself.
-EVENT_CHANNEL_PROMPT = "What channel should your event be posted in?"
-EVENT_CHANNEL_HINT = "A forum or media channel gets its own event post."
+EVENT_CHANNEL_PROMPT = "Where should your event be posted?"
+EVENT_CHANNEL_HINT = "A channel, or an existing forum post or thread."
 
 # Discord's hard cap on how many options one select may hold, which is also the
 # most it may return. A WvW roster seats 50 plus a waitlist, so the removal
@@ -897,9 +899,11 @@ class EventEditConfirmView(_PreviewConfirmView):
             await interaction.response.edit_message(
                 content=(
                     "Changing the channel will **delete the current event "
-                    "message and its thread** — in a forum, the whole event "
-                    "post — including every message posted there. The roster "
-                    "is kept and re-posted in the new channel. Continue?"
+                    "message**, along with any signup thread the bot opened "
+                    "for it and every message in that thread. A forum post or "
+                    "thread the event was posted into is left in place. The "
+                    "roster is kept and re-posted at the new destination. "
+                    "Continue?"
                 ),
                 embeds=[],
                 view=ChannelMoveConfirmView(

@@ -79,42 +79,44 @@ automatically tag new posts as `In Review`.
 ## Guild Event Destinations
 
 `/event new` (and **Change something → Channel** on an existing event) can post
-an event to a text channel or to a forum or media channel:
+an event to a text channel or into a thread that already exists — a forum post,
+or a thread under a text channel:
 
 - **Text channel** — the event is sent as a message and the bot opens a signup
-  thread under it, named `<status> | MM.dd.yyyy | HH:mm`.
-- **Forum or media channel** — the event becomes its own post. The post's
-  starter message carries the event embed and the sign-up buttons, and the post
-  itself is the signup thread, so roster changes are announced in it and members
-  who sign up are added to it. The post is named
-  `<status> | <title> | MM.dd.yyyy | HH:mm`, with the title truncated to fit
-  Discord's 100-character thread name limit.
+  thread under it, named `<status> | MM.dd.yyyy | HH:mm` and renamed whenever the
+  status changes or the occurrence is rescheduled.
+- **Existing forum post or thread** — the event is sent as a message inside it,
+  and that thread stands in for the signup thread: roster changes are announced
+  there, and members who sign up are added to it (and removed when they sign
+  out), exactly as they would be for a signup thread.
 
-Either way the name is refreshed whenever the status changes or the occurrence is
-rescheduled, and moving an event between a channel and a forum is supported: the
-current message (in a forum, the whole post) is deleted and the roster is
-re-posted at the new destination.
+Forum *channels* are deliberately not offered, so the bot never opens a forum
+post of its own. A post it was only sent into is never renamed and never
+deleted: `/event delete`, a channel move, and a superseded recurring occurrence
+each remove only the event's own message and leave the post (and everything else
+in it) standing. The same post can therefore hold several events, and each event
+manages just its own message.
 
-A forum post is opened with the longest auto-archive window Discord allows
-(7 days), because an event can be created well before it starts. A post that
-Discord archives anyway is reopened before each refresh, since an archived post
-rejects the message edits that keep the embed and roster current; reopening
-needs `Manage Threads`.
+Moving an event between a channel and a post works in both directions. Because
+the roster is keyed to the occurrence rather than to the message, the message is
+re-sent at the new destination and the roster carries over.
 
-A forum that requires a tag on every new post is not supported. The bot applies
-no tags, so Discord refuses the post: the event reports that it could not be
-posted, and the failure is logged with the Discord status and error code.
+Discord archives a quiet thread and then refuses messages and message edits in
+it, so a dormant post is reopened before the bot posts an event, announces a
+roster change, or refreshes an embed in it. Reopening needs `Manage Threads`;
+without it the update is logged as a `50013` (`missing_permissions`) failure and
+retried on the next maintenance pass.
 
-Any channel selected for an event needs `View Channel`, `Send Messages`, and
-`Create Public Threads` so the bot can post the event and open its signup thread
-(in a forum, Discord presents `Send Messages` as `Create Posts`), plus
-`Send Messages in Threads` so it can announce roster changes there. It also
-needs `Manage Threads`: moving an event to a new channel, pruning a superseded
-recurring occurrence, and deleting an event all delete that occurrence's thread
-explicitly, because Discord does not remove a thread on its own when its starter
-message is deleted. Without `Manage Threads` those operations still remove the
-message but log a `50013` (`missing_permissions`) error and leave the orphaned
-thread behind.
+Any destination selected for an event needs `View Channel` and `Send Messages`.
+A text channel also needs `Create Public Threads` for the signup thread, and
+`Manage Threads`: moving an event to a new channel, pruning a superseded
+recurring occurrence, and deleting an event all delete that occurrence's signup
+thread explicitly, because Discord does not remove a thread on its own when its
+starter message is deleted. Without `Manage Threads` those operations still
+remove the message but log a `50013` (`missing_permissions`) error and leave the
+orphaned thread behind. A forum post or thread destination needs
+`Send Messages in Threads` instead of `Send Messages`, and `Manage Threads` only
+to reopen it once Discord has archived it.
 
 ## Feast Stock Alerts
 

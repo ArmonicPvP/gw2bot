@@ -246,8 +246,9 @@ class EventCommands(app_commands.Group):
             return
         await interaction.response.send_message(
             f"Delete **{event.title}** (event **{event.event_id}**)? This "
-            "removes its message(s), thread(s) and everyone's sign-ups, and "
-            "cannot be undone.",
+            "removes its message(s), any signup thread(s) the bot opened for "
+            "them and everyone's sign-ups, and cannot be undone. A forum post "
+            "the event was posted into is kept.",
             view=EventDeleteConfirmView(self._bot, event),
             ephemeral=True,
         )

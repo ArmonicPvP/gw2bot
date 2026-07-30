@@ -95,61 +95,53 @@ class FakeChannel:
 
 
 class FakeForumPost(FakeThread):
-    """A forum post: a thread that also holds the event's starter message."""
+    """A forum post that already exists: the bot may only post messages in it."""
 
     def __init__(self, thread_id: int = 901, archived: bool = False):
         super().__init__(thread_id)
+        self.type = discord.ChannelType.public_thread
         self.archived = archived
+        self.sent: list[dict[str, Any]] = []
+        self.send_error: Exception | None = None
         self.partial_message = SimpleNamespace(
             edit=AsyncMock(),
             delete=AsyncMock(),
         )
         self.edit = AsyncMock(side_effect=self._edit)
+        self.send = AsyncMock(side_effect=self._send)
 
     async def _edit(self, **fields: Any) -> None:
-        # Discord clears the archive flag as part of the edit, so a rename that
-        # follows an unarchive does not have to fight it again.
+        # Discord clears the archive flag as part of the edit.
         if "archived" in fields:
             self.archived = bool(fields["archived"])
+
+    async def _send(self, content: Any = None, **fields: Any) -> Any:
+        if self.send_error is not None:
+            error = self.send_error
+            self.send_error = None
+            raise error
+        # A message inside a thread cannot carry a thread of its own, so this
+        # deliberately has no create_thread: calling it would raise.
+        message = SimpleNamespace(id=606, delete=AsyncMock())
+        self.sent.append({**fields, "content": content, "message": message})
+        return message
 
     def get_partial_message(self, message_id: int) -> Any:
         return self.partial_message
 
 
-class FakeForumChannel:
-    """A forum channel: it takes no messages, only posts."""
-
-    def __init__(
-        self,
-        channel_id: int = 4321,
-        post: FakeForumPost | None = None,
-    ):
-        self.id = channel_id
-        self.type = discord.ChannelType.forum
-        self.post = post if post is not None else FakeForumPost()
-        self.created: list[dict[str, Any]] = []
-        self.create_thread_error: Exception | None = None
-
-    async def create_thread(self, **fields: Any) -> Any:
-        if self.create_thread_error is not None:
-            error = self.create_thread_error
-            self.create_thread_error = None
-            raise error
-        message = SimpleNamespace(id=606, delete=AsyncMock())
-        self.created.append({**fields, "message": message})
-        return SimpleNamespace(thread=self.post, message=message)
-
-
-def forum_bot(
+def forum_post_bot(
     store: EventStore,
-    forum: FakeForumChannel,
+    post: FakeForumPost,
     channel: FakeChannel | None = None,
 ) -> Any:
-    # The forum event needs a bot that resolves both the forum and its post; the
-    # text channel comes along so a move between the two can be exercised.
-    bot = cast(Any, FakeBot(store, channel if channel is not None else FakeChannel()))
-    bot._channels[forum.id] = forum
-    bot._channels[forum.post.id] = forum.post
+    # The text channel comes along so a move between a channel and a post can be
+    # exercised; the post is resolvable on its own, as its own channel.
+    bot = cast(
+        Any,
+        FakeBot(store, channel if channel is not None else FakeChannel()),
+    )
+    bot._channels[post.id] = post
     return bot
 
 
@@ -531,58 +523,63 @@ class TestPostOccurrence:
         }
 
 
-class TestForumPostOccurrence:
-    async def post_forum_event(
+class TestPostingIntoAnExistingForumPost:
+    async def post_event_in_post(
         self,
         bot: Any,
         store: EventStore,
-        forum: FakeForumChannel,
+        post: FakeForumPost,
     ) -> Any:
-        event = create_event(store, channel_id=forum.id)
+        event = create_event(store, channel_id=post.id)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
         posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
         return event, posted
 
-    async def test_publishes_the_event_as_its_own_forum_post(
+    async def test_sends_the_event_into_the_post_without_creating_one(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
 
-        event, posted = await self.post_forum_event(bot, store, forum)
+        event, posted = await self.post_event_in_post(bot, store, post)
 
-        assert len(forum.created) == 1
-        created = forum.created[0]
-        # The post name is the event's heading in the forum listing, where no
-        # message is visible, so it carries the title as well as the schedule.
-        assert "Kitty Cleanup" in created["name"]
-        assert "01.30.2027" in created["name"]
-        assert "20:00" in created["name"]
-        assert created["embed"].footer.text == f"eventID: {event.event_id}"
-        assert created["view"] is not None
-        # Discord's longest window, so a post opened days ahead of the event is
-        # still open for the edits that keep the embed current.
-        assert created["auto_archive_duration"] == 10080
-        # The starter message lives in the post, so the post is both the stored
-        # channel (what later edits and deletes address) and the stored thread.
+        assert len(post.sent) == 1
+        sent = post.sent[0]
+        assert sent["embed"].footer.text == f"eventID: {event.event_id}"
+        assert sent["view"] is not None
+        # The message lives in the post, so the post is both the stored channel
+        # (what later edits and deletes address) and the stored thread (where the
+        # roster is announced). No thread is opened for the event.
         assert posted.message_id == 606
-        assert posted.channel_id == forum.post.id
-        assert posted.thread_id == forum.post.id
+        assert posted.channel_id == post.id
+        assert posted.thread_id == post.id
         assert posted.status is EventStatus.OPEN
 
-    async def test_a_refused_post_leaves_the_occurrence_unposted(
+    async def test_reopens_an_archived_post_before_sending(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel()
-        forum.create_thread_error = forbidden_error(50013)
-        bot = forum_bot(store, forum)
-        event = create_event(store, channel_id=forum.id)
+        post = FakeForumPost(archived=True)
+        bot = forum_post_bot(store, post)
+
+        await self.post_event_in_post(bot, store, post)
+
+        # Discord refuses messages in an archived post, so a dormant one is
+        # reopened rather than the event failing to post.
+        assert not post.archived
+        assert len(post.sent) == 1
+
+    async def test_a_refused_send_leaves_the_occurrence_unposted(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        post.send_error = forbidden_error(50013)
+        bot = forum_post_bot(store, post)
+        event = create_event(store, channel_id=post.id)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
 
-        # Unlike a text channel's thread, the post *is* the message, so a
-        # failure must reach the caller instead of being logged and shrugged off.
         with pytest.raises(discord.HTTPException):
             await post_occurrence(bot, event, occurrence, BEFORE_START)
 
@@ -594,13 +591,13 @@ class TestForumPostOccurrence:
             for entry in store.get_unposted_occurrences()
         }
 
-    async def test_persistence_failure_deletes_the_orphaned_post(
+    async def test_persistence_failure_deletes_only_the_message(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
-        event = create_event(store, channel_id=forum.id)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        event = create_event(store, channel_id=post.id)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
         store.set_occurrence_message = MagicMock(  # type: ignore[method-assign]
             side_effect=SQLAlchemyError("database is locked")
@@ -609,37 +606,18 @@ class TestForumPostOccurrence:
         with pytest.raises(SQLAlchemyError):
             await post_occurrence(bot, event, occurrence, BEFORE_START)
 
-        # The post must not be left behind advertising an occurrence that still
-        # looks unposted, or the next scheduler pass would open a second one.
-        forum.created[-1]["message"].delete.assert_awaited_once()
-        forum.post.delete.assert_awaited_once()
-        stored = store.get_occurrence(occurrence.occurrence_id)
-        assert stored is not None
-        assert stored.message_id is None
+        # The orphaned message goes, but the post it was sent into is not the
+        # bot's to delete.
+        post.sent[-1]["message"].delete.assert_awaited_once()
+        post.delete.assert_not_awaited()
 
-    async def test_signup_reopens_an_archived_post_before_using_it(
+    async def test_refresh_edits_the_message_and_never_renames_the_post(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
-        event, posted = await self.post_forum_event(bot, store, forum)
-        # A post with no discussion is archived by Discord on its own, which
-        # would otherwise refuse the membership update and the roster message.
-        forum.post.archived = True
-
-        await complete_signup(bot, event, posted, 11, EventRole.DPS, ())
-
-        assert not forum.post.archived
-        forum.post.add_user.assert_awaited_once()
-
-    async def test_refresh_edits_the_message_and_renames_the_post(
-        self,
-        store: EventStore,
-    ) -> None:
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
-        event, posted = await self.post_forum_event(bot, store, forum)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        event, posted = await self.post_event_in_post(bot, store, post)
 
         status = await refresh_occurrence_message(
             bot,
@@ -648,19 +626,23 @@ class TestForumPostOccurrence:
             START + timedelta(hours=3),
         )
 
+        # The post's name describes whatever the post is for, not this event's
+        # status, so it is left alone - and the status still commits.
         assert status is EventStatus.OVER
-        forum.post.partial_message.edit.assert_awaited_once()
-        assert forum.post.edit.await_args is not None
-        renamed = forum.post.edit.await_args.kwargs["name"]
-        assert "Kitty Cleanup" in renamed
+        post.partial_message.edit.assert_awaited_once()
+        post.edit.assert_not_awaited()
+        cleared = store.get_occurrence(posted.occurrence_id)
+        assert cleared is not None
+        assert not cleared.needs_refresh
 
     async def test_refresh_reopens_an_archived_post(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel(post=FakeForumPost(archived=True))
-        bot = forum_bot(store, forum)
-        event, posted = await self.post_forum_event(bot, store, forum)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        post.archived = True
 
         status = await refresh_occurrence_message(
             bot,
@@ -671,60 +653,86 @@ class TestForumPostOccurrence:
 
         # Discord refuses edits inside an archived post, so it is reopened
         # before the embed edit rather than after it.
-        edits = [call.kwargs for call in forum.post.edit.await_args_list]
+        edits = [call.kwargs for call in post.edit.await_args_list]
         assert edits[0]["archived"] is False
-        assert not forum.post.archived
-        forum.post.partial_message.edit.assert_awaited_once()
+        assert not post.archived
+        post.partial_message.edit.assert_awaited_once()
         assert status is EventStatus.OVER
-        cleared = store.get_occurrence(posted.occurrence_id)
-        assert cleared is not None
-        assert not cleared.needs_refresh
 
-    async def test_signup_joins_the_post_and_refreshes_its_message(
+    async def test_signup_joins_the_post_and_announces_the_roster_in_it(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
-        event, posted = await self.post_forum_event(bot, store, forum)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        event, posted = await self.post_event_in_post(bot, store, post)
 
-        signup = await complete_signup(
+        await complete_signup(
             bot,
             event,
             posted,
             11,
-            EventRole.QUICKNESS_HEAL,
+            EventRole.QUICKNESS_DPS,
+            (EventRole.ALACRITY_HEAL,),
+        )
+        # Seating the second member flexes the first, which is announced where
+        # the event lives: the post stands in for the signup thread.
+        await complete_signup(
+            bot,
+            event,
+            posted,
+            12,
+            EventRole.QUICKNESS_DPS,
             (),
         )
+        await remove_signup(bot, event, posted, 12)
 
-        assert not signup.waitlisted
-        forum.post.add_user.assert_awaited_once()
-        forum.post.partial_message.edit.assert_awaited()
+        assert post.add_user.await_count == 2
+        assert post.remove_user.await_count == 1
+        announcements = [
+            entry["content"] for entry in post.sent if entry["content"]
+        ]
+        assert len(announcements) == 2
+        assert "<@11>" in announcements[0]
+        assert post.partial_message.edit.await_count == 3
 
-    async def test_delete_removes_the_post(
+    async def test_signup_reopens_an_archived_post_before_using_it(
         self,
         store: EventStore,
     ) -> None:
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
-        event, posted = await self.post_forum_event(bot, store, forum)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        post.archived = True
+
+        await complete_signup(bot, event, posted, 11, EventRole.DPS, ())
+
+        assert not post.archived
+        post.add_user.assert_awaited_once()
+
+    async def test_delete_removes_the_message_but_keeps_the_post(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        event, posted = await self.post_event_in_post(bot, store, post)
 
         deleted = await delete_event_posts(bot, event, [posted])
 
-        # The starter message is addressed through the post itself, which is the
-        # channel it was sent to; the post is then removed as well, so a failed
-        # message delete cannot leave it behind.
+        # Deleting the post would take everything else in it - and the forum
+        # entry itself - along with the event.
         assert deleted == 1
-        forum.post.partial_message.delete.assert_awaited_once()
-        forum.post.delete.assert_awaited_once()
+        post.partial_message.delete.assert_awaited_once()
+        post.delete.assert_not_awaited()
 
-    async def test_moving_from_a_text_channel_opens_a_forum_post(
+    async def test_moving_into_a_post_deletes_the_channel_message_and_thread(
         self,
         store: EventStore,
     ) -> None:
         channel = FakeChannel()
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum, channel)
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post, channel)
         event = create_event(store)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
         posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
@@ -741,7 +749,7 @@ class TestForumPostOccurrence:
             category=event.category,
             title=event.title,
             description=event.description,
-            channel_id=forum.id,
+            channel_id=post.id,
             leader_discord_id=event.leader_discord_id,
             start_time=event.start_time,
             duration_minutes=event.duration_minutes,
@@ -751,12 +759,44 @@ class TestForumPostOccurrence:
 
         reposted = await repost_occurrence(bot, moved, posted)
 
-        assert len(forum.created) == 1
-        assert reposted.channel_id == forum.post.id
-        assert reposted.thread_id == forum.post.id
+        assert len(post.sent) == 1
+        assert reposted.channel_id == post.id
+        assert reposted.thread_id == post.id
+        # The signup thread the bot opened in the channel is its own to remove.
         channel.partial_message.delete.assert_awaited_once()
         channel.thread.delete.assert_awaited_once()
-        forum.post.add_user.assert_awaited_once()
+        post.add_user.assert_awaited_once()
+
+    async def test_moving_out_of_a_post_leaves_the_post_standing(
+        self,
+        store: EventStore,
+    ) -> None:
+        channel = FakeChannel()
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post, channel)
+        event = create_event(store, channel_id=post.id)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        reposted = await repost_occurrence(bot, moved, posted)
+
+        assert len(channel.sent) == 1
+        assert reposted.channel_id == channel.id
+        assert reposted.thread_id == channel.thread.id
+        post.partial_message.delete.assert_awaited_once()
+        post.delete.assert_not_awaited()
 
 
 class TestCompleteSignup:
@@ -3298,19 +3338,19 @@ class TestPostingLoggingSafety:
         store: EventStore,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        # A forum post is named after the event, so its title reaches Discord in
-        # a place a text-channel post never puts it. It must still stay out of
-        # the logs, including when the post is refused.
+        # Posting into an existing forum post takes its own code path - reopen,
+        # send, edit, keep the post - so it gets its own proof that no event
+        # content reaches the logs, including when the send is refused.
         title = "SECRET EVENT TITLE"
         description = "SECRET EVENT DESCRIPTION"
-        forum = FakeForumChannel()
-        bot = forum_bot(store, forum)
+        post = FakeForumPost(archived=True)
+        bot = forum_post_bot(store, post)
         with caplog.at_level("DEBUG"):
             event = store.create_event(
                 category=EventCategory.FRACTAL,
                 title=title,
                 description=description,
-                channel_id=forum.id,
+                channel_id=post.id,
                 leader_discord_id=42,
                 start_time=START,
                 duration_minutes=90,
@@ -3322,6 +3362,7 @@ class TestPostingLoggingSafety:
                 event.start_time,
             )
             posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+            await complete_signup(bot, event, posted, 11, EventRole.DPS, ())
             await refresh_occurrence_message(
                 bot,
                 event,
@@ -3329,7 +3370,7 @@ class TestPostingLoggingSafety:
                 START + timedelta(hours=3),
             )
             await delete_event_posts(bot, event, [posted])
-            forum.create_thread_error = forbidden_error(50013)
+            post.send_error = forbidden_error(50013)
             retry = store.create_occurrence(
                 event.event_id,
                 START + timedelta(days=1),

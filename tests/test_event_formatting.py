@@ -6,13 +6,11 @@ import pytest
 
 from gw2bot.events.formatting import (
     EMBED_TOTAL_LIMIT,
-    THREAD_NAME_LIMIT,
     WAITLIST_EMOJI,
     compute_status,
     confirm_embed,
     describe_repeat,
     event_embed,
-    event_post_name,
     event_thread_name,
     format_duration,
     format_role_groups,
@@ -280,36 +278,6 @@ class TestEventThreadName:
             start,
             UTC_ZONE,
         ).startswith("⚫️ |")
-
-
-class TestEventPostName:
-    def test_formats_status_emoji_title_date_and_time(self) -> None:
-        start = datetime(2027, 1, 31, 1, 5, tzinfo=UTC)
-
-        name = event_post_name(
-            EventStatus.OPEN,
-            "Kitty Cleanup",
-            start,
-            NEW_YORK,
-        )
-
-        assert name == "🟢 | Kitty Cleanup | 01.30.2027 | 20:05"
-
-    def test_truncates_a_title_that_would_exceed_the_name_limit(self) -> None:
-        start = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
-
-        name = event_post_name(
-            EventStatus.OPEN,
-            "Kitty " * 40,
-            start,
-            UTC_ZONE,
-        )
-
-        # Discord rejects a thread name over 100 characters, which would take
-        # the whole post down with it.
-        assert len(name) <= THREAD_NAME_LIMIT
-        assert name.startswith("🟢 | Kitty")
-        assert name.endswith("… | 01.30.2027 | 20:00")
 
 
 class TestFormatRoleGroups:

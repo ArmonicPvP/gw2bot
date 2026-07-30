@@ -156,20 +156,25 @@ class TestEventDraft:
 
 
 class TestEventChannelChoices:
-    """An event may be posted to a text channel or to a forum as its own post."""
+    """An event goes to a text channel or into a thread that already exists."""
 
-    def test_details_modal_offers_forum_channels(self) -> None:
+    def test_details_modal_offers_channels_and_existing_threads(self) -> None:
         modal = EventDetailsModal(make_bot(), EventDraft(leader_discord_id=42))
 
         assert discord.ChannelType.text in modal.channel.channel_types
-        assert discord.ChannelType.forum in modal.channel.channel_types
-        assert discord.ChannelType.media in modal.channel.channel_types
+        assert discord.ChannelType.public_thread in modal.channel.channel_types
 
-    def test_change_channel_picker_offers_forum_channels(self) -> None:
+    def test_change_channel_picker_offers_existing_threads(self) -> None:
         select = ChannelPickSelect()
 
         assert set(select.channel_types) == set(EVENT_CHANNEL_TYPES)
-        assert discord.ChannelType.forum in select.channel_types
+        assert discord.ChannelType.public_thread in select.channel_types
+
+    def test_forum_channels_are_never_offered(self) -> None:
+        # Posting to a forum channel would open a new post; events may only be
+        # posted into forum posts that already exist.
+        assert discord.ChannelType.forum not in EVENT_CHANNEL_TYPES
+        assert discord.ChannelType.media not in EVENT_CHANNEL_TYPES
 
 
 class TestEventDetailsModal:
