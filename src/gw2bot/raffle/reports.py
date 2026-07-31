@@ -10,6 +10,7 @@ import discord
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.raffle.formatting import (
+    RAFFLE_CONTRIBUTION_REPORT_HOURS as RAFFLE_CONTRIBUTION_REPORT_HOURS,
     RAFFLE_TICKETS_PAGE_SIZE,
     raffle_contribution_report_embed,
 )
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 RAFFLE_CONTRIBUTION_CHANNEL_ID = 856343628984746014
-RAFFLE_CONTRIBUTION_REPORT_HOURS = 6
 
 
 def raffle_contribution_report_end(now: datetime) -> datetime:
@@ -92,7 +92,11 @@ async def send_raffle_contribution_report(bot: Gw2Bot, report_end: datetime) -> 
     if not contributions:
         return
     view = (
-        RaffleContributionReportView(contributions)
+        RaffleContributionReportView(
+            report_start,
+            report_end,
+            len(contributions),
+        )
         if len(contributions) > RAFFLE_TICKETS_PAGE_SIZE
         else None
     )

@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Protocol, cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -43,8 +44,10 @@ from gw2bot.raffle.views import (
     RaffleAccountLinkModal,
     RaffleAuditRangesButton,
     RaffleAuditRangesView,
-    RaffleTicketTableView,
     RaffleBulkAddTicketsModal,
+    RaffleLeaderboardButton,
+    RaffleLeaderboardView,
+    RaffleTicketsListButton,
     RaffleTicketsListView,
 )
 from gw2bot.discord_utils import user_has_role
@@ -928,6 +931,19 @@ class TestRaffleTicketsCommand:
         view = interaction.response.send_message.await_args.kwargs["view"]
         assert isinstance(view, RaffleTicketsListView)
         assert len(view.children) == 2
+        # A finite timeout would leave the arrows dead on a message that is
+        # still on screen; persistence comes from the dynamic custom_ids.
+        assert view.timeout is None
+        buttons = [
+            child
+            for child in view.children
+            if isinstance(child, RaffleTicketsListButton)
+        ]
+        assert [button.custom_id for button in buttons] == [
+            "gw2bot:raffle-tickets-list:0:-1",
+            "gw2bot:raffle-tickets-list:0:1",
+        ]
+        assert [button.item.disabled for button in buttons] == [True, False]
 
     async def test_leaderboard_lists_split_and_paginates(self) -> None:
         bot = SimpleNamespace(
@@ -960,7 +976,18 @@ class TestRaffleTicketsCommand:
         ]
         await leaderboard.callback(group, interaction)  # type: ignore[arg-type]
         view = interaction.response.send_message.await_args.kwargs["view"]
-        assert isinstance(view, RaffleTicketTableView)
+        assert isinstance(view, RaffleLeaderboardView)
+        assert view.timeout is None
+        buttons = [
+            child
+            for child in view.children
+            if isinstance(child, RaffleLeaderboardButton)
+        ]
+        assert [button.custom_id for button in buttons] == [
+            "gw2bot:raffle-leaderboard:total:0:-1",
+            "gw2bot:raffle-leaderboard:total:0:1",
+        ]
+        assert [button.item.disabled for button in buttons] == [True, False]
 
     async def test_leaderboard_sortby_reorders_rows(self) -> None:
         bot = SimpleNamespace(
@@ -1021,8 +1048,11 @@ class TestRaffleTicketsCommand:
         ]
         totals.append(raffle_total("Former Participant.9999"))
         first_embed = raffle_ticket_list_embed(totals, 0)
-        view = RaffleTicketsListView(totals)
+        button = RaffleTicketsListButton(0, 1)
         interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_totals=MagicMock(return_value=totals)
+            ),
             response=SimpleNamespace(edit_message=AsyncMock()),
         )
 
@@ -1040,7 +1070,7 @@ class TestRaffleTicketsCommand:
         )
         assert "```" not in (first_embed.description or "")
 
-        await view.change_page(interaction, 1)  # type: ignore[arg-type]
+        await button.callback(interaction)  # type: ignore[arg-type]
 
         page_embeds = interaction.response.edit_message.await_args.kwargs["embeds"]
         assert page_embeds[0].title == "Raffle Tier Summary"
@@ -1945,6 +1975,246 @@ class TestRaffleAuditFormatting:
         interaction.response.edit_message.assert_not_awaited()
         interaction.response.send_message.assert_awaited_once_with(
             "Could not load this raffle audit. Try again later.",
+            ephemeral=True,
+        )
+
+    async def test_tickets_list_button_restores_state_from_custom_id(
+        self,
+    ) -> None:
+        # Dispatch rebuilds the button from its custom_id alone, which is
+        # what keeps the arrows alive on a message the bot no longer holds
+        # a view for.
+        original = RaffleTicketsListButton(4, -1)
+        match = original.template.fullmatch(original.custom_id)
+        assert match is not None
+
+        restored = await RaffleTicketsListButton.from_custom_id(
+            cast(discord.Interaction, SimpleNamespace()),
+            cast("discord.ui.Item[Any]", SimpleNamespace()),
+            match,
+        )
+
+        assert restored.page == 4
+        assert restored.direction == -1
+
+    async def test_leaderboard_button_restores_state_from_custom_id(
+        self,
+    ) -> None:
+        original = RaffleLeaderboardButton("purchased", 2, 1)
+        match = original.template.fullmatch(original.custom_id)
+        assert match is not None
+
+        restored = await RaffleLeaderboardButton.from_custom_id(
+            cast(discord.Interaction, SimpleNamespace()),
+            cast("discord.ui.Item[Any]", SimpleNamespace()),
+            match,
+        )
+
+        assert restored.sort_key == "purchased"
+        assert restored.page == 2
+        assert restored.direction == 1
+
+    async def test_leaderboard_button_pages_reloaded_rows(self) -> None:
+        contributions = [
+            RaffleContribution(f"Member {index:02d}.1234", index + 1, 0)
+            for index in range(11)
+        ]
+        button = RaffleLeaderboardButton("total", 0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_lifetime_raffle_contributions=MagicMock(
+                    return_value=contributions
+                )
+            ),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        await button.callback(interaction)  # type: ignore[arg-type]
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        embed = kwargs["embed"]
+        assert embed.title == "Lifetime raffle tickets"
+        assert embed.footer.text == "Page 2 of 2"
+        assert "Member 00.1234" in (embed.description or "")
+        view = kwargs["view"]
+        assert isinstance(view, RaffleLeaderboardView)
+        assert view.timeout is None
+        buttons = [
+            child
+            for child in view.children
+            if isinstance(child, RaffleLeaderboardButton)
+        ]
+        assert [button.custom_id for button in buttons] == [
+            "gw2bot:raffle-leaderboard:total:1:-1",
+            "gw2bot:raffle-leaderboard:total:1:1",
+        ]
+        assert [button.item.disabled for button in buttons] == [False, True]
+
+    async def test_leaderboard_button_keeps_sort_key_in_title(self) -> None:
+        contributions = [
+            RaffleContribution(f"Member {index:02d}.1234", 0, index + 1)
+            for index in range(11)
+        ]
+        button = RaffleLeaderboardButton("free", 0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_lifetime_raffle_contributions=MagicMock(
+                    return_value=contributions
+                )
+            ),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        await button.callback(interaction)  # type: ignore[arg-type]
+
+        embed = interaction.response.edit_message.await_args.kwargs["embed"]
+        assert embed.title == "Lifetime raffle tickets (by free)"
+
+    async def test_leaderboard_button_rejects_retired_sort_key(self) -> None:
+        # A custom_id outlives the deploy that wrote it, so an unknown sort
+        # key must not raise out of the callback.
+        button = RaffleLeaderboardButton("retired", 0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_lifetime_raffle_contributions=MagicMock()
+            ),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        await button.callback(interaction)  # type: ignore[arg-type]
+
+        interaction.client.get_lifetime_raffle_contributions.assert_not_called()
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "That leaderboard sort is no longer supported. "
+            "Run `/raffle leaderboard` again.",
+            ephemeral=True,
+        )
+
+    async def test_tickets_list_button_keeps_tier_summary_stable(self) -> None:
+        # /raffle list builds the summary from ticket holders only, so paging
+        # must do the same or the tier progress jumps on the first click.
+        totals = [
+            raffle_total(f"Member {index:02d}.1234", purchased=1)
+            for index in range(11)
+        ]
+        # A member who has spent every ticket they bought: still counted by
+        # the tier summary's purchased total, but no longer a ticket holder.
+        totals.append(
+            replace(raffle_total("Spent Out.9999", purchased=50), raffle_tickets=0)
+        )
+        active_totals = [total for total in totals if total.raffle_tickets > 0]
+        button = RaffleTicketsListButton(0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_totals=MagicMock(return_value=totals)
+            ),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        await button.callback(interaction)  # type: ignore[arg-type]
+
+        summary_embed = interaction.response.edit_message.await_args.kwargs[
+            "embeds"
+        ][0]
+        expected = raffle_tier_summary_embed(active_totals)
+        assert summary_embed.title == expected.title
+        assert summary_embed.description == expected.description
+        assert [
+            (field.name, field.value) for field in summary_embed.fields
+        ] == [(field.name, field.value) for field in expected.fields]
+
+    async def test_tickets_list_button_clamps_page_past_shrunk_data(
+        self,
+    ) -> None:
+        # Rows are reloaded on click, so the stored page can point past the
+        # end once tickets are removed between render and click.
+        button = RaffleTicketsListButton(9, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_totals=MagicMock(
+                    return_value=[raffle_total("Member.1234", purchased=1)]
+                )
+            ),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        await button.callback(interaction)  # type: ignore[arg-type]
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert kwargs["embeds"][1].footer.text == "Page 1 of 1"
+        buttons = [
+            child
+            for child in kwargs["view"].children
+            if isinstance(child, RaffleTicketsListButton)
+        ]
+        assert [button.item.disabled for button in buttons] == [True, True]
+
+    async def test_tickets_list_button_failure_logging_omits_secrets(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "ticket-paging-secret"
+        button = RaffleTicketsListButton(0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_totals=MagicMock(
+                    side_effect=SQLAlchemyError(
+                        f"query failed with access_token={secret}"
+                    )
+                )
+            ),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            await button.callback(interaction)  # type: ignore[arg-type]
+
+        assert secret not in caplog.text
+        assert "Could not load raffle totals for ticket list paging" in caplog.text
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Could not load this page. Try again later.",
+            ephemeral=True,
+        )
+
+    async def test_leaderboard_button_failure_logging_omits_secrets(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "leaderboard-paging-secret"
+        button = RaffleLeaderboardButton("total", 0, 1)
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_lifetime_raffle_contributions=MagicMock(
+                    side_effect=SQLAlchemyError(
+                        f"query failed with access_token={secret}"
+                    )
+                )
+            ),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            await button.callback(interaction)  # type: ignore[arg-type]
+
+        assert secret not in caplog.text
+        assert (
+            "Could not load lifetime raffle contributions for paging"
+            in caplog.text
+        )
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Could not load this page. Try again later.",
             ephemeral=True,
         )
 

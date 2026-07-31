@@ -296,7 +296,11 @@ async def send_automated_message_diagnostics(
     )
     if contributions:
         report_view = (
-            RaffleContributionReportView(contributions)
+            RaffleContributionReportView(
+                report_start,
+                current_time,
+                len(contributions),
+            )
             if len(contributions) > RAFFLE_TICKETS_PAGE_SIZE
             else None
         )
@@ -304,11 +308,7 @@ async def send_automated_message_diagnostics(
         delivered += await try_send_automated_diagnostic(
             channel,
             "contribution-report",
-            embed=(
-                raffle_contribution_report_embed(contributions, 0)
-                if report_view is None
-                else report_view.embed
-            ),
+            embed=raffle_contribution_report_embed(contributions, 0),
             view=report_view,
         )
     attempted += 1

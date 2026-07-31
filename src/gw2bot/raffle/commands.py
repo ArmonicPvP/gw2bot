@@ -21,6 +21,7 @@ from gw2bot.raffle.formatting import (
     raffle_audit_embeds,
     raffle_result_embed,
     raffle_contribution_table_rows,
+    raffle_leaderboard_title,
     raffle_ticket_embed,
     raffle_ticket_list_embed,
     raffle_ticket_table_embed,
@@ -30,7 +31,7 @@ from gw2bot.raffle.views import (
     RaffleAccountLinkModal,
     RaffleAuditRangesView,
     RaffleBulkAddTicketsModal,
-    RaffleTicketTableView,
+    RaffleLeaderboardView,
     RaffleTicketsListView,
 )
 
@@ -637,7 +638,7 @@ class RaffleCommands(app_commands.Group):
             len(active_totals),
         )
         view = (
-            RaffleTicketsListView(active_totals)
+            RaffleTicketsListView(len(active_totals))
             if len(active_totals) > RAFFLE_TICKETS_PAGE_SIZE
             else None
         )
@@ -685,11 +686,9 @@ class RaffleCommands(app_commands.Group):
             raffle_contribution_table_rows(contributions),
             sort_key,
         )
-        title = "Lifetime raffle tickets"
-        if sort_key != "total":
-            title += f" (by {sort_key})"
+        title = raffle_leaderboard_title(sort_key)
         view = (
-            RaffleTicketTableView(rows, title)
+            RaffleLeaderboardView(sort_key, len(rows))
             if len(rows) > RAFFLE_TICKETS_PAGE_SIZE
             else None
         )

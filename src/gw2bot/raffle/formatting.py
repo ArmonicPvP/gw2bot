@@ -25,6 +25,10 @@ from gw2bot.raffle.models import (
 LOGGER = logging.getLogger(__name__)
 
 RAFFLE_TICKETS_PAGE_SIZE = 10
+# The width of one scheduled contribution report window. It lives here rather
+# than in gw2bot.raffle.reports so that both the report title and the pager
+# that reloads a window can reach it without importing the poller.
+RAFFLE_CONTRIBUTION_REPORT_HOURS = 6
 RAFFLE_BULK_SUMMARY_SAMPLE_SIZE = 10
 RAFFLE_BULK_SUMMARY_NAME_LENGTH = 42
 # Discord caps embed field values at 1,024 characters.
@@ -550,15 +554,28 @@ def raffle_tier_summary_embed(
     return embed
 
 
+RAFFLE_CONTRIBUTION_REPORT_TITLE = (
+    "Raffle contributions from the last "
+    f"{RAFFLE_CONTRIBUTION_REPORT_HOURS} hours"
+)
+
+
 def raffle_contribution_report_embed(
     contributions: list[RaffleContribution],
     page: int,
 ) -> discord.Embed:
     return raffle_ticket_table_embed(
         raffle_contribution_table_rows(contributions),
-        "Raffle contributions from the last 6 hours",
+        RAFFLE_CONTRIBUTION_REPORT_TITLE,
         page,
     )
+
+
+def raffle_leaderboard_title(sort_key: str) -> str:
+    title = "Lifetime raffle tickets"
+    if sort_key != "total":
+        title += f" (by {sort_key})"
+    return title
 
 
 def format_raffle_milestone_preview(
