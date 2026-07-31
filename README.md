@@ -125,6 +125,53 @@ orphaned thread behind. A forum post destination needs `Send Messages in Threads
 instead of `Send Messages`, and `Manage Threads` only to reopen it once Discord
 has archived it.
 
+## Event Reminders
+
+Members who hold a seat on an event are pinged where the event was posted — its
+signup thread, or the forum post it was sent into — as the start approaches:
+
+- an hour before,
+- fifteen minutes before,
+- and as it starts.
+
+Each ping reads:
+
+```text
+@Member1 @Member2: Kitty Cleanup starts in 15 minutes
+```
+
+The start is a Discord relative timestamp, so every member reads it in their own
+locale and it stays accurate whichever reminder they are looking at. Mentions
+that do not fit one Discord message are split over as many messages as they need,
+so nobody on a large roster is dropped from the ping.
+
+Only seated members are reminded. A waitlisted member has no place in the squad
+yet, so a ping telling them it is starting would invite them to show up for a
+seat they do not have. The roster is read at the moment the reminder goes out, so
+a member who signs up between two reminders is included in the later one.
+
+Each reminder is recorded once it has been resolved, so a restart, a second
+maintenance pass, or an event that is edited never pings a roster twice. A
+reminder is recorded without being sent when there is nobody seated, when the
+occurrence has no thread or forum post to ping in, or when the occurrence has
+already finished.
+
+Reminders are resolved by the one-minute event maintenance pass, so one can
+arrive up to a minute after its moment. If the bot is down across a reminder, it
+sends only the most imminent reminder that is still due on the way back up and
+records the ones it overtook, rather than delivering a burst of stale pings. A
+reminder whose moment passed more than ten minutes ago is dropped entirely — an
+event that already started is news, not a reminder. That window also bounds
+retries: a reminder Discord refuses is retried on each maintenance pass until it
+leaves the window, then recorded and dropped.
+
+`/event remind event_id:<event>` sends the same ping on demand and requires the
+event role `1318357141521825872`. It pings the roster of the event's earliest
+unfinished occurrence and leaves the automatic reminders untouched, so a manual
+ping never costs the event one of its scheduled ones. It reports back privately
+how many members were pinged, and refuses when the event is over, has nobody
+signed up, or has no thread or forum post yet.
+
 ## Feast Stock Alerts
 
 The monitor tracks these fixed Guild Storage consumable IDs:

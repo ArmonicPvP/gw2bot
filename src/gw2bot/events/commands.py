@@ -8,7 +8,8 @@ import discord
 from discord import app_commands
 
 from gw2bot.discord_utils import user_has_role
-from gw2bot.events.models import Event, EventStatus
+from gw2bot.events.models import Event, EventOccurrence, EventStatus
+from gw2bot.events.reminders import reminder_participants, send_reminder
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
     ONGOING_EDIT_REJECTION,
@@ -200,6 +201,121 @@ class EventCommands(app_commands.Group):
             "Event edit preview opened; user_id=%s event_id=%s",
             interaction.user.id,
             event_id,
+        )
+
+    def _reminder_occurrence(self, event_id: int) -> EventOccurrence | None:
+        # The occurrence a manual reminder is about: the earliest one that has
+        # not finished, which is the one whose roster is being reminded. A
+        # recurring series can hold a later occurrence too, and pinging next
+        # week's roster about an event that has not come around yet would be
+        # noise.
+        for occurrence in self._bot.event_store.get_event_occurrences(event_id):
+            if occurrence.status is not EventStatus.OVER:
+                return occurrence
+        return None
+
+    @app_commands.command(
+        name="remind",
+        description="Ping an event's members that it is coming up",
+    )
+    @app_commands.describe(
+        event_id="The event to remind about (shown as eventID in its footer)"
+    )
+    @app_commands.autocomplete(event_id=active_event_id_autocomplete)
+    async def remind(
+        self,
+        interaction: discord.Interaction,
+        event_id: int,
+    ) -> None:
+        LOGGER.debug(
+            "Event remind command invoked by Discord user %s; event_id=%s",
+            interaction.user.id,
+            event_id,
+        )
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event remind command from Discord user %s; "
+                "required role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to remind event members.",
+                ephemeral=True,
+            )
+            return
+        event = self._bot.event_store.get_event(event_id)
+        occurrence = (
+            self._reminder_occurrence(event_id)
+            if event is not None and not event.cancelled
+            else None
+        )
+        if event is None or occurrence is None:
+            LOGGER.debug(
+                "Event remind rejected for a missing or completed event; "
+                "user_id=%s event_id=%s exists=%s",
+                interaction.user.id,
+                event_id,
+                event is not None,
+            )
+            await interaction.response.send_message(
+                "That event does not exist or is over, so there is nobody "
+                "left to remind.",
+                ephemeral=True,
+            )
+            return
+        if occurrence.thread_id is None:
+            LOGGER.debug(
+                "Event remind rejected without a thread; user_id=%s "
+                "event_id=%s occurrence_id=%s posted=%s",
+                interaction.user.id,
+                event_id,
+                occurrence.occurrence_id,
+                occurrence.message_id is not None,
+            )
+            await interaction.response.send_message(
+                "That event has no thread or forum post to remind its members "
+                "in yet.",
+                ephemeral=True,
+            )
+            return
+        signups = self._bot.event_store.get_signups(occurrence.occurrence_id)
+        participants = reminder_participants(signups)
+        if not participants:
+            LOGGER.debug(
+                "Event remind found nobody to ping; user_id=%s event_id=%s "
+                "occurrence_id=%s",
+                interaction.user.id,
+                event_id,
+                occurrence.occurrence_id,
+            )
+            await interaction.response.send_message(
+                "Nobody is signed up for that event yet.",
+                ephemeral=True,
+            )
+            return
+        # The reminder is one or more Discord sends, which can outrun the three
+        # seconds an interaction has to be answered in.
+        await interaction.response.defer(ephemeral=True)
+        sent = await send_reminder(self._bot, event, occurrence, signups)
+        if not sent:
+            await interaction.followup.send(
+                "The reminder could not be sent. Check that the bot can post "
+                "in the event's thread or forum post.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"Reminded {len(participants)} member(s) about **{event.title}**.",
+            ephemeral=True,
+        )
+        LOGGER.debug(
+            "Sent a manual event reminder; user_id=%s event_id=%s "
+            "occurrence_id=%s participants=%s",
+            interaction.user.id,
+            event_id,
+            occurrence.occurrence_id,
+            len(participants),
         )
 
     @app_commands.command(

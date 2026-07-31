@@ -301,7 +301,7 @@ async def refresh_occurrence_message(
         # Discord rejects edits inside an archived thread, so an event posted
         # into one is reopened first; otherwise every refresh would fail and the
         # occurrence would sit dirty with a stale embed until it was retired.
-        await _reopen_occurrence_thread(bot, occurrence)
+        await reopen_occurrence_thread(bot, occurrence)
         try:
             channel = await resolve_channel(
                 bot,
@@ -437,7 +437,7 @@ async def _reopen_thread(thread: Any, occurrence_id: int) -> None:
     )
 
 
-async def _reopen_occurrence_thread(
+async def reopen_occurrence_thread(
     bot: Gw2Bot,
     occurrence: EventOccurrence,
 ) -> None:
@@ -733,7 +733,7 @@ async def update_thread_membership(
     # announcement that follows it, so reopen it first. This is the first thread
     # call of every signup flow; the refresh at the end of the flow relies on the
     # same reopen.
-    await _reopen_occurrence_thread(bot, occurrence)
+    await reopen_occurrence_thread(bot, occurrence)
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         member = discord.Object(id=discord_user_id)
@@ -1124,7 +1124,7 @@ async def notify_roster_update(
     # An event posted into a dormant forum post has to reopen it before the
     # announcement can land; a signup flow has usually done so already, and this
     # no-ops when the thread is open.
-    await _reopen_occurrence_thread(bot, occurrence)
+    await reopen_occurrence_thread(bot, occurrence)
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         await thread.send(content)

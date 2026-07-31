@@ -86,6 +86,8 @@ def make_interaction(
     interaction.response.send_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
     interaction.response.edit_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     return interaction
 
 
@@ -100,7 +102,7 @@ class TestEventCommandGroup:
 
         assert group.name == "event"
         assert group.guild_only
-        assert commands == {"new", "edit", "delete"}
+        assert commands == {"new", "edit", "remind", "delete"}
 
     async def test_new_rejects_users_without_the_create_role(self) -> None:
         group = EventCommands(make_bot())
@@ -2628,6 +2630,185 @@ class TestDeleteCommand:
         assert kwargs["ephemeral"] is True
         # Confirmation only; nothing is deleted yet.
         assert store.get_event(event.event_id) is not None
+
+
+class TestRemindCommand:
+    @staticmethod
+    def _seat(store: EventStore, occurrence_id: int, user_id: int) -> None:
+        store.add_signup(
+            occurrence_id=occurrence_id,
+            discord_user_id=user_id,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+    async def test_remind_rejects_users_without_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        self._seat(store, occurrence.occurrence_id, 11)
+        interaction = make_interaction()
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        channel.thread.send.assert_not_awaited()
+
+    async def test_remind_rejects_unknown_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(group, interaction, 999)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert (
+            "does not exist"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_remind_rejects_a_finished_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        self._seat(store, occurrence.occurrence_id, 11)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        assert (
+            "is over"
+            in interaction.response.send_message.await_args.args[0]
+        )
+        channel.thread.send.assert_not_awaited()
+
+    async def test_remind_rejects_an_event_nobody_signed_up_for(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        assert (
+            "Nobody is signed up"
+            in interaction.response.send_message.await_args.args[0]
+        )
+        channel.thread.send.assert_not_awaited()
+
+    async def test_remind_rejects_an_event_without_a_thread(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event = make_edit_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        self._seat(store, occurrence.occurrence_id, 11)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        assert (
+            "no thread or forum post"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_remind_pings_the_roster_in_the_thread(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        self._seat(store, occurrence.occurrence_id, 11)
+        self._seat(store, occurrence.occurrence_id, 22)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        channel.thread.send.assert_awaited_once_with(
+            "<@11> <@22>: Original Title starts "
+            f"<t:{int(FAR_FUTURE.timestamp())}:R>"
+        )
+        interaction.response.defer.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once()
+        assert "2 member(s)" in interaction.followup.send.await_args.args[0]
+
+    async def test_remind_does_not_consume_the_automatic_reminders(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        self._seat(store, occurrence.occurrence_id, 11)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        assert (
+            store.get_handled_reminder_offsets(occurrence.occurrence_id)
+            == set()
+        )
+
+    async def test_remind_reports_a_failed_ping(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        self._seat(store, occurrence.occurrence_id, 11)
+        channel.thread.send = AsyncMock(side_effect=forbidden_error(50013))
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.remind.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.followup.send.assert_awaited_once()
+        assert (
+            "could not be sent"
+            in interaction.followup.send.await_args.args[0]
+        )
 
 
 class TestEventDeleteConfirmView:

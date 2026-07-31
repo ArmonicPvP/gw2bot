@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import re
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from math import ceil
 from zoneinfo import ZoneInfo
@@ -27,6 +28,7 @@ from gw2bot.events.models import (
     count_roster,
     is_roster_full,
 )
+from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
 
 EVENT_DATETIME_FORMAT = "%m.%d.%Y %H:%M"
 EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"
@@ -277,6 +279,53 @@ def roster_update_message(update: RosterUpdate) -> str | None:
             f"└ <@{signup.discord_user_id}> moved up from the waitlist{seat}"
         )
     return "\n".join(lines)
+
+
+def reminder_messages(
+    title: str,
+    start_time: datetime,
+    discord_user_ids: Sequence[int],
+) -> list[str]:
+    """Ping the given members about an event that is about to start.
+
+    The start is rendered as a Discord relative timestamp, so every member
+    reads it in their own locale and it stays correct whichever reminder they
+    are looking at ("in an hour", "in 15 minutes", "now").
+
+    A roster can hold fifty members, whose mentions plus a long title can
+    outgrow a single Discord message, so the mentions are split over as many
+    messages as they need and each one repeats the event line. Returns an empty
+    list when there is nobody to ping, so a caller never sends a bare colon.
+    """
+    if not discord_user_ids:
+        return []
+    # Keep at least half the message for mentions: a title is capped well below
+    # that by the creation modal, but a stored one from elsewhere must not be
+    # able to squeeze the ping it belongs to out of the message.
+    suffix = f": {title} starts <t:{int(start_time.timestamp())}:R>"
+    if len(suffix) > DISCORD_MESSAGE_LIMIT // 2:
+        keep = (
+            DISCORD_MESSAGE_LIMIT // 2
+            - (len(suffix) - len(title))
+            - len(_TRUNCATION_MARKER)
+        )
+        suffix = suffix.replace(
+            title,
+            title[:keep].rstrip() + _TRUNCATION_MARKER,
+            1,
+        )
+    messages: list[str] = []
+    current = ""
+    for discord_user_id in discord_user_ids:
+        mention = f"<@{discord_user_id}>"
+        candidate = f"{current} {mention}" if current else mention
+        if current and len(candidate) + len(suffix) > DISCORD_MESSAGE_LIMIT:
+            messages.append(f"{current}{suffix}")
+            current = mention
+        else:
+            current = candidate
+    messages.append(f"{current}{suffix}")
+    return messages
 
 
 def _chunk_lines(lines: list[str]) -> list[str]:
