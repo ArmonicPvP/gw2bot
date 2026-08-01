@@ -22,6 +22,8 @@ from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
     confirm_embed,
     describe_repeat,
+    details_confirm_embed,
+    details_preview_embed,
     edit_confirm_embed,
     event_embed,
     format_duration_input,
@@ -278,6 +280,26 @@ def _primary_live_occurrence(
     return live[0] if live else None
 
 
+def build_details_preview(
+    bot: Gw2Bot,
+    draft: EventDraft,
+) -> tuple[list[discord.Embed], discord.ui.View]:
+    # The step-one preview of a draft whose schedule has not been entered yet.
+    # It carries the same "Change something" flow as the final preview, so a
+    # correction can be made before answering three more questions.
+    preview = details_preview_embed(
+        draft.category,
+        draft.title,
+        draft.description,
+        draft.channel_id,
+        draft.leader_discord_id,
+        PREVIEW_EVENT_ID_TEXT,
+    )
+    return [preview, details_confirm_embed()], EventDetailsConfirmView(
+        bot, draft
+    )
+
+
 def build_event_preview(
     bot: Gw2Bot,
     draft: EventDraft,
@@ -287,6 +309,12 @@ def build_event_preview(
     # Split out from send_event_preview so a flow that has already answered the
     # interaction (the roster removal below awaits Discord I/O first) can still
     # re-render the same preview through edit_original_response.
+    if not draft.is_complete():
+        # Only a creation draft mid-flow lands here: an edit draft is built
+        # from a stored event and is complete from the start. Every "Change
+        # something" path funnels back through this function, so the step-one
+        # preview is what a change made before the schedule returns to.
+        return build_details_preview(bot, draft)
     editing_event_id = draft.editing_event_id
     view: discord.ui.View
     if editing_event_id is not None:
@@ -344,13 +372,14 @@ async def send_event_preview(
     embeds, view = build_event_preview(bot, draft, primary=primary)
     LOGGER.debug(
         "Sending event preview; user_id=%s category=%s repeat=%s "
-        "title_characters=%s in_place=%s editing=%s",
+        "title_characters=%s in_place=%s editing=%s complete=%s",
         draft.leader_discord_id,
         draft.category.value if draft.category is not None else None,
         draft.repeat_frequency.value,
         len(draft.title),
         _is_ephemeral_component_interaction(interaction),
         draft.editing_event_id is not None,
+        draft.is_complete(),
     )
     if _is_ephemeral_component_interaction(interaction):
         await interaction.response.edit_message(
@@ -455,14 +484,6 @@ class _ModalOpenView(discord.ui.View):
         raise NotImplementedError
 
 
-class ContinueToScheduleView(_ModalOpenView):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
-        super().__init__(bot, draft, "Continue")
-
-    def build_modal(self) -> discord.ui.Modal:
-        return EventScheduleModal(self._bot, self._draft)
-
-
 class RetryScheduleView(_ModalOpenView):
     def __init__(self, bot: Gw2Bot, draft: EventDraft):
         super().__init__(bot, draft, "Try again")
@@ -559,11 +580,7 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
             len(self._draft.title),
             len(self._draft.description),
         )
-        await interaction.response.send_message(
-            "**Step 2 of 3** — press Continue to enter the event schedule.",
-            view=ContinueToScheduleView(self._bot, self._draft),
-            ephemeral=True,
-        )
+        await send_event_preview(self._bot, interaction, self._draft)
 
 
 class RetryDetailsView(_ModalOpenView):
@@ -746,6 +763,11 @@ class _PreviewConfirmView(discord.ui.View):
         self._bot = bot
         self._draft = draft
 
+    def change_fields(self) -> tuple[tuple[str, str], ...]:
+        # Resolved at call time rather than as a class attribute, because the
+        # field lists are defined further down with the change flow itself.
+        return _CHANGE_FIELDS
+
     @discord.ui.button(
         label="Change something",
         style=discord.ButtonStyle.secondary,
@@ -757,8 +779,36 @@ class _PreviewConfirmView(discord.ui.View):
     ) -> None:
         await interaction.response.send_message(
             "What would you like to change?",
-            view=ChangeFieldView(self._bot, self._draft),
+            view=ChangeFieldView(
+                self._bot,
+                self._draft,
+                fields=self.change_fields(),
+            ),
             ephemeral=True,
+        )
+
+
+class EventDetailsConfirmView(_PreviewConfirmView):
+    """Step-one preview: continue to the schedule, or correct the details."""
+
+    def change_fields(self) -> tuple[tuple[str, str], ...]:
+        # The schedule and repeat settings have not been asked yet, so offering
+        # them here would let a commander skip past the questions that follow.
+        return _DETAILS_CHANGE_FIELDS
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next_step(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventDetailsConfirmView],
+    ) -> None:
+        LOGGER.debug(
+            "Event details preview continued to the schedule step; "
+            "user_id=%s",
+            interaction.user.id,
+        )
+        await interaction.response.send_modal(
+            EventScheduleModal(self._bot, self._draft)
         )
 
 
@@ -2023,14 +2073,22 @@ _CHANGE_FIELDS = (
     ("leader", "Leader"),
 )
 
+# What the step-one preview may change: the details that have been entered by
+# then, in the same order as the full list.
+_DETAILS_CHANGE_FIELDS = tuple(
+    entry
+    for entry in _CHANGE_FIELDS
+    if entry[0] in ("category", "title", "description", "channel", "leader")
+)
+
 
 class ChangeFieldSelect(discord.ui.Select["ChangeFieldView"]):
-    def __init__(self):
+    def __init__(self, fields: tuple[tuple[str, str], ...] = _CHANGE_FIELDS):
         super().__init__(
             placeholder="What would you like to change?",
             options=[
                 discord.SelectOption(label=label, value=value)
-                for value, label in _CHANGE_FIELDS
+                for value, label in fields
             ],
         )
 
@@ -2041,11 +2099,17 @@ class ChangeFieldSelect(discord.ui.Select["ChangeFieldView"]):
 
 
 class ChangeFieldView(discord.ui.View):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        *,
+        fields: tuple[tuple[str, str], ...] = _CHANGE_FIELDS,
+    ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._draft = draft
-        self.add_item(ChangeFieldSelect())
+        self.add_item(ChangeFieldSelect(fields))
 
     async def handle_choice(
         self,

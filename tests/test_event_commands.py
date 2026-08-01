@@ -26,6 +26,9 @@ from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
     AutoSignupChoiceView,
+    CategoryPickView,
+    ChangeFieldSelect,
+    ChangeFieldView,
     ChannelMoveConfirmView,
     ChannelPickSelect,
     ChannelPickView,
@@ -34,6 +37,7 @@ from gw2bot.events.views import (
     EditWaitlistConfirmView,
     EventConfirmView,
     EventDeleteConfirmView,
+    EventDetailsConfirmView,
     EventDetailsModal,
     EventDraft,
     EventEditConfirmView,
@@ -51,6 +55,7 @@ from gw2bot.events.views import (
     SignupSettingsView,
     UpdateRememberedRolesView,
     _signup_summary,
+    build_event_preview,
     build_signup_view,
     draft_from_event,
 )
@@ -224,7 +229,8 @@ class TestEventChannelChoices:
         await modal.on_submit(interaction)
 
         assert draft.channel_id == 901
-        assert "Step 2" in interaction.response.send_message.await_args.args[0]
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDetailsConfirmView)
 
     async def test_details_modal_rejects_a_thread_under_a_channel(self) -> None:
         draft = EventDraft(leader_discord_id=42)
@@ -278,7 +284,7 @@ class TestEventChannelChoices:
 
 
 class TestEventDetailsModal:
-    async def test_submit_stores_details_and_offers_step_two(self) -> None:
+    async def test_submit_stores_details_and_previews_them(self) -> None:
         draft = EventDraft(leader_discord_id=42)
         modal = EventDetailsModal(make_bot(), draft)
         modal.category._values = ["Raid"]
@@ -297,7 +303,96 @@ class TestEventDetailsModal:
         assert interaction.response.send_message.await_args is not None
         kwargs = interaction.response.send_message.await_args.kwargs
         assert kwargs["ephemeral"] is True
-        assert "Step 2" in interaction.response.send_message.await_args.args[0]
+        # The details are shown back as an event preview rather than as a
+        # "press Continue" prompt, so what was entered can be checked first.
+        preview, confirmation = kwargs["embeds"]
+        assert "Kitty Cleanup" in cast(str, preview.title)
+        assert preview.description == "Bring food."
+        assert "<#1234>" in {field.value for field in preview.fields}
+        assert "Next" in cast(str, confirmation.description)
+        assert isinstance(kwargs["view"], EventDetailsConfirmView)
+
+
+class TestEventDetailsConfirmView:
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+        )
+
+    def buttons(self, view: discord.ui.View) -> list[str]:
+        return [
+            cast(str, item.label)
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ]
+
+    def test_offers_next_and_change_something(self) -> None:
+        view = EventDetailsConfirmView(make_bot(), self.make_draft())
+
+        assert set(self.buttons(view)) == {"Next", "Change something"}
+
+    async def test_next_opens_the_schedule_modal(self) -> None:
+        draft = self.make_draft()
+        view = EventDetailsConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.next_step.callback)(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, EventScheduleModal)
+
+    async def test_change_something_only_offers_entered_fields(self) -> None:
+        draft = self.make_draft()
+        view = EventDetailsConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.change_something.callback)(interaction)
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        change_view = kwargs["view"]
+        assert isinstance(change_view, ChangeFieldView)
+        select = next(
+            item
+            for item in change_view.children
+            if isinstance(item, ChangeFieldSelect)
+        )
+        # The schedule and repeat questions have not been asked yet, so they
+        # cannot be answered out of order from this preview.
+        assert [option.value for option in select.options] == [
+            "category",
+            "title",
+            "description",
+            "channel",
+            "leader",
+        ]
+
+    async def test_a_change_returns_to_the_details_preview(self) -> None:
+        draft = self.make_draft()
+        view = CategoryPickView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.pick(interaction, EventCategory.FRACTAL)
+
+        assert draft.category is EventCategory.FRACTAL
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDetailsConfirmView)
+        assert len(kwargs["embeds"]) == 2
+
+    def test_a_complete_draft_gets_the_full_preview(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+        )
+
+        _, view = build_event_preview(make_bot(), draft)
+
+        assert isinstance(view, EventConfirmView)
 
 
 class TestEventScheduleModal:
