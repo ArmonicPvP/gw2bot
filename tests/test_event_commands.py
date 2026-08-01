@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
+from gw2bot.events.formatting import next_occurrence_start
 from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
@@ -660,6 +661,82 @@ class TestEventRepeatModal:
             "Try again"
             in interaction.response.send_message.await_args.args[0]
         )
+
+    async def test_invalid_days_leave_the_draft_untouched(self) -> None:
+        # A frequency stored without its days would describe an event that
+        # repeats on no day at all. next_occurrence_start raises on one of
+        # those, and that aborts the whole maintenance pass, so it must never
+        # reach a draft a still-open preview could post.
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days_text="",
+            delete_previous_on_repeat=False,
+        )
+        modal = EventRepeatModal(make_bot(), draft)
+        modal.frequency._values = ["weekly"]
+        modal.days_input._value = "someday"
+        modal.delete_previous._values = ["yes"]
+
+        await modal.on_submit(make_interaction())
+
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+        assert draft.repeat_days == ()
+        assert draft.repeat_days_text == ""
+        assert draft.delete_previous_on_repeat is False
+
+    async def test_a_rejected_attempt_refills_the_retry_modal(self) -> None:
+        # The draft never took the answers on, so the retry has to carry them.
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days_text="",
+        )
+        modal = EventRepeatModal(make_bot(), draft)
+        modal.frequency._values = ["weekly"]
+        modal.days_input._value = "someday"
+        modal.delete_previous._values = ["yes"]
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        retry = interaction.response.send_message.await_args.kwargs["view"]
+        refilled = cast(EventRepeatModal, retry.build_modal())
+        assert refilled.days_input.default == "someday"
+        assert [
+            option.value
+            for option in refilled.frequency.options
+            if option.default
+        ] == ["weekly"]
+        assert [
+            option.value
+            for option in refilled.delete_previous.options
+            if option.default
+        ] == ["yes"]
+
+    async def test_a_stale_preview_cannot_post_a_dayless_repeat(self) -> None:
+        # The rejection message is not the only live message: a preview from an
+        # earlier step shares the draft and can still complete it.
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+        modal = EventRepeatModal(make_bot(), draft)
+        modal.frequency._values = ["weekly"]
+        modal.days_input._value = "someday"
+        modal.delete_previous._values = ["no"]
+        await modal.on_submit(make_interaction())
+
+        event = draft.to_event()
+
+        assert event.repeat_frequency is RepeatFrequency.NONE
+        with pytest.raises(ValueError, match="no next occurrence"):
+            next_occurrence_start(
+                event.repeat_frequency,
+                event.repeat_days,
+                event.start_time,
+                ZoneInfo("UTC"),
+            )
 
     def test_an_unanswered_frequency_preselects_nothing(self) -> None:
         draft = replace(

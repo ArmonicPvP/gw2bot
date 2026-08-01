@@ -202,6 +202,23 @@ def draft_from_event(
     )
 
 
+@dataclass(frozen=True)
+class RepeatAttempt:
+    """Repeat answers that failed validation, kept only to refill the modal.
+
+    They are deliberately never written to the draft. A preview opened from an
+    earlier step shares that draft and can complete it, so a frequency stored
+    beside unparsed days could be posted as a weekly or monthly event with no
+    days to repeat on. Such an event raises out of next_occurrence_start when
+    its occurrence ends, which aborts the whole maintenance pass, not just
+    that event's.
+    """
+
+    frequency: RepeatFrequency
+    days_text: str
+    delete_previous: bool
+
+
 def _category_options(
     selected: EventCategory | None,
 ) -> list[discord.SelectOption]:
@@ -501,11 +518,17 @@ class ContinueToRepeatView(_ModalOpenView):
 
 
 class RetryRepeatView(_ModalOpenView):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        attempt: RepeatAttempt | None = None,
+    ):
         super().__init__(bot, draft, "Try again")
+        self._attempt = attempt
 
     def build_modal(self) -> discord.ui.Modal:
-        return EventRepeatModal(self._bot, self._draft)
+        return EventRepeatModal(self._bot, self._draft, self._attempt)
 
 
 class EventDetailsModal(discord.ui.Modal, title="Create new event"):
@@ -689,12 +712,30 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
 
 
 class EventRepeatModal(discord.ui.Modal, title="Create new event"):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        attempt: RepeatAttempt | None = None,
+    ):
         super().__init__()
         self._bot = bot
         self._draft = draft
+        # A rejected attempt refills the modal from itself rather than from the
+        # draft, which never took those answers on.
+        frequency = (
+            attempt.frequency if attempt is not None else draft.repeat_frequency
+        )
+        days_text = (
+            attempt.days_text if attempt is not None else draft.repeat_days_text
+        )
+        delete_previous = (
+            attempt.delete_previous
+            if attempt is not None
+            else draft.delete_previous_on_repeat
+        )
         self.frequency = discord.ui.Select["EventRepeatModal"](
-            options=_frequency_options(draft.repeat_frequency),
+            options=_frequency_options(frequency),
         )
         self.add_item(
             discord.ui.Label(
@@ -704,7 +745,7 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
         )
         self.days_input = discord.ui.TextInput["EventRepeatModal"](
             required=False,
-            default=draft.repeat_days_text or None,
+            default=days_text or None,
             placeholder="Weekly: Sunday, Wednesday — Monthly: 1, 15, 30",
             max_length=120,
         )
@@ -718,7 +759,7 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
             )
         )
         self.delete_previous = discord.ui.Select["EventRepeatModal"](
-            options=_yes_no_options(draft.delete_previous_on_repeat),
+            options=_yes_no_options(delete_previous),
         )
         self.add_item(
             discord.ui.Label(
@@ -732,23 +773,27 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         frequency = RepeatFrequency(self.frequency.values[0])
-        self._draft.repeat_frequency = frequency
-        self._draft.repeat_days_text = self.days_input.value.strip()
-        self._draft.delete_previous_on_repeat = (
-            self.delete_previous.values[0] == "yes"
-        )
+        days_text = self.days_input.value.strip()
+        delete_previous = self.delete_previous.values[0] == "yes"
         try:
-            repeat_days = parse_repeat_days(
-                frequency,
-                self._draft.repeat_days_text,
-            )
+            repeat_days = parse_repeat_days(frequency, days_text)
         except ValueError as error:
+            # The draft keeps the repeat settings it already had: a rejected
+            # frequency must not reach it, because a still-open preview from an
+            # earlier step could complete and post it without any days.
             await _send_validation_error(
                 interaction,
                 error,
-                RetryRepeatView(self._bot, self._draft),
+                RetryRepeatView(
+                    self._bot,
+                    self._draft,
+                    RepeatAttempt(frequency, days_text, delete_previous),
+                ),
             )
             return
+        self._draft.repeat_frequency = frequency
+        self._draft.repeat_days_text = days_text
+        self._draft.delete_previous_on_repeat = delete_previous
         self._draft.repeat_days = repeat_days
         LOGGER.debug(
             "Event repeat step submitted; user_id=%s frequency=%s days=%s",
