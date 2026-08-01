@@ -332,6 +332,23 @@ class EventSignupRecord(Base):
     )
 
 
+class EventReminderRecord(Base):
+    __tablename__ = "gw2_event_reminders"
+
+    # One row per reminder that has been handled for an occurrence, so a restart
+    # or a second maintenance pass never pings the same roster twice. A row is
+    # also written for a reminder that was deliberately not sent (nobody to
+    # ping, no thread to ping in, or its moment lapsed during downtime): the
+    # question the row answers is "is this reminder still outstanding?", and in
+    # each of those cases it is not.
+    occurrence_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_event_occurrences.occurrence_id"),
+        primary_key=True,
+    )
+    offset_minutes: Mapped[int] = mapped_column(Integer, primary_key=True)
+    handled_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class EventSignupPreferenceRecord(Base):
     __tablename__ = "gw2_event_signup_preferences"
 
