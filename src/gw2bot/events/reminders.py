@@ -194,6 +194,16 @@ async def deliver_due_reminders(
     )
     due, deliverable = due_reminder_offsets(occurrence, handled, current_time)
     if not due:
+        # Recorded per occurrence rather than left silent: this is the common
+        # outcome of a maintenance pass, and without it an occurrence whose
+        # status also held still leaves no trace at all, so a missing reminder
+        # cannot be told apart from an occurrence the pass never looked at.
+        LOGGER.debug(
+            "No event reminders due; occurrence_id=%s handled=%s remaining=%s",
+            occurrence.occurrence_id,
+            len(handled),
+            len(REMINDER_OFFSETS) - len(handled),
+        )
         return None
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     # A finished occurrence is about to leave maintenance for good, so anything

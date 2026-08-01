@@ -462,6 +462,23 @@ class TestDeliverDueReminders:
             == set()
         )
 
+    async def test_an_occurrence_with_nothing_due_is_logged_as_evaluated(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # An occurrence whose status also holds still leaves no other trace in
+        # the pass, so the skip is what tells an operator it was looked at.
+        event, occurrence = await post_event(bot, store, title="SECRET TITLE")
+
+        with caplog.at_level("DEBUG"):
+            await deliver_due_reminders(bot, event, occurrence, BEFORE_START)
+
+        assert "No event reminders due" in caplog.text
+        assert f"occurrence_id={occurrence.occurrence_id}" in caplog.text
+        assert "SECRET TITLE" not in caplog.text
+
     async def test_each_reminder_is_sent_once_at_its_moment(
         self,
         bot: Any,
