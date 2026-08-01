@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Any
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import discord_failure_reason, log_discord_failure
+from gw2bot.discord_utils import (
+    GuildMembership,
+    discord_failure_reason,
+    log_discord_failure,
+)
 from gw2bot.events.formatting import (
     compute_status,
     event_embed,
@@ -876,6 +880,131 @@ async def remove_signup(
         await notify_roster_update(bot, occurrence, update)
     await refresh_occurrence_message(bot, event, occurrence)
     return removed, update
+
+
+def departed_roster_members(
+    signups: Sequence[EventSignup],
+    memberships: Mapping[int, GuildMembership],
+) -> list[int]:
+    """Pick out the roster members Discord has confirmed have left.
+
+    Only a definite "not a member" counts. A lookup that failed - a permission
+    error, an outage, a member the bot was never told about - reports None, and
+    treating that as a departure would drop half a roster the first time
+    Discord is unreachable.
+    """
+    return [
+        signup.discord_user_id
+        for signup in signups
+        if memberships.get(signup.discord_user_id, GuildMembership()).in_guild
+        is False
+    ]
+
+
+async def prune_departed_signups(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    memberships: Mapping[int, GuildMembership],
+    now: datetime | None = None,
+) -> tuple[list[int], RosterUpdate]:
+    """Drop roster members who have left the Discord server.
+
+    A member who leaves the server keeps their seat: the bot runs without the
+    members intent, so it never hears about the departure, and the seat would
+    hold a place nobody can fill for an event they cannot even see. Every
+    roster edit re-checks the members it lists and clears those out, promoting
+    the waitlist into the freed seats exactly as a leader's own removal would.
+
+    Automatic sign-up is switched off for each departure as well, so a
+    recurring series does not seat them again on its next occurrence.
+
+    Returns the ids actually removed and the merged roster movement to report,
+    which the caller announces or folds into its own announcement.
+    """
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    if not signups:
+        return [], RosterUpdate()
+    if occurrence_status(event, occurrence, signups, now) is EventStatus.OVER:
+        # A finished occurrence's roster is history. Removing from it would
+        # promote someone into a run that is already over, and re-rendering the
+        # message can persist OVER without seeding the series' next occurrence.
+        LOGGER.debug(
+            "Skipped pruning departed members from a finished occurrence; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return [], RosterUpdate()
+    departed = departed_roster_members(signups, memberships)
+    if not departed:
+        LOGGER.debug(
+            "No departed members on the roster; occurrence_id=%s roster=%s",
+            occurrence.occurrence_id,
+            len(signups),
+        )
+        return [], RosterUpdate()
+    removed: list[int] = []
+    updates: list[RosterUpdate] = []
+    for index, user_id in enumerate(departed):
+        # remove_signup awaits Discord I/O between members, so the event can
+        # cross its end partway through a long roster even though the check
+        # above passed. Re-read both the clock and the occurrence every
+        # iteration - the row can be rescheduled or retired outright while the
+        # loop runs - and stop the moment the run is over, so no removal (and
+        # no waitlist promotion behind it) ever lands on a finished roster.
+        # An explicit now pins the clock for callers that asked for one;
+        # otherwise it really is the elapsing time that counts.
+        current_time = now if now is not None else datetime.now(UTC)
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        if current is None or current_time >= current.start_time + timedelta(
+            minutes=event.duration_minutes
+        ):
+            LOGGER.debug(
+                "Event ended mid-prune; stopping; occurrence_id=%s kept=%s "
+                "exists=%s",
+                occurrence.occurrence_id,
+                len(departed) - index,
+                current is not None,
+            )
+            break
+        # One member failing to leave the roster must not strand the rest, and
+        # remove_signup already absorbs its own Discord failures.
+        signup, update = await remove_signup(
+            bot,
+            event,
+            current,
+            user_id,
+            notify=False,
+        )
+        if signup is None:
+            continue
+        removed.append(user_id)
+        updates.append(update)
+        try:
+            # The fresh row again: disable_auto_signup withdraws the member
+            # from occurrences later than this one, which is decided by
+            # comparing start times.
+            disable_auto_signup(bot, event, current, user_id)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not disable auto signup for a departed member; "
+                "occurrence_id=%s user_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                user_id,
+                type(exc).__name__,
+            )
+    merged = merge_roster_updates(updates, removed)
+    LOGGER.debug(
+        "Pruned departed members from the roster; event_id=%s "
+        "occurrence_id=%s roster=%s departed=%s removed=%s promoted=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        len(signups),
+        len(departed),
+        len(removed),
+        len(merged.promoted),
+    )
+    return removed, merged
 
 
 def rebalance_occurrence_roster(

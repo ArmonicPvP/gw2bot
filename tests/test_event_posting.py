@@ -9,6 +9,8 @@ import discord
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.discord_utils import GuildMembership
+from gw2bot.events import posting
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
     AutoSignupChoice,
@@ -32,10 +34,12 @@ from gw2bot.events.posting import (
     apply_signup_edit,
     complete_signup,
     delete_event_posts,
+    departed_roster_members,
     disable_auto_signup,
     merge_roster_updates,
     occurrence_status,
     post_occurrence,
+    prune_departed_signups,
     prune_superseded_occurrences,
     rebalance_occurrence_roster,
     refresh_occurrence_message,
@@ -1315,6 +1319,238 @@ class TestCompleteSignupReshuffle:
         assert moved.assigned_role is EventRole.DPS
         # The public embed refresh still runs after the failed ping.
         channel.partial_message.edit.assert_awaited()
+
+
+class TestPruneDepartedSignups:
+    async def seat_pair(self, bot: Any, store: EventStore) -> Any:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+        await complete_signup(bot, event, occurrence, 12, EventRole.DPS, ())
+        return event, occurrence
+
+    def test_only_a_confirmed_departure_counts(self) -> None:
+        signups = [
+            make_signup(11, EventRole.DPS),
+            make_signup(12, EventRole.DPS),
+            make_signup(13, EventRole.DPS),
+        ]
+        memberships = {
+            11: GuildMembership("Present", True),
+            12: GuildMembership("Gone", False),
+            # Discord could not be reached for this one, which proves nothing.
+            13: GuildMembership(None, None),
+        }
+
+        assert departed_roster_members(signups, memberships) == [12]
+
+    def test_a_member_with_no_lookup_at_all_keeps_their_seat(self) -> None:
+        signups = [make_signup(11, EventRole.DPS)]
+
+        assert departed_roster_members(signups, {}) == []
+
+    async def test_removes_departed_members_and_promotes_the_waitlist(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+        waitlisted = await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_HEAL, ()
+        )
+        assert waitlisted.waitlisted
+
+        removed, update = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {
+                11: GuildMembership("Gone", False),
+                12: GuildMembership("Present", True),
+            },
+        )
+
+        assert removed == [11]
+        # The freed seat goes to the waitlist exactly as a leader's own
+        # removal would hand it over.
+        assert [signup.discord_user_id for signup in update.promoted] == [12]
+        assert store.get_signup(occurrence.occurrence_id, 11) is None
+        promoted = store.get_signup(occurrence.occurrence_id, 12)
+        assert promoted is not None
+        assert not promoted.waitlisted
+
+    async def test_keeps_members_whose_lookup_failed(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.seat_pair(bot, store)
+
+        removed, update = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {
+                11: GuildMembership(None, None),
+                12: GuildMembership("Present", True),
+            },
+        )
+
+        assert removed == []
+        assert not update.has_changes
+        assert len(store.get_signups(occurrence.occurrence_id)) == 2
+
+    async def test_disables_auto_signup_for_a_departed_member(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Left alone, automatic sign-up would seat them again on the series'
+        # next occurrence, undoing the prune every week.
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        await complete_signup(bot, event, occurrence, 11, EventRole.DPS, ())
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        removed, _ = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {11: GuildMembership("Gone", False)},
+        )
+
+        assert removed == [11]
+        auto = store.get_auto_signup(event.event_id, 11)
+        assert auto is not None
+        assert auto.choice is AutoSignupChoice.NO
+
+    async def test_stops_when_the_event_ends_partway_through(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Each removal awaits Discord I/O, so a long roster of departures can
+        # cross the event's end mid-loop. Everything after that point would be
+        # a removal - and a waitlist promotion - landing on a finished roster.
+        event, occurrence = await post_new_event(bot, store)
+        for user_id in (11, 12, 13):
+            await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+        real_remove = posting.remove_signup
+        ended = False
+
+        async def remove_then_end(*args: Any, **kwargs: Any) -> Any:
+            nonlocal ended
+            result = await real_remove(*args, **kwargs)
+            if not ended:
+                # The first removal is the one the clock catches up with.
+                ended = True
+                store.set_occurrence_start_time(
+                    occurrence.occurrence_id,
+                    datetime.now(UTC)
+                    - timedelta(minutes=event.duration_minutes + 1),
+                )
+            return result
+
+        monkeypatch.setattr(posting, "remove_signup", remove_then_end)
+
+        removed, _ = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {
+                user_id: GuildMembership(f"Gone {user_id}", False)
+                for user_id in (11, 12, 13)
+            },
+        )
+
+        # Only the removal that ran before the event ended went through; the
+        # rest keep their rows for the next edit to deal with.
+        assert removed == [11]
+        remaining = {
+            signup.discord_user_id
+            for signup in store.get_signups(occurrence.occurrence_id)
+        }
+        assert remaining == {12, 13}
+
+    async def test_stops_when_the_occurrence_is_retired_partway_through(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The same guard covers the row disappearing outright - a deleted event
+        # or a pruned superseded occurrence - rather than only the clock.
+        event, occurrence = await post_new_event(bot, store)
+        for user_id in (11, 12):
+            await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+        real_remove = posting.remove_signup
+        dropped = False
+
+        async def remove_then_delete(*args: Any, **kwargs: Any) -> Any:
+            nonlocal dropped
+            result = await real_remove(*args, **kwargs)
+            if not dropped:
+                dropped = True
+                store.delete_event(event.event_id)
+            return result
+
+        monkeypatch.setattr(posting, "remove_signup", remove_then_delete)
+
+        removed, _ = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {
+                11: GuildMembership("Gone", False),
+                12: GuildMembership("Gone too", False),
+            },
+        )
+
+        assert removed == [11]
+
+    async def test_leaves_a_finished_occurrence_alone(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A finished roster is history: removing from it would promote someone
+        # into a run that is already over, and the refresh behind that can
+        # persist OVER without seeding the series' next occurrence.
+        event, occurrence = await self.seat_pair(bot, store)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(minutes=event.duration_minutes + 1),
+        )
+        finished = store.get_occurrence(occurrence.occurrence_id)
+        assert finished is not None
+
+        removed, _ = await prune_departed_signups(
+            bot,
+            event,
+            finished,
+            {11: GuildMembership("Gone", False)},
+        )
+
+        assert removed == []
+        assert store.get_signup(finished.occurrence_id, 11) is not None
 
 
 class TestRemoveSignupResettle:
