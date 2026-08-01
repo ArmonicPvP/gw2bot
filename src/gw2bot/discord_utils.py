@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 import discord
@@ -55,23 +56,51 @@ def discord_failure_signature(error: discord.DiscordException) -> str:
     )
 
 
-async def resolve_display_name(
+@dataclass(frozen=True, slots=True)
+class GuildMembership:
+    """What one member lookup could establish about a Discord user.
+
+    ``in_guild`` is deliberately three-valued. Discord answering "unknown
+    member" proves the user has left, but a permission error or an outage
+    proves nothing, and a caller that drops people from a roster must be able
+    to tell those apart: only a definite False may cost someone their seat.
+    """
+
+    display_name: str | None = None
+    in_guild: bool | None = None
+
+
+async def resolve_guild_membership(
     bot: Any,
     guild: discord.Guild | None,
     user_id: int,
-) -> str | None:
-    """Return the display name, or None when Discord cannot be reached.
+) -> GuildMembership:
+    """Look a member up once, reporting both their name and their membership.
 
     The bot runs without the members intent, so the guild member cache is
-    almost always empty and the name has to be fetched. The guild member is
-    preferred over the global user so a server nickname wins.
+    almost always empty and the member has to be fetched. The guild member is
+    preferred over the global user so a server nickname wins, and that same
+    fetch is what answers whether the user is still in the server at all.
     """
+    in_guild: bool | None = None
     if guild is not None:
         member = guild.get_member(user_id)
         if member is not None:
-            return member.display_name
+            return GuildMembership(member.display_name, True)
         try:
             member = await guild.fetch_member(user_id)
+        except discord.NotFound as exc:
+            # Discord knows the guild and does not know this member in it, so
+            # they have left. The global lookup below still runs: the name is
+            # wanted for whatever the caller reports about the departure.
+            LOGGER.debug(
+                "Guild member lookup reported a departed member; user_id=%s "
+                "failure=%s",
+                user_id,
+                discord_failure_signature(exc),
+            )
+            in_guild = False
+            member = None
         except discord.HTTPException as exc:
             # The global lookup below can still succeed and hide this from the
             # aggregate counts, so record the guild failure on its own: a
@@ -86,7 +115,7 @@ async def resolve_display_name(
             )
             member = None
         if member is not None:
-            return member.display_name
+            return GuildMembership(member.display_name, True)
     try:
         user = await bot.fetch_user(user_id)
     except discord.HTTPException as exc:
@@ -95,8 +124,48 @@ async def resolve_display_name(
             user_id,
             discord_failure_signature(exc),
         )
-        return None
-    return user.display_name
+        return GuildMembership(None, in_guild)
+    return GuildMembership(user.display_name, in_guild)
+
+
+async def resolve_guild_memberships(
+    bot: Any,
+    guild: discord.Guild | None,
+    user_ids: Sequence[int],
+) -> dict[int, GuildMembership]:
+    """Resolve several members at once.
+
+    Lookups run concurrently so a whole roster costs one round trip rather
+    than one per member.
+    """
+    unique = list(dict.fromkeys(user_ids))
+    if not unique:
+        return {}
+    memberships = await asyncio.gather(
+        *(resolve_guild_membership(bot, guild, user_id) for user_id in unique)
+    )
+    resolved = dict(zip(unique, memberships, strict=True))
+    LOGGER.debug(
+        "Resolved guild memberships; requested=%s named=%s unnamed=%s "
+        "in_guild=%s departed=%s unknown=%s",
+        len(unique),
+        sum(1 for entry in memberships if entry.display_name is not None),
+        sum(1 for entry in memberships if entry.display_name is None),
+        sum(1 for entry in memberships if entry.in_guild is True),
+        sum(1 for entry in memberships if entry.in_guild is False),
+        sum(1 for entry in memberships if entry.in_guild is None),
+    )
+    return resolved
+
+
+async def resolve_display_name(
+    bot: Any,
+    guild: discord.Guild | None,
+    user_id: int,
+) -> str | None:
+    """Return the display name, or None when Discord cannot be reached."""
+    membership = await resolve_guild_membership(bot, guild, user_id)
+    return membership.display_name
 
 
 async def resolve_display_names(
@@ -106,24 +175,14 @@ async def resolve_display_names(
 ) -> dict[int, str | None]:
     """Resolve several display names at once.
 
-    Lookups run concurrently so a whole roster costs one round trip rather
-    than one per member. An entry is None when Discord could not be reached
-    for that member; callers substitute their own placeholder.
+    An entry is None when Discord could not be reached for that member;
+    callers substitute their own placeholder.
     """
-    unique = list(dict.fromkeys(user_ids))
-    if not unique:
-        return {}
-    names = await asyncio.gather(
-        *(resolve_display_name(bot, guild, user_id) for user_id in unique)
-    )
-    resolved = dict(zip(unique, names, strict=True))
-    LOGGER.debug(
-        "Resolved display names; requested=%s resolved=%s failed=%s",
-        len(unique),
-        sum(1 for name in names if name is not None),
-        sum(1 for name in names if name is None),
-    )
-    return resolved
+    memberships = await resolve_guild_memberships(bot, guild, user_ids)
+    return {
+        user_id: membership.display_name
+        for user_id, membership in memberships.items()
+    }
 
 
 async def send_direct_message(bot: Any, user_id: int, content: str) -> bool:

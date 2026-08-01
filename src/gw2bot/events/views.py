@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import ceil
@@ -10,16 +10,19 @@ from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 import discord
+from discord.utils import MISSING
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import (
     resolve_display_names,
+    resolve_guild_memberships,
     safe_int,
     send_direct_message,
     user_has_role,
 )
 from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
+    compute_status,
     confirm_embed,
     describe_repeat,
     details_confirm_embed,
@@ -32,6 +35,7 @@ from gw2bot.events.formatting import (
     parse_event_datetime,
     parse_event_duration,
     parse_repeat_days,
+    roster_edit_embed,
     signup_edit_limit_message,
 )
 from gw2bot.events.models import (
@@ -49,6 +53,7 @@ from gw2bot.events.models import (
     RosterUpdate,
     available_edit_tokens,
     fitting_roles,
+    is_roster_full,
 )
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 
@@ -62,12 +67,15 @@ EVENT_TITLE_MAX_LENGTH = 256
 EVENT_DESCRIPTION_MAX_LENGTH = 4000
 FLOW_TIMEOUT_SECONDS = 600
 
-# An event whose occurrence has started is live and cannot be edited: re-rendering
-# it can persist OVER without seeding a recurring series' next occurrence, and its
-# roster is already in play. Deleting is the only remaining action.
+# An event whose occurrence has started is live, so its details are frozen:
+# re-rendering it from an edit can persist OVER without seeding a recurring
+# series' next occurrence, and moving or rescheduling a run people are already
+# in is not an edit anyone wants. Its roster is still in play, though - members
+# sign out of it and leaders take them off it - so that stays editable.
 ONGOING_EDIT_REJECTION = (
-    "That event has already started, so it can no longer be edited. "
-    "Use `/event delete` to remove it."
+    "That event has already started, so its details can no longer be changed. "
+    "Run `/event edit` again to manage its roster, or `/event delete` to "
+    "remove it."
 )
 PREVIEW_EVENT_ID_TEXT = "—"
 
@@ -107,6 +115,12 @@ REMOVE_SELECT_PAGE_SIZE = 25
 # rather than rejected by the API.
 REMOVE_OPTION_LABEL_MAX_LENGTH = 100
 
+# How many characters the list of departed members may take. Discord refuses a
+# message body over 2,000 characters, and this line is prefixed to the removal
+# picker's own prompt, so the budget leaves room for that and for the sentence
+# wrapped around the names.
+DEPARTED_SUMMARY_BUDGET = 1_000
+
 
 @dataclass
 class EventDraft:
@@ -128,6 +142,19 @@ class EventDraft:
     # whole "Change something" flow reuses this draft, so a single flag steers
     # every editor back to the edit preview and Save-changes path.
     editing_event_id: int | None = None
+    # Set when the event being edited is already in progress. Its stored
+    # details are frozen at that point, so the preview offers the roster
+    # controls alone and no path from it can reach apply_event_edit.
+    roster_only: bool = False
+    # The occurrence a roster-only session was opened for. A running event is
+    # minutes from ending, and the moment it does the scheduler retires it and
+    # seeds the series' next occurrence - which would become the soonest live
+    # one. Re-resolving the occurrence on each click would then silently move
+    # the session onto next week's roster, so it is pinned here instead and the
+    # flow refuses it once it has ended. Only roster-only sessions pin: the
+    # editor for an upcoming event edits the whole series, and apply_event_edit
+    # walks every live occurrence by design.
+    editing_occurrence_id: int | None = None
     # Guards the Save-changes / Move-event terminal actions against a double
     # click that would otherwise apply the edit (or re-post) twice.
     edit_applied: bool = False
@@ -170,6 +197,8 @@ def draft_from_event(
     timezone: ZoneInfo,
     *,
     start_time_override: datetime | None = None,
+    roster_only: bool = False,
+    editing_occurrence_id: int | None = None,
 ) -> EventDraft:
     # Pre-fill the text mirror fields so the reused edit modals show the current
     # values (start/duration/repeat are re-parsed from these strings). For a
@@ -199,6 +228,8 @@ def draft_from_event(
         ),
         delete_previous_on_repeat=event.delete_previous_on_repeat,
         editing_event_id=event.event_id,
+        roster_only=roster_only,
+        editing_occurrence_id=editing_occurrence_id,
     )
 
 
@@ -317,6 +348,46 @@ def build_details_preview(
     )
 
 
+def _editing_occurrence(
+    bot: Gw2Bot,
+    draft: EventDraft,
+    primary: EventOccurrence | None = None,
+) -> EventOccurrence | None:
+    """The occurrence an edit session is working on.
+
+    A roster-only session pins its occurrence, so it keeps editing the run the
+    commander opened even after that run ends and the series seeds its
+    successor. Every other session tracks the soonest live occurrence, which is
+    what a date change reschedules.
+    """
+    if primary is not None:
+        return primary
+    if draft.editing_occurrence_id is not None:
+        return bot.event_store.get_occurrence(draft.editing_occurrence_id)
+    if draft.editing_event_id is None:
+        return None
+    return _primary_live_occurrence(bot, draft.editing_event_id)
+
+
+def _preview_status(
+    event: Event,
+    signups: list[EventSignup],
+    roster_only: bool,
+) -> EventStatus:
+    # A pending edit has no status of its own - it describes an event that does
+    # not exist yet - so the "before you save" preview renders neutrally as
+    # OPEN. A roster-only preview mirrors an event that is already running, so
+    # it shows the status that event actually has.
+    if not roster_only:
+        return EventStatus.OPEN
+    return compute_status(
+        event.start_time,
+        event.duration_minutes,
+        datetime.now(UTC),
+        is_roster_full(event.capacity, signups),
+    )
+
+
 def build_event_preview(
     bot: Gw2Bot,
     draft: EventDraft,
@@ -340,24 +411,28 @@ def build_event_preview(
         # start_time), not the occurrence's stored time. The initial /event edit
         # call passes the occurrence it already fetched; change-flow re-renders
         # do not have it, so look it up.
-        occurrence = (
-            primary
-            if primary is not None
-            else _primary_live_occurrence(bot, editing_event_id)
-        )
+        occurrence = _editing_occurrence(bot, draft, primary)
         signups = (
             bot.event_store.get_signups(occurrence.occurrence_id)
             if occurrence is not None
             else []
         )
+        edited = draft.to_event(editing_event_id)
         preview = event_embed(
-            draft.to_event(editing_event_id),
+            edited,
             signups,
-            EventStatus.OPEN,
+            _preview_status(edited, signups, draft.roster_only),
             event_id_text=str(editing_event_id),
         )
-        confirmation = edit_confirm_embed()
-        view = EventEditConfirmView(bot, draft)
+        if draft.roster_only:
+            # The event is running: its details are frozen, so the preview is a
+            # live roster with the roster controls under it rather than a
+            # "before you save" picture of pending changes.
+            confirmation = roster_edit_embed()
+            view = EventRosterEditView(bot, draft)
+        else:
+            confirmation = edit_confirm_embed()
+            view = EventEditConfirmView(bot, draft)
     else:
         preview = event_embed(
             draft.to_event(),
@@ -385,27 +460,46 @@ async def send_event_preview(
     draft: EventDraft,
     *,
     primary: EventOccurrence | None = None,
+    deferred: bool = False,
+    content: str | None = None,
 ) -> None:
     embeds, view = build_event_preview(bot, draft, primary=primary)
     LOGGER.debug(
         "Sending event preview; user_id=%s category=%s repeat=%s "
-        "title_characters=%s in_place=%s editing=%s complete=%s",
+        "title_characters=%s in_place=%s editing=%s roster_only=%s "
+        "deferred=%s complete=%s",
         draft.leader_discord_id,
         draft.category.value if draft.category is not None else None,
         draft.repeat_frequency.value,
         len(draft.title),
         _is_ephemeral_component_interaction(interaction),
         draft.editing_event_id is not None,
+        draft.roster_only,
+        deferred,
         draft.is_complete(),
     )
-    if _is_ephemeral_component_interaction(interaction):
+    if deferred:
+        # The caller already acknowledged the interaction because it had to
+        # await Discord I/O (a roster membership check) before it could answer,
+        # so the preview goes out as a follow-up rather than a first response.
+        await interaction.followup.send(
+            # A follow-up refuses a None content, unlike an edit or a first
+            # response, so the "no note to show" case is the API's own
+            # sentinel rather than an empty message.
+            content=content if content is not None else MISSING,
+            embeds=embeds,
+            view=view,
+            ephemeral=True,
+        )
+    elif _is_ephemeral_component_interaction(interaction):
         await interaction.response.edit_message(
-            content=None,
+            content=content,
             embeds=embeds,
             view=view,
         )
     else:
         await interaction.response.send_message(
+            content=content,
             embeds=embeds,
             view=view,
             ephemeral=True,
@@ -804,12 +898,20 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
         await send_event_preview(self._bot, interaction, self._draft)
 
 
-class _PreviewConfirmView(discord.ui.View):
+class _EditFlowView(discord.ui.View):
+    """Base for the views that sit on a draft, carrying no buttons of its own.
+
+    The in-progress roster editor deliberately does not inherit the
+    "Change something" button, so that lives one level down rather than here.
+    """
+
     def __init__(self, bot: Gw2Bot, draft: EventDraft):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._draft = draft
 
+
+class _PreviewConfirmView(_EditFlowView):
     def change_fields(self) -> tuple[tuple[str, str], ...]:
         # Resolved at call time rather than as a class attribute, because the
         # field lists are defined further down with the change flow itself.
@@ -1096,96 +1198,255 @@ class EventEditConfirmView(_PreviewConfirmView):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventEditConfirmView],
     ) -> None:
-        editing_event_id = self._draft.editing_event_id
-        if editing_event_id is None:
-            await interaction.response.send_message(
-                "This edit session is no longer valid.",
-                ephemeral=True,
-            )
-            return
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
-            LOGGER.warning(
-                "Rejected event roster removal from Discord user %s; required "
-                "role %s",
-                interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to edit events.",
-                ephemeral=True,
-            )
-            return
-        # The roster belongs to the occurrence, not the draft, so it is read
-        # fresh: members can sign up or out while the preview sits open.
-        occurrence = _primary_live_occurrence(self._bot, editing_event_id)
-        signups = (
-            self._bot.event_store.get_signups(occurrence.occurrence_id)
-            if occurrence is not None
-            else []
+        await open_roster_removal(self._bot, interaction, self._draft)
+
+
+class EventRosterEditView(_EditFlowView):
+    """The whole editor for an event that is already in progress.
+
+    It carries the roster button alone: the event's stored details are frozen
+    once it starts, so there is nothing here to save and no way from this view
+    into apply_event_edit.
+    """
+
+    @discord.ui.button(
+        label="Remove sign-ups",
+        style=discord.ButtonStyle.danger,
+    )
+    async def remove_signups(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventRosterEditView],
+    ) -> None:
+        await open_roster_removal(self._bot, interaction, self._draft)
+
+
+async def open_roster_removal(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    draft: EventDraft,
+) -> None:
+    """Show the roster removal picker for the draft's event.
+
+    Shared by the upcoming-event editor and the in-progress roster editor, so
+    both reach the same picker over the same freshly read roster.
+    """
+    editing_event_id = draft.editing_event_id
+    if editing_event_id is None:
+        await interaction.response.send_message(
+            "This edit session is no longer valid.",
+            ephemeral=True,
         )
-        if occurrence is None or not signups:
-            LOGGER.debug(
-                "Roster removal opened with an empty roster; event_id=%s "
-                "user_id=%s",
-                editing_event_id,
-                interaction.user.id,
-            )
-            await interaction.response.send_message(
-                "Nobody is signed up for this event yet.",
-                ephemeral=True,
-            )
-            return
+        return
+    if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        LOGGER.warning(
+            "Rejected event roster removal from Discord user %s; required "
+            "role %s",
+            interaction.user.id,
+            EVENT_CREATE_ROLE_ID,
+        )
+        await interaction.response.send_message(
+            "You do not have the required role to edit events.",
+            ephemeral=True,
+        )
+        return
+    # The roster belongs to the occurrence, not the draft, so it is read
+    # fresh: members can sign up or out while the preview sits open. A
+    # roster-only session stays on the occurrence it pinned rather than
+    # following the series onto its successor.
+    event = bot.event_store.get_event(editing_event_id)
+    occurrence = _editing_occurrence(bot, draft)
+    if event is None or occurrence is None:
         LOGGER.debug(
-            "Opened roster removal; event_id=%s occurrence_id=%s user_id=%s "
-            "roster=%s",
+            "Roster removal opened for a missing event; event_id=%s "
+            "user_id=%s exists=%s",
             editing_event_id,
+            interaction.user.id,
+            event is not None,
+        )
+        await interaction.response.send_message(
+            "This event no longer exists.",
+            ephemeral=True,
+        )
+        return
+    # The preview can sit open for minutes, and a roster-only session opens on
+    # an event that is already running, so it can reach its end while the
+    # commander reads it. An ended roster is history: it cannot be pruned or
+    # removed from, so refuse before the picker is drawn rather than offering
+    # controls that would all be rejected.
+    if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+        LOGGER.debug(
+            "Rejected roster removal for an ended event; occurrence_id=%s "
+            "user_id=%s",
             occurrence.occurrence_id,
             interaction.user.id,
-            len(signups),
         )
-        # The picker lists the roster by name, and the bot runs without the
-        # members intent, so every name is a Discord fetch. That cannot finish
-        # inside the three-second interaction window on a large roster, so
-        # acknowledge first and fill the picker in on the follow-up edit.
         await interaction.response.edit_message(
-            content="Loading the roster…",
+            content=(
+                "This event has already ended, so its roster can no longer "
+                "be changed."
+            ),
             embeds=[],
             view=None,
         )
-        names = await resolve_display_names(
-            self._bot,
-            interaction.guild,
-            [signup.discord_user_id for signup in signups],
-        )
+        return
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    if not signups:
         LOGGER.debug(
-            "Resolved removal picker names; occurrence_id=%s roster=%s "
-            "resolved=%s",
+            "Roster removal opened with an empty roster; event_id=%s "
+            "user_id=%s",
+            editing_event_id,
+            interaction.user.id,
+        )
+        await interaction.response.send_message(
+            "Nobody is signed up for this event yet.",
+            ephemeral=True,
+        )
+        return
+    LOGGER.debug(
+        "Opened roster removal; event_id=%s occurrence_id=%s user_id=%s "
+        "roster=%s roster_only=%s",
+        editing_event_id,
+        occurrence.occurrence_id,
+        interaction.user.id,
+        len(signups),
+        draft.roster_only,
+    )
+    # The picker lists the roster by name, and the bot runs without the
+    # members intent, so every member is a Discord fetch. That cannot finish
+    # inside the three-second interaction window on a large roster, so
+    # acknowledge first and fill the picker in on the follow-up edit.
+    await interaction.response.edit_message(
+        content="Loading the roster…",
+        embeds=[],
+        view=None,
+    )
+    # One lookup per member answers both questions the picker needs: what to
+    # call them, and whether they are still in the server at all. Anyone who
+    # has left goes before the picker is drawn, so a leader is never offered a
+    # seat holder who cannot see the event.
+    departed_note, names = await prune_departed_members(
+        bot,
+        interaction.guild,
+        event,
+        occurrence,
+    )
+    if departed_note is not None:
+        signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    if not signups:
+        LOGGER.debug(
+            "Roster removal emptied the roster by pruning departed members; "
+            "occurrence_id=%s",
             occurrence.occurrence_id,
-            len(signups),
-            sum(1 for name in names.values() if name is not None),
-        )
-        # Keep the roster embed on screen while the picker is open: it shows
-        # the seating the picker's one-line descriptions cannot. Mirror how
-        # build_event_preview renders the editing preview so the two views show
-        # the same roster.
-        roster = event_embed(
-            self._draft.to_event(editing_event_id),
-            signups,
-            EventStatus.OPEN,
-            event_id_text=str(editing_event_id),
-        )
-        view = RemoveSignupsView(
-            self._bot,
-            self._draft,
-            occurrence,
-            signups,
-            names,
         )
         await interaction.edit_original_response(
-            content=view.prompt(),
-            embeds=[roster],
-            view=view,
+            content=departed_note,
+            embeds=[],
+            view=None,
         )
+        return
+    # Keep the roster embed on screen while the picker is open: it shows
+    # the seating the picker's one-line descriptions cannot. Mirror how
+    # build_event_preview renders the editing preview so the two views show
+    # the same roster.
+    edited = draft.to_event(editing_event_id)
+    roster = event_embed(
+        edited,
+        signups,
+        _preview_status(edited, signups, draft.roster_only),
+        event_id_text=str(editing_event_id),
+    )
+    view = RemoveSignupsView(
+        bot,
+        draft,
+        occurrence,
+        signups,
+        names,
+    )
+    prompt = view.prompt()
+    if departed_note is not None:
+        prompt = f"{departed_note}\n\n{prompt}"
+    await interaction.edit_original_response(
+        content=prompt,
+        embeds=[roster],
+        view=view,
+    )
+
+
+async def prune_departed_members(
+    bot: Gw2Bot,
+    guild: discord.Guild | None,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> tuple[str | None, dict[int, str | None]]:
+    """Take everyone who has left the server off the roster.
+
+    Returns the line describing who went (None when nobody did) and the
+    display names of the whole roster, which the caller reuses so one round of
+    member lookups serves both the check and whatever it renders next.
+    """
+    from gw2bot.events.posting import (
+        notify_roster_update,
+        prune_departed_signups,
+    )
+
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    if not signups:
+        return None, {}
+    memberships = await resolve_guild_memberships(
+        bot,
+        guild,
+        [signup.discord_user_id for signup in signups],
+    )
+    names = {
+        user_id: membership.display_name
+        for user_id, membership in memberships.items()
+    }
+    departed, update = await prune_departed_signups(
+        bot,
+        event,
+        occurrence,
+        memberships,
+    )
+    if not departed:
+        return None, names
+    await notify_roster_update(bot, occurrence, update)
+    return _departed_summary(departed, names), names
+
+
+def _departed_summary(
+    departed: Sequence[int],
+    names: Mapping[int, str | None],
+) -> str | None:
+    """Report the members a prune took off the roster, or None when it took none."""
+    if not departed:
+        return None
+    labels = [
+        _removal_option_label(user_id, names.get(user_id))
+        for user_id in departed
+    ]
+    # A 50-seat WvW roster whose members have all left would run to thousands
+    # of characters, and the message carrying this line would be refused by
+    # Discord *after* the removals were already committed - leaving the
+    # commander with no answer at all. Name as many as the budget holds and
+    # count the rest; the removals themselves are unaffected either way.
+    shown: list[str] = []
+    used = 0
+    for label in labels:
+        if shown and used + len(label) + 2 > DEPARTED_SUMMARY_BUDGET:
+            break
+        shown.append(label)
+        used += len(label) + 2
+    listed = ", ".join(shown)
+    remaining = len(labels) - len(shown)
+    if remaining:
+        listed += f" and {remaining} other"
+        if remaining > 1:
+            listed += "s"
+    # Names rather than mentions: these members are gone from the server, so a
+    # mention would render as a raw id nobody can place. "They have left" reads
+    # correctly for one member and for many, so the sentence needs no plural.
+    return f"Removed {listed} from the roster: they have left the server."
 
 
 def _removal_option_label(
@@ -1443,7 +1704,7 @@ class RemoveSignupsView(discord.ui.View):
         # and re-rendering the message could persist OVER without seeding the
         # next occurrence of a recurring series. This mirrors the sign-out
         # button, which stays usable while an event is ongoing.
-        if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+        if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
             LOGGER.debug(
                 "Rejected roster removal for an ended event; occurrence_id=%s "
                 "user_id=%s",
@@ -1475,7 +1736,7 @@ class RemoveSignupsView(discord.ui.View):
             # the loop even though the pre-loop check passed. Re-check every
             # iteration and stop the moment it has ended, so no removal (and no
             # waitlist promotion behind it) ever lands on a finished roster.
-            if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+            if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
                 kept_after_end = list(user_ids[index:])
                 LOGGER.debug(
                     "Event ended mid-removal; stopping; occurrence_id=%s "
@@ -1959,10 +2220,11 @@ def _mark_occurrence_stale(bot: Gw2Bot, occurrence: EventOccurrence) -> None:
     #
     # Nothing else would ever fix that. The scheduler only re-renders an
     # occurrence whose status changed or that is flagged dirty, and an edit
-    # normally leaves the status alone (an ongoing event cannot be edited at all,
-    # so the occurrence is always still upcoming here). The post would stay stale
-    # until the event actually started. Flag it so the next maintenance pass
-    # re-renders it in place, against the channel it really lives in.
+    # normally leaves the status alone (apply_event_edit refuses an event that
+    # has started, so the occurrence is always still upcoming here). The post
+    # would stay stale until the event actually started. Flag it so the next
+    # maintenance pass re-renders it in place, against the channel it really
+    # lives in.
     if occurrence.needs_refresh:
         return
     try:
@@ -2415,7 +2677,7 @@ def build_signup_view(occurrence_id: int) -> discord.ui.View:
     return view
 
 
-def _occurrence_has_ended(
+def occurrence_has_ended(
     event: Event,
     occurrence: EventOccurrence,
     now: datetime,
@@ -2514,7 +2776,7 @@ class EventSignOutButton(
         if context is None:
             return
         event, occurrence = context
-        if _occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+        if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
             LOGGER.debug(
                 "Sign out pressed after the event ended; occurrence_id=%s "
                 "user_id=%s",
@@ -2709,7 +2971,7 @@ class SignupSettingsView(discord.ui.View):
                 view=None,
             )
             return
-        if _occurrence_has_ended(
+        if occurrence_has_ended(
             self._event, self._occurrence, datetime.now(UTC)
         ):
             await interaction.response.edit_message(
@@ -2992,7 +3254,7 @@ class SignOutConfirmView(discord.ui.View):
         # The event may have ended while this confirmation was open; never
         # mutate a historical roster (which could also promote a waitlisted
         # user into a past event).
-        if _occurrence_has_ended(
+        if occurrence_has_ended(
             self._event, self._occurrence, datetime.now(UTC)
         ):
             LOGGER.debug(
@@ -3084,7 +3346,7 @@ async def start_signup_flow(
     event, occurrence = context
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     now = datetime.now(UTC)
-    if _occurrence_has_ended(event, occurrence, now):
+    if occurrence_has_ended(event, occurrence, now):
         await interaction.response.send_message(
             "This event is already over.",
             ephemeral=True,

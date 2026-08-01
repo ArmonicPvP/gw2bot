@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 EMOJI_QUICKNESS = "<:quickness:1525428594371985459>"
@@ -231,6 +231,31 @@ def available_edit_tokens(signup: EventSignup, now: datetime) -> float:
         SIGNUP_EDIT_TOKEN_CAPACITY,
         signup.edit_tokens + elapsed / SIGNUP_EDIT_REFILL_SECONDS,
     )
+
+
+# Reminders ping an occurrence's seated members in its thread (or the forum post
+# it was sent into) as the start approaches: an hour ahead, a quarter of an hour
+# ahead, and as it begins. Ordered from the earliest to the latest, so the last
+# one that has come due is always the most imminent.
+REMINDER_OFFSETS: tuple[timedelta, ...] = (
+    timedelta(hours=1),
+    timedelta(minutes=15),
+    timedelta(0),
+)
+
+# How long after its moment a reminder may still be delivered. The bot can be
+# down (or Discord unreachable) across a reminder's moment, and a ping that
+# announces an event which actually started half an hour ago is noise rather
+# than a reminder, so a lapsed one is recorded as handled and never sent. It
+# also bounds retries: a reminder whose delivery keeps failing is retried each
+# maintenance pass only until it leaves this window.
+REMINDER_GRACE = timedelta(minutes=10)
+
+
+def reminder_offset_minutes(offset: timedelta) -> int:
+    # Reminders are recorded by their offset in whole minutes, which is what the
+    # store keys them on; every configured offset is a whole number of minutes.
+    return int(offset.total_seconds() // 60)
 
 
 @dataclass(frozen=True, slots=True)

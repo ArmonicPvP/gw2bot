@@ -11,6 +11,7 @@ from gw2bot.database import (
     EventAutoSignupRecord,
     EventOccurrenceRecord,
     EventRecord,
+    EventReminderRecord,
     EventSignupPreferenceRecord,
     EventSignupRecord,
     create_database_engine,
@@ -474,11 +475,63 @@ class EventStore:
         )
         return starts
 
+    def get_handled_reminder_offsets(self, occurrence_id: int) -> set[int]:
+        with self._sessions() as session:
+            offsets = session.scalars(
+                select(EventReminderRecord.offset_minutes).where(
+                    EventReminderRecord.occurrence_id == occurrence_id
+                )
+            ).all()
+            return set(offsets)
+
+    def mark_reminders_handled(
+        self,
+        occurrence_id: int,
+        offset_minutes: Sequence[int],
+        now: datetime | None = None,
+    ) -> None:
+        # Idempotent: a reminder already recorded is left alone, so a caller
+        # never has to check first and a concurrent pass cannot collide on the
+        # primary key.
+        if not offset_minutes:
+            return
+        handled_at = now if now is not None else datetime.now(UTC)
+        added = 0
+        with self._sessions() as session:
+            for offset in offset_minutes:
+                existing = session.get(
+                    EventReminderRecord,
+                    (occurrence_id, offset),
+                )
+                if existing is not None:
+                    continue
+                session.add(
+                    EventReminderRecord(
+                        occurrence_id=occurrence_id,
+                        offset_minutes=offset,
+                        handled_at=_serialize_time(handled_at),
+                    )
+                )
+                added += 1
+            session.commit()
+        LOGGER.debug(
+            "Recorded handled event reminders; occurrence_id=%s recorded=%s "
+            "already_recorded=%s",
+            occurrence_id,
+            added,
+            len(offset_minutes) - added,
+        )
+
     def delete_occurrence(self, occurrence_id: int) -> None:
         with self._sessions() as session:
             session.execute(
                 delete(EventSignupRecord).where(
                     EventSignupRecord.occurrence_id == occurrence_id
+                )
+            )
+            session.execute(
+                delete(EventReminderRecord).where(
+                    EventReminderRecord.occurrence_id == occurrence_id
                 )
             )
             session.execute(
@@ -503,6 +556,11 @@ class EventStore:
                 session.execute(
                     delete(EventSignupRecord).where(
                         EventSignupRecord.occurrence_id.in_(occurrence_ids)
+                    )
+                )
+                session.execute(
+                    delete(EventReminderRecord).where(
+                        EventReminderRecord.occurrence_id.in_(occurrence_ids)
                     )
                 )
             session.execute(

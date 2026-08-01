@@ -14,6 +14,7 @@ from gw2bot.events.posting import (
     refresh_occurrence_message,
     update_thread_membership,
 )
+from gw2bot.events.reminders import deliver_due_reminders
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -58,6 +59,22 @@ async def run_event_maintenance(
                 occurrence.occurrence_id,
             )
             continue
+        # Reminders are resolved before the status work below, which skips an
+        # occurrence whose status has not moved: a reminder comes due on the
+        # clock rather than on a roster or status change, so it must not be
+        # gated behind one. A failure here is contained so one occurrence's
+        # reminder cannot stop the rest of the pass.
+        try:
+            await deliver_due_reminders(bot, event, occurrence, current_time)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.error(
+                "Could not resolve event reminders; occurrence_id=%s "
+                "error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
         signups = bot.event_store.get_signups(occurrence.occurrence_id)
         status = occurrence_status(event, occurrence, signups, current_time)
         # A dirty occurrence still needs its message re-rendered even when the
