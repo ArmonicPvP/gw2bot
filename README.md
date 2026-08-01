@@ -150,6 +150,10 @@ yet, so a ping telling them it is starting would invite them to show up for a
 seat they do not have. The roster is read at the moment the reminder goes out, so
 a member who signs up between two reminders is included in the later one.
 
+Each reminder names exactly the members it pings, so mention syntax in an event
+title — `@everyone`, a role, or another user — stays inert text and a reminder
+can only ever notify the roster it is for.
+
 Each reminder is recorded once it has been resolved, so a restart, a second
 maintenance pass, or an event that is edited never pings a roster twice. A
 reminder is recorded without being sent when there is nobody seated, when the

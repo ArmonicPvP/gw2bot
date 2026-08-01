@@ -1,11 +1,13 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
-from gw2bot.events.formatting import reminder_messages
+from gw2bot.events.formatting import ReminderMessage, reminder_messages
 from gw2bot.events.models import (
     REMINDER_GRACE,
     REMINDER_OFFSETS,
@@ -60,6 +62,25 @@ def channel() -> FakeChannel:
 @pytest.fixture
 def bot(store: EventStore, channel: FakeChannel) -> Any:
     return cast(Any, FakeBot(store, channel))
+
+
+def secret_bearing_forbidden(secret: str) -> discord.Forbidden:
+    # A Discord failure whose reason and response body both carry a credential,
+    # so a log that echoed either would leak it.
+    response = SimpleNamespace(status=403, reason=f"Forbidden token={secret}")
+    return discord.Forbidden(
+        response,  # type: ignore[arg-type]
+        {
+            "code": 50013,
+            "message": f"Missing Permissions; authorization=Bot {secret}",
+        },
+    )
+
+
+def sent_contents(send: Any) -> list[str]:
+    # Reminders are sent with allowed mentions alongside the content, so the
+    # content is read off each call rather than matched as a whole call.
+    return [call.args[0] for call in send.await_args_list]
 
 
 def create_event(
@@ -125,8 +146,11 @@ class TestReminderMessages:
         messages = reminder_messages("Kitty Cleanup", START, [11, 22, 33])
 
         assert messages == [
-            "<@11> <@22> <@33>: Kitty Cleanup starts "
-            f"<t:{int(START.timestamp())}:R>"
+            ReminderMessage(
+                "<@11> <@22> <@33>: Kitty Cleanup starts "
+                f"<t:{int(START.timestamp())}:R>",
+                (11, 22, 33),
+            )
         ]
 
     def test_no_members_produces_no_message(self) -> None:
@@ -141,22 +165,44 @@ class TestReminderMessages:
 
         assert len(messages) > 1
         assert all(
-            len(message) <= DISCORD_MESSAGE_LIMIT for message in messages
+            len(message.content) <= DISCORD_MESSAGE_LIMIT
+            for message in messages
         )
         mentioned = [
             mention
             for message in messages
-            for mention in message.split(":")[0].split()
+            for mention in message.content.split(":")[0].split()
         ]
         assert mentioned == [f"<@{user_id}>" for user_id in user_ids]
+
+    def test_each_message_carries_exactly_the_members_it_mentions(self) -> None:
+        # The sender turns this into the message's allowed mentions, so a split
+        # message must not claim members whose mentions went to another one.
+        user_ids = list(range(100_000_000_000_000_000, 100_000_000_000_000_120))
+
+        messages = reminder_messages("Kitty Cleanup", START, user_ids)
+
+        for message in messages:
+            assert list(message.discord_user_ids) == [
+                int(mention.removeprefix("<@").removesuffix(">"))
+                for mention in message.content.split(":")[0].split()
+            ]
+        assert [
+            user_id
+            for message in messages
+            for user_id in message.discord_user_ids
+        ] == user_ids
 
     def test_an_oversized_title_cannot_squeeze_out_the_ping(self) -> None:
         messages = reminder_messages("t" * 4_000, START, [11, 22])
 
         assert len(messages) == 1
-        assert len(messages[0]) <= DISCORD_MESSAGE_LIMIT
-        assert messages[0].startswith("<@11> <@22>: ")
-        assert messages[0].endswith(f"starts <t:{int(START.timestamp())}:R>")
+        assert len(messages[0].content) <= DISCORD_MESSAGE_LIMIT
+        assert messages[0].content.startswith("<@11> <@22>: ")
+        assert messages[0].content.endswith(
+            f"starts <t:{int(START.timestamp())}:R>"
+        )
+        assert messages[0].discord_user_ids == (11, 22)
 
 
 class TestReminderParticipants:
@@ -263,10 +309,60 @@ class TestSendReminder:
 
         assert await send_reminder(bot, event, occurrence, signups) is True
 
-        channel.thread.send.assert_awaited_once_with(
+        assert sent_contents(channel.thread.send) == [
             "<@11> <@22>: Kitty Cleanup starts "
             f"<t:{int(START.timestamp())}:R>"
+        ]
+
+    async def test_only_the_pinged_members_are_allowed_to_be_mentioned(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A title is author-written text in the same message, so a reminder must
+        # name its audience rather than let Discord parse whatever the title
+        # holds - otherwise "@everyone" in a title pings the whole server.
+        event, occurrence = await post_event(
+            bot,
+            store,
+            title="@everyone <@&999> Kitty Cleanup",
         )
+        signups = store.get_signups(occurrence.occurrence_id)
+
+        await send_reminder(bot, event, occurrence, signups)
+
+        assert channel.thread.send.await_args is not None
+        allowed = channel.thread.send.await_args.kwargs["allowed_mentions"]
+        assert allowed.everyone is False
+        assert allowed.roles is False
+        assert [mention.id for mention in allowed.users] == [11, 22]
+
+    async def test_split_messages_only_allow_the_members_they_mention(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        user_ids = tuple(
+            range(100_000_000_000_000_000, 100_000_000_000_000_120)
+        )
+        event, occurrence = await post_event(
+            bot,
+            store,
+            participants=user_ids,
+        )
+        signups = store.get_signups(occurrence.occurrence_id)
+
+        await send_reminder(bot, event, occurrence, signups)
+
+        assert channel.thread.send.await_count > 1
+        for call in channel.thread.send.await_args_list:
+            allowed = call.kwargs["allowed_mentions"]
+            assert [mention.id for mention in allowed.users] == [
+                int(mention.removeprefix("<@").removesuffix(">"))
+                for mention in call.args[0].split(":")[0].split()
+            ]
 
     async def test_pings_inside_the_forum_post_and_reopens_it(
         self,
@@ -526,6 +622,26 @@ class TestDeliverDueReminders:
             START_OFFSET,
         }
 
+    async def test_an_occurrence_past_its_end_is_finished_before_maintenance(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The stored status only moves when a maintenance pass persists it, so
+        # an occurrence that just ended still reads as ONGOING. Reminders judge
+        # the end on the clock, so nothing is pinged about it.
+        event, occurrence = await post_event(bot, store)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.ONGOING,
+        )
+        live = cast(Any, store.get_occurrence(occurrence.occurrence_id))
+
+        assert await deliver_due_reminders(bot, event, live, AFTER_END) is None
+
+        channel.thread.send.assert_not_awaited()
+
     async def test_members_who_sign_up_late_are_reminded_too(
         self,
         bot: Any,
@@ -622,10 +738,10 @@ class TestSchedulerReminders:
         # out if it is resolved independently of the status work.
         await run_event_maintenance(bot, AN_HOUR_BEFORE)
 
-        channel.thread.send.assert_awaited_once_with(
+        assert sent_contents(channel.thread.send) == [
             "<@11> <@22>: Kitty Cleanup starts "
             f"<t:{int(START.timestamp())}:R>"
-        )
+        ]
         updated = store.get_occurrence(occurrence.occurrence_id)
         assert updated is not None
         assert updated.status is EventStatus.OPEN
@@ -675,3 +791,51 @@ class TestSchedulerReminders:
         assert "SECRET" not in caplog.text
         assert "Bring food." not in caplog.text
         assert "<@11>" not in caplog.text
+
+    async def test_a_failed_reminder_never_logs_a_secret_bearing_error(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The delivery failure path logs the exception type and nothing else,
+        # so a Discord error carrying a token in its message or response body
+        # cannot reach the console.
+        secret = "reminder-discord-failure-secret"
+        title = "SECRET EVENT TITLE"
+        event, occurrence = await post_event(bot, store, title=title)
+        channel.thread.send = AsyncMock(
+            side_effect=secret_bearing_forbidden(secret)
+        )
+
+        with caplog.at_level("DEBUG"):
+            await run_event_maintenance(bot, AN_HOUR_BEFORE)
+
+        assert secret not in caplog.text
+        assert title not in caplog.text
+        assert "Could not send event reminder" in caplog.text
+        assert "error_type=Forbidden" in caplog.text
+
+    async def test_an_unexpected_reminder_error_is_logged_without_its_message(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The scheduler's catch-all around reminders logs the exception type
+        # only, so an error whose text carries a credential stays out of the
+        # console while the pass still reports that reminders failed.
+        secret = "reminder-unexpected-failure-secret"
+        event, occurrence = await post_event(bot, store)
+        channel.thread.send = AsyncMock(
+            side_effect=RuntimeError(f"failed with authorization={secret}")
+        )
+
+        with caplog.at_level("DEBUG"):
+            await run_event_maintenance(bot, AN_HOUR_BEFORE)
+
+        assert secret not in caplog.text
+        assert "Could not resolve event reminders" in caplog.text
+        assert "error_type=RuntimeError" in caplog.text

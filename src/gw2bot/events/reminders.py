@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import discord
@@ -14,11 +14,9 @@ from gw2bot.events.models import (
     Event,
     EventOccurrence,
     EventSignup,
-    EventStatus,
     reminder_offset_minutes,
 )
 from gw2bot.events.posting import (
-    occurrence_status,
     reopen_occurrence_thread,
     resolve_channel,
 )
@@ -39,6 +37,22 @@ def reminder_participants(signups: Sequence[EventSignup]) -> list[int]:
         for signup in signups
         if not signup.waitlisted
     ]
+
+
+def occurrence_finished(
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime,
+) -> bool:
+    # Whether an occurrence has run its course, from the clock rather than from
+    # the stored status. The status is only persisted by a maintenance pass, so
+    # it lags the end by up to one interval - longer after downtime or a refresh
+    # that failed - and a reminder that trusted it would ping a finished event's
+    # roster with a start time in the past. Nothing but time can end an
+    # occurrence, so the roster does not come into it.
+    return now >= occurrence.start_time + timedelta(
+        minutes=event.duration_minutes
+    )
 
 
 def can_remind(
@@ -122,7 +136,23 @@ async def send_reminder(
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
         for message in messages:
-            await thread.send(message)
+            # The event title is author-written text sitting in the same
+            # message, so it can hold mention syntax of its own - including
+            # @everyone or a role. Naming exactly the members this message pings
+            # leaves anything else in it as inert text, so a reminder can only
+            # ever notify the roster it is for.
+            await thread.send(
+                message.content,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False,
+                    roles=False,
+                    replied_user=False,
+                    users=[
+                        discord.Object(id=discord_user_id)
+                        for discord_user_id in message.discord_user_ids
+                    ],
+                ),
+            )
     except discord.HTTPException as exc:
         LOGGER.error(
             "Could not send event reminder; occurrence_id=%s participants=%s "
@@ -140,7 +170,7 @@ async def send_reminder(
         occurrence.occurrence_id,
         len(participants),
         len(messages),
-        sum(len(message) for message in messages),
+        sum(len(message.content) for message in messages),
     )
     return True
 
@@ -170,10 +200,7 @@ async def deliver_due_reminders(
     # still outstanding on it is settled here rather than left as a reminder
     # that can never resolve. Reminding a roster about an event that is already
     # over would be wrong in any case.
-    finished = (
-        occurrence_status(event, occurrence, signups, current_time)
-        is EventStatus.OVER
-    )
+    finished = occurrence_finished(event, occurrence, current_time)
     LOGGER.debug(
         "Resolving due event reminders; event_id=%s occurrence_id=%s due=%s "
         "deliverable_offset_minutes=%s finished=%s",

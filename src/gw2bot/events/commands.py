@@ -9,7 +9,11 @@ from discord import app_commands
 
 from gw2bot.discord_utils import user_has_role
 from gw2bot.events.models import Event, EventOccurrence, EventStatus
-from gw2bot.events.reminders import reminder_participants, send_reminder
+from gw2bot.events.reminders import (
+    occurrence_finished,
+    reminder_participants,
+    send_reminder,
+)
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
     ONGOING_EDIT_REJECTION,
@@ -203,15 +207,33 @@ class EventCommands(app_commands.Group):
             event_id,
         )
 
-    def _reminder_occurrence(self, event_id: int) -> EventOccurrence | None:
+    def _reminder_occurrence(
+        self,
+        event: Event,
+        now: datetime | None = None,
+    ) -> EventOccurrence | None:
         # The occurrence a manual reminder is about: the earliest one that has
         # not finished, which is the one whose roster is being reminded. A
         # recurring series can hold a later occurrence too, and pinging next
         # week's roster about an event that has not come around yet would be
         # noise.
-        for occurrence in self._bot.event_store.get_event_occurrences(event_id):
-            if occurrence.status is not EventStatus.OVER:
-                return occurrence
+        #
+        # Finishing is judged on the clock as well as on the stored status: the
+        # status only moves when a maintenance pass persists it, so an
+        # occurrence that ended moments ago (or during downtime) can still read
+        # as ONGOING, and reminding its roster would announce an event that is
+        # already behind them. The stored status still counts on its own,
+        # because an occurrence whose message was deleted is retired as OVER
+        # before its end time.
+        current_time = now if now is not None else datetime.now(UTC)
+        for occurrence in self._bot.event_store.get_event_occurrences(
+            event.event_id
+        ):
+            if occurrence.status is EventStatus.OVER:
+                continue
+            if occurrence_finished(event, occurrence, current_time):
+                continue
+            return occurrence
         return None
 
     @app_commands.command(
@@ -246,7 +268,7 @@ class EventCommands(app_commands.Group):
             return
         event = self._bot.event_store.get_event(event_id)
         occurrence = (
-            self._reminder_occurrence(event_id)
+            self._reminder_occurrence(event)
             if event is not None and not event.cancelled
             else None
         )
