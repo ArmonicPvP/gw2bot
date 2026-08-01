@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import GuildMembership
+from gw2bot.events import posting
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
     AutoSignupChoice,
@@ -1435,6 +1436,95 @@ class TestPruneDepartedSignups:
         auto = store.get_auto_signup(event.event_id, 11)
         assert auto is not None
         assert auto.choice is AutoSignupChoice.NO
+
+    async def test_stops_when_the_event_ends_partway_through(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Each removal awaits Discord I/O, so a long roster of departures can
+        # cross the event's end mid-loop. Everything after that point would be
+        # a removal - and a waitlist promotion - landing on a finished roster.
+        event, occurrence = await post_new_event(bot, store)
+        for user_id in (11, 12, 13):
+            await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+        real_remove = posting.remove_signup
+        ended = False
+
+        async def remove_then_end(*args: Any, **kwargs: Any) -> Any:
+            nonlocal ended
+            result = await real_remove(*args, **kwargs)
+            if not ended:
+                # The first removal is the one the clock catches up with.
+                ended = True
+                store.set_occurrence_start_time(
+                    occurrence.occurrence_id,
+                    datetime.now(UTC)
+                    - timedelta(minutes=event.duration_minutes + 1),
+                )
+            return result
+
+        monkeypatch.setattr(posting, "remove_signup", remove_then_end)
+
+        removed, _ = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {
+                user_id: GuildMembership(f"Gone {user_id}", False)
+                for user_id in (11, 12, 13)
+            },
+        )
+
+        # Only the removal that ran before the event ended went through; the
+        # rest keep their rows for the next edit to deal with.
+        assert removed == [11]
+        remaining = {
+            signup.discord_user_id
+            for signup in store.get_signups(occurrence.occurrence_id)
+        }
+        assert remaining == {12, 13}
+
+    async def test_stops_when_the_occurrence_is_retired_partway_through(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The same guard covers the row disappearing outright - a deleted event
+        # or a pruned superseded occurrence - rather than only the clock.
+        event, occurrence = await post_new_event(bot, store)
+        for user_id in (11, 12):
+            await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+        real_remove = posting.remove_signup
+        dropped = False
+
+        async def remove_then_delete(*args: Any, **kwargs: Any) -> Any:
+            nonlocal dropped
+            result = await real_remove(*args, **kwargs)
+            if not dropped:
+                dropped = True
+                store.delete_event(event.event_id)
+            return result
+
+        monkeypatch.setattr(posting, "remove_signup", remove_then_delete)
+
+        removed, _ = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            {
+                11: GuildMembership("Gone", False),
+                12: GuildMembership("Gone too", False),
+            },
+        )
+
+        assert removed == [11]
 
     async def test_leaves_a_finished_occurrence_alone(
         self,

@@ -200,6 +200,12 @@ class EventCommands(app_commands.Group):
             self._bot.event_timezone,
             start_time_override=primary.start_time,
             roster_only=roster_only,
+            # A running event is minutes from ending, and the scheduler seeds
+            # the series' next occurrence the moment it does. Pin the run being
+            # edited so the session cannot drift onto that successor's roster.
+            editing_occurrence_id=(
+                primary.occurrence_id if roster_only else None
+            ),
         )
         # Checking the roster against the server is one Discord fetch per
         # member, which cannot finish inside the three-second interaction

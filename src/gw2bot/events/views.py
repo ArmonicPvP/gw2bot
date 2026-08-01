@@ -113,6 +113,12 @@ REMOVE_SELECT_PAGE_SIZE = 25
 # rather than rejected by the API.
 REMOVE_OPTION_LABEL_MAX_LENGTH = 100
 
+# How many characters the list of departed members may take. Discord refuses a
+# message body over 2,000 characters, and this line is prefixed to the removal
+# picker's own prompt, so the budget leaves room for that and for the sentence
+# wrapped around the names.
+DEPARTED_SUMMARY_BUDGET = 1_000
+
 
 @dataclass
 class EventDraft:
@@ -138,6 +144,15 @@ class EventDraft:
     # details are frozen at that point, so the preview offers the roster
     # controls alone and no path from it can reach apply_event_edit.
     roster_only: bool = False
+    # The occurrence a roster-only session was opened for. A running event is
+    # minutes from ending, and the moment it does the scheduler retires it and
+    # seeds the series' next occurrence - which would become the soonest live
+    # one. Re-resolving the occurrence on each click would then silently move
+    # the session onto next week's roster, so it is pinned here instead and the
+    # flow refuses it once it has ended. Only roster-only sessions pin: the
+    # editor for an upcoming event edits the whole series, and apply_event_edit
+    # walks every live occurrence by design.
+    editing_occurrence_id: int | None = None
     # Guards the Save-changes / Move-event terminal actions against a double
     # click that would otherwise apply the edit (or re-post) twice.
     edit_applied: bool = False
@@ -181,6 +196,7 @@ def draft_from_event(
     *,
     start_time_override: datetime | None = None,
     roster_only: bool = False,
+    editing_occurrence_id: int | None = None,
 ) -> EventDraft:
     # Pre-fill the text mirror fields so the reused edit modals show the current
     # values (start/duration/repeat are re-parsed from these strings). For a
@@ -211,6 +227,7 @@ def draft_from_event(
         delete_previous_on_repeat=event.delete_previous_on_repeat,
         editing_event_id=event.event_id,
         roster_only=roster_only,
+        editing_occurrence_id=editing_occurrence_id,
     )
 
 
@@ -292,6 +309,27 @@ def _primary_live_occurrence(
     return live[0] if live else None
 
 
+def _editing_occurrence(
+    bot: Gw2Bot,
+    draft: EventDraft,
+    primary: EventOccurrence | None = None,
+) -> EventOccurrence | None:
+    """The occurrence an edit session is working on.
+
+    A roster-only session pins its occurrence, so it keeps editing the run the
+    commander opened even after that run ends and the series seeds its
+    successor. Every other session tracks the soonest live occurrence, which is
+    what a date change reschedules.
+    """
+    if primary is not None:
+        return primary
+    if draft.editing_occurrence_id is not None:
+        return bot.event_store.get_occurrence(draft.editing_occurrence_id)
+    if draft.editing_event_id is None:
+        return None
+    return _primary_live_occurrence(bot, draft.editing_event_id)
+
+
 def _preview_status(
     event: Event,
     signups: list[EventSignup],
@@ -328,11 +366,7 @@ def build_event_preview(
         # start_time), not the occurrence's stored time. The initial /event edit
         # call passes the occurrence it already fetched; change-flow re-renders
         # do not have it, so look it up.
-        occurrence = (
-            primary
-            if primary is not None
-            else _primary_live_occurrence(bot, editing_event_id)
-        )
+        occurrence = _editing_occurrence(bot, draft, primary)
         signups = (
             bot.event_store.get_signups(occurrence.occurrence_id)
             if occurrence is not None
@@ -1120,9 +1154,11 @@ async def open_roster_removal(
         )
         return
     # The roster belongs to the occurrence, not the draft, so it is read
-    # fresh: members can sign up or out while the preview sits open.
+    # fresh: members can sign up or out while the preview sits open. A
+    # roster-only session stays on the occurrence it pinned rather than
+    # following the series onto its successor.
     event = bot.event_store.get_event(editing_event_id)
-    occurrence = _primary_live_occurrence(bot, editing_event_id)
+    occurrence = _editing_occurrence(bot, draft)
     if event is None or occurrence is None:
         LOGGER.debug(
             "Roster removal opened for a missing event; event_id=%s "
@@ -1134,6 +1170,27 @@ async def open_roster_removal(
         await interaction.response.send_message(
             "This event no longer exists.",
             ephemeral=True,
+        )
+        return
+    # The preview can sit open for minutes, and a roster-only session opens on
+    # an event that is already running, so it can reach its end while the
+    # commander reads it. An ended roster is history: it cannot be pruned or
+    # removed from, so refuse before the picker is drawn rather than offering
+    # controls that would all be rejected.
+    if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+        LOGGER.debug(
+            "Rejected roster removal for an ended event; occurrence_id=%s "
+            "user_id=%s",
+            occurrence.occurrence_id,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "This event has already ended, so its roster can no longer "
+                "be changed."
+            ),
+            embeds=[],
+            view=None,
         )
         return
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
@@ -1267,14 +1324,32 @@ def _departed_summary(
     """Report the members a prune took off the roster, or None when it took none."""
     if not departed:
         return None
-    listed = ", ".join(
+    labels = [
         _removal_option_label(user_id, names.get(user_id))
         for user_id in departed
-    )
+    ]
+    # A 50-seat WvW roster whose members have all left would run to thousands
+    # of characters, and the message carrying this line would be refused by
+    # Discord *after* the removals were already committed - leaving the
+    # commander with no answer at all. Name as many as the budget holds and
+    # count the rest; the removals themselves are unaffected either way.
+    shown: list[str] = []
+    used = 0
+    for label in labels:
+        if shown and used + len(label) + 2 > DEPARTED_SUMMARY_BUDGET:
+            break
+        shown.append(label)
+        used += len(label) + 2
+    listed = ", ".join(shown)
+    remaining = len(labels) - len(shown)
+    if remaining:
+        listed += f" and {remaining} other"
+        if remaining > 1:
+            listed += "s"
     # Names rather than mentions: these members are gone from the server, so a
-    # mention would render as a raw id nobody can place.
-    left = "has left" if len(departed) == 1 else "have left"
-    return f"Removed {listed} from the roster: they {left} the server."
+    # mention would render as a raw id nobody can place. "They have left" reads
+    # correctly for one member and for many, so the sentence needs no plural.
+    return f"Removed {listed} from the roster: they have left the server."
 
 
 def _removal_option_label(

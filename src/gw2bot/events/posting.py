@@ -945,13 +945,34 @@ async def prune_departed_signups(
         return [], RosterUpdate()
     removed: list[int] = []
     updates: list[RosterUpdate] = []
-    for user_id in departed:
+    for index, user_id in enumerate(departed):
+        # remove_signup awaits Discord I/O between members, so the event can
+        # cross its end partway through a long roster even though the check
+        # above passed. Re-read both the clock and the occurrence every
+        # iteration - the row can be rescheduled or retired outright while the
+        # loop runs - and stop the moment the run is over, so no removal (and
+        # no waitlist promotion behind it) ever lands on a finished roster.
+        # An explicit now pins the clock for callers that asked for one;
+        # otherwise it really is the elapsing time that counts.
+        current_time = now if now is not None else datetime.now(UTC)
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        if current is None or current_time >= current.start_time + timedelta(
+            minutes=event.duration_minutes
+        ):
+            LOGGER.debug(
+                "Event ended mid-prune; stopping; occurrence_id=%s kept=%s "
+                "exists=%s",
+                occurrence.occurrence_id,
+                len(departed) - index,
+                current is not None,
+            )
+            break
         # One member failing to leave the roster must not strand the rest, and
         # remove_signup already absorbs its own Discord failures.
         signup, update = await remove_signup(
             bot,
             event,
-            occurrence,
+            current,
             user_id,
             notify=False,
         )
@@ -960,7 +981,10 @@ async def prune_departed_signups(
         removed.append(user_id)
         updates.append(update)
         try:
-            disable_auto_signup(bot, event, occurrence, user_id)
+            # The fresh row again: disable_auto_signup withdraws the member
+            # from occurrences later than this one, which is decided by
+            # comparing start times.
+            disable_auto_signup(bot, event, current, user_id)
         except SQLAlchemyError as exc:
             LOGGER.error(
                 "Could not disable auto signup for a departed member; "

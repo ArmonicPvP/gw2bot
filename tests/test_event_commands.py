@@ -53,6 +53,7 @@ from gw2bot.events.views import (
     SignupFlow,
     SignupSettingsView,
     UpdateRememberedRolesView,
+    _departed_summary,
     _signup_summary,
     build_signup_view,
     draft_from_event,
@@ -2113,6 +2114,76 @@ class TestEditCommandOngoing:
         # Nobody was reported as removed, so the preview carries no note.
         assert preview_kwargs(interaction)["content"] is MISSING
 
+    async def test_roster_session_stays_on_the_occurrence_it_opened(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A running event is minutes from ending, and the scheduler seeds the
+        # series' next occurrence the moment it does. Re-resolving "the soonest
+        # live occurrence" on each click would hand the picker next week's
+        # roster, so a leader tidying up tonight's run would silently be
+        # removing people from the one after it.
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=FakeGuild({7: "Still Here"}),
+        )
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+        view = preview_kwargs(interaction)["view"]
+        assert isinstance(view, EventRosterEditView)
+
+        # The run ends and the scheduler retires it, seeding tomorrow's.
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(minutes=event.duration_minutes + 1),
+        )
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        successor = store.create_occurrence(
+            event.event_id,
+            datetime.now(UTC) + timedelta(days=1),
+        )
+        store.add_signup(
+            occurrence_id=successor.occurrence_id,
+            discord_user_id=8,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        click = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild({}),
+        )
+        click.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(click)
+
+        # The pinned run is over, so the session refuses rather than opening a
+        # picker over the successor's roster - which must be untouched.
+        kwargs = click.response.edit_message.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+        assert kwargs["view"] is None
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(successor.occurrence_id)
+        ] == [8]
+
     async def test_roster_removal_stays_available_while_running(
         self,
         fake_bot: Any,
@@ -2145,6 +2216,59 @@ class TestEditCommandOngoing:
         assert interaction.edit_original_response.await_args is not None
         picker = interaction.edit_original_response.await_args.kwargs["view"]
         assert isinstance(picker, RemoveSignupsView)
+
+
+class TestDepartedSummary:
+    def test_names_a_single_departure(self) -> None:
+        summary = _departed_summary([7], {7: "Wanderer"})
+
+        assert summary == (
+            "Removed Wanderer from the roster: they have left the server."
+        )
+
+    def test_names_several_departures(self) -> None:
+        summary = _departed_summary([7, 8], {7: "Wanderer", 8: "Drifter"})
+
+        assert summary == (
+            "Removed Wanderer, Drifter from the roster: they have left the "
+            "server."
+        )
+
+    def test_falls_back_to_the_id_when_the_name_is_unknown(self) -> None:
+        # Discord could not be reached for them, but they still left.
+        summary = _departed_summary([7], {})
+
+        assert summary is not None
+        assert "Member 7" in summary
+
+    def test_reports_nothing_when_nobody_left(self) -> None:
+        assert _departed_summary([], {}) is None
+
+    def test_caps_a_mass_departure_at_the_content_budget(self) -> None:
+        # A whole WvW roster leaving would otherwise build a message Discord
+        # refuses - after the removals are already committed, so the commander
+        # would be left with no answer at all.
+        departed = list(range(1, 61))
+        names = {user_id: "N" * 100 for user_id in departed}
+
+        summary = _departed_summary(departed, names)
+
+        assert summary is not None
+        assert len(summary) < 2000
+        # Whoever did not fit is still accounted for.
+        assert "others" in summary
+        named = summary.count("N" * 100)
+        assert named < len(departed)
+        assert f"and {len(departed) - named} others" in summary
+
+    def test_a_single_overlong_name_is_still_reported(self) -> None:
+        # The budget never drops the only entry it has, so the message stays
+        # meaningful rather than reading as "and 1 other".
+        summary = _departed_summary([7], {7: "N" * 100})
+
+        assert summary is not None
+        assert "N" * 100 in summary
+        assert "other" not in summary
 
 
 class TestEventEditConfirmView:
