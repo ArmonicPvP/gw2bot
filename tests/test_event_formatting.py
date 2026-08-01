@@ -5,11 +5,14 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from gw2bot.events.formatting import (
+    DRAFT_PENDING_TEXT,
     EMBED_TOTAL_LIMIT,
     WAITLIST_EMOJI,
     compute_status,
     confirm_embed,
     describe_repeat,
+    details_confirm_embed,
+    details_preview_embed,
     event_embed,
     event_thread_name,
     format_duration,
@@ -616,6 +619,92 @@ class TestEventEmbed:
 
         assert len(embed) <= EMBED_TOTAL_LIMIT
         assert embed.description == "Bring food."
+
+
+class TestDetailsPreviewEmbed:
+    def test_shows_the_details_entered_so_far(self) -> None:
+        embed = details_preview_embed(
+            EventCategory.FRACTAL,
+            "Kitty Cleanup",
+            "Bring food.",
+            1234,
+            42,
+        )
+
+        assert embed.title == (
+            f"{CATEGORY_EMOJI[EventCategory.FRACTAL]} Kitty Cleanup"
+        )
+        assert embed.description == "Bring food."
+        values = {field.name: field.value for field in embed.fields}
+        assert values["👑 Leader"] == "<@42>"
+        assert values["📢 Posted in"] == "<#1234>"
+
+    def test_marks_the_unanswered_schedule_as_pending(self) -> None:
+        embed = details_preview_embed(
+            EventCategory.FRACTAL,
+            "Kitty Cleanup",
+            "Bring food.",
+            1234,
+            42,
+        )
+
+        values = {field.name: field.value for field in embed.fields}
+        assert values["📅 Date & Time"] == DRAFT_PENDING_TEXT
+        assert values["⏳ Duration"] == DRAFT_PENDING_TEXT
+
+    def test_renders_without_a_category_or_channel(self) -> None:
+        embed = details_preview_embed(None, "Kitty Cleanup", "", None, 42)
+
+        assert embed.title == "Kitty Cleanup"
+        values = {field.name: field.value for field in embed.fields}
+        assert values["📢 Posted in"] == DRAFT_PENDING_TEXT
+
+    def test_title_with_emoji_prefix_stays_within_title_limit(self) -> None:
+        embed = details_preview_embed(
+            EventCategory.FRACTAL,
+            "x" * 256,
+            "Bring food.",
+            1234,
+            42,
+        )
+
+        assert embed.title is not None
+        assert len(embed.title) <= 256
+        assert embed.title.endswith("…")
+
+    def test_long_description_stays_within_the_total_limit(self) -> None:
+        embed = details_preview_embed(
+            EventCategory.FRACTAL,
+            "Kitty Cleanup",
+            "x" * (EMBED_TOTAL_LIMIT + 100),
+            1234,
+            42,
+        )
+
+        assert len(embed) <= EMBED_TOTAL_LIMIT
+
+    def test_footer_carries_the_placeholder_event_id(self) -> None:
+        embed = details_preview_embed(
+            EventCategory.FRACTAL,
+            "Kitty Cleanup",
+            "Bring food.",
+            1234,
+            42,
+            "—",
+        )
+
+        assert embed.footer.text == "eventID: —"
+
+
+class TestDetailsConfirmEmbed:
+    def test_offers_next_or_change(self) -> None:
+        embed = details_confirm_embed()
+
+        assert embed.title == "Create new event"
+        assert embed.description is not None
+        assert "**Next**" in embed.description
+        assert "change something" in embed.description
+        assert "step 2 of 3" in embed.description
 
 
 class TestConfirmEmbed:

@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
+from gw2bot.events.formatting import next_occurrence_start
 from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
@@ -28,6 +29,9 @@ from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
     AutoSignupChoiceView,
+    CategoryPickView,
+    ChangeFieldSelect,
+    ChangeFieldView,
     ChannelMoveConfirmView,
     ChannelPickSelect,
     ChannelPickView,
@@ -36,6 +40,7 @@ from gw2bot.events.views import (
     EditWaitlistConfirmView,
     EventConfirmView,
     EventDeleteConfirmView,
+    EventDetailsConfirmView,
     EventDetailsModal,
     EventDraft,
     EventEditConfirmView,
@@ -47,6 +52,7 @@ from gw2bot.events.views import (
     EventSignUpButton,
     RemoveSignupsSelect,
     RemoveSignupsView,
+    RepeatChoiceView,
     RolePickSelect,
     RolePickView,
     SignOutConfirmView,
@@ -55,8 +61,10 @@ from gw2bot.events.views import (
     UpdateRememberedRolesView,
     _departed_summary,
     _signup_summary,
+    build_event_preview,
     build_signup_view,
     draft_from_event,
+    send_event_preview,
 )
 
 from factories import forbidden_error, not_found_error
@@ -261,7 +269,8 @@ class TestEventChannelChoices:
         await modal.on_submit(interaction)
 
         assert draft.channel_id == 901
-        assert "Step 2" in interaction.response.send_message.await_args.args[0]
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDetailsConfirmView)
 
     async def test_details_modal_rejects_a_thread_under_a_channel(self) -> None:
         draft = EventDraft(leader_discord_id=42)
@@ -315,7 +324,7 @@ class TestEventChannelChoices:
 
 
 class TestEventDetailsModal:
-    async def test_submit_stores_details_and_offers_step_two(self) -> None:
+    async def test_submit_stores_details_and_previews_them(self) -> None:
         draft = EventDraft(leader_discord_id=42)
         modal = EventDetailsModal(make_bot(), draft)
         modal.category._values = ["Raid"]
@@ -334,7 +343,174 @@ class TestEventDetailsModal:
         assert interaction.response.send_message.await_args is not None
         kwargs = interaction.response.send_message.await_args.kwargs
         assert kwargs["ephemeral"] is True
-        assert "Step 2" in interaction.response.send_message.await_args.args[0]
+        # The details are shown back as an event preview rather than as a
+        # "press Continue" prompt, so what was entered can be checked first.
+        preview, confirmation = kwargs["embeds"]
+        assert "Kitty Cleanup" in cast(str, preview.title)
+        assert preview.description == "Bring food."
+        assert "<#1234>" in {field.value for field in preview.fields}
+        assert "Next" in cast(str, confirmation.description)
+        assert isinstance(kwargs["view"], EventDetailsConfirmView)
+
+
+class TestEventDetailsConfirmView:
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+        )
+
+    def buttons(self, view: discord.ui.View) -> list[str]:
+        return [
+            cast(str, item.label)
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ]
+
+    def test_offers_next_and_change_something(self) -> None:
+        view = EventDetailsConfirmView(make_bot(), self.make_draft())
+
+        assert set(self.buttons(view)) == {"Next", "Change something"}
+
+    async def test_next_opens_the_schedule_modal(self) -> None:
+        draft = self.make_draft()
+        view = EventDetailsConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.next_step.callback)(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, EventScheduleModal)
+
+    async def test_change_something_only_offers_entered_fields(self) -> None:
+        draft = self.make_draft()
+        view = EventDetailsConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.change_something.callback)(interaction)
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        change_view = kwargs["view"]
+        assert isinstance(change_view, ChangeFieldView)
+        select = next(
+            item
+            for item in change_view.children
+            if isinstance(item, ChangeFieldSelect)
+        )
+        # The schedule and repeat questions have not been asked yet, so they
+        # cannot be answered out of order from this preview.
+        assert [option.value for option in select.options] == [
+            "category",
+            "title",
+            "description",
+            "channel",
+            "leader",
+        ]
+
+    async def test_a_change_returns_to_the_details_preview(self) -> None:
+        draft = self.make_draft()
+        view = CategoryPickView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.pick(interaction, EventCategory.FRACTAL)
+
+        assert draft.category is EventCategory.FRACTAL
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDetailsConfirmView)
+        assert len(kwargs["embeds"]) == 2
+
+    def test_a_complete_draft_gets_the_full_preview(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+        )
+
+        _, view = build_event_preview(make_bot(), draft)
+
+        assert isinstance(view, EventConfirmView)
+
+
+class TestEventPreviewLogging:
+    """The preview embeds carry the event; the log must not."""
+
+    TITLE = "SECRET EVENT TITLE"
+    DESCRIPTION = "SECRET EVENT DESCRIPTION"
+
+    def make_draft(self, complete: bool) -> EventDraft:
+        draft = EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title=self.TITLE,
+            description=self.DESCRIPTION,
+            channel_id=1234,
+        )
+        if not complete:
+            return draft
+        return replace(
+            draft,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            start_text=FUTURE_START_TEXT,
+            duration_minutes=90,
+            duration_text="01:30",
+        )
+
+    async def test_details_preview_logging_omits_the_event_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        draft = EventDraft(leader_discord_id=42)
+        modal = EventDetailsModal(make_bot(), draft)
+        modal.category._values = ["Raid"]
+        modal.title_input._value = self.TITLE
+        modal.description_input._value = self.DESCRIPTION
+        cast(Any, modal.channel)._values = [SimpleNamespace(id=1234)]
+        interaction = make_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await modal.on_submit(interaction)
+
+        assert self.TITLE not in caplog.text
+        assert self.DESCRIPTION not in caplog.text
+        # The step is still traceable end to end, including which preview the
+        # commander was shown.
+        assert "Event details step submitted" in caplog.text
+        assert "Sending event preview" in caplog.text
+        assert "complete=False" in caplog.text
+
+    async def test_full_preview_logging_omits_the_event_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        draft = self.make_draft(complete=True)
+        interaction = make_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await send_event_preview(make_bot(), interaction, draft)
+
+        assert self.TITLE not in caplog.text
+        assert self.DESCRIPTION not in caplog.text
+        assert "Sending event preview" in caplog.text
+        assert "complete=True" in caplog.text
+
+    async def test_next_step_logging_omits_the_event_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        draft = self.make_draft(complete=False)
+        view = EventDetailsConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        with caplog.at_level("DEBUG"):
+            await cast(Any, view.next_step.callback)(interaction)
+
+        assert self.TITLE not in caplog.text
+        assert self.DESCRIPTION not in caplog.text
+        assert "continued to the schedule step" in caplog.text
 
 
 class TestEventScheduleModal:
@@ -522,6 +698,161 @@ class TestEventRepeatModal:
             "Try again"
             in interaction.response.send_message.await_args.args[0]
         )
+
+    async def test_invalid_days_leave_the_draft_untouched(self) -> None:
+        # A frequency stored without its days would describe an event that
+        # repeats on no day at all. next_occurrence_start raises on one of
+        # those, and that aborts the whole maintenance pass, so it must never
+        # reach a draft a still-open preview could post.
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days_text="",
+            delete_previous_on_repeat=False,
+        )
+        modal = EventRepeatModal(make_bot(), draft)
+        modal.frequency._values = ["weekly"]
+        modal.days_input._value = "someday"
+        modal.delete_previous._values = ["yes"]
+
+        await modal.on_submit(make_interaction())
+
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+        assert draft.repeat_days == ()
+        assert draft.repeat_days_text == ""
+        assert draft.delete_previous_on_repeat is False
+
+    async def test_a_rejected_attempt_refills_the_retry_modal(self) -> None:
+        # The draft never took the answers on, so the retry has to carry them.
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days_text="",
+        )
+        modal = EventRepeatModal(make_bot(), draft)
+        modal.frequency._values = ["weekly"]
+        modal.days_input._value = "someday"
+        modal.delete_previous._values = ["yes"]
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        retry = interaction.response.send_message.await_args.kwargs["view"]
+        refilled = cast(EventRepeatModal, retry.build_modal())
+        assert refilled.days_input.default == "someday"
+        assert [
+            option.value
+            for option in refilled.frequency.options
+            if option.default
+        ] == ["weekly"]
+        assert [
+            option.value
+            for option in refilled.delete_previous.options
+            if option.default
+        ] == ["yes"]
+
+    async def test_a_stale_preview_cannot_post_a_dayless_repeat(self) -> None:
+        # The rejection message is not the only live message: a preview from an
+        # earlier step shares the draft and can still complete it.
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+        modal = EventRepeatModal(make_bot(), draft)
+        modal.frequency._values = ["weekly"]
+        modal.days_input._value = "someday"
+        modal.delete_previous._values = ["no"]
+        await modal.on_submit(make_interaction())
+
+        event = draft.to_event()
+
+        assert event.repeat_frequency is RepeatFrequency.NONE
+        with pytest.raises(ValueError, match="no next occurrence"):
+            next_occurrence_start(
+                event.repeat_frequency,
+                event.repeat_days,
+                event.start_time,
+                ZoneInfo("UTC"),
+            )
+
+    def test_an_unanswered_frequency_preselects_nothing(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+
+        modal = EventRepeatModal(make_bot(), draft)
+
+        # Required with nothing preselected: the commander has to choose a
+        # frequency, so none can be inherited from a placeholder.
+        assert modal.frequency.required
+        assert not any(option.default for option in modal.frequency.options)
+
+
+class TestUnansweredRepeatSettings:
+    """Saying "yes, it repeats" must not itself put a frequency on the draft.
+
+    A preview left open at an earlier step keeps working off the same draft, so
+    a frequency written before the repeat modal is answered could be posted
+    from there without anyone having chosen it.
+    """
+
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+        )
+
+    async def test_schedule_step_leaves_the_frequency_unset(self) -> None:
+        draft = self.make_draft()
+        modal = EventScheduleModal(make_bot(), draft)
+        modal.start_input._value = FUTURE_START_TEXT
+        modal.duration_input._value = "01:30"
+        modal.repeat._values = ["yes"]
+        interaction = make_interaction(message=ephemeral_message())
+
+        await modal.on_submit(interaction)
+
+        assert "Step 3" in (
+            interaction.response.edit_message.await_args.kwargs["content"]
+        )
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+
+    async def test_repeat_choice_leaves_the_frequency_unset(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+        )
+        view = RepeatChoiceView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.repeat_yes.callback)(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+
+    async def test_an_abandoned_repeat_step_previews_as_non_repeating(
+        self,
+    ) -> None:
+        # The step-three prompt is not the only live message: a preview from an
+        # earlier step can still complete the draft. What it offers to post has
+        # to be what it shows.
+        draft = self.make_draft()
+        schedule = EventScheduleModal(make_bot(), draft)
+        schedule.start_input._value = FUTURE_START_TEXT
+        schedule.duration_input._value = "01:30"
+        schedule.repeat._values = ["yes"]
+        await schedule.on_submit(make_interaction(message=ephemeral_message()))
+
+        embeds, view = build_event_preview(make_bot(), draft)
+
+        assert isinstance(view, EventConfirmView)
+        assert "Does not repeat" in cast(str, embeds[1].description)
+        assert draft.to_event().repeat_frequency is RepeatFrequency.NONE
 
 
 @pytest.fixture

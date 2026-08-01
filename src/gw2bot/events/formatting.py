@@ -38,6 +38,9 @@ EMBED_FIELD_VALUE_LIMIT = 1024
 EMBED_TOTAL_LIMIT = 6000
 EMBED_TITLE_LIMIT = 256
 EMPTY_FIELD_TEXT = "—"
+# Stands in for a value the commander has not reached yet in the creation flow,
+# so the step-one preview keeps the shape of the finished event.
+DRAFT_PENDING_TEXT = "Not set yet"
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
 WAITLIST_EMOJI = "⌛️"
@@ -400,15 +403,15 @@ def _role_group_lines(signups: list[EventSignup]) -> list[str]:
     return lines
 
 
-def _embed_title(event: Event) -> str:
+def _embed_title(category: EventCategory | None, title: str) -> str:
     # The category emoji is prefixed to the title, but a custom-emoji string
     # such as "<:fractal:...>" counts in full toward Discord's 256-character
     # title limit. A user-entered title may already be at that limit, so
     # reserve room for the prefix and truncate the title rather than letting
-    # the API reject the whole embed as an invalid form body.
-    prefix = f"{CATEGORY_EMOJI[event.category]} "
+    # the API reject the whole embed as an invalid form body. A draft preview
+    # may not have a category yet, in which case there is no prefix.
+    prefix = f"{CATEGORY_EMOJI[category]} " if category is not None else ""
     budget = EMBED_TITLE_LIMIT - len(prefix)
-    title = event.title
     if len(title) > budget:
         keep = budget - len(_TRUNCATION_MARKER)
         title = title[:keep].rstrip() + _TRUNCATION_MARKER
@@ -426,7 +429,7 @@ def event_embed(
     active = [signup for signup in signups if not signup.waitlisted]
     waitlisted = [signup for signup in signups if signup.waitlisted]
     embed = discord.Embed(
-        title=_embed_title(event),
+        title=_embed_title(event.category, event.title),
         description=event.description,
         color=STATUS_COLORS[status],
     )
@@ -567,6 +570,63 @@ def _fit_within_total_limit(embed: discord.Embed) -> None:
             )
         else:
             embed.remove_field(index)
+
+
+def details_preview_embed(
+    category: EventCategory | None,
+    title: str,
+    description: str,
+    channel_id: int | None,
+    leader_discord_id: int,
+    event_id_text: str = EMPTY_FIELD_TEXT,
+) -> discord.Embed:
+    """Render the event as far as the details step has defined it.
+
+    Mirrors event_embed's layout so the commander recognises the same event
+    once the schedule fills the pending fields in. The roster sections are
+    absent rather than empty: a draft has no signups, and capacity follows from
+    the category alone, which the final preview already shows.
+    """
+    embed = discord.Embed(
+        title=_embed_title(category, title),
+        description=description or EMPTY_FIELD_TEXT,
+        color=STATUS_COLORS[EventStatus.OPEN],
+    )
+    embed.add_field(
+        name="📅 Date & Time",
+        value=DRAFT_PENDING_TEXT,
+        inline=True,
+    )
+    embed.add_field(name="⏳ Duration", value=DRAFT_PENDING_TEXT, inline=True)
+    embed.add_field(
+        name="👑 Leader",
+        value=f"<@{leader_discord_id}>",
+        inline=True,
+    )
+    embed.add_field(
+        name="📢 Posted in",
+        value=(
+            f"<#{channel_id}>"
+            if channel_id is not None
+            else DRAFT_PENDING_TEXT
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"eventID: {event_id_text}")
+    _fit_within_total_limit(embed)
+    return embed
+
+
+def details_confirm_embed() -> discord.Embed:
+    return discord.Embed(
+        title="Create new event",
+        description=(
+            "Above is the event so far. Press **Next** to enter the "
+            "schedule, or change something first."
+            "\n\n*Date & time, duration and repeat settings come next "
+            "(step 2 of 3).*"
+        ),
+    )
 
 
 def confirm_embed() -> discord.Embed:

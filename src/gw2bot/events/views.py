@@ -25,6 +25,8 @@ from gw2bot.events.formatting import (
     compute_status,
     confirm_embed,
     describe_repeat,
+    details_confirm_embed,
+    details_preview_embed,
     edit_confirm_embed,
     event_embed,
     format_duration_input,
@@ -231,6 +233,23 @@ def draft_from_event(
     )
 
 
+@dataclass(frozen=True)
+class RepeatAttempt:
+    """Repeat answers that failed validation, kept only to refill the modal.
+
+    They are deliberately never written to the draft. A preview opened from an
+    earlier step shares that draft and can complete it, so a frequency stored
+    beside unparsed days could be posted as a weekly or monthly event with no
+    days to repeat on. Such an event raises out of next_occurrence_start when
+    its occurrence ends, which aborts the whole maintenance pass, not just
+    that event's.
+    """
+
+    frequency: RepeatFrequency
+    days_text: str
+    delete_previous: bool
+
+
 def _category_options(
     selected: EventCategory | None,
 ) -> list[discord.SelectOption]:
@@ -309,6 +328,26 @@ def _primary_live_occurrence(
     return live[0] if live else None
 
 
+def build_details_preview(
+    bot: Gw2Bot,
+    draft: EventDraft,
+) -> tuple[list[discord.Embed], discord.ui.View]:
+    # The step-one preview of a draft whose schedule has not been entered yet.
+    # It carries the same "Change something" flow as the final preview, so a
+    # correction can be made before answering three more questions.
+    preview = details_preview_embed(
+        draft.category,
+        draft.title,
+        draft.description,
+        draft.channel_id,
+        draft.leader_discord_id,
+        PREVIEW_EVENT_ID_TEXT,
+    )
+    return [preview, details_confirm_embed()], EventDetailsConfirmView(
+        bot, draft
+    )
+
+
 def _editing_occurrence(
     bot: Gw2Bot,
     draft: EventDraft,
@@ -358,6 +397,12 @@ def build_event_preview(
     # Split out from send_event_preview so a flow that has already answered the
     # interaction (the roster removal below awaits Discord I/O first) can still
     # re-render the same preview through edit_original_response.
+    if not draft.is_complete():
+        # Only a creation draft mid-flow lands here: an edit draft is built
+        # from a stored event and is complete from the start. Every "Change
+        # something" path funnels back through this function, so the step-one
+        # preview is what a change made before the schedule returns to.
+        return build_details_preview(bot, draft)
     editing_event_id = draft.editing_event_id
     view: discord.ui.View
     if editing_event_id is not None:
@@ -422,7 +467,7 @@ async def send_event_preview(
     LOGGER.debug(
         "Sending event preview; user_id=%s category=%s repeat=%s "
         "title_characters=%s in_place=%s editing=%s roster_only=%s "
-        "deferred=%s",
+        "deferred=%s complete=%s",
         draft.leader_discord_id,
         draft.category.value if draft.category is not None else None,
         draft.repeat_frequency.value,
@@ -431,6 +476,7 @@ async def send_event_preview(
         draft.editing_event_id is not None,
         draft.roster_only,
         deferred,
+        draft.is_complete(),
     )
     if deferred:
         # The caller already acknowledged the interaction because it had to
@@ -549,14 +595,6 @@ class _ModalOpenView(discord.ui.View):
         raise NotImplementedError
 
 
-class ContinueToScheduleView(_ModalOpenView):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
-        super().__init__(bot, draft, "Continue")
-
-    def build_modal(self) -> discord.ui.Modal:
-        return EventScheduleModal(self._bot, self._draft)
-
-
 class RetryScheduleView(_ModalOpenView):
     def __init__(self, bot: Gw2Bot, draft: EventDraft):
         super().__init__(bot, draft, "Try again")
@@ -574,11 +612,17 @@ class ContinueToRepeatView(_ModalOpenView):
 
 
 class RetryRepeatView(_ModalOpenView):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        attempt: RepeatAttempt | None = None,
+    ):
         super().__init__(bot, draft, "Try again")
+        self._attempt = attempt
 
     def build_modal(self) -> discord.ui.Modal:
-        return EventRepeatModal(self._bot, self._draft)
+        return EventRepeatModal(self._bot, self._draft, self._attempt)
 
 
 class EventDetailsModal(discord.ui.Modal, title="Create new event"):
@@ -653,11 +697,7 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
             len(self._draft.title),
             len(self._draft.description),
         )
-        await interaction.response.send_message(
-            "**Step 2 of 3** — press Continue to enter the event schedule.",
-            view=ContinueToScheduleView(self._bot, self._draft),
-            ephemeral=True,
-        )
+        await send_event_preview(self._bot, interaction, self._draft)
 
 
 class RetryDetailsView(_ModalOpenView):
@@ -745,8 +785,10 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
             self._draft.delete_previous_on_repeat = False
             await send_event_preview(self._bot, interaction, self._draft)
             return
-        if self._draft.repeat_frequency is RepeatFrequency.NONE:
-            self._draft.repeat_frequency = RepeatFrequency.DAILY
+        # Answering "yes" here does not write a frequency onto the draft: only
+        # the repeat modal does. A draft that never reaches that modal must not
+        # carry a frequency nobody chose, because a preview reopened from an
+        # earlier step would then offer to post it.
         message = "**Step 3 of 3** — press Continue to set how it repeats."
         view = ContinueToRepeatView(self._bot, self._draft)
         if _is_ephemeral_component_interaction(interaction):
@@ -764,12 +806,30 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
 
 
 class EventRepeatModal(discord.ui.Modal, title="Create new event"):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        attempt: RepeatAttempt | None = None,
+    ):
         super().__init__()
         self._bot = bot
         self._draft = draft
+        # A rejected attempt refills the modal from itself rather than from the
+        # draft, which never took those answers on.
+        frequency = (
+            attempt.frequency if attempt is not None else draft.repeat_frequency
+        )
+        days_text = (
+            attempt.days_text if attempt is not None else draft.repeat_days_text
+        )
+        delete_previous = (
+            attempt.delete_previous
+            if attempt is not None
+            else draft.delete_previous_on_repeat
+        )
         self.frequency = discord.ui.Select["EventRepeatModal"](
-            options=_frequency_options(draft.repeat_frequency),
+            options=_frequency_options(frequency),
         )
         self.add_item(
             discord.ui.Label(
@@ -779,7 +839,7 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
         )
         self.days_input = discord.ui.TextInput["EventRepeatModal"](
             required=False,
-            default=draft.repeat_days_text or None,
+            default=days_text or None,
             placeholder="Weekly: Sunday, Wednesday — Monthly: 1, 15, 30",
             max_length=120,
         )
@@ -793,7 +853,7 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
             )
         )
         self.delete_previous = discord.ui.Select["EventRepeatModal"](
-            options=_yes_no_options(draft.delete_previous_on_repeat),
+            options=_yes_no_options(delete_previous),
         )
         self.add_item(
             discord.ui.Label(
@@ -807,23 +867,27 @@ class EventRepeatModal(discord.ui.Modal, title="Create new event"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         frequency = RepeatFrequency(self.frequency.values[0])
-        self._draft.repeat_frequency = frequency
-        self._draft.repeat_days_text = self.days_input.value.strip()
-        self._draft.delete_previous_on_repeat = (
-            self.delete_previous.values[0] == "yes"
-        )
+        days_text = self.days_input.value.strip()
+        delete_previous = self.delete_previous.values[0] == "yes"
         try:
-            repeat_days = parse_repeat_days(
-                frequency,
-                self._draft.repeat_days_text,
-            )
+            repeat_days = parse_repeat_days(frequency, days_text)
         except ValueError as error:
+            # The draft keeps the repeat settings it already had: a rejected
+            # frequency must not reach it, because a still-open preview from an
+            # earlier step could complete and post it without any days.
             await _send_validation_error(
                 interaction,
                 error,
-                RetryRepeatView(self._bot, self._draft),
+                RetryRepeatView(
+                    self._bot,
+                    self._draft,
+                    RepeatAttempt(frequency, days_text, delete_previous),
+                ),
             )
             return
+        self._draft.repeat_frequency = frequency
+        self._draft.repeat_days_text = days_text
+        self._draft.delete_previous_on_repeat = delete_previous
         self._draft.repeat_days = repeat_days
         LOGGER.debug(
             "Event repeat step submitted; user_id=%s frequency=%s days=%s",
@@ -848,6 +912,11 @@ class _EditFlowView(discord.ui.View):
 
 
 class _PreviewConfirmView(_EditFlowView):
+    def change_fields(self) -> tuple[tuple[str, str], ...]:
+        # Resolved at call time rather than as a class attribute, because the
+        # field lists are defined further down with the change flow itself.
+        return _CHANGE_FIELDS
+
     @discord.ui.button(
         label="Change something",
         style=discord.ButtonStyle.secondary,
@@ -859,8 +928,36 @@ class _PreviewConfirmView(_EditFlowView):
     ) -> None:
         await interaction.response.send_message(
             "What would you like to change?",
-            view=ChangeFieldView(self._bot, self._draft),
+            view=ChangeFieldView(
+                self._bot,
+                self._draft,
+                fields=self.change_fields(),
+            ),
             ephemeral=True,
+        )
+
+
+class EventDetailsConfirmView(_PreviewConfirmView):
+    """Step-one preview: continue to the schedule, or correct the details."""
+
+    def change_fields(self) -> tuple[tuple[str, str], ...]:
+        # The schedule and repeat settings have not been asked yet, so offering
+        # them here would let a commander skip past the questions that follow.
+        return _DETAILS_CHANGE_FIELDS
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next_step(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventDetailsConfirmView],
+    ) -> None:
+        LOGGER.debug(
+            "Event details preview continued to the schedule step; "
+            "user_id=%s",
+            interaction.user.id,
+        )
+        await interaction.response.send_modal(
+            EventScheduleModal(self._bot, self._draft)
         )
 
 
@@ -2285,14 +2382,22 @@ _CHANGE_FIELDS = (
     ("leader", "Leader"),
 )
 
+# What the step-one preview may change: the details that have been entered by
+# then, in the same order as the full list.
+_DETAILS_CHANGE_FIELDS = tuple(
+    entry
+    for entry in _CHANGE_FIELDS
+    if entry[0] in ("category", "title", "description", "channel", "leader")
+)
+
 
 class ChangeFieldSelect(discord.ui.Select["ChangeFieldView"]):
-    def __init__(self):
+    def __init__(self, fields: tuple[tuple[str, str], ...] = _CHANGE_FIELDS):
         super().__init__(
             placeholder="What would you like to change?",
             options=[
                 discord.SelectOption(label=label, value=value)
-                for value, label in _CHANGE_FIELDS
+                for value, label in fields
             ],
         )
 
@@ -2303,11 +2408,17 @@ class ChangeFieldSelect(discord.ui.Select["ChangeFieldView"]):
 
 
 class ChangeFieldView(discord.ui.View):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        *,
+        fields: tuple[tuple[str, str], ...] = _CHANGE_FIELDS,
+    ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._draft = draft
-        self.add_item(ChangeFieldSelect())
+        self.add_item(ChangeFieldSelect(fields))
 
     async def handle_choice(
         self,
@@ -2538,8 +2649,9 @@ class RepeatChoiceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[RepeatChoiceView],
     ) -> None:
-        if self._draft.repeat_frequency is RepeatFrequency.NONE:
-            self._draft.repeat_frequency = RepeatFrequency.DAILY
+        # As in the schedule step, the frequency is the repeat modal's to set.
+        # Dismissing that modal leaves the previous setting standing, so the
+        # still-open preview keeps offering to post what it already shows.
         await interaction.response.send_modal(
             EventRepeatModal(self._bot, self._draft)
         )
