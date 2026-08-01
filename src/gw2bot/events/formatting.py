@@ -523,6 +523,17 @@ def edit_confirm_embed() -> discord.Embed:
     )
 
 
+def roster_edit_embed() -> discord.Embed:
+    return discord.Embed(
+        title="Edit roster",
+        description=(
+            "This event is already in progress, so its details are fixed and "
+            "only its roster can still be changed. Above is the roster as it "
+            "stands now."
+        ),
+    )
+
+
 def describe_repeat(
     frequency: RepeatFrequency,
     repeat_days: tuple[int, ...],

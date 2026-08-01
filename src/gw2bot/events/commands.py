@@ -6,16 +6,18 @@ from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import user_has_role
 from gw2bot.events.models import Event, EventStatus
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
-    ONGOING_EDIT_REJECTION,
     EventDeleteConfirmView,
     EventDetailsModal,
     EventDraft,
     draft_from_event,
+    occurrence_has_ended,
+    prune_departed_members,
     send_event_preview,
 )
 
@@ -153,7 +155,12 @@ class EventCommands(app_commands.Group):
             if event is not None and not event.cancelled
             else []
         )
-        if event is None or event.cancelled or not live:
+        now = datetime.now(UTC)
+        # The soonest live occurrence is the one being edited; an event with a
+        # started occurrence always has it first, because they are ordered by
+        # start time.
+        primary = live[0] if live else None
+        if event is None or event.cancelled or primary is None:
             LOGGER.debug(
                 "Event edit rejected for missing or completed event; "
                 "user_id=%s event_id=%s exists=%s",
@@ -167,39 +174,69 @@ class EventCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
-        # An event that has started is ongoing: it can only be deleted. Editing
-        # it would re-render a live roster, and shortening its duration would
-        # persist OVER without seeding a recurring series' next occurrence.
-        if any(
-            occurrence.start_time <= datetime.now(UTC) for occurrence in live
-        ):
+        # An event that has started is in progress: its stored details are
+        # frozen, because re-rendering it from an edit can persist OVER without
+        # seeding a recurring series' next occurrence, and rescheduling or
+        # moving a run people are already in helps nobody. Its roster is still
+        # live, though, so that alone stays editable.
+        roster_only = primary.start_time <= now
+        if roster_only and occurrence_has_ended(event, primary, now):
+            # Past its end but not yet retired by the scheduler: the roster is
+            # history now, so there is nothing left to edit either.
             LOGGER.debug(
-                "Event edit rejected for an ongoing event; "
-                "user_id=%s event_id=%s",
+                "Event edit rejected for a finished occurrence awaiting "
+                "retirement; user_id=%s event_id=%s",
                 interaction.user.id,
                 event_id,
             )
             await interaction.response.send_message(
-                ONGOING_EDIT_REJECTION,
+                "That event does not exist or is over and can no longer be "
+                "edited.",
                 ephemeral=True,
             )
             return
-        primary = live[0]
         draft = draft_from_event(
             event,
             self._bot.event_timezone,
             start_time_override=primary.start_time,
+            roster_only=roster_only,
         )
+        # Checking the roster against the server is one Discord fetch per
+        # member, which cannot finish inside the three-second interaction
+        # window, so acknowledge first and send the preview as a follow-up.
+        await interaction.response.defer(ephemeral=True)
+        departed_note = None
+        try:
+            departed_note, _ = await prune_departed_members(
+                self._bot,
+                interaction.guild,
+                event,
+                primary,
+            )
+        except (discord.DiscordException, SQLAlchemyError) as exc:
+            # A roster the bot could not clean up is still an editable roster,
+            # so report nothing and show the preview as it stands.
+            LOGGER.error(
+                "Could not check the roster for departed members; "
+                "event_id=%s error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
         await send_event_preview(
             self._bot,
             interaction,
             draft,
             primary=primary,
+            deferred=True,
+            content=departed_note,
         )
         LOGGER.debug(
-            "Event edit preview opened; user_id=%s event_id=%s",
+            "Event edit preview opened; user_id=%s event_id=%s "
+            "roster_only=%s departed_removed=%s",
             interaction.user.id,
             event_id,
+            roster_only,
+            departed_note is not None,
         )
 
     @app_commands.command(
