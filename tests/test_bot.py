@@ -17,7 +17,12 @@ from gw2bot.events.views import (
     EventSignOutButton,
     EventSignUpButton,
 )
-from gw2bot.raffle.views import RaffleAuditRangesButton
+from gw2bot.raffle.views import (
+    RaffleAuditRangesButton,
+    RaffleContributionReportButton,
+    RaffleLeaderboardButton,
+    RaffleTicketsListButton,
+)
 
 
 class TestCommand:
@@ -172,6 +177,14 @@ class TestBotIntent:
             bot.event_store.close()
 
         add_dynamic_items.assert_any_call(RaffleAuditRangesButton)
+        # Without registration these pagers would only work while their view
+        # object stayed alive, so their arrows would start failing on a
+        # message that is still on screen.
+        add_dynamic_items.assert_any_call(
+            RaffleTicketsListButton,
+            RaffleLeaderboardButton,
+            RaffleContributionReportButton,
+        )
         add_dynamic_items.assert_any_call(
             EventSignUpButton,
             EventSignOutButton,

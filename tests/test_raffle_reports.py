@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import discord
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleContribution, RaffleDeposit
@@ -18,7 +19,10 @@ from gw2bot.raffle.reports import (
     raffle_contribution_report_end,
     seconds_until_raffle_contribution_report,
 )
-from gw2bot.raffle.views import RaffleContributionReportView
+from gw2bot.raffle.views import (
+    RaffleContributionReportButton,
+    RaffleContributionReportView,
+)
 
 from factories import raffle_total
 
@@ -118,17 +122,105 @@ class TestRaffleContributionNotification:
 
         embed, view = bot._send_raffle_contribution_embed.await_args.args
         assert isinstance(view, RaffleContributionReportView)
+        # The report sits in a channel for six hours, far longer than any
+        # view timeout, so its arrows have to be dynamic custom_ids.
+        assert view.timeout is None
         assert "Member 09.1234" in (embed.description or "")
         assert "Member 10.1234" not in (embed.description or "")
 
+        buttons = [
+            child
+            for child in view.children
+            if isinstance(child, RaffleContributionReportButton)
+        ]
+        window = (
+            f"{int(datetime(2026, 6, 7, tzinfo=UTC).timestamp())}:"
+            f"{int(report_end.timestamp())}"
+        )
+        assert [button.custom_id for button in buttons] == [
+            f"gw2bot:raffle-contributions:{window}:0:-1",
+            f"gw2bot:raffle-contributions:{window}:0:1",
+        ]
+        assert [button.item.disabled for button in buttons] == [True, False]
+
         interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_contributions=MagicMock(return_value=contributions)
+            ),
             response=SimpleNamespace(edit_message=AsyncMock()),
         )
-        await view.change_page(interaction, 1)  # type: ignore[arg-type]
+        await buttons[1].callback(interaction)  # type: ignore[arg-type]
 
+        # The window is reloaded from the custom_id, not from view state.
+        interaction.client.get_raffle_contributions.assert_called_once_with(
+            datetime(2026, 6, 7, 0, tzinfo=UTC),
+            report_end,
+        )
         second_embed = interaction.response.edit_message.await_args.kwargs["embed"]
         assert "Member 10.1234" in (second_embed.description or "")
         assert "Member 09.1234" not in (second_embed.description or "")
+
+    async def test_report_button_restores_window_from_custom_id(self) -> None:
+        # The report message outlives any view timeout, so the window it
+        # covers has to be recoverable from the custom_id alone.
+        original = RaffleContributionReportButton(
+            1_779_978_400,
+            1_780_000_000,
+            3,
+            -1,
+        )
+        match = original.template.fullmatch(original.custom_id)
+        assert match is not None
+
+        restored = await RaffleContributionReportButton.from_custom_id(
+            cast(discord.Interaction, SimpleNamespace()),
+            cast("discord.ui.Item[Any]", SimpleNamespace()),
+            match,
+        )
+
+        assert restored.report_start == 1_779_978_400
+        assert restored.report_end == 1_780_000_000
+        assert restored.page == 3
+        assert restored.direction == -1
+
+    async def test_report_button_failure_logging_omits_secrets(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "contribution-paging-secret"
+        button = RaffleContributionReportButton(
+            1_779_978_400,
+            1_780_000_000,
+            0,
+            1,
+        )
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(
+                get_raffle_contributions=MagicMock(
+                    side_effect=SQLAlchemyError(
+                        f"query failed with access_token={secret}"
+                    )
+                )
+            ),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            await button.callback(interaction)  # type: ignore[arg-type]
+
+        assert secret not in caplog.text
+        assert (
+            "Could not load raffle contributions for report paging"
+            in caplog.text
+        )
+        interaction.response.edit_message.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Could not load this page. Try again later.",
+            ephemeral=True,
+        )
 
     async def test_sends_pending_purchase_embeds_to_raffle_channel(self) -> None:
         deposit = RaffleDeposit(

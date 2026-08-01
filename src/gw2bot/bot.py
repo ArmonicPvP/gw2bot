@@ -34,7 +34,12 @@ from gw2bot.raffle import (
 )
 from gw2bot.raffle import reports as raffle_reports
 from gw2bot.raffle.commands import RaffleCommands
-from gw2bot.raffle.views import RaffleAuditRangesButton
+from gw2bot.raffle.views import (
+    RaffleAuditRangesButton,
+    RaffleContributionReportButton,
+    RaffleLeaderboardButton,
+    RaffleTicketsListButton,
+)
 from gw2bot.trials.commands import (
     create_check_command,
     create_track_command,
@@ -96,6 +101,14 @@ class Gw2Bot(discord.Client):
         # Rebuild raffle audit pager buttons from their custom_ids so old
         # audit messages keep paging after view timeouts and restarts.
         self.add_dynamic_items(RaffleAuditRangesButton)
+        # The raffle ticket, leaderboard and contribution report pagers reload
+        # their rows on click, so their arrows keep working for as long as the
+        # message is on screen instead of dying with a view timeout.
+        self.add_dynamic_items(
+            RaffleTicketsListButton,
+            RaffleLeaderboardButton,
+            RaffleContributionReportButton,
+        )
         # Event signup buttons live on long-lived event messages and must
         # keep working after view timeouts and bot restarts.
         self.add_dynamic_items(
