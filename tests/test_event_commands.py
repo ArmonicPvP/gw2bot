@@ -58,6 +58,7 @@ from gw2bot.events.views import (
     build_event_preview,
     build_signup_view,
     draft_from_event,
+    send_event_preview,
 )
 
 from factories import forbidden_error, not_found_error
@@ -393,6 +394,84 @@ class TestEventDetailsConfirmView:
         _, view = build_event_preview(make_bot(), draft)
 
         assert isinstance(view, EventConfirmView)
+
+
+class TestEventPreviewLogging:
+    """The preview embeds carry the event; the log must not."""
+
+    TITLE = "SECRET EVENT TITLE"
+    DESCRIPTION = "SECRET EVENT DESCRIPTION"
+
+    def make_draft(self, complete: bool) -> EventDraft:
+        draft = EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title=self.TITLE,
+            description=self.DESCRIPTION,
+            channel_id=1234,
+        )
+        if not complete:
+            return draft
+        return replace(
+            draft,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            start_text=FUTURE_START_TEXT,
+            duration_minutes=90,
+            duration_text="01:30",
+        )
+
+    async def test_details_preview_logging_omits_the_event_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        draft = EventDraft(leader_discord_id=42)
+        modal = EventDetailsModal(make_bot(), draft)
+        modal.category._values = ["Raid"]
+        modal.title_input._value = self.TITLE
+        modal.description_input._value = self.DESCRIPTION
+        cast(Any, modal.channel)._values = [SimpleNamespace(id=1234)]
+        interaction = make_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await modal.on_submit(interaction)
+
+        assert self.TITLE not in caplog.text
+        assert self.DESCRIPTION not in caplog.text
+        # The step is still traceable end to end, including which preview the
+        # commander was shown.
+        assert "Event details step submitted" in caplog.text
+        assert "Sending event preview" in caplog.text
+        assert "complete=False" in caplog.text
+
+    async def test_full_preview_logging_omits_the_event_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        draft = self.make_draft(complete=True)
+        interaction = make_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await send_event_preview(make_bot(), interaction, draft)
+
+        assert self.TITLE not in caplog.text
+        assert self.DESCRIPTION not in caplog.text
+        assert "Sending event preview" in caplog.text
+        assert "complete=True" in caplog.text
+
+    async def test_next_step_logging_omits_the_event_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        draft = self.make_draft(complete=False)
+        view = EventDetailsConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        with caplog.at_level("DEBUG"):
+            await cast(Any, view.next_step.callback)(interaction)
+
+        assert self.TITLE not in caplog.text
+        assert self.DESCRIPTION not in caplog.text
+        assert "continued to the schedule step" in caplog.text
 
 
 class TestEventScheduleModal:
