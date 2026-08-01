@@ -668,8 +668,10 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
             self._draft.delete_previous_on_repeat = False
             await send_event_preview(self._bot, interaction, self._draft)
             return
-        if self._draft.repeat_frequency is RepeatFrequency.NONE:
-            self._draft.repeat_frequency = RepeatFrequency.DAILY
+        # Answering "yes" here does not write a frequency onto the draft: only
+        # the repeat modal does. A draft that never reaches that modal must not
+        # carry a frequency nobody chose, because a preview reopened from an
+        # earlier step would then offer to post it.
         message = "**Step 3 of 3** — press Continue to set how it repeats."
         view = ContinueToRepeatView(self._bot, self._draft)
         if _is_ephemeral_component_interaction(interaction):
@@ -2340,8 +2342,9 @@ class RepeatChoiceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[RepeatChoiceView],
     ) -> None:
-        if self._draft.repeat_frequency is RepeatFrequency.NONE:
-            self._draft.repeat_frequency = RepeatFrequency.DAILY
+        # As in the schedule step, the frequency is the repeat modal's to set.
+        # Dismissing that modal leaves the previous setting standing, so the
+        # still-open preview keeps offering to post what it already shows.
         await interaction.response.send_modal(
             EventRepeatModal(self._bot, self._draft)
         )

@@ -48,6 +48,7 @@ from gw2bot.events.views import (
     EventSignUpButton,
     RemoveSignupsSelect,
     RemoveSignupsView,
+    RepeatChoiceView,
     RolePickSelect,
     RolePickView,
     SignOutConfirmView,
@@ -659,6 +660,85 @@ class TestEventRepeatModal:
             "Try again"
             in interaction.response.send_message.await_args.args[0]
         )
+
+    def test_an_unanswered_frequency_preselects_nothing(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+
+        modal = EventRepeatModal(make_bot(), draft)
+
+        # Required with nothing preselected: the commander has to choose a
+        # frequency, so none can be inherited from a placeholder.
+        assert modal.frequency.required
+        assert not any(option.default for option in modal.frequency.options)
+
+
+class TestUnansweredRepeatSettings:
+    """Saying "yes, it repeats" must not itself put a frequency on the draft.
+
+    A preview left open at an earlier step keeps working off the same draft, so
+    a frequency written before the repeat modal is answered could be posted
+    from there without anyone having chosen it.
+    """
+
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+        )
+
+    async def test_schedule_step_leaves_the_frequency_unset(self) -> None:
+        draft = self.make_draft()
+        modal = EventScheduleModal(make_bot(), draft)
+        modal.start_input._value = FUTURE_START_TEXT
+        modal.duration_input._value = "01:30"
+        modal.repeat._values = ["yes"]
+        interaction = make_interaction(message=ephemeral_message())
+
+        await modal.on_submit(interaction)
+
+        assert "Step 3" in (
+            interaction.response.edit_message.await_args.kwargs["content"]
+        )
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+
+    async def test_repeat_choice_leaves_the_frequency_unset(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+        )
+        view = RepeatChoiceView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.repeat_yes.callback)(interaction)
+
+        interaction.response.send_modal.assert_awaited_once()
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+
+    async def test_an_abandoned_repeat_step_previews_as_non_repeating(
+        self,
+    ) -> None:
+        # The step-three prompt is not the only live message: a preview from an
+        # earlier step can still complete the draft. What it offers to post has
+        # to be what it shows.
+        draft = self.make_draft()
+        schedule = EventScheduleModal(make_bot(), draft)
+        schedule.start_input._value = FUTURE_START_TEXT
+        schedule.duration_input._value = "01:30"
+        schedule.repeat._values = ["yes"]
+        await schedule.on_submit(make_interaction(message=ephemeral_message()))
+
+        embeds, view = build_event_preview(make_bot(), draft)
+
+        assert isinstance(view, EventConfirmView)
+        assert "Does not repeat" in cast(str, embeds[1].description)
+        assert draft.to_event().repeat_frequency is RepeatFrequency.NONE
 
 
 @pytest.fixture
