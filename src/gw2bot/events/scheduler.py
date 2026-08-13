@@ -9,10 +9,9 @@ from gw2bot.events.models import EventStatus
 from gw2bot.events.posting import (
     ensure_next_recurring_occurrence,
     occurrence_status,
-    post_occurrence,
+    post_pending_occurrence,
     prune_superseded_occurrences,
     refresh_occurrence_message,
-    update_thread_membership,
 )
 from gw2bot.events.reminders import deliver_due_reminders
 
@@ -138,24 +137,7 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
         # One failed posting must not block the remaining pending
         # occurrences; failures are retried on the next maintenance pass.
         try:
-            posted = await post_occurrence(bot, event, occurrence, now)
-            if occurrence.needs_refresh:
-                # The flag only asked for this posting; the message it produced
-                # is current, so clear it rather than leave every later pass
-                # re-rendering a post nothing has changed.
-                bot.event_store.set_occurrence_needs_refresh(
-                    posted.occurrence_id,
-                    False,
-                )
-            for signup in bot.event_store.get_signups(
-                posted.occurrence_id
-            ):
-                await update_thread_membership(
-                    bot,
-                    posted,
-                    signup.discord_user_id,
-                    add=True,
-                )
+            posted = await post_pending_occurrence(bot, event, occurrence, now)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -165,6 +147,10 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
                 occurrence.occurrence_id,
                 type(exc).__name__,
             )
+            continue
+        if posted is None:
+            # A cancellation posted it between this pass reading the pending
+            # set and reaching it.
             continue
         LOGGER.debug(
             "Posted pending event occurrence; event_id=%s occurrence_id=%s",

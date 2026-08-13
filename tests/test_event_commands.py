@@ -3596,6 +3596,47 @@ class TestEventCancelConfirmView:
             in interaction.response.edit_message.await_args.kwargs["content"]
         )
 
+    async def test_cancel_rejects_an_occurrence_that_has_already_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A confirmation opened just before the run ends and answered after it.
+        started = datetime.now(UTC) - timedelta(hours=3)
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Weekly clear",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(0,),
+        )
+        occurrence = store.create_occurrence(event.event_id, started)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        view = EventCancelConfirmView(fake_bot, event, stored)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.cancel_occurrence.callback(interaction)
+
+        # The run already happened, so its roster and post are history rather
+        # than something to call off. A series that keeps its occurrences still
+        # has the row, which is why the status alone is not enough to tell.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert (
+            "already run"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
     async def test_cancel_rejects_an_event_that_no_longer_repeats(
         self,
         fake_bot: Any,

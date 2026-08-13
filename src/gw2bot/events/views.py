@@ -2456,6 +2456,32 @@ class EventCancelConfirmView(discord.ui.View):
                 view=None,
             )
             return
+        if occurrence.status is EventStatus.OVER or occurrence_has_ended(
+            event,
+            occurrence,
+            datetime.now(UTC),
+        ):
+            # The run ended while this confirmation sat open. Its row survives
+            # a series that keeps its history, but it is a record of something
+            # that happened now, not an upcoming run: cancelling would delete
+            # the roster and the post of an event people already attended.
+            self._cancelling = False
+            LOGGER.debug(
+                "Event cancel rejected for a finished occurrence; user_id=%s "
+                "event_id=%s occurrence_id=%s",
+                interaction.user.id,
+                event.event_id,
+                occurrence.occurrence_id,
+            )
+            await interaction.response.edit_message(
+                content=(
+                    "That occurrence has already run, so it can no longer be "
+                    "cancelled. Run `/event cancel` again for the next one."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
         if event.repeat_frequency is RepeatFrequency.NONE:
             # An edit turned the series into a one-off while this confirmation
             # sat open. Cancelling now would delete the only occurrence and
