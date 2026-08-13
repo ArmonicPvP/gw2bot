@@ -645,6 +645,91 @@ async def delete_event_posts(
     return deleted
 
 
+@dataclass(frozen=True, slots=True)
+class OccurrenceCancellation:
+    """What cancelling one occurrence of a repeating series left behind.
+
+    ``successor`` is the occurrence the series continues with, and
+    ``successor_posted`` says whether its public message is live. A successor
+    that could not be posted is reported rather than raised: the cancellation
+    itself is already committed by then, so the caller has to tell the
+    commander what is (and is not) in the channel.
+    """
+
+    successor: EventOccurrence | None
+    successor_posted: bool
+
+
+async def cancel_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime | None = None,
+) -> OccurrenceCancellation:
+    """Cancel one occurrence of a repeating series, keeping the series alive.
+
+    The occurrence's roster, store rows and public post are removed, and the
+    series carries on from the next one. Store failures propagate before
+    anything is removed, so a cancellation that raises has changed nothing.
+    """
+    current_time = now if now is not None else datetime.now(UTC)
+    # Seed the successor before the cancelled row goes: its start is computed
+    # from the occurrence being cancelled, and has_later_occurrence can only
+    # tell that the series still needs one while that row is there. It is a
+    # no-op when a later occurrence already exists, which is the case when the
+    # occurrence being cancelled is one the scheduler has already moved past.
+    ensure_next_recurring_occurrence(bot, event, occurrence, current_time)
+    bot.event_store.delete_occurrence(occurrence.occurrence_id)
+    # The row is removed before the post is, so the series has no posted
+    # occurrence for as long as this call is doing Discord I/O. That is what
+    # stops the scheduler from posting the successor underneath us and leaving
+    # the channel with two posts for the same run.
+    await delete_event_posts(bot, event, [occurrence])
+    successor = next(
+        (
+            candidate
+            for candidate in bot.event_store.get_event_occurrences(
+                event.event_id
+            )
+            if candidate.status is not EventStatus.OVER
+        ),
+        None,
+    )
+    LOGGER.debug(
+        "Cancelled event occurrence; event_id=%s occurrence_id=%s "
+        "successor_id=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        successor.occurrence_id if successor is not None else None,
+    )
+    if successor is None:
+        return OccurrenceCancellation(successor=None, successor_posted=False)
+    if successor.message_id is not None:
+        return OccurrenceCancellation(
+            successor=successor,
+            successor_posted=True,
+        )
+    # The successor is posted here rather than left to the scheduler, which
+    # only posts a pending occurrence for a series that already has a posted
+    # one. Cancelling the only posted occurrence of a series leaves none, so
+    # waiting for the scheduler would strand the series unposted forever.
+    try:
+        posted = await post_occurrence(bot, event, successor, current_time)
+    except (discord.HTTPException, SQLAlchemyError, RuntimeError) as exc:
+        LOGGER.error(
+            "Could not post the successor of a cancelled occurrence; "
+            "event_id=%s occurrence_id=%s error_type=%s",
+            event.event_id,
+            successor.occurrence_id,
+            type(exc).__name__,
+        )
+        return OccurrenceCancellation(
+            successor=successor,
+            successor_posted=False,
+        )
+    return OccurrenceCancellation(successor=posted, successor_posted=True)
+
+
 async def prune_superseded_occurrences(bot: Gw2Bot, event: Event) -> int:
     # For a recurring event with delete_previous_on_repeat, remove the
     # occurrences the current post supersedes (their message, thread and store

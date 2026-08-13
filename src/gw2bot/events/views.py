@@ -59,7 +59,10 @@ from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
-    from gw2bot.events.posting import AutoSignupDisableResult
+    from gw2bot.events.posting import (
+        AutoSignupDisableResult,
+        OccurrenceCancellation,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -2366,6 +2369,183 @@ class EventDeleteConfirmView(discord.ui.View):
     ) -> None:
         await interaction.response.edit_message(
             content="The event was not deleted.",
+            embeds=[],
+            view=None,
+        )
+
+
+class EventCancelConfirmView(discord.ui.View):
+    """Confirmation for calling off one occurrence of a repeating event.
+
+    Only a repeating event reaches this view: cancelling the single run of an
+    event that does not repeat leaves nothing behind, so `/event cancel` sends
+    the delete confirmation above for one of those instead.
+    """
+
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        event: Event,
+        occurrence: EventOccurrence,
+    ):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event = event
+        self._occurrence = occurrence
+        self._cancelling = False
+
+    @discord.ui.button(
+        label="Cancel occurrence",
+        style=discord.ButtonStyle.danger,
+    )
+    async def cancel_occurrence(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventCancelConfirmView],
+    ) -> None:
+        from gw2bot.events.posting import cancel_occurrence
+
+        # The confirmation can sit open for minutes; recheck the role before
+        # the irreversible cancel, mirroring the delete/edit/post paths.
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event cancel from Discord user %s; required role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to cancel events.",
+                ephemeral=True,
+            )
+            return
+        # Guard a double click racing two callbacks before the first removes
+        # the buttons; the check and set are synchronous, so the second
+        # observes it.
+        if self._cancelling:
+            await interaction.response.send_message(
+                "This occurrence is already being cancelled.",
+                ephemeral=True,
+            )
+            return
+        self._cancelling = True
+        # The confirmation holds the event and the occurrence as they were when
+        # it was opened, and either can be gone by the time it is answered: the
+        # event deleted, or the occurrence pruned or retired. Cancelling from
+        # those stale copies would seed a successor for an event that no longer
+        # exists, so re-read both and stop if the run has already gone.
+        event = self._bot.event_store.get_event(self._event.event_id)
+        occurrence = self._bot.event_store.get_occurrence(
+            self._occurrence.occurrence_id
+        )
+        if event is None or event.cancelled or occurrence is None:
+            self._cancelling = False
+            LOGGER.debug(
+                "Event cancel rejected for a run that is already gone; "
+                "user_id=%s event_id=%s occurrence_id=%s event_exists=%s",
+                interaction.user.id,
+                self._event.event_id,
+                self._occurrence.occurrence_id,
+                event is not None,
+            )
+            await interaction.response.edit_message(
+                content=(
+                    "That occurrence is no longer there, so there is nothing "
+                    "left to cancel."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
+        self._event = event
+        self._occurrence = occurrence
+        await interaction.response.edit_message(
+            content="Cancelling the occurrence…",
+            embeds=[],
+            view=None,
+        )
+        try:
+            cancellation = await cancel_occurrence(
+                self._bot,
+                self._event,
+                self._occurrence,
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            # Nothing is removed until the successor is secured, so the
+            # occurrence is still there and the commander can try again. A
+            # ValueError only reaches here for a stored event whose repeat
+            # settings have no day to repeat on, which has no next start to
+            # compute and so can never be cancelled this way.
+            self._cancelling = False
+            LOGGER.error(
+                "Could not cancel event occurrence; event_id=%s "
+                "occurrence_id=%s error_type=%s",
+                self._event.event_id,
+                self._occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "The occurrence could not be cancelled. Try again later."
+                ),
+                view=None,
+            )
+            return
+        LOGGER.debug(
+            "Cancelled event occurrence from confirmation; event_id=%s "
+            "occurrence_id=%s user_id=%s successor_posted=%s",
+            self._event.event_id,
+            self._occurrence.occurrence_id,
+            interaction.user.id,
+            cancellation.successor_posted,
+        )
+        await interaction.edit_original_response(
+            content=self._result_message(cancellation),
+            view=None,
+        )
+
+    def _result_message(self, cancellation: OccurrenceCancellation) -> str:
+        title = self._event.title
+        cancelled_on = format_event_datetime(
+            self._occurrence.start_time,
+            self._bot.event_timezone,
+        )
+        successor = cancellation.successor
+        if successor is None:
+            # A repeating series always seeds its next run, so this only
+            # happens when the store lost it; say so rather than promising a
+            # post that is not coming.
+            return (
+                f"**{title}** on {cancelled_on} was cancelled, but no next "
+                "occurrence could be found. Use `/event new` to schedule it "
+                "again."
+            )
+        next_on = format_event_datetime(
+            successor.start_time,
+            self._bot.event_timezone,
+        )
+        if not cancellation.successor_posted:
+            return (
+                f"**{title}** on {cancelled_on} was cancelled, but its next "
+                f"occurrence on {next_on} could not be posted in "
+                f"<#{self._event.channel_id}>. Check the bot's permissions "
+                "there."
+            )
+        return (
+            f"**{title}** on {cancelled_on} was cancelled. The event "
+            f"continues on {next_on} in <#{self._event.channel_id}>."
+        )
+
+    @discord.ui.button(
+        label="Keep occurrence",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[EventCancelConfirmView],
+    ) -> None:
+        await interaction.response.edit_message(
+            content="The occurrence was not cancelled.",
             embeds=[],
             view=None,
         )

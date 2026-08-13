@@ -14,7 +14,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
-from gw2bot.events.formatting import next_occurrence_start
+from gw2bot.events.formatting import (
+    format_event_datetime,
+    next_occurrence_start,
+)
 from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
@@ -38,6 +41,7 @@ from gw2bot.events.views import (
     DisableAutoSignupView,
     EditSignupFlow,
     EditWaitlistConfirmView,
+    EventCancelConfirmView,
     EventConfirmView,
     EventDeleteConfirmView,
     EventDetailsConfirmView,
@@ -145,7 +149,7 @@ class TestEventCommandGroup:
 
         assert group.name == "event"
         assert group.guild_only
-        assert commands == {"new", "edit", "remind", "delete"}
+        assert commands == {"new", "edit", "remind", "cancel", "delete"}
 
     async def test_new_rejects_users_without_the_create_role(self) -> None:
         group = EventCommands(make_bot())
@@ -2130,6 +2134,20 @@ def make_advanced_recurring_event(
     return event, occurrence
 
 
+def make_posted_recurring_event(store: EventStore) -> Any:
+    """A recurring series, with the occurrence read back after it was posted.
+
+    The helper above returns the row as it was created, before its message ids
+    were stored. A command re-reads the occurrence before handing it to a view,
+    so a view test has to start from the stored row to see the same post the
+    commander is looking at.
+    """
+    event, occurrence = make_advanced_recurring_event(store)
+    stored = store.get_occurrence(occurrence.occurrence_id)
+    assert stored is not None
+    return event, stored
+
+
 class TestEditCommand:
     async def test_edit_rejects_users_without_the_create_role(
         self,
@@ -3279,6 +3297,355 @@ class TestDeleteCommand:
         assert kwargs["ephemeral"] is True
         # Confirmation only; nothing is deleted yet.
         assert store.get_event(event.event_id) is not None
+
+
+class TestCancelCommand:
+    async def test_cancel_rejects_users_without_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_advanced_recurring_event(store)
+        interaction = make_interaction()
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "view" not in kwargs
+        # The occurrence is untouched.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+
+    async def test_cancel_rejects_unknown_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(group, interaction, 999)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert (
+            "does not exist"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_cancel_opens_the_confirmation_for_a_repeating_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_advanced_recurring_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventCancelConfirmView)
+        assert kwargs["ephemeral"] is True
+        # The confirmation names the occurrence being called off, so nobody
+        # cancels a run they were not looking at.
+        content = interaction.response.send_message.await_args.args[0]
+        starts_at = format_event_datetime(
+            occurrence.start_time,
+            ZoneInfo("UTC"),
+        )
+        assert starts_at in content
+        # Confirmation only; nothing is cancelled yet.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+
+    async def test_cancel_falls_back_to_deletion_for_a_one_off_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_posted_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        # An event that does not repeat has nothing left after the run being
+        # cancelled, so cancelling it is deleting it.
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDeleteConfirmView)
+        assert (
+            "does not repeat"
+            in interaction.response.send_message.await_args.args[0]
+        )
+        assert store.get_event(event.event_id) is not None
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+
+    async def test_cancel_rejects_a_series_without_an_upcoming_occurrence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_advanced_recurring_event(store)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        assert (
+            "no upcoming occurrence"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+
+class TestEventCancelConfirmView:
+    async def test_cancel_removes_the_occurrence_and_posts_the_next_one(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.cancel_occurrence.callback(interaction)
+
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert store.get_signups(occurrence.occurrence_id) == []
+        assert store.get_event(event.event_id) is not None
+        channel.partial_message.delete.assert_awaited_once()
+        next_start = next_occurrence_start(
+            event.repeat_frequency,
+            event.repeat_days,
+            occurrence.start_time,
+            ZoneInfo("UTC"),
+        )
+        successor = store.get_event_occurrences(event.event_id)[0]
+        assert successor.start_time == next_start
+        assert successor.message_id is not None
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "continues on" in content
+        assert format_event_datetime(next_start, ZoneInfo("UTC")) in content
+
+    async def test_cancel_reports_a_next_occurrence_that_cannot_be_posted(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        channel.send_error = forbidden_error(50013)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.cancel_occurrence.callback(interaction)
+
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "could not be posted" in content
+
+    async def test_cancel_rejects_users_without_the_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.cancel_occurrence.callback(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+
+    async def test_cancel_ignores_a_racing_second_click(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        first = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        first.edit_original_response = AsyncMock()
+
+        await view.cancel_occurrence.callback(first)
+        assert view._cancelling
+
+        second = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        await view.cancel_occurrence.callback(second)
+
+        second.response.send_message.assert_awaited_once()
+        assert (
+            "already being cancelled"
+            in second.response.send_message.await_args.args[0]
+        )
+
+    async def test_a_store_failure_keeps_the_occurrence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        store.delete_occurrence = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.cancel_occurrence.callback(interaction)
+
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "could not be cancelled"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+        # The guard is released so the commander can try the same button again.
+        assert not view._cancelling
+
+    async def test_keep_leaves_the_occurrence_alone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.keep.callback(interaction)
+
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert (
+            "not cancelled"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_cancel_reports_a_run_that_is_already_gone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        # The event is deleted while the confirmation sits open.
+        store.delete_event(event.event_id)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.cancel_occurrence.callback(interaction)
+
+        # Cancelling from the stale copies would seed an occurrence for an
+        # event that is not there any more.
+        assert store.get_event_occurrences(event.event_id) == []
+        assert (
+            "no longer there"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_cancel_logging_keeps_the_event_out_of_the_log(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description=description,
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        group = EventCommands(fake_bot)
+        command_interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+        )
+        view = EventCancelConfirmView(fake_bot, event, stored)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        with caplog.at_level("DEBUG"):
+            await cast(Any, group.cancel.callback)(
+                group, command_interaction, event.event_id
+            )
+            await view.cancel_occurrence.callback(interaction)
+
+        # Both the confirmation and the result name the event, so neither may
+        # reach the log.
+        assert title not in caplog.text
+        assert description not in caplog.text
+        # The workflow still has to be traceable end to end.
+        assert "Event cancel command invoked" in caplog.text
+        assert "Event cancel confirmation opened" in caplog.text
+        assert "Cancelled event occurrence" in caplog.text
+        assert "Cancelled event occurrence from confirmation" in caplog.text
+        assert "Posted event occurrence" in caplog.text
 
 
 class TestRemindCommand:
