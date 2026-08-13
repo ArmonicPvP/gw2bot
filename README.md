@@ -198,8 +198,10 @@ leaving an event behind that can never be posted again.
 Nothing is removed until the next occurrence has been secured, so a
 cancellation that fails leaves the run posted and can simply be retried. If the
 next occurrence cannot be posted afterwards — the bot lost `Send Messages` in
-the channel, say — the cancellation still stands and the reply says so, naming
-the channel to check.
+the channel, say — the cancellation still stands and the reply names the
+channel to check. That posting is then retried by every maintenance pass until
+it goes through, so fixing the permission is enough to bring the series back
+even though the cancellation removed its last post.
 
 ## Feast Stock Alerts
 

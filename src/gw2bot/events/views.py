@@ -2456,6 +2456,30 @@ class EventCancelConfirmView(discord.ui.View):
                 view=None,
             )
             return
+        if event.repeat_frequency is RepeatFrequency.NONE:
+            # An edit turned the series into a one-off while this confirmation
+            # sat open. Cancelling now would delete the only occurrence and
+            # seed nothing, leaving an event row that no occurrence-based
+            # lookup can reach any more. Send the commander back to
+            # `/event cancel`, which offers deletion for a one-off event.
+            self._cancelling = False
+            LOGGER.debug(
+                "Event cancel rejected for an event that no longer repeats; "
+                "user_id=%s event_id=%s occurrence_id=%s",
+                interaction.user.id,
+                event.event_id,
+                occurrence.occurrence_id,
+            )
+            await interaction.response.edit_message(
+                content=(
+                    "That event no longer repeats, so this occurrence is all "
+                    "there is of it. Run `/event cancel` again to delete the "
+                    "event instead."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
         self._event = event
         self._occurrence = occurrence
         await interaction.response.edit_message(
@@ -2528,7 +2552,8 @@ class EventCancelConfirmView(discord.ui.View):
                 f"**{title}** on {cancelled_on} was cancelled, but its next "
                 f"occurrence on {next_on} could not be posted in "
                 f"<#{self._event.channel_id}>. Check the bot's permissions "
-                "there."
+                "there; posting is retried automatically every minute until "
+                "it goes through."
             )
         return (
             f"**{title}** on {cancelled_on} was cancelled. The event "
@@ -2548,6 +2573,12 @@ class EventCancelConfirmView(discord.ui.View):
             content="The occurrence was not cancelled.",
             embeds=[],
             view=None,
+        )
+        LOGGER.debug(
+            "Event cancel declined; user_id=%s event_id=%s occurrence_id=%s",
+            interaction.user.id,
+            self._event.event_id,
+            self._occurrence.occurrence_id,
         )
 
 

@@ -3596,6 +3596,65 @@ class TestEventCancelConfirmView:
             in interaction.response.edit_message.await_args.kwargs["content"]
         )
 
+    async def test_cancel_rejects_an_event_that_no_longer_repeats(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        # An edit turns the series into a one-off while the confirmation sits
+        # open, so the run being cancelled is now all there is of the event.
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.cancel_occurrence.callback(interaction)
+
+        # Cancelling would delete the only occurrence and seed nothing, leaving
+        # an event no occurrence-based lookup can reach.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert (
+            "no longer repeats"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_keeping_the_occurrence_is_logged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        with caplog.at_level("DEBUG"):
+            await view.keep.callback(interaction)
+
+        # Declining is a decision the workflow's trail has to carry too.
+        assert "Event cancel declined" in caplog.text
+        assert f"occurrence_id={occurrence.occurrence_id}" in caplog.text
+        assert event.title not in caplog.text
+
     async def test_cancel_logging_keeps_the_event_out_of_the_log(
         self,
         fake_bot: Any,

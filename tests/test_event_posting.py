@@ -3719,6 +3719,27 @@ class TestCancelOccurrence:
         assert cancellation.successor_posted
         assert len(channel.sent) == 2
 
+    async def test_subscribes_auto_signed_members_to_the_new_post(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # A member carried onto the successor never touched its post, so
+        # nothing else would subscribe them to it.
+        channel.thread.add_user.assert_awaited_once()
+
     async def test_reports_a_successor_that_could_not_be_posted(
         self,
         bot: Any,
@@ -3738,7 +3759,12 @@ class TestCancelOccurrence:
         successor = cancellation.successor
         assert successor is not None
         assert not cancellation.successor_posted
-        assert store.get_occurrence(successor.occurrence_id) is not None
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        # The series has no posted occurrence left, which is what normally
+        # makes the scheduler leave a pending one alone; the flag is what lets
+        # it retry this posting instead of hiding the series for good.
+        assert stored.needs_refresh
 
     async def test_a_store_failure_leaves_the_occurrence_in_place(
         self,

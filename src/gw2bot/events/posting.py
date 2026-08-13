@@ -723,11 +723,50 @@ async def cancel_occurrence(
             successor.occurrence_id,
             type(exc).__name__,
         )
+        _mark_cancellation_successor_pending(bot, successor)
         return OccurrenceCancellation(
             successor=successor,
             successor_posted=False,
         )
+    # The seeded successor carries the event's auto-signups, and the scheduler
+    # subscribes those members to the post it opens. This path posts without
+    # it, so it has to do the same or a member who never touched the new post
+    # would miss every roster message and reminder in it.
+    for signup in bot.event_store.get_signups(posted.occurrence_id):
+        await update_thread_membership(
+            bot,
+            posted,
+            signup.discord_user_id,
+            add=True,
+        )
     return OccurrenceCancellation(successor=posted, successor_posted=True)
+
+
+def _mark_cancellation_successor_pending(
+    bot: Gw2Bot,
+    successor: EventOccurrence,
+) -> None:
+    # The cancellation stands but its successor never went out, and the
+    # cancelled post it would have replaced is already gone, so the series has
+    # nothing in the channel. The scheduler skips a pending occurrence whose
+    # series has no posted one, because that normally means a manual post is
+    # still in flight; the refresh flag is what tells it this one is the bot's
+    # to retry instead. Without it a transient Discord failure would hide the
+    # series for good.
+    if successor.needs_refresh:
+        return
+    try:
+        bot.event_store.set_occurrence_needs_refresh(
+            successor.occurrence_id,
+            True,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not flag a cancelled occurrence's successor for posting; "
+            "occurrence_id=%s error_type=%s",
+            successor.occurrence_id,
+            type(exc).__name__,
+        )
 
 
 async def prune_superseded_occurrences(bot: Gw2Bot, event: Event) -> int:

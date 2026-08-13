@@ -122,8 +122,13 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
             continue
         # A series without any posted occurrence is a manual post still in
         # flight (or abandoned); posting it here would race the creator's
-        # own posting flow and duplicate the message.
-        if not bot.event_store.has_posted_occurrence(event.event_id):
+        # own posting flow and duplicate the message. An occurrence flagged
+        # for refresh is the exception: a cancellation already removed the
+        # series' last post and only failed to send this one, so nobody is
+        # coming to post it by hand and it is the bot's to retry.
+        if not occurrence.needs_refresh and not (
+            bot.event_store.has_posted_occurrence(event.event_id)
+        ):
             LOGGER.debug(
                 "Skipping pending occurrence awaiting manual posting; "
                 "occurrence_id=%s",
@@ -134,6 +139,14 @@ async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
         # occurrences; failures are retried on the next maintenance pass.
         try:
             posted = await post_occurrence(bot, event, occurrence, now)
+            if occurrence.needs_refresh:
+                # The flag only asked for this posting; the message it produced
+                # is current, so clear it rather than leave every later pass
+                # re-rendering a post nothing has changed.
+                bot.event_store.set_occurrence_needs_refresh(
+                    posted.occurrence_id,
+                    False,
+                )
             for signup in bot.event_store.get_signups(
                 posted.occurrence_id
             ):
