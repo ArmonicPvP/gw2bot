@@ -3585,15 +3585,17 @@ class TestEventCancelConfirmView:
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
         )
+        interaction.edit_original_response = AsyncMock()
 
         await view.cancel_occurrence.callback(interaction)
 
         # Cancelling from the stale copies would seed an occurrence for an
         # event that is not there any more.
         assert store.get_event_occurrences(event.event_id) == []
+        assert interaction.edit_original_response.await_args is not None
         assert (
             "no longer there"
-            in interaction.response.edit_message.await_args.kwargs["content"]
+            in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
     async def test_cancel_rejects_an_occurrence_that_has_already_run(
@@ -3624,6 +3626,7 @@ class TestEventCancelConfirmView:
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
         )
+        interaction.edit_original_response = AsyncMock()
 
         await view.cancel_occurrence.callback(interaction)
 
@@ -3632,9 +3635,48 @@ class TestEventCancelConfirmView:
         # has the row, which is why the status alone is not enough to tell.
         assert store.get_occurrence(occurrence.occurrence_id) is not None
         channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
         assert (
             "already run"
-            in interaction.response.edit_message.await_args.kwargs["content"]
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+    async def test_cancel_rechecks_the_run_after_acknowledging_the_click(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        async def retire_the_run(*args: Any, **kwargs: Any) -> None:
+            # The run ends inside the round-trip the acknowledgement costs.
+            store.set_occurrence_status(
+                occurrence.occurrence_id,
+                EventStatus.OVER,
+            )
+
+        interaction.response.edit_message = AsyncMock(
+            side_effect=retire_the_run
+        )
+
+        await view.cancel_occurrence.callback(interaction)
+
+        # The guards run after the acknowledgement, so they see the run as it
+        # is when the cancellation would act on it rather than as it was when
+        # the click arrived.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "already run"
+            in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
     async def test_cancel_rejects_an_event_that_no_longer_repeats(
@@ -3663,6 +3705,7 @@ class TestEventCancelConfirmView:
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
         )
+        interaction.edit_original_response = AsyncMock()
 
         await view.cancel_occurrence.callback(interaction)
 
@@ -3670,9 +3713,10 @@ class TestEventCancelConfirmView:
         # an event no occurrence-based lookup can reach.
         assert store.get_occurrence(occurrence.occurrence_id) is not None
         channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
         assert (
             "no longer repeats"
-            in interaction.response.edit_message.await_args.kwargs["content"]
+            in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
     async def test_keeping_the_occurrence_is_logged(

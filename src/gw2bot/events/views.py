@@ -2428,6 +2428,16 @@ class EventCancelConfirmView(discord.ui.View):
             )
             return
         self._cancelling = True
+        # Answer the click before the checks below rather than after them. The
+        # acknowledgement is a Discord round-trip, and an occurrence can end
+        # (or be edited) inside it, so a check made first is already stale by
+        # the time the cancellation runs; making it last is what keeps it the
+        # word the mutation acts on.
+        await interaction.response.edit_message(
+            content="Cancelling the occurrence…",
+            embeds=[],
+            view=None,
+        )
         # The confirmation holds the event and the occurrence as they were when
         # it was opened, and either can be gone by the time it is answered: the
         # event deleted, or the occurrence pruned or retired. Cancelling from
@@ -2447,12 +2457,11 @@ class EventCancelConfirmView(discord.ui.View):
                 self._occurrence.occurrence_id,
                 event is not None,
             )
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     "That occurrence is no longer there, so there is nothing "
                     "left to cancel."
                 ),
-                embeds=[],
                 view=None,
             )
             return
@@ -2473,12 +2482,11 @@ class EventCancelConfirmView(discord.ui.View):
                 event.event_id,
                 occurrence.occurrence_id,
             )
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     "That occurrence has already run, so it can no longer be "
                     "cancelled. Run `/event cancel` again for the next one."
                 ),
-                embeds=[],
                 view=None,
             )
             return
@@ -2496,23 +2504,17 @@ class EventCancelConfirmView(discord.ui.View):
                 event.event_id,
                 occurrence.occurrence_id,
             )
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=(
                     "That event no longer repeats, so this occurrence is all "
                     "there is of it. Run `/event cancel` again to delete the "
                     "event instead."
                 ),
-                embeds=[],
                 view=None,
             )
             return
         self._event = event
         self._occurrence = occurrence
-        await interaction.response.edit_message(
-            content="Cancelling the occurrence…",
-            embeds=[],
-            view=None,
-        )
         try:
             cancellation = await cancel_occurrence(
                 self._bot,
