@@ -4009,6 +4009,33 @@ class TestEventCancelConfirmView:
         assert "Could not acknowledge an event cancellation" in caplog.text
         assert event.title not in caplog.text
 
+    async def test_a_failed_result_message_is_logged_without_its_body(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+
+        with caplog.at_level("ERROR", logger="gw2bot.events.views"):
+            await view.cancel_occurrence.callback(interaction)
+
+        # The cancellation itself went through; only its wording was lost. It
+        # must not escape into discord.py's handler, which logs the exception
+        # text - Discord's raw response body - rather than an error type.
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        assert "Could not report the event cancellation result" in caplog.text
+        assert "error_type=Forbidden" in caplog.text
+        assert event.title not in caplog.text
+
     async def test_cancel_says_so_when_no_retry_could_be_queued(
         self,
         fake_bot: Any,

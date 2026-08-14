@@ -2298,6 +2298,32 @@ def _restore_event_channel(
     return restored
 
 
+async def _send_flow_result(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    workflow: str,
+    event_id: int,
+) -> None:
+    """Replace a confirmation's own message with what became of the request.
+
+    The work these report on is already done, so a Discord failure here costs
+    the commander the wording and nothing else. It must not escape the button
+    callback either: discord.py's default handler logs the exception's full
+    text, which for an HTTPException carries Discord's raw response body, and
+    only sanitized identifiers and exception types may reach the log.
+    """
+    try:
+        await interaction.edit_original_response(content=content, view=None)
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not report the %s result; event_id=%s error_type=%s",
+            workflow,
+            event_id,
+            type(exc).__name__,
+        )
+
+
 class EventDeleteConfirmView(discord.ui.View):
     def __init__(
         self,
@@ -2414,9 +2440,11 @@ class EventDeleteConfirmView(discord.ui.View):
                     interaction.user.id,
                     self._event.event_id,
                 )
-                await interaction.edit_original_response(
-                    content=refusal,
-                    view=None,
+                await _send_flow_result(
+                    interaction,
+                    refusal,
+                    workflow="event cancel deletion refusal",
+                    event_id=self._event.event_id,
                 )
                 return
         # Read the occurrences before the store rows are removed so their
@@ -2433,9 +2461,11 @@ class EventDeleteConfirmView(discord.ui.View):
                 self._event.event_id,
                 type(exc).__name__,
             )
-            await interaction.edit_original_response(
-                content="The event could not be deleted. Try again later.",
-                view=None,
+            await _send_flow_result(
+                interaction,
+                "The event could not be deleted. Try again later.",
+                workflow="event deletion failure",
+                event_id=self._event.event_id,
             )
             return
         await delete_event_posts(self._bot, self._event, occurrences)
@@ -2445,9 +2475,11 @@ class EventDeleteConfirmView(discord.ui.View):
             len(occurrences),
             interaction.user.id,
         )
-        await interaction.edit_original_response(
-            content=f"Event **{self._event.event_id}** was deleted.",
-            view=None,
+        await _send_flow_result(
+            interaction,
+            f"Event **{self._event.event_id}** was deleted.",
+            workflow="event deletion",
+            event_id=self._event.event_id,
         )
 
     @discord.ui.button(
@@ -2577,12 +2609,12 @@ class EventCancelConfirmView(discord.ui.View):
                 self._occurrence.occurrence_id,
                 event is not None,
             )
-            await interaction.edit_original_response(
-                content=(
-                    "That occurrence is no longer there, so there is nothing "
-                    "left to cancel."
-                ),
-                view=None,
+            await _send_flow_result(
+                interaction,
+                "That occurrence is no longer there, so there is nothing left "
+                "to cancel.",
+                workflow="event cancel refusal",
+                event_id=self._event.event_id,
             )
             return
         if occurrence.status is EventStatus.OVER or occurrence_has_ended(
@@ -2602,12 +2634,12 @@ class EventCancelConfirmView(discord.ui.View):
                 event.event_id,
                 occurrence.occurrence_id,
             )
-            await interaction.edit_original_response(
-                content=(
-                    "That occurrence has already run, so it can no longer be "
-                    "cancelled. Run `/event cancel` again for the next one."
-                ),
-                view=None,
+            await _send_flow_result(
+                interaction,
+                "That occurrence has already run, so it can no longer be "
+                "cancelled. Run `/event cancel` again for the next one.",
+                workflow="event cancel refusal",
+                event_id=self._event.event_id,
             )
             return
         if event.repeat_frequency is RepeatFrequency.NONE:
@@ -2624,13 +2656,13 @@ class EventCancelConfirmView(discord.ui.View):
                 event.event_id,
                 occurrence.occurrence_id,
             )
-            await interaction.edit_original_response(
-                content=(
-                    "That event no longer repeats, so this occurrence is all "
-                    "there is of it. Run `/event cancel` again to delete the "
-                    "event instead."
-                ),
-                view=None,
+            await _send_flow_result(
+                interaction,
+                "That event no longer repeats, so this occurrence is all "
+                "there is of it. Run `/event cancel` again to delete the "
+                "event instead.",
+                workflow="event cancel refusal",
+                event_id=self._event.event_id,
             )
             return
         self._event = event
@@ -2655,11 +2687,11 @@ class EventCancelConfirmView(discord.ui.View):
                 self._occurrence.occurrence_id,
                 type(exc).__name__,
             )
-            await interaction.edit_original_response(
-                content=(
-                    "The occurrence could not be cancelled. Try again later."
-                ),
-                view=None,
+            await _send_flow_result(
+                interaction,
+                "The occurrence could not be cancelled. Try again later.",
+                workflow="event cancellation failure",
+                event_id=self._event.event_id,
             )
             return
         LOGGER.debug(
@@ -2670,9 +2702,11 @@ class EventCancelConfirmView(discord.ui.View):
             interaction.user.id,
             cancellation.successor_posted,
         )
-        await interaction.edit_original_response(
-            content=self._result_message(cancellation),
-            view=None,
+        await _send_flow_result(
+            interaction,
+            self._result_message(cancellation),
+            workflow="event cancellation",
+            event_id=self._event.event_id,
         )
 
     def _result_message(self, cancellation: OccurrenceCancellation) -> str:

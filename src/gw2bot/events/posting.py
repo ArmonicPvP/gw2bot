@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -652,12 +653,37 @@ async def delete_event_posts(
 
 
 # Two paths post an occurrence that has no message yet: the maintenance pass,
-# and a cancellation posting the successor it just seeded. Both hold this while
-# they send, so the second to arrive re-reads the row inside the lock and finds
-# the message the first one stored instead of sending the same run twice and
-# orphaning one of the posts. The bot is a single process, so a process-local
-# lock covers every poster there is.
-_PENDING_POST_LOCK = asyncio.Lock()
+# and a cancellation posting the successor it just seeded. Each holds this
+# occurrence's lock while it sends, so the second to arrive re-reads the row
+# inside the lock and finds the message the first one stored instead of sending
+# the same run twice and orphaning one of the posts. The bot is a single
+# process, so process-local locks cover every poster there is.
+#
+# Keyed by occurrence rather than shared, because a send can sit in a Discord
+# rate limit for seconds and posting one event's run must not hold up anyone
+# else's. Entries live only while someone holds or waits on them.
+_POSTING_LOCKS: dict[int, asyncio.Lock] = {}
+_POSTING_LOCK_HOLDERS: dict[int, int] = {}
+
+
+@asynccontextmanager
+async def _posting_lock(occurrence_id: int) -> AsyncIterator[None]:
+    lock = _POSTING_LOCKS.setdefault(occurrence_id, asyncio.Lock())
+    _POSTING_LOCK_HOLDERS[occurrence_id] = (
+        _POSTING_LOCK_HOLDERS.get(occurrence_id, 0) + 1
+    )
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _POSTING_LOCK_HOLDERS[occurrence_id] - 1
+        if remaining:
+            _POSTING_LOCK_HOLDERS[occurrence_id] = remaining
+        else:
+            # Last one out drops the entry, so the table tracks what is in
+            # flight rather than every occurrence ever posted.
+            del _POSTING_LOCK_HOLDERS[occurrence_id]
+            del _POSTING_LOCKS[occurrence_id]
 
 
 async def post_pending_occurrence(
@@ -672,7 +698,7 @@ async def post_pending_occurrence(
     already (or gone). Members on its roster are subscribed to the post, which
     is how a successor's auto-signups reach the thread they were seeded into.
     """
-    async with _PENDING_POST_LOCK:
+    async with _posting_lock(occurrence.occurrence_id):
         current = bot.event_store.get_occurrence(occurrence.occurrence_id)
         if current is None or current.message_id is not None:
             LOGGER.debug(

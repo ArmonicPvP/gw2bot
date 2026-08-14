@@ -4000,6 +4000,60 @@ class TestCancelOccurrence:
         assert len(channel.sent) == 1
         assert sum(result is not None for result in results) == 1
 
+    async def test_posting_one_event_does_not_block_another(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        other_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot._channels[other_channel.id] = other_channel
+        bot._channels[other_channel.thread.id] = other_channel.thread
+        slow_event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        quick_event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            channel_id=other_channel.id,
+        )
+        slow = store.create_occurrence(slow_event.event_id, START)
+        quick = store.create_occurrence(quick_event.event_id, START)
+        quick_posted = asyncio.Event()
+        plain_send = channel.send
+
+        async def wait_for_the_other_post(**kwargs: Any) -> Any:
+            # The first send sits in what a Discord rate limit would feel
+            # like, and only finishes once the unrelated event has posted.
+            await quick_posted.wait()
+            return await plain_send(**kwargs)
+
+        channel.send = wait_for_the_other_post  # type: ignore
+
+        async def post_the_quick_one() -> Any:
+            try:
+                return await post_pending_occurrence(
+                    bot, quick_event, quick, BEFORE_START
+                )
+            finally:
+                quick_posted.set()
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                post_pending_occurrence(
+                    bot, slow_event, slow, BEFORE_START
+                ),
+                post_the_quick_one(),
+            ),
+            timeout=5,
+        )
+
+        # A shared lock would deadlock this: the stalled send would hold it
+        # while the unrelated post waited for it. Posting is per occurrence,
+        # so one event's delivery never holds up anyone else's.
+        assert all(result is not None for result in results)
+
     async def test_a_successor_posted_by_the_scheduler_is_left_alone(
         self,
         bot: Any,
