@@ -713,10 +713,25 @@ async def post_pending_occurrence(
             # The flag only asked for this posting, and the message it produced
             # is current, so clear it rather than leave every later maintenance
             # pass re-rendering a post nothing has changed.
-            bot.event_store.set_occurrence_needs_refresh(
-                posted.occurrence_id,
-                False,
-            )
+            try:
+                bot.event_store.set_occurrence_needs_refresh(
+                    posted.occurrence_id,
+                    False,
+                )
+            except SQLAlchemyError as exc:
+                # The post is live and its message id is stored; this was
+                # housekeeping. Failing the call over it would tell the caller
+                # a delivered post never went out - and a cancellation would
+                # then offer to put the series back, which means calling off
+                # the run that is sitting in the channel. A flag left set only
+                # costs one redundant refresh on the next pass, which clears
+                # it.
+                LOGGER.error(
+                    "Could not clear the refresh flag after posting; "
+                    "occurrence_id=%s error_type=%s",
+                    posted.occurrence_id,
+                    type(exc).__name__,
+                )
     for signup in bot.event_store.get_signups(posted.occurrence_id):
         await update_thread_membership(
             bot,

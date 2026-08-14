@@ -3922,6 +3922,42 @@ class TestCancelOccurrence:
         assert cancellation.successor is None
         assert not cancellation.successor_posted
 
+    async def test_a_posted_successor_survives_failed_flag_cleanup(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        real_flag = store.set_occurrence_needs_refresh
+
+        def fail_only_when_clearing(
+            occurrence_id: int,
+            needs_refresh: bool,
+        ) -> None:
+            if not needs_refresh:
+                raise SQLAlchemyError("boom")
+            real_flag(occurrence_id, needs_refresh)
+
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=fail_only_when_clearing)
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # Clearing the claim is housekeeping after a delivered post. Failing
+        # the cancellation over it would report a live post as undelivered,
+        # and the commander would be told to cancel again - calling off the
+        # run now sitting in the channel.
+        successor = cancellation.successor
+        assert successor is not None
+        assert cancellation.successor_posted
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        assert stored.message_id is not None
+
     async def test_an_interrupted_cancellation_leaves_the_successor_postable(
         self,
         bot: Any,
