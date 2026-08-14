@@ -54,6 +54,25 @@ If a user's instruction conflicts with a preference or other rules or informatio
 - A failure in one diagnostic preview must be logged and must not prevent the
   remaining previews from being attempted.
 
+## Concurrency And Rare Races
+
+- Write defensively against failures that actually happen: Discord errors,
+  missing permissions, rows that disappear, restarts mid-workflow, and stale
+  snapshots held while a confirmation sits open. Re-read state before mutating
+  it, and clean up after a write that fails part-way.
+- Do not chase sub-second interleavings - a race that needs two commanders, or
+  a commander and the maintenance pass, colliding inside the same few hundred
+  milliseconds. Re-reading before the mutation is the accepted mitigation for
+  these; a further guard is not worth its cost.
+- Reject review findings of that shape, including automated ones, rather than
+  acting on them. Say plainly that the interleaving is too rare to be worth
+  the change, and move on.
+- Never trade away the asynchronous design to close one: no holding locks
+  across Discord I/O for whole workflows, no serialising the event loop, no
+  broad mutation locks over central paths.
+- A race actually observed in production is a different matter. Fix that one
+  deliberately, with the evidence in hand.
+
 ## Python Verification
 
 - Create and maintain tests with pytest, not unittest. Use pytest fixtures,
