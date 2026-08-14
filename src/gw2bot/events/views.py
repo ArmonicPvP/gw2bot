@@ -2354,11 +2354,24 @@ class EventDeleteConfirmView(discord.ui.View):
             )
             return
         self._deleting = True
-        await interaction.response.edit_message(
-            content="Deleting the event…",
-            embeds=[],
-            view=None,
-        )
+        try:
+            await interaction.response.edit_message(
+                content="Deleting the event…",
+                embeds=[],
+                view=None,
+            )
+        except discord.HTTPException as exc:
+            # As above: nothing is deleted yet, so the guard must not outlive
+            # a failed acknowledgement and lock the commander out of retrying.
+            self._deleting = False
+            LOGGER.error(
+                "Could not acknowledge an event deletion; user_id=%s "
+                "event_id=%s error_type=%s",
+                interaction.user.id,
+                self._event.event_id,
+                type(exc).__name__,
+            )
+            return
         if self._only_while_one_off:
             # Checked after the acknowledgement, not before: that await is a
             # Discord round-trip, and an edit landing inside it would make a
@@ -2524,11 +2537,27 @@ class EventCancelConfirmView(discord.ui.View):
         # (or be edited) inside it, so a check made first is already stale by
         # the time the cancellation runs; making it last is what keeps it the
         # word the mutation acts on.
-        await interaction.response.edit_message(
-            content="Cancelling the occurrence…",
-            embeds=[],
-            view=None,
-        )
+        try:
+            await interaction.response.edit_message(
+                content="Cancelling the occurrence…",
+                embeds=[],
+                view=None,
+            )
+        except discord.HTTPException as exc:
+            # Nothing has been touched yet and the confirmation still carries
+            # its buttons, so the guard has to come back off: left set, it
+            # would refuse every later click as an in-progress cancellation
+            # until the view times out.
+            self._cancelling = False
+            LOGGER.error(
+                "Could not acknowledge an event cancellation; user_id=%s "
+                "event_id=%s occurrence_id=%s error_type=%s",
+                interaction.user.id,
+                self._event.event_id,
+                self._occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            return
         # The confirmation holds the event and the occurrence as they were when
         # it was opened, and either can be gone by the time it is answered: the
         # event deleted, or the occurrence pruned or retired. Cancelling from

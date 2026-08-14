@@ -3607,6 +3607,32 @@ class TestCancelDeleteFallbackView:
             in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
+    async def test_a_failed_acknowledgement_releases_the_guard(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, _ = self._one_off_event(store)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.response.edit_message = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+
+        with caplog.at_level("ERROR", logger="gw2bot.events.views"):
+            await view.delete.callback(interaction)
+
+        # Nothing was deleted, and the confirmation still carries its buttons,
+        # so a guard left set would refuse every retry until it timed out.
+        assert store.get_event(event.event_id) is not None
+        assert not view._deleting
+        assert "Could not acknowledge an event deletion" in caplog.text
+        assert event.title not in caplog.text
+
     async def test_declining_the_deletion_is_logged(
         self,
         fake_bot: Any,
@@ -3955,6 +3981,32 @@ class TestEventCancelConfirmView:
         # Declining is a decision the workflow's trail has to carry too.
         assert "Event cancel declined" in caplog.text
         assert f"occurrence_id={occurrence.occurrence_id}" in caplog.text
+        assert event.title not in caplog.text
+
+    async def test_a_failed_acknowledgement_releases_the_guard(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.response.edit_message = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+
+        with caplog.at_level("ERROR", logger="gw2bot.events.views"):
+            await view.cancel_occurrence.callback(interaction)
+
+        # The occurrence is untouched and the buttons are still there, so the
+        # commander has to be able to click again.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        assert not view._cancelling
+        assert "Could not acknowledge an event cancellation" in caplog.text
         assert event.title not in caplog.text
 
     async def test_cancel_says_so_when_no_retry_could_be_queued(
