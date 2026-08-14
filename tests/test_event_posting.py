@@ -3770,6 +3770,66 @@ class TestCancelOccurrence:
         # nothing else would subscribe them to it.
         channel.thread.add_user.assert_awaited_once()
 
+    async def test_skips_a_run_that_ended_without_being_retired(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        # An earlier run that ended while its refresh was failing: the clock
+        # has passed it, but no maintenance pass has persisted OVER yet.
+        stale = store.create_occurrence(
+            event.event_id,
+            START - timedelta(hours=3),
+        )
+        store.set_occurrence_message(stale.occurrence_id, 1234, 501, 777)
+        target = store.create_occurrence(
+            event.event_id,
+            START + timedelta(hours=1),
+        )
+        posted = await post_occurrence(bot, event, target, START)
+
+        cancellation = await cancel_occurrence(bot, event, posted, START)
+
+        # The stale row still reads as live and still has a message, so taking
+        # it for the series' next run would report a date already behind us
+        # and leave the seeded run unposted.
+        successor = cancellation.successor
+        assert successor is not None
+        assert successor.start_time == START + timedelta(days=1, hours=1)
+        assert cancellation.successor_posted
+
+    async def test_a_successor_removed_mid_post_is_reported_as_settled(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        plain_send = channel.send
+
+        async def remove_the_successor_mid_send(**kwargs: Any) -> Any:
+            message = await plain_send(**kwargs)
+            # Another cancellation (or a delete) takes the successor while its
+            # message is in flight, so persisting that message raises.
+            pending = store.get_unposted_occurrences()
+            if pending:
+                store.delete_occurrence(pending[0].occurrence_id)
+            return message
+
+        channel.send = remove_the_successor_mid_send  # type: ignore
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # The cancellation itself is done, so it reports the series as it
+        # stands instead of raising a failure the commander would retry.
+        assert store.get_occurrence(posted.occurrence_id) is None
+        assert cancellation.successor is None
+        assert not cancellation.successor_posted
+
     async def test_reports_the_run_another_cancellation_left_behind(
         self,
         bot: Any,

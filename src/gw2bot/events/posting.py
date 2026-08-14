@@ -748,7 +748,7 @@ async def cancel_occurrence(
             _discard_seeded_successor(bot, seeded)
         raise
     await delete_event_posts(bot, event, [occurrence])
-    successor = _leading_occurrence(bot, event.event_id)
+    successor = _leading_occurrence(bot, event, current_time)
     LOGGER.debug(
         "Cancelled event occurrence; event_id=%s occurrence_id=%s "
         "successor_id=%s",
@@ -771,6 +771,19 @@ async def cancel_occurrence(
         posted = await post_pending_occurrence(
             bot, event, successor, current_time
         )
+    except ValueError:
+        # The successor's row went away while its message was in flight,
+        # because another cancellation or a delete reached it first.
+        # post_occurrence has already removed the message it sent, and this
+        # cancellation is itself done, so this is not a failure to retry: fall
+        # through and report the series as it now stands.
+        LOGGER.debug(
+            "A cancelled occurrence's successor was removed mid-post; "
+            "event_id=%s occurrence_id=%s",
+            event.event_id,
+            successor.occurrence_id,
+        )
+        posted = None
     except (discord.HTTPException, SQLAlchemyError, RuntimeError) as exc:
         LOGGER.error(
             "Could not post the successor of a cancelled occurrence; "
@@ -791,7 +804,7 @@ async def cancel_occurrence(
         # what the series actually has now rather than assuming the first -
         # announcing a run that is not there would send the commander off to
         # rebuild an event that is still going.
-        current = _leading_occurrence(bot, event.event_id)
+        current = _leading_occurrence(bot, event, current_time)
         LOGGER.debug(
             "Cancelled occurrence's successor was settled elsewhere; "
             "event_id=%s successor_id=%s leading_id=%s",
@@ -810,16 +823,26 @@ async def cancel_occurrence(
 
 def _leading_occurrence(
     bot: Gw2Bot,
-    event_id: int,
+    event: Event,
+    now: datetime,
 ) -> EventOccurrence | None:
-    # The run a series is on now: its earliest occurrence that is not finished.
-    # get_event_occurrences is ordered by start time, so the first match is the
-    # soonest.
+    """The run a series is on now: its earliest occurrence still to happen.
+
+    Judged on the clock as well as on the stored status, the way `/event
+    cancel` picks its target. The status alone lags: it only moves when a
+    maintenance pass persists it, so a run that ended while its refresh was
+    failing still reads as live, and taking one of those for the series'
+    next run would report a date that has already passed.
+    """
+    duration = timedelta(minutes=event.duration_minutes)
     return next(
         (
             candidate
-            for candidate in bot.event_store.get_event_occurrences(event_id)
+            for candidate in bot.event_store.get_event_occurrences(
+                event.event_id
+            )
             if candidate.status is not EventStatus.OVER
+            and candidate.start_time + duration > now
         ),
         None,
     )
