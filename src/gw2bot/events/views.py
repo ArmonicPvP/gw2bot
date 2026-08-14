@@ -15,6 +15,7 @@ from discord.utils import MISSING
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import (
+    GuildMembership,
     resolve_display_names,
     resolve_guild_memberships,
     safe_int,
@@ -2297,6 +2298,97 @@ class _AdditionStop(StrEnum):
     CHANGED = "changed"
 
 
+@dataclass
+class _AdditionOutcome:
+    """What a batch addition did with each member the commander picked."""
+
+    added: list[int] = field(default_factory=list)
+    waitlisted: list[int] = field(default_factory=list)
+    skipped: list[int] = field(default_factory=list)
+    departed: list[int] = field(default_factory=list)
+    failed: list[int] = field(default_factory=list)
+    left_off: list[int] = field(default_factory=list)
+    undelivered: list[int] = field(default_factory=list)
+    stop: _AdditionStop | None = None
+
+
+def _addition_target(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> tuple[Event, EventOccurrence] | _AdditionStop:
+    """Re-read the rows a batch addition works on, or say why it must stop.
+
+    seat_signup awaits Discord I/O, so both rows can go out from under a batch
+    between one member and the next, in three ways worth telling apart:
+
+    - the occurrence reaches its scheduled end;
+    - seating a member refreshes the public message, and a message or channel
+      that has been deleted retires the occurrence as OVER and seeds the
+      series' successor;
+    - another leader saves an edit. A category change is the one that matters,
+      because the category picks the capacity every seat is computed against,
+      and that edit re-seats the whole roster under the new one. Seating from
+      the event a batch started with would quietly undo that with the old
+      capacity.
+    """
+    fresh_event = bot.event_store.get_event(event.event_id)
+    fresh_occurrence = bot.event_store.get_occurrence(
+        occurrence.occurrence_id
+    )
+    if fresh_event is None or fresh_occurrence is None:
+        return _AdditionStop.RETIRED
+    if fresh_event.category is not event.category:
+        return _AdditionStop.CHANGED
+    # Checked before the stored status, so an occurrence that is OVER because
+    # it genuinely finished is not reported as a deleted post.
+    if occurrence_has_ended(fresh_event, fresh_occurrence, datetime.now(UTC)):
+        return _AdditionStop.ENDED
+    if fresh_occurrence.status is EventStatus.OVER:
+        return _AdditionStop.RETIRED
+    return fresh_event, fresh_occurrence
+
+
+async def _drop_departed_picks(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    user_ids: list[int],
+) -> tuple[list[int], list[int]]:
+    """Split the picked members into those still here and those who have left.
+
+    The picker, and the role step behind it, can sit open for minutes, so a
+    picked member may have left the server since. Seating them would spend a
+    roster slot on someone who cannot see the event, and the thread add behind
+    it fails quietly, so the whole batch is checked in one round of lookups
+    first. Only a definite "not a member" counts: a lookup that failed proves
+    nothing, and treating it as a departure would refuse legitimate additions
+    whenever Discord is unreachable.
+    """
+    memberships = await resolve_guild_memberships(
+        bot,
+        interaction.guild,
+        user_ids,
+    )
+    departed = [
+        user_id
+        for user_id in user_ids
+        if memberships.get(user_id, GuildMembership()).in_guild is False
+    ]
+    if not departed:
+        return user_ids, []
+    LOGGER.debug(
+        "Dropped picked members who have left the server; user_id=%s "
+        "picked=%s departed=%s",
+        interaction.user.id,
+        len(user_ids),
+        len(departed),
+    )
+    remaining = set(departed)
+    return [
+        user_id for user_id in user_ids if user_id not in remaining
+    ], departed
+
+
 async def apply_roster_addition(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -2327,79 +2419,38 @@ async def apply_roster_addition(
         embeds=[],
         view=None,
     )
-    added: list[int] = []
-    waitlisted: list[int] = []
-    skipped: list[int] = []
-    failed: list[int] = []
-    left_off: list[int] = []
-    undelivered: list[int] = []
+    outcome = _AdditionOutcome()
     updates: list[RosterUpdate] = []
-    stop: _AdditionStop | None = None
-    # Seeded from the rows the picker checked and recomputed from the fresh
-    # rows each iteration, so the notice always names the event as it stands
-    # when the member it goes to is seated.
-    link = _event_message_link(interaction.guild_id, event, current)
-    content = _addition_dm_content(interaction.user.id, event, link)
+    picked = list(user_ids)
+    user_ids, outcome.departed = await _drop_departed_picks(
+        bot,
+        interaction,
+        user_ids,
+    )
     for index, user_id in enumerate(user_ids):
-        # The picker holds several members and seat_signup awaits Discord I/O
-        # between each, so both rows can go out from under the loop even though
-        # the pre-loop check passed, in three ways worth telling apart:
-        #
-        # - the occurrence reaches its scheduled end;
-        # - seating a member refreshes the public message, and a message or
-        #   channel that has been deleted retires the occurrence as OVER and
-        #   seeds the series' successor;
-        # - another leader saves an edit. A category change is the one that
-        #   matters, because the category picks the capacity every seat is
-        #   computed against, and that edit re-seats the whole roster under the
-        #   new one. Seating the rest from the event read before the loop would
-        #   quietly undo that with the old capacity.
-        #
-        # So re-read both rather than trusting the rows read before the loop.
-        # The member being seated when the change lands is already past this
-        # check and keeps whatever seat the old capacity gave them; stopping
-        # here bounds the damage to that one member instead of the whole batch.
-        fresh_event = bot.event_store.get_event(event.event_id)
-        fresh_occurrence = bot.event_store.get_occurrence(
-            current.occurrence_id
-        )
-        if fresh_event is None or fresh_occurrence is None:
-            stop = _AdditionStop.RETIRED
-        elif fresh_event.category is not event.category:
-            stop = _AdditionStop.CHANGED
-        elif occurrence_has_ended(
-            fresh_event,
-            fresh_occurrence,
-            datetime.now(UTC),
-        ):
-            # Checked before the stored status, so an occurrence that is OVER
-            # because it genuinely finished is not reported as a deleted post.
-            stop = _AdditionStop.ENDED
-        elif fresh_occurrence.status is EventStatus.OVER:
-            stop = _AdditionStop.RETIRED
-        else:
-            # Carry the fresh rows forward: seating reads both, and the message
-            # the notice links to moves with a channel change.
-            event = fresh_event
-            current = fresh_occurrence
-            link = _event_message_link(interaction.guild_id, event, current)
-            content = _addition_dm_content(interaction.user.id, event, link)
-        if stop is not None:
-            left_off = list(user_ids[index:])
+        # Re-read both rows rather than trusting the ones the batch started
+        # with. The member being seated when a change lands is already past
+        # this check and keeps whatever seat the old state gave them; stopping
+        # here bounds that to one member instead of the whole batch.
+        target = _addition_target(bot, event, current)
+        if isinstance(target, _AdditionStop):
+            outcome.stop = target
+            outcome.left_off = list(user_ids[index:])
             LOGGER.debug(
                 "Stopped a roster addition; occurrence_id=%s user_id=%s "
                 "reason=%s left_off=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                stop.value,
-                len(left_off),
+                target.value,
+                len(outcome.left_off),
             )
             break
+        event, current = target
         # add_signup would overwrite an existing row, resetting the member's
         # signed-up time and with it their seating priority, so a member who is
         # already on the roster is left exactly as they are.
         if bot.event_store.get_signup(current.occurrence_id, user_id):
-            skipped.append(user_id)
+            outcome.skipped.append(user_id)
             continue
         try:
             # Notification is deferred to a single merged announcement
@@ -2424,17 +2475,43 @@ async def apply_roster_addition(
                 current.occurrence_id,
                 type(error).__name__,
             )
-            failed.append(user_id)
+            outcome.failed.append(user_id)
             continue
-        added.append(user_id)
+        outcome.added.append(user_id)
         updates.append(update)
         if signup.waitlisted:
-            waitlisted.append(user_id)
-        # The thread announcement below is a roster summary, not a notice to
-        # the member, and one member with closed DMs must not stop the rest of
-        # the additions, so a failed delivery is only recorded for the summary.
+            outcome.waitlisted.append(user_id)
+    if outcome.stop is None:
+        # The last seat refreshed the public message too, and no iteration is
+        # left to notice that the refresh retired the occurrence. Run the same
+        # check once more, so the final member is not sent a link to a message
+        # that is gone and the preview below is not offered for a roster that
+        # can no longer be edited.
+        target = _addition_target(bot, event, current)
+        if isinstance(target, _AdditionStop):
+            outcome.stop = target
+            LOGGER.debug(
+                "Roster addition finished on an event that is no longer "
+                "live; occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                target.value,
+            )
+        else:
+            event, current = target
+    # Sent once the roster's final state is known, so a seat that retired the
+    # occurrence cannot send anyone a link to the deleted message. One member
+    # with closed DMs must not stop the rest, so a failed delivery is only
+    # recorded for the summary.
+    link = (
+        None
+        if outcome.stop is _AdditionStop.RETIRED
+        else _event_message_link(interaction.guild_id, event, current)
+    )
+    content = _addition_dm_content(interaction.user.id, event, link)
+    for user_id in outcome.added:
         if not await send_direct_message(bot, user_id, content):
-            undelivered.append(user_id)
+            outcome.undelivered.append(user_id)
     # Each addition can flex seated members into another of their roles, and a
     # later addition can move someone an earlier one already moved. Merging
     # collapses each member's changes into one line describing the net result.
@@ -2443,31 +2520,25 @@ async def apply_roster_addition(
     LOGGER.debug(
         "Applied roster addition; event_id=%s occurrence_id=%s user_id=%s "
         "role=%s picked=%s added=%s waitlisted=%s already_signed_up=%s "
-        "failed=%s left_off=%s undelivered=%s reassigned=%s stop=%s",
+        "departed=%s failed=%s left_off=%s undelivered=%s reassigned=%s "
+        "stop=%s",
         event.event_id,
         current.occurrence_id,
         interaction.user.id,
         role.value if role is not None else None,
-        len(user_ids),
-        len(added),
-        len(waitlisted),
-        len(skipped),
-        len(failed),
-        len(left_off),
-        len(undelivered),
+        len(picked),
+        len(outcome.added),
+        len(outcome.waitlisted),
+        len(outcome.skipped),
+        len(outcome.departed),
+        len(outcome.failed),
+        len(outcome.left_off),
+        len(outcome.undelivered),
         len(merged.reassigned),
-        stop.value if stop is not None else None,
+        outcome.stop.value if outcome.stop is not None else None,
     )
-    summary = _addition_summary(
-        added,
-        waitlisted,
-        skipped,
-        failed,
-        left_off,
-        stop,
-        undelivered,
-    )
-    if left_off:
+    summary = _addition_summary(outcome)
+    if outcome.stop is not None:
         # The event went out from under the batch, so this edit session is no
         # longer valid. Report what was applied and stop, rather than
         # re-showing an edit preview that can no longer be trusted.
@@ -2512,20 +2583,15 @@ def _addition_stop_note(
     )
 
 
-def _addition_summary(
-    added: list[int],
-    waitlisted: list[int],
-    skipped: list[int],
-    failed: list[int],
-    left_off: list[int],
-    stop: _AdditionStop | None,
-    undelivered: list[int],
-) -> str:
-    seated = [user_id for user_id in added if user_id not in waitlisted]
+def _addition_summary(outcome: _AdditionOutcome) -> str:
+    waitlisted = outcome.waitlisted
+    seated = [
+        user_id for user_id in outcome.added if user_id not in waitlisted
+    ]
     lines: list[str] = []
     if seated:
         lines.append(f"Added {_mention_list(seated)} to the roster.")
-    elif not added:
+    elif not outcome.added:
         lines.append("Nobody was added to the roster.")
     if waitlisted:
         lines.append(
@@ -2537,25 +2603,38 @@ def _addition_summary(
                 else " were added to the waitlist."
             )
         )
-    if skipped:
+    if outcome.skipped:
+        skipped = _mention_list(outcome.skipped)
         lines.append(
-            f"{_mention_list(skipped)} was already signed up for this event."
-            if len(skipped) == 1
-            else (
-                f"{_mention_list(skipped)} were already signed up for this "
-                "event."
-            )
+            f"{skipped} was already signed up for this event."
+            if len(outcome.skipped) == 1
+            else f"{skipped} were already signed up for this event."
         )
-    if failed:
-        lines.append(f"Could not add {_mention_list(failed)} to the roster.")
-    if left_off:
-        lines.append(_addition_stop_note(stop, left_off))
-    if undelivered:
+    if outcome.departed:
+        lines.append(
+            _mention_list(outcome.departed)
+            + (" has" if len(outcome.departed) == 1 else " have")
+            + " left the server, so they were not added."
+        )
+    if outcome.failed:
+        lines.append(
+            f"Could not add {_mention_list(outcome.failed)} to the roster."
+        )
+    if outcome.left_off:
+        lines.append(_addition_stop_note(outcome.stop, outcome.left_off))
+    elif outcome.stop is _AdditionStop.RETIRED:
+        # Everyone picked was dealt with, but the post they were added to has
+        # gone; the commander would otherwise have no idea.
+        lines.append(
+            "This event's post is no longer available; its message may have "
+            "been deleted."
+        )
+    if outcome.undelivered:
         # The addition itself went through; only the notice did not, which the
         # commander needs to know so they can pass the word along.
         lines.append(
             "Could not send a direct message to "
-            + _mention_list(undelivered)
+            + _mention_list(outcome.undelivered)
             + ", so they were not notified."
         )
     return "\n".join(lines)

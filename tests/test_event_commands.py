@@ -4609,10 +4609,15 @@ class TestAddSignups:
             occurrence,
         )
 
-    def make_add_interaction(self, guild_id: int | None = 9876) -> Any:
+    def make_add_interaction(
+        self,
+        guild_id: int | None = 9876,
+        guild: Any = None,
+    ) -> Any:
         interaction = make_interaction(
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
+            guild=guild,
         )
         interaction.guild_id = guild_id
         interaction.edit_original_response = AsyncMock()
@@ -4953,7 +4958,7 @@ class TestAddSignups:
         unchanged = store.get_signup(occurrence.occurrence_id, 11)
         assert unchanged is not None
         assert unchanged.signed_up_at == original.signed_up_at
-        assert 11 not in fake_bot.users
+        fake_bot.users[11].send.assert_not_awaited()
         content = interaction.edit_original_response.await_args.kwargs[
             "content"
         ]
@@ -5148,8 +5153,8 @@ class TestAddSignups:
         assert retired.status is EventStatus.OVER
         seated = store.get_signups(occurrence.occurrence_id)
         assert {signup.discord_user_id for signup in seated} == {11}
-        assert 12 not in fake_bot.users
-        assert 13 not in fake_bot.users
+        fake_bot.users[12].send.assert_not_awaited()
+        fake_bot.users[13].send.assert_not_awaited()
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert kwargs["view"] is None
         assert "Added <@11> to the roster." in kwargs["content"]
@@ -5186,12 +5191,89 @@ class TestAddSignups:
 
         seated = store.get_signups(occurrence.occurrence_id)
         assert {signup.discord_user_id for signup in seated} == {11}
-        assert 12 not in fake_bot.users
-        assert 13 not in fake_bot.users
+        fake_bot.users[12].send.assert_not_awaited()
+        fake_bot.users[13].send.assert_not_awaited()
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert kwargs["view"] is None
         assert "Another leader changed this event" in kwargs["content"]
         assert "<@12>, <@13> were left off." in kwargs["content"]
+
+    async def test_a_member_who_left_the_server_is_not_seated(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The picker, and the role step behind it, can sit open for minutes.
+        # Seating someone who has left spends a roster slot on a member who
+        # cannot see the event, and the thread add behind it fails quietly.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction(
+            guild=FakeGuild({11: "Still Here"}),
+        )
+
+        await view.pick(interaction, [11, 12])
+
+        seated = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in seated} == {11}
+        fake_bot.users[12].send.assert_not_awaited()
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11> to the roster." in content
+        assert "<@12> has left the server, so they were not added." in content
+
+    async def test_an_unresolvable_member_is_still_added(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Only a definite "not a member" may cost someone their seat: a lookup
+        # that failed proves nothing, and refusing on it would block every
+        # addition whenever Discord is unreachable.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        guild = FakeGuild({})
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+        interaction = self.make_add_interaction(guild=guild)
+
+        await view.pick(interaction, [11])
+
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11> to the roster." in content
+        assert "left the server" not in content
+
+    async def test_the_last_seat_retiring_the_event_is_reported(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Seating the only member refreshes the public message, which retires
+        # the occurrence when that message is gone. No iteration is left to
+        # notice, so without a final check the member is sent a link to the
+        # deleted message and the commander gets an editable preview back.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        # Told they were added, but never pointed at a message that is gone.
+        dm = fake_bot.users[11].send.await_args.args[0]
+        assert dm == "<@42> added you to **Original Title**."
+        assert "discord.com/channels" not in dm
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "Added <@11> to the roster." in kwargs["content"]
+        assert (
+            "This event's post is no longer available" in kwargs["content"]
+        )
 
     async def test_a_picker_that_outlives_its_event_is_logged(
         self,
