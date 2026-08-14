@@ -3922,6 +3922,28 @@ class TestCancelOccurrence:
         assert cancellation.successor is None
         assert not cancellation.successor_posted
 
+    async def test_an_interrupted_cancellation_leaves_the_successor_postable(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        channel.partial_message.delete = AsyncMock(
+            side_effect=RuntimeError("the process went away")
+        )
+
+        with pytest.raises(RuntimeError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # Everything after the cancelled row is removed is what would have
+        # posted the successor, and a restart anywhere in there would leave a
+        # series with nothing posted - the one state the maintenance pass
+        # leaves alone. The claim is what lets it recover.
+        successor = store.get_event_occurrences(event.event_id)[0]
+        assert successor.message_id is None
+        assert successor.needs_refresh
+
     async def test_reports_a_successor_that_could_not_be_posted(
         self,
         bot: Any,

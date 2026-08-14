@@ -2298,6 +2298,36 @@ def _restore_event_channel(
     return restored
 
 
+async def _send_flow_decline(
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    workflow: str,
+    event_id: int,
+) -> None:
+    """Answer a confirmation that was declined, tolerating a Discord failure.
+
+    Nothing was changed, so a failure here is only the wording. It must not
+    escape the callback: discord.py's default handler logs the exception with
+    its full text, and an HTTPException's text carries Discord's raw response
+    body. Reporting the decline is also what puts it in the diagnostic trail,
+    so that is logged either way.
+    """
+    try:
+        await interaction.response.edit_message(
+            content=content,
+            embeds=[],
+            view=None,
+        )
+    except discord.HTTPException as exc:
+        LOGGER.error(
+            "Could not answer a declined %s; event_id=%s error_type=%s",
+            workflow,
+            event_id,
+            type(exc).__name__,
+        )
+
+
 async def _send_flow_result(
     interaction: discord.Interaction,
     content: str,
@@ -2491,15 +2521,16 @@ class EventDeleteConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventDeleteConfirmView],
     ) -> None:
-        await interaction.response.edit_message(
-            content="The event was not deleted.",
-            embeds=[],
-            view=None,
-        )
         LOGGER.debug(
             "Event deletion declined; user_id=%s event_id=%s",
             interaction.user.id,
             self._event.event_id,
+        )
+        await _send_flow_decline(
+            interaction,
+            "The event was not deleted.",
+            workflow="event deletion",
+            event_id=self._event.event_id,
         )
 
 
@@ -2761,16 +2792,17 @@ class EventCancelConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventCancelConfirmView],
     ) -> None:
-        await interaction.response.edit_message(
-            content="The occurrence was not cancelled.",
-            embeds=[],
-            view=None,
-        )
         LOGGER.debug(
             "Event cancel declined; user_id=%s event_id=%s occurrence_id=%s",
             interaction.user.id,
             self._event.event_id,
             self._occurrence.occurrence_id,
+        )
+        await _send_flow_decline(
+            interaction,
+            "The occurrence was not cancelled.",
+            workflow="event cancellation",
+            event_id=self._event.event_id,
         )
 
 

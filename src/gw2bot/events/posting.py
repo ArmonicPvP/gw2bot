@@ -781,6 +781,16 @@ async def cancel_occurrence(
                 "the successor of a failed cancellation",
             )
         raise
+    # Flag the run that takes over before any of the Discord work below. The
+    # bot can be restarted at any point in it - a deploy, a container move -
+    # and everything after this line is what would otherwise have posted the
+    # successor. Without the flag a restart here leaves it unposted with no
+    # posted occurrence left in the series, which is exactly the state the
+    # maintenance pass leaves alone, so the series would quietly never come
+    # back. Posting clears the flag again.
+    successor = leading_occurrence(bot, event, current_time)
+    if successor is not None and successor.message_id is None:
+        _mark_cancellation_successor_pending(bot, successor)
     await delete_event_posts(bot, event, [occurrence])
     successor = leading_occurrence(bot, event, current_time)
     LOGGER.debug(
@@ -914,13 +924,15 @@ def _mark_cancellation_successor_pending(
     bot: Gw2Bot,
     successor: EventOccurrence,
 ) -> bool:
-    # The cancellation stands but its successor never went out, and the
-    # cancelled post it would have replaced is already gone, so the series has
-    # nothing in the channel. The scheduler skips a pending occurrence whose
-    # series has no posted one, because that normally means a manual post is
-    # still in flight; the refresh flag is what tells it this one is the bot's
-    # to retry instead. Without it a transient Discord failure would hide the
-    # series for good.
+    # Claim the successor for the bot to post. The scheduler skips a pending
+    # occurrence whose series has no posted one, because that normally means a
+    # manual post is still in flight; the refresh flag is what tells it this
+    # one is its own to send instead. A cancellation removes the series' last
+    # post, so without the flag anything that stops this call short - a
+    # Discord failure, a restart - would hide the series for good.
+    #
+    # Set once before the Discord work and again if that work fails, so the
+    # second call is normally a no-op. Posting clears it.
     if successor.needs_refresh:
         return True
     try:
