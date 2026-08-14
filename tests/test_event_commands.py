@@ -5328,6 +5328,51 @@ class TestAddSignups:
         assert kwargs["embeds"] == []
         assert "no longer available" in kwargs["content"]
 
+    async def test_an_unsaved_category_change_is_saved_first(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The preview offers a category change, and the roster is seated
+        # against the saved category. Adding under a pending change would ask
+        # the wrong question - a headcount category skips the role step - and
+        # the save behind it would rebalance those members into roles the
+        # commander never picked.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        draft = self.make_draft(event, occurrence)
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = self.make_add_interaction()
+
+        await cast(Any, view.add_signups.callback)(interaction)
+
+        assert store.get_signups(occurrence.occurrence_id) == []
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "has not been saved" in kwargs["content"]
+        # The preview comes back, so Save changes is still one click away and
+        # the pending change survives.
+        assert isinstance(kwargs["view"], EventEditConfirmView)
+        assert draft.category is EventCategory.FRACTAL
+
+    async def test_the_saved_category_still_opens_the_picker(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The guard must only catch a *pending* change: an edit draft is
+        # seeded from the stored event, so the ordinary case matches.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = EventEditConfirmView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+        )
+        interaction = self.make_add_interaction()
+
+        await cast(Any, view.add_signups.callback)(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], AddSignupsView)
+
     async def test_a_picker_that_outlives_its_event_is_logged(
         self,
         fake_bot: Any,

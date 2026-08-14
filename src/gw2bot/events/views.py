@@ -2032,6 +2032,34 @@ async def open_roster_addition(
     if context is None:
         return
     event, occurrence = context
+    # The roster is seated against the *saved* category, because that is the
+    # capacity the stored assignments describe, while the preview above already
+    # shows the pending one. Adding under an unsaved category change would ask
+    # the wrong question - a change to a headcount category would skip the role
+    # step entirely - and the save behind it would then rebalance those members
+    # into roles the commander never picked. Send them back to the preview to
+    # save first; the change itself is untouched.
+    if draft.category is not None and draft.category is not event.category:
+        LOGGER.debug(
+            "Rejected a roster addition with an unsaved category change; "
+            "event_id=%s user_id=%s saved=%s pending=%s",
+            event.event_id,
+            interaction.user.id,
+            event.category.value,
+            draft.category.value,
+        )
+        await send_event_preview(
+            bot,
+            interaction,
+            draft,
+            primary=occurrence,
+            content=(
+                "This preview shows a category change that has not been saved "
+                "yet, and members are seated against the saved category. "
+                "Choose **Save changes** first, then add them."
+            ),
+        )
+        return
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     LOGGER.debug(
         "Opened roster addition; event_id=%s occurrence_id=%s user_id=%s "
