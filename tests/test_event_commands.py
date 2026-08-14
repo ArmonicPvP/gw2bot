@@ -5323,10 +5323,15 @@ class TestAddSignups:
 
         await view.pick(interaction, [11, 12])
 
+        # The deletion cascaded 12's seat away mid-delivery, so they must not
+        # be told they joined an event that no longer exists.
+        fake_bot.users[12].send.assert_not_awaited()
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert kwargs["view"] is None
         assert kwargs["embeds"] == []
         assert "no longer available" in kwargs["content"]
+        # The commander has to know 12 went untold.
+        assert "<@12>, so they were not notified." in kwargs["content"]
 
     async def test_an_unsaved_category_change_is_saved_first(
         self,

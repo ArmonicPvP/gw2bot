@@ -2564,6 +2564,21 @@ async def apply_roster_addition(
     )
     content = _addition_dm_content(interaction.user.id, event, link)
     for user_id in outcome.added:
+        # These are sequential external deliveries, so /event delete can land
+        # between two of them and cascade the whole roster away. The member's
+        # own row is the exact question being answered: a row that has gone
+        # means they are on nothing, so telling them they joined it would be
+        # wrong, while a row that survives an occurrence retired above still
+        # earns its notice (without the link the check above already dropped).
+        # Either way the commander is told they went unnotified.
+        if bot.event_store.get_signup(current.occurrence_id, user_id) is None:
+            LOGGER.debug(
+                "Skipped a roster addition notice for a seat that has gone; "
+                "occurrence_id=%s",
+                current.occurrence_id,
+            )
+            outcome.undelivered.append(user_id)
+            continue
         if not await send_direct_message(bot, user_id, content):
             outcome.undelivered.append(user_id)
     if outcome.stop is None:
