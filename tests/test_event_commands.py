@@ -73,7 +73,7 @@ from gw2bot.events.views import (
 )
 
 from factories import forbidden_error, not_found_error
-from test_event_posting import FakeBot, FakeChannel, FakeThread
+from test_event_posting import FakeBot, FakeChannel, FakeThread, FakeUser
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
 
@@ -5274,6 +5274,59 @@ class TestAddSignups:
         assert (
             "This event's post is no longer available" in kwargs["content"]
         )
+
+    async def test_a_role_answered_for_the_old_category_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The role step is answered against the category the picker opened
+        # for. A headcount signup is always role-less, so a role chosen for
+        # the old category must not ride through onto one.
+        event, occurrence = self.make_event(store)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            [],
+            [11],
+        )
+        self.change_event(store, event, category=EventCategory.WVW)
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        assert store.get_signups(occurrence.occurrence_id) == []
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "changed this event's category" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_an_event_deleted_while_notices_go_out_is_reported(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The notices are external deliveries, so /event delete can land while
+        # they go out. Edit controls must not come back for a roster that has
+        # since gone.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        deleter = FakeUser(11, "User 11")
+
+        async def delete_during_delivery(_content: Any) -> None:
+            store.delete_event(event.event_id)
+
+        deleter.send = AsyncMock(side_effect=delete_during_delivery)
+        fake_bot.users[11] = deleter
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert kwargs["embeds"] == []
+        assert "no longer available" in kwargs["content"]
 
     async def test_a_picker_that_outlives_its_event_is_logged(
         self,

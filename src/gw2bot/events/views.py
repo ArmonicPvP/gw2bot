@@ -2414,6 +2414,32 @@ async def apply_roster_addition(
     if context is None:
         return
     event, current = context
+    # The role step is answered against the category the picker was opened
+    # for, and another leader changing the category between the two swaps the
+    # capacity underneath it. A role chosen for a role-based event would then
+    # be persisted onto a headcount signup, which is always role-less, and a
+    # later rebalance would honour a role picked for a category the event no
+    # longer has. The freshly read event decides, so this mismatch is exactly
+    # that race - the flow itself always pairs them correctly.
+    if event.capacity.has_roles != (role is not None):
+        LOGGER.debug(
+            "Rejected a roster addition whose role step no longer matches "
+            "the event; event_id=%s user_id=%s has_roles=%s role_picked=%s",
+            event.event_id,
+            interaction.user.id,
+            event.capacity.has_roles,
+            role is not None,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "Another leader changed this event's category while you were "
+                "picking, so nobody was added. Run `/event edit` again to add "
+                "them."
+            ),
+            embeds=[],
+            view=None,
+        )
+        return
     await interaction.response.edit_message(
         content="Adding the selected members…",
         embeds=[],
@@ -2512,6 +2538,22 @@ async def apply_roster_addition(
     for user_id in outcome.added:
         if not await send_direct_message(bot, user_id, content):
             outcome.undelivered.append(user_id)
+    if outcome.stop is None:
+        # Those notices are external deliveries, up to one per picked member,
+        # so the event can be deleted or retired while they go out. The check
+        # above guarded what the notices say; this one guards what is offered
+        # afterwards, so edit controls are never rebuilt for a roster that has
+        # since gone.
+        final = _addition_target(bot, event, current)
+        if isinstance(final, _AdditionStop):
+            outcome.stop = final
+            LOGGER.debug(
+                "Roster addition target went away while its notices were "
+                "sent; occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                final.value,
+            )
     # Each addition can flex seated members into another of their roles, and a
     # later addition can move someone an earlier one already moved. Merging
     # collapses each member's changes into one line describing the net result.
