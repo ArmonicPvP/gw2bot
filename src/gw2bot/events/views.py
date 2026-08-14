@@ -2762,14 +2762,19 @@ class EventCancelConfirmView(discord.ui.View):
         )
         if not cancellation.successor_posted:
             if not cancellation.retry_pending:
+                # Saying "run /event cancel again" here would be telling the
+                # commander to delete the run this message just named: that is
+                # what cancelling the unposted successor does. State what is
+                # actually there and what the alternative costs instead.
                 return (
-                    f"**{title}** on {cancelled_on} was cancelled, but its "
-                    f"next occurrence on {next_on} could not be posted in "
-                    f"<#{self._event.channel_id}> and could not be queued for "
-                    "another attempt either, so nothing will post it on its "
-                    "own. Check the bot's permissions there, then run "
-                    "`/event cancel` again to put the event back in the "
-                    "channel."
+                    f"**{title}** on {cancelled_on} was cancelled. Its next "
+                    f"occurrence on {next_on} could not be posted in "
+                    f"<#{self._event.channel_id}>, and the retry could not be "
+                    "recorded either, so nothing will post it on its own. The "
+                    "run and its sign-ups are still there. Fix the bot's "
+                    "permissions in that channel, then use `/event cancel` "
+                    "again only if you would rather skip that run and post "
+                    "the one after it."
                 )
             return (
                 f"**{title}** on {cancelled_on} was cancelled, but its next "

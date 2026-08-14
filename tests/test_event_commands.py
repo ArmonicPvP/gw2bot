@@ -4089,7 +4089,11 @@ class TestEventCancelConfirmView:
         content = interaction.edit_original_response.await_args.kwargs[
             "content"
         ]
-        assert "could not be queued" in content
+        assert "could not be recorded" in content
+        assert "nothing will post it on its own" in content
+        # The alternative it offers has to name its cost: cancelling again
+        # deletes the run this message just named rather than restoring it.
+        assert "skip that run" in content
         assert "retried automatically" not in content
 
     async def test_a_duplicate_cancellation_click_is_logged(
