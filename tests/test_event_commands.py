@@ -3465,6 +3465,129 @@ class TestCancelCommand:
         )
 
 
+    async def test_cancel_refuses_a_one_off_event_that_has_already_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        started = datetime.now(UTC) - timedelta(hours=3)
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="One and done",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, started)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        # The run is behind us, so there is nothing to call off. Offering the
+        # deletion here would erase a finished run's roster and post through a
+        # command that only promised to cancel the next one.
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert "view" not in kwargs
+        assert (
+            "no upcoming occurrence"
+            in interaction.response.send_message.await_args.args[0]
+        )
+        assert store.get_event(event.event_id) is not None
+
+
+class TestCancelDeleteFallbackView:
+    def _one_off_event(self, store: EventStore) -> Any:
+        event = make_edit_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        return event, occurrence
+
+    async def test_delete_is_refused_once_the_event_repeats(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self._one_off_event(store)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        # An edit gives the event a repeat while the confirmation sits open.
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.delete.callback(interaction)
+
+        # `/event cancel` never removes more than the next run of a repeating
+        # event, so the reason this confirmation offered deletion is gone.
+        assert store.get_event(event.event_id) is not None
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert (
+            "repeats now"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_delete_still_removes_a_one_off_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._one_off_event(store)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        assert store.get_event(event.event_id) is None
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+
+    async def test_declining_the_deletion_is_logged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, _ = self._one_off_event(store)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        with caplog.at_level("DEBUG"):
+            await view.keep.callback(interaction)
+
+        # Declining is a decision the workflow's trail has to carry too.
+        assert "Event deletion declined" in caplog.text
+        assert f"event_id={event.event_id}" in caplog.text
+        assert event.title not in caplog.text
+
+
 class TestEventCancelConfirmView:
     async def test_cancel_removes_the_occurrence_and_posts_the_next_one(
         self,

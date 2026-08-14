@@ -2299,11 +2299,24 @@ def _restore_event_channel(
 
 
 class EventDeleteConfirmView(discord.ui.View):
-    def __init__(self, bot: Gw2Bot, event: Event):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        event: Event,
+        *,
+        only_while_one_off: bool = False,
+    ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._event = event
         self._deleting = False
+        # Set when `/event cancel` opened this confirmation because the event
+        # does not repeat, which is the only reason cancelling one run means
+        # deleting the whole event. If an edit gives the event a repeat while
+        # this sits open, that reason is gone and the deletion has to be
+        # refused: `/event cancel` never removes more than the next run of a
+        # repeating event.
+        self._only_while_one_off = only_while_one_off
 
     @discord.ui.button(label="Delete event", style=discord.ButtonStyle.danger)
     async def delete(
@@ -2334,6 +2347,29 @@ class EventDeleteConfirmView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        if self._only_while_one_off:
+            stored = self._bot.event_store.get_event(self._event.event_id)
+            if (
+                stored is not None
+                and stored.repeat_frequency is not RepeatFrequency.NONE
+            ):
+                LOGGER.debug(
+                    "Event cancel deletion refused for an event that now "
+                    "repeats; user_id=%s event_id=%s",
+                    interaction.user.id,
+                    self._event.event_id,
+                )
+                await interaction.response.edit_message(
+                    content=(
+                        "That event repeats now, so cancelling it would only "
+                        "call off its next run rather than delete it. Run "
+                        "`/event cancel` again to do that, or `/event delete` "
+                        "to remove the whole event."
+                    ),
+                    embeds=[],
+                    view=None,
+                )
+                return
         self._deleting = True
         await interaction.response.edit_message(
             content="Deleting the event…",
@@ -2384,6 +2420,11 @@ class EventDeleteConfirmView(discord.ui.View):
             content="The event was not deleted.",
             embeds=[],
             view=None,
+        )
+        LOGGER.debug(
+            "Event deletion declined; user_id=%s event_id=%s",
+            interaction.user.id,
+            self._event.event_id,
         )
 
 

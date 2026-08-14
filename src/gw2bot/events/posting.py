@@ -745,7 +745,11 @@ async def cancel_occurrence(
         # post the following run while the one that failed to cancel is still
         # live, so take it back out before reporting the failure.
         if seeded is not None:
-            _discard_seeded_successor(bot, seeded)
+            _discard_occurrence(
+                bot,
+                seeded,
+                "the successor of a failed cancellation",
+            )
         raise
     await delete_event_posts(bot, event, [occurrence])
     successor = _leading_occurrence(bot, event, current_time)
@@ -848,23 +852,28 @@ def _leading_occurrence(
     )
 
 
-def _discard_seeded_successor(
+def _discard_occurrence(
     bot: Gw2Bot,
-    successor: EventOccurrence,
+    occurrence: EventOccurrence,
+    reason: str,
 ) -> None:
+    # Take back an occurrence row whose creation could not be completed. Best
+    # effort: a failure here is logged rather than raised, because it is always
+    # reported alongside the original failure that made the row unwanted.
     try:
-        bot.event_store.delete_occurrence(successor.occurrence_id)
+        bot.event_store.delete_occurrence(occurrence.occurrence_id)
     except SQLAlchemyError as exc:
         LOGGER.error(
-            "Could not discard the successor of a failed cancellation; "
-            "occurrence_id=%s error_type=%s",
-            successor.occurrence_id,
+            "Could not discard %s; occurrence_id=%s error_type=%s",
+            reason,
+            occurrence.occurrence_id,
             type(exc).__name__,
         )
         return
     LOGGER.debug(
-        "Discarded the successor of a failed cancellation; occurrence_id=%s",
-        successor.occurrence_id,
+        "Discarded %s; occurrence_id=%s",
+        reason,
+        occurrence.occurrence_id,
     )
 
 
@@ -1948,7 +1957,21 @@ def _create_next_occurrence(
         event.event_id,
         next_start,
     )
-    applied = apply_auto_signups(bot, event, new_occurrence)
+    try:
+        applied = apply_auto_signups(bot, event, new_occurrence)
+    except Exception:
+        # The row is committed but its roster is half-built. Leaving it would
+        # publish a run carrying an arbitrary slice of the members who asked to
+        # be signed up automatically - and a caller that never saw this
+        # occurrence returned cannot take it back, so a cancellation whose
+        # seeding failed here would report failure while the maintenance pass
+        # went on to post the run anyway. Seeding lands whole or not at all.
+        _discard_occurrence(
+            bot,
+            new_occurrence,
+            "a successor whose auto-signups failed",
+        )
+        raise
     LOGGER.debug(
         "Created next recurring event occurrence; event_id=%s "
         "occurrence_id=%s auto_signups=%s",

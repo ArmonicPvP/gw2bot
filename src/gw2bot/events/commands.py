@@ -434,6 +434,25 @@ class EventCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
+        # Resolve the run first, whether or not the event repeats. Cancelling
+        # is about a run still to come, and an event whose last run is behind
+        # it has none - offering to delete a one-off event in that state would
+        # erase a completed run's roster and post through a command that only
+        # ever promised to call off the next one.
+        occurrence = self._next_occurrence(event)
+        if occurrence is None:
+            LOGGER.debug(
+                "Event cancel rejected without an upcoming occurrence; "
+                "user_id=%s event_id=%s repeats=%s",
+                interaction.user.id,
+                event_id,
+                event.repeat_frequency is not RepeatFrequency.NONE,
+            )
+            await interaction.response.send_message(
+                "That event has no upcoming occurrence left to cancel.",
+                ephemeral=True,
+            )
+            return
         if event.repeat_frequency is RepeatFrequency.NONE:
             # A one-off event has nothing after the run being called off, so
             # cancelling it is deleting it. Hand over to the delete
@@ -451,20 +470,11 @@ class EventCommands(app_commands.Group):
                 "message(s), any signup thread(s) the bot opened for them and "
                 "everyone's sign-ups, and cannot be undone. A forum post the "
                 "event was posted into is kept.",
-                view=EventDeleteConfirmView(self._bot, event),
-                ephemeral=True,
-            )
-            return
-        occurrence = self._next_occurrence(event)
-        if occurrence is None:
-            LOGGER.debug(
-                "Event cancel rejected without an upcoming occurrence; "
-                "user_id=%s event_id=%s",
-                interaction.user.id,
-                event_id,
-            )
-            await interaction.response.send_message(
-                "That event has no upcoming occurrence left to cancel.",
+                view=EventDeleteConfirmView(
+                    self._bot,
+                    event,
+                    only_while_one_off=True,
+                ),
                 ephemeral=True,
             )
             return

@@ -3770,6 +3770,36 @@ class TestCancelOccurrence:
         # nothing else would subscribe them to it.
         channel.thread.add_user.assert_awaited_once()
 
+    async def test_a_half_seeded_successor_is_taken_back(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        store.add_signup = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # The successor's row commits before its roster is seeded, so a
+        # failure part-way leaves a run the caller never saw returned and
+        # cannot take back itself. Seeding has to land whole or not at all,
+        # or the next maintenance pass posts that run while the one that
+        # failed to cancel is still live.
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [posted.occurrence_id]
+
     async def test_skips_a_run_that_ended_without_being_retired(
         self,
         bot: Any,
