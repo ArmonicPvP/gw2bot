@@ -812,22 +812,24 @@ async def cancel_occurrence(
         excluding=occurrence.occurrence_id,
     )
     claimed = successor is not None and successor.message_id is None
-    if claimed and successor is not None:
-        # Deliberately strict, unlike the re-claim after a failed post: nothing
-        # has been destroyed yet, and a claim that will not write means the
-        # store is unhealthy right now. Going on to delete rows against it
-        # risks the one state nothing recovers from - a series with no posted
-        # run and an unclaimed pending one. Refusing costs a retry.
-        _claim_cancellation_successor(bot, successor)
     try:
+        if claimed and successor is not None:
+            # Deliberately strict, unlike the re-claim after a failed post:
+            # nothing has been destroyed yet, and a claim that will not write
+            # means the store is unhealthy right now. Going on to delete rows
+            # against it risks the one state nothing recovers from - a series
+            # with no posted run and an unclaimed pending one. Refusing costs
+            # a retry.
+            _claim_cancellation_successor(bot, successor)
         bot.event_store.delete_occurrence(occurrence.occurrence_id)
     except SQLAlchemyError:
         # The successor is committed in its own transaction, so it outlives a
-        # failed delete. Leaving it behind would let the next maintenance pass
-        # post the following run while the one that failed to cancel is still
-        # live, so take it back out before reporting the failure. A successor
-        # that was already there keeps its row and gives back the claim, which
-        # would otherwise invite that same premature post.
+        # claim or a delete that fails. Leaving it behind would let the next
+        # maintenance pass post the following run while the one that failed to
+        # cancel is still live, so take it back out before reporting the
+        # failure. A successor that was already there keeps its row and gives
+        # back the claim, which would otherwise invite that same premature
+        # post.
         if seeded is not None:
             _discard_occurrence(
                 bot,

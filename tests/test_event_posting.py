@@ -4049,6 +4049,30 @@ class TestCancelOccurrence:
         assert store.get_occurrence(posted.occurrence_id) is not None
         channel.partial_message.delete.assert_not_awaited()
 
+    async def test_a_failed_claim_discards_the_seeded_successor(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # The run this cancellation seeded is committed before the claim is
+        # attempted. Left behind with the original still posted, the next
+        # maintenance pass would publish it even though the cancellation was
+        # reported as failed.
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [posted.occurrence_id]
+        channel.partial_message.delete.assert_not_awaited()
+
     async def test_a_failed_delete_gives_back_the_claim(
         self,
         bot: Any,
