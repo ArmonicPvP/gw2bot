@@ -193,7 +193,12 @@ async def post_occurrence(
             message.id,
             thread_id,
         )
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, ValueError) as exc:
+        # A ValueError here means the row went away while the message was in
+        # flight - the event was deleted, or this run cancelled, by someone
+        # else in that window. It is the same situation as a failed write and
+        # needs the same recovery: without it the message just sent stays in
+        # the channel forever, referencing an occurrence that no longer exists.
         LOGGER.error(
             "Could not persist posted event occurrence; occurrence_id=%s "
             "error_type=%s",

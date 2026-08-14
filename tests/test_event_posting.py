@@ -500,6 +500,34 @@ class TestPostOccurrence:
         assert posted.message_id == 555
         assert posted.thread_id is None
 
+    async def test_a_row_deleted_mid_post_deletes_the_orphaned_message(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        async def cancel_it_mid_flight(**kwargs: Any) -> Any:
+            # Someone deletes or cancels the run while the message is being
+            # sent, so the row this post belongs to is gone by the time it
+            # comes to be recorded.
+            message = await FakeChannel.send(channel, **kwargs)
+            store.delete_occurrence(occurrence.occurrence_id)
+            return message
+
+        channel.send = cancel_it_mid_flight  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError):
+            await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        # Nothing owns the message that was just sent, so leaving it in the
+        # channel would strand a post whose buttons point at a run that no
+        # longer exists.
+        channel.sent[-1]["message"].delete.assert_awaited_once()
+        channel.thread.delete.assert_awaited_once()
+
     async def test_persistence_failure_deletes_the_orphaned_message(
         self,
         bot: Any,

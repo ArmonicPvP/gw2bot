@@ -12,7 +12,7 @@ from discord.utils import MISSING
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.commands import EventCommands
-from gw2bot.events.posting import post_occurrence
+from gw2bot.events.posting import cancel_occurrence, post_occurrence
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.formatting import (
     format_event_datetime,
@@ -938,6 +938,59 @@ class TestPostEventButton:
             for occurrence in posted
         }
         assert len(events) == 1
+
+    async def test_a_cancellation_racing_the_first_post_leaves_nothing_behind(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = replace(
+            make_complete_draft(),
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+
+        async def cancel_while_the_message_is_in_flight(**kwargs: Any) -> Any:
+            # Only the first send is interrupted; the cancellation's own post
+            # of the successor goes through the plain channel.
+            channel.send = plain_send  # type: ignore[method-assign]
+            message = await plain_send(**kwargs)
+            # Another commander cancels this run inside the send: the row is
+            # gone and its successor is seeded and posted in its place.
+            pending = store.get_unposted_occurrences()[0]
+            stored_event = store.get_event(pending.event_id)
+            assert stored_event is not None
+            await cancel_occurrence(fake_bot, stored_event, pending)
+            return message
+
+        plain_send = channel.send
+        # type: ignore[method-assign] - the fake channel stands in for Discord.
+        channel.send = cancel_while_the_message_is_in_flight  # type: ignore
+
+        await view.post_event.callback(interaction)
+
+        # The event is torn down, and every message that went out with it -
+        # the one this post sent and the successor the cancellation posted -
+        # is deleted rather than left in the channel with no rows behind it.
+        assert not draft.posted
+        assert store.get_event_occurrences(1) == []
+        # The post whose row vanished is deleted by the send that made it, and
+        # the successor's post - which does have stored ids - through the
+        # channel, so both are gone.
+        channel.sent[0]["message"].delete.assert_awaited_once()
+        channel.partial_message.delete.assert_awaited()
+        assert interaction.followup.send.await_args is not None
+        assert (
+            "could not be posted"
+            in interaction.followup.send.await_args.args[0]
+        )
 
     async def test_successful_post_stores_and_sends_once(
         self,

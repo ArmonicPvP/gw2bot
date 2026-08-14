@@ -971,7 +971,7 @@ class EventConfirmView(_PreviewConfirmView):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventConfirmView],
     ) -> None:
-        from gw2bot.events.posting import post_occurrence
+        from gw2bot.events.posting import delete_event_posts, post_occurrence
 
         # The preview can sit open for minutes; the creator role may have
         # been revoked since /event new, so recheck before the irreversible
@@ -1059,7 +1059,12 @@ class EventConfirmView(_PreviewConfirmView):
             return
         try:
             await post_occurrence(self._bot, event, occurrence)
-        except (discord.HTTPException, SQLAlchemyError) as exc:
+        except (discord.HTTPException, SQLAlchemyError, ValueError) as exc:
+            # A ValueError means this event's rows went away while the message
+            # was in flight, because someone deleted or cancelled it in that
+            # window. post_occurrence has already removed the message it sent,
+            # and the cleanup below still applies: whatever is left of the
+            # event goes, so nothing half-posted survives.
             self._draft.posted = False
             await self._restore_post_controls(interaction)
             LOGGER.error(
@@ -1068,7 +1073,13 @@ class EventConfirmView(_PreviewConfirmView):
                 type(exc).__name__,
             )
             # Remove the stored rows so retrying cannot create duplicate
-            # events and the scheduler cannot resurrect this occurrence.
+            # events and the scheduler cannot resurrect this occurrence. Read
+            # the occurrences first: a cancellation racing this post can have
+            # seeded and posted a successor, whose message would otherwise be
+            # left in the channel with its rows gone.
+            occurrences = self._bot.event_store.get_event_occurrences(
+                event.event_id
+            )
             try:
                 self._bot.event_store.delete_event(event.event_id)
             except SQLAlchemyError as cleanup_exc:
@@ -1078,6 +1089,8 @@ class EventConfirmView(_PreviewConfirmView):
                     event.event_id,
                     type(cleanup_exc).__name__,
                 )
+            else:
+                await delete_event_posts(self._bot, event, occurrences)
             await interaction.followup.send(
                 "The event could not be posted to the selected channel. "
                 "Check the bot's permissions there and try again.",
