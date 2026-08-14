@@ -811,11 +811,14 @@ async def cancel_occurrence(
         current_time,
         excluding=occurrence.occurrence_id,
     )
-    claimed = (
-        successor is not None
-        and successor.message_id is None
-        and _mark_cancellation_successor_pending(bot, successor)
-    )
+    claimed = successor is not None and successor.message_id is None
+    if claimed and successor is not None:
+        # Deliberately strict, unlike the re-claim after a failed post: nothing
+        # has been destroyed yet, and a claim that will not write means the
+        # store is unhealthy right now. Going on to delete rows against it
+        # risks the one state nothing recovers from - a series with no posted
+        # run and an unclaimed pending one. Refusing costs a retry.
+        _claim_cancellation_successor(bot, successor)
     try:
         bot.event_store.delete_occurrence(occurrence.occurrence_id)
     except SQLAlchemyError:
@@ -955,6 +958,25 @@ def leading_occurrence(
             and candidate.start_time + duration > now
         ),
         None,
+    )
+
+
+def _claim_cancellation_successor(
+    bot: Gw2Bot,
+    successor: EventOccurrence,
+) -> None:
+    # Raises rather than reporting: see the caller. Already-claimed rows need
+    # no write, which is what makes this safe to call again later.
+    if successor.needs_refresh:
+        return
+    bot.event_store.set_occurrence_needs_refresh(
+        successor.occurrence_id,
+        True,
+    )
+    LOGGER.debug(
+        "Claimed a cancelled occurrence's successor for posting; "
+        "occurrence_id=%s",
+        successor.occurrence_id,
     )
 
 

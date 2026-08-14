@@ -12,7 +12,11 @@ from discord.utils import MISSING
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.commands import EventCommands
-from gw2bot.events.posting import cancel_occurrence, post_occurrence
+from gw2bot.events.posting import (
+    OccurrenceCancellation,
+    cancel_occurrence,
+    post_occurrence,
+)
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.formatting import (
     format_event_datetime,
@@ -4093,36 +4097,31 @@ class TestEventCancelConfirmView:
         assert "error_type=Forbidden" in caplog.text
         assert event.title not in caplog.text
 
-    async def test_cancel_says_so_when_no_retry_could_be_queued(
+    def test_the_result_names_a_successor_nothing_will_post(
         self,
         fake_bot: Any,
         store: EventStore,
-        channel: FakeChannel,
     ) -> None:
         event, occurrence = make_posted_recurring_event(store)
-        channel.send_error = forbidden_error(50013)
-        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
-            MagicMock(side_effect=SQLAlchemyError("boom"))
-        )
         view = EventCancelConfirmView(fake_bot, event, occurrence)
-        interaction = make_interaction(
-            role_ids=(EVENT_CREATE_ROLE_ID,),
-            message=ephemeral_message(),
+        successor = store.create_occurrence(
+            event.event_id,
+            occurrence.start_time + timedelta(days=7),
         )
-        interaction.edit_original_response = AsyncMock()
 
-        await view.cancel_occurrence.callback(interaction)
+        content = view._result_message(
+            OccurrenceCancellation(
+                successor=successor,
+                successor_posted=False,
+                retry_pending=False,
+            )
+        )
 
-        # Nothing will post the successor now, so promising an automatic retry
-        # would leave the commander waiting on a series that never comes back.
-        assert interaction.edit_original_response.await_args is not None
-        content = interaction.edit_original_response.await_args.kwargs[
-            "content"
-        ]
+        # Nothing will post that run, so the message must say so - and the
+        # alternative it offers has to name its cost, because cancelling again
+        # deletes the run rather than restoring it.
         assert "could not be recorded" in content
         assert "nothing will post it on its own" in content
-        # The alternative it offers has to name its cost: cancelling again
-        # deletes the run this message just named rather than restoring it.
         assert "skip that run" in content
         assert "retried automatically" not in content
 

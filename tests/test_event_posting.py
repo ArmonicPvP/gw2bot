@@ -4028,6 +4028,27 @@ class TestCancelOccurrence:
         # before the first destructive step, not after it.
         assert claimed_before_delete == [True]
 
+    async def test_a_claim_that_will_not_write_stops_the_cancellation(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.create_occurrence(event.event_id, START + timedelta(days=1))
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # A claim that cannot be written means the store is unhealthy, and
+        # deleting rows against it risks a series with no posted run and
+        # nothing coming to post one. Nothing is touched; a retry is cheap.
+        assert store.get_occurrence(posted.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+
     async def test_a_failed_delete_gives_back_the_claim(
         self,
         bot: Any,
