@@ -732,7 +732,23 @@ async def post_pending_occurrence(
                     posted.occurrence_id,
                     type(exc).__name__,
                 )
-    for signup in bot.event_store.get_signups(posted.occurrence_id):
+    try:
+        signups = bot.event_store.get_signups(posted.occurrence_id)
+    except SQLAlchemyError as exc:
+        # Delivery is done and recorded; subscribing the roster is what
+        # follows it. Failing the call over this would report a post that is
+        # in the channel as never sent, and a cancellation would then promise
+        # a retry that cannot happen - the scheduler only posts rows with no
+        # message. The members keep their seats and miss only the thread
+        # subscription, which signing up again would give them.
+        LOGGER.error(
+            "Could not read the roster to subscribe it after posting; "
+            "occurrence_id=%s error_type=%s",
+            posted.occurrence_id,
+            type(exc).__name__,
+        )
+        return posted
+    for signup in signups:
         await update_thread_membership(
             bot,
             posted,

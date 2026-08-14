@@ -3922,6 +3922,45 @@ class TestCancelOccurrence:
         assert cancellation.successor is None
         assert not cancellation.successor_posted
 
+    async def test_a_posted_successor_survives_a_failed_roster_lookup(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        real_get_signups = store.get_signups
+
+        def fail_once_the_post_is_recorded(occurrence_id: int) -> Any:
+            stored = store.get_occurrence(occurrence_id)
+            if (
+                occurrence_id == successor.occurrence_id
+                and stored is not None
+                and stored.message_id is not None
+            ):
+                raise SQLAlchemyError("boom")
+            return real_get_signups(occurrence_id)
+
+        store.get_signups = (  # type: ignore[method-assign]
+            MagicMock(side_effect=fail_once_the_post_is_recorded)
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # Subscribing the roster follows delivery. Reporting the post as
+        # undelivered would promise a retry the scheduler cannot make, since
+        # it only posts rows that have no message.
+        assert cancellation.successor_posted
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        assert stored.message_id is not None
+
     async def test_a_posted_successor_survives_failed_flag_cleanup(
         self,
         bot: Any,
