@@ -50,6 +50,11 @@ from gw2bot.events.views import (
     EventScheduleModal,
     EventSignOutButton,
     EventSignUpButton,
+    ADD_SELECT_MAX_MEMBERS,
+    AddSignupsRoleSelect,
+    AddSignupsRoleView,
+    AddSignupsSelect,
+    AddSignupsView,
     RemoveSignupsSelect,
     RemoveSignupsView,
     RepeatChoiceView,
@@ -2319,7 +2324,7 @@ class TestEditCommandOngoing:
             for item in view.children
             if isinstance(item, discord.ui.Button)
         ]
-        assert labels == ["Remove sign-ups"]
+        assert labels == ["Add sign-ups", "Remove sign-ups"]
         assert view._draft.roster_only
 
     async def test_roster_only_preview_shows_the_live_status(
@@ -4535,3 +4540,660 @@ class TestRemoveSignups:
         assert "Delivered direct message" in caplog.text
         assert "Could not deliver a direct message" in caplog.text
         assert "Applied roster removal" in caplog.text
+
+
+def add_select(view: AddSignupsView) -> AddSignupsSelect:
+    return next(
+        item for item in view.children if isinstance(item, AddSignupsSelect)
+    )
+
+
+def add_back_button(view: AddSignupsView) -> Any:
+    return next(
+        item
+        for item in view.children
+        if isinstance(item, discord.ui.Button) and item.label == "Back"
+    )
+
+
+class TestAddSignups:
+    """Manually putting members on an event's roster from /event edit."""
+
+    def make_event(
+        self,
+        store: EventStore,
+        category: EventCategory = EventCategory.FRACTAL,
+        *,
+        posted: bool = True,
+    ) -> Any:
+        event = store.create_event(
+            category=category,
+            title="Original Title",
+            description="Original description.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        if posted:
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                1234,
+                555,
+                777,
+            )
+            refetched = store.get_occurrence(occurrence.occurrence_id)
+            assert refetched is not None
+            occurrence = refetched
+        return event, occurrence
+
+    def make_draft(self, event: Any, occurrence: Any) -> EventDraft:
+        return draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+
+    def make_add_view(
+        self,
+        fake_bot: Any,
+        event: Any,
+        occurrence: Any,
+    ) -> AddSignupsView:
+        return AddSignupsView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+        )
+
+    def make_add_interaction(self, guild_id: int | None = 9876) -> Any:
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.guild_id = guild_id
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    def change_event(
+        self,
+        store: EventStore,
+        event: Any,
+        **changes: Any,
+    ) -> Any:
+        # update_event replaces every field, so the unchanged ones are carried
+        # over from the stored event.
+        fields = {
+            "category": event.category,
+            "title": event.title,
+            "description": event.description,
+            "channel_id": event.channel_id,
+            "leader_discord_id": event.leader_discord_id,
+            "start_time": event.start_time,
+            "duration_minutes": event.duration_minutes,
+            "repeat_frequency": event.repeat_frequency,
+            "repeat_days": event.repeat_days,
+        }
+        return store.update_event(
+            event_id=event.event_id,
+            **{**fields, **changes},
+        )
+
+    def seat(
+        self,
+        store: EventStore,
+        occurrence: Any,
+        discord_user_id: int,
+        role: EventRole | None = EventRole.DPS,
+        flex_roles: tuple[EventRole, ...] = (),
+        waitlisted: bool = False,
+    ) -> None:
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=discord_user_id,
+            role=role,
+            assigned_role=None if waitlisted else role,
+            flex_roles=flex_roles,
+            waitlisted=waitlisted,
+        )
+
+    def test_edit_preview_offers_the_add_button(
+        self,
+        fake_bot: Any,
+    ) -> None:
+        draft = draft_from_event(
+            make_edit_event(EventStore(":memory:")),
+            ZoneInfo("UTC"),
+        )
+
+        labels = [
+            item.label
+            for item in EventEditConfirmView(fake_bot, draft).children
+            if isinstance(item, discord.ui.Button)
+        ]
+        assert "Add sign-ups" in labels
+
+    def test_roster_editor_offers_the_add_button(
+        self,
+        fake_bot: Any,
+    ) -> None:
+        draft = replace(
+            draft_from_event(
+                make_edit_event(EventStore(":memory:")),
+                ZoneInfo("UTC"),
+            ),
+            roster_only=True,
+        )
+
+        labels = [
+            item.label
+            for item in EventRosterEditView(fake_bot, draft).children
+            if isinstance(item, discord.ui.Button)
+        ]
+        assert "Add sign-ups" in labels
+
+    async def test_button_opens_the_member_search(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1)
+        view = EventEditConfirmView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+        )
+        interaction = self.make_add_interaction()
+
+        await cast(Any, view.add_signups.callback)(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        picker = kwargs["view"]
+        assert isinstance(picker, AddSignupsView)
+        # Discord's own user select: the commander searches the whole server
+        # rather than a list the bot builds, so there are no options to page.
+        select = add_select(picker)
+        assert select.max_values == ADD_SELECT_MAX_MEMBERS
+        assert select.min_values == 1
+        # The current roster stays on screen above the picker.
+        assert len(kwargs["embeds"]) == 1
+
+    async def test_button_requires_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        view = EventEditConfirmView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+        )
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.add_signups.callback)(interaction)
+
+        interaction.response.edit_message.assert_not_awaited()
+        assert (
+            "required role"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_button_refuses_an_ended_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(hours=3),
+        )
+        view = EventEditConfirmView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+        )
+        interaction = self.make_add_interaction()
+
+        await cast(Any, view.add_signups.callback)(interaction)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_a_role_event_asks_which_role_to_seat_them_as(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # Nothing is written until the role is answered.
+        assert store.get_signups(occurrence.occurrence_id) == []
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        role_view = kwargs["view"]
+        assert isinstance(role_view, AddSignupsRoleView)
+        assert "<@11>, <@12>" in kwargs["content"]
+        select = next(
+            item
+            for item in role_view.children
+            if isinstance(item, AddSignupsRoleSelect)
+        )
+        assert [option.value for option in select.options] == [
+            role.value for role in EventRole
+        ]
+
+    async def test_a_headcount_event_adds_without_asking_for_a_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        seated = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in seated} == {11, 12}
+        assert not any(signup.waitlisted for signup in seated)
+        assert all(signup.role is None for signup in seated)
+        # They join the event thread and the public message is re-rendered.
+        assert channel.thread.add_user.await_count == 2
+        channel.partial_message.edit.assert_awaited()
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Added <@11>, <@12> to the roster." in kwargs["content"]
+        assert isinstance(kwargs["view"], EventEditConfirmView)
+        assert len(kwargs["embeds"]) == 2
+
+    async def test_the_picked_role_seats_every_member(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            [],
+            [11, 12],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        seated = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in seated} == {11, 12}
+        for signup in seated:
+            assert signup.role is EventRole.DPS
+            assert signup.assigned_role is EventRole.DPS
+            # A commander cannot answer the flex question for someone else, so
+            # a manual add carries the picked role alone.
+            assert signup.flex_roles == ()
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11>, <@12> to the roster." in content
+
+    async def test_added_members_are_told_who_added_them(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        fake_bot.users[11].send.assert_awaited_once()
+        content = fake_bot.users[11].send.await_args.args[0]
+        assert content == (
+            "<@42> added you to [Original Title]"
+            "(https://discord.com/channels/9876/1234/555)."
+        )
+
+    async def test_the_link_points_at_the_channel_the_event_was_posted_to(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # An event whose channel was changed keeps occurrences that were not
+        # re-posted where they already live, so the link follows the message.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        self.change_event(store, event, channel_id=4321)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        content = fake_bot.users[11].send.await_args.args[0]
+        assert "/9876/1234/555)" in content
+
+    async def test_an_unposted_occurrence_names_the_event_without_a_link(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(
+            store,
+            EventCategory.WVW,
+            posted=False,
+        )
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        content = fake_bot.users[11].send.await_args.args[0]
+        assert content == "<@42> added you to **Original Title**."
+
+    async def test_a_bracket_in_the_title_cannot_break_the_link(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        self.change_event(store, event, title="CM [exp] run")
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        content = fake_bot.users[11].send.await_args.args[0]
+        assert content == (
+            "<@42> added you to [CM \\[exp\\] run]"
+            "(https://discord.com/channels/9876/1234/555)."
+        )
+
+    async def test_a_closed_dm_is_reported_but_keeps_the_signup(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        fake_bot.dm_errors[11] = forbidden_error(50007)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        assert store.get_signup(occurrence.occurrence_id, 12) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Could not send a direct message to <@11>" in content
+
+    async def test_a_member_who_is_already_signed_up_is_left_alone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Re-adding them would rewrite their signup row, and with it the
+        # sign-up time their seating priority is read from.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        self.seat(store, occurrence, 11, role=None)
+        original = store.get_signup(occurrence.occurrence_id, 11)
+        assert original is not None
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        unchanged = store.get_signup(occurrence.occurrence_id, 11)
+        assert unchanged is not None
+        assert unchanged.signed_up_at == original.signed_up_at
+        assert 11 not in fake_bot.users
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@12> to the roster." in content
+        assert "<@11> was already signed up for this event." in content
+
+    async def test_a_full_roster_puts_the_addition_on_the_waitlist(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        added = store.get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert added.waitlisted
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert (
+            "The event is full, so <@11> was added to the waitlist." in content
+        )
+        assert "Added <@11> to the roster." not in content
+        # They are still told, because they are on the event either way.
+        fake_bot.users[11].send.assert_awaited_once()
+
+    async def test_several_additions_send_one_merged_thread_ping(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A fractal seats one quickness in total, so seating a Quickness DPS
+        # flexes the quickness healer onto their alacrity flex role. Two
+        # additions must still read as the single edit the leader made.
+        event, occurrence = self.make_event(store)
+        self.seat(
+            store,
+            occurrence,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            flex_roles=(EventRole.ALACRITY_HEAL,),
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11, 12],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_DPS)
+
+        flexed = store.get_signup(occurrence.occurrence_id, 1)
+        assert flexed is not None
+        assert flexed.assigned_role is EventRole.ALACRITY_HEAL
+        channel.thread.send.assert_awaited_once()
+        send = channel.thread.send.await_args
+        assert send is not None
+        assert "<@1>" in send.args[0]
+
+    async def test_a_plain_addition_leaves_the_thread_quiet(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # Nobody already on the roster moved, so there is nothing to announce.
+        channel.thread.send.assert_not_awaited()
+
+    async def test_addition_requires_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.guild_id = 9876
+        interaction.edit_original_response = AsyncMock()
+
+        await view.pick(interaction, [11])
+
+        assert store.get_signups(occurrence.occurrence_id) == []
+        interaction.edit_original_response.assert_not_awaited()
+        assert (
+            "required role"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_addition_after_the_event_ended_changes_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(hours=3),
+        )
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        assert store.get_signups(occurrence.occurrence_id) == []
+        interaction.edit_original_response.assert_not_awaited()
+        assert (
+            "already ended"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_addition_stops_when_the_event_ends_mid_loop(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The end check runs once before the loop, but seating a member awaits
+        # Discord I/O, so the event can cross its end partway through.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+        calls = {"count": 0}
+
+        # False for the two picker re-checks and the first iteration, then
+        # True: the event ends right after the first member is seated.
+        def fake_ended(_event: Any, _occurrence: Any, _now: Any) -> bool:
+            calls["count"] += 1
+            return calls["count"] > 3
+
+        monkeypatch.setattr(
+            "gw2bot.events.views.occurrence_has_ended",
+            fake_ended,
+        )
+
+        await view.pick(interaction, [11, 12, 13])
+
+        seated = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in seated} == {11}
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        # The edit session is void once the event ends, so no preview returns.
+        assert kwargs["view"] is None
+        assert "Added <@11> to the roster." in kwargs["content"]
+        assert "ended before" in kwargs["content"]
+        assert "<@12>, <@13> were left off." in kwargs["content"]
+
+    async def test_addition_reports_a_deleted_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        store.delete_event(event.event_id)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        interaction.edit_original_response.assert_not_awaited()
+        assert (
+            "no longer exists"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_back_returns_to_the_edit_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await add_back_button(view).callback(interaction)
+
+        assert store.get_signups(occurrence.occurrence_id) == []
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventEditConfirmView)
+
+    async def test_addition_logging_keeps_the_event_out_of_the_log(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title=title,
+            description=description,
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        refetched = store.get_occurrence(occurrence.occurrence_id)
+        assert refetched is not None
+        fake_bot.dm_errors[12] = forbidden_error(50007)
+        view = self.make_add_view(fake_bot, event, refetched)
+        interaction = self.make_add_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await view.pick(interaction, [11, 12])
+
+        # The direct message carries the event title and a link to its message,
+        # so neither the event nor the message body may reach the log.
+        assert title not in caplog.text
+        assert description not in caplog.text
+        assert "discord.com/channels" not in caplog.text
+        # The workflow still has to be traceable end to end.
+        assert "Picked members to add" in caplog.text
+        assert "Sending direct message" in caplog.text
+        assert "Delivered direct message" in caplog.text
+        assert "Could not deliver a direct message" in caplog.text
+        assert "Applied roster addition" in caplog.text

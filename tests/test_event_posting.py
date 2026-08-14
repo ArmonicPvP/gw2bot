@@ -45,6 +45,7 @@ from gw2bot.events.posting import (
     refresh_occurrence_message,
     remove_signup,
     repost_occurrence,
+    seat_signup,
 )
 from gw2bot.events.store import EventStore
 
@@ -3810,3 +3811,78 @@ class TestPostingLoggingSafety:
             "required_permissions=manage_threads "
             "(type=Forbidden status=403 code=50013)" in caplog.text
         )
+
+
+class TestSeatSignup:
+    """The seating primitive complete_signup and the manual adder share."""
+
+    async def test_it_reports_the_seats_the_newcomer_moved(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot,
+            event,
+            occurrence,
+            11,
+            EventRole.QUICKNESS_HEAL,
+            (EventRole.ALACRITY_HEAL,),
+        )
+
+        signup, update = await seat_signup(
+            bot,
+            event,
+            occurrence,
+            12,
+            EventRole.QUICKNESS_DPS,
+            (),
+        )
+
+        assert signup.assigned_role is EventRole.QUICKNESS_DPS
+        # A fractal seats one quickness in total, so the healer takes their
+        # alacrity flex role to make room.
+        assert update.reassigned == (
+            RoleChange(
+                discord_user_id=11,
+                old_role=EventRole.QUICKNESS_HEAL,
+                new_role=EventRole.ALACRITY_HEAL,
+            ),
+        )
+
+    async def test_notify_false_leaves_the_announcement_to_the_caller(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A leader adding several members at once merges the updates into one
+        # announcement of their own, so each seating must stay quiet.
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot,
+            event,
+            occurrence,
+            11,
+            EventRole.QUICKNESS_HEAL,
+            (EventRole.ALACRITY_HEAL,),
+        )
+        channel.thread.send.reset_mock()
+
+        _, update = await seat_signup(
+            bot,
+            event,
+            occurrence,
+            12,
+            EventRole.QUICKNESS_DPS,
+            (),
+            notify=False,
+        )
+
+        assert update.reassigned
+        channel.thread.send.assert_not_awaited()
+        # The roster itself is still applied and the public message refreshed.
+        seated = store.get_signup(occurrence.occurrence_id, 12)
+        assert seated is not None
+        channel.partial_message.edit.assert_awaited()
