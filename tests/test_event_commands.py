@@ -5373,6 +5373,90 @@ class TestAddSignups:
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert isinstance(kwargs["view"], AddSignupsView)
 
+    async def test_a_seat_rebalanced_mid_write_is_reported_as_it_stands(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A category edit landing while seat_signup awaits Discord re-seats the
+        # roster under the new capacity, so the row the write returned can
+        # describe a capacity that no longer applies. The summary must
+        # describe the member as they now stand, not as they were written.
+        from gw2bot.events.posting import rebalance_occurrence_roster
+
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+
+        async def another_leaders_edit(**_fields: Any) -> None:
+            # /event edit saving a category change does exactly this: store the
+            # new category, then re-seat the roster against its capacity.
+            widened = self.change_event(
+                store,
+                event,
+                category=EventCategory.WVW,
+            )
+            rebalance_occurrence_roster(fake_bot, widened, occurrence)
+
+        channel.partial_message.edit = AsyncMock(
+            side_effect=another_leaders_edit
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The fractal was full, so the write waitlisted them; the rebalance
+        # onto a 50-seat category then seated them.
+        seat = store.get_signup(occurrence.occurrence_id, 11)
+        assert seat is not None
+        assert not seat.waitlisted
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11> to the roster." in content
+        assert "waitlist" not in content
+
+    async def test_a_concurrent_change_is_reported_with_nobody_left_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The whole batch was applied, so there is nobody to name - but the
+        # preview does not come back, so the commander still has to be told
+        # why and that the roster may have moved under them.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+
+        async def another_leaders_edit(**_fields: Any) -> None:
+            self.change_event(store, event, category=EventCategory.FRACTAL)
+
+        channel.partial_message.edit = AsyncMock(
+            side_effect=another_leaders_edit
+        )
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11])
+
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "Added <@11> to the roster." in kwargs["content"]
+        assert "Another leader changed this event" in kwargs["content"]
+        # The moves this batch computed were against the old capacity, and the
+        # edit announces its own rebalance, so nothing stale is posted.
+        channel.thread.send.assert_not_awaited()
+
     async def test_a_picker_that_outlives_its_event_is_logged(
         self,
         fake_bot: Any,

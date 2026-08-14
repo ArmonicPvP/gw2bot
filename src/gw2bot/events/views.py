@@ -2582,10 +2582,29 @@ async def apply_roster_addition(
                 interaction.user.id,
                 final.value,
             )
+    # Re-read the seats rather than trusting what each write returned. An edit
+    # landing while seat_signup awaited Discord re-seats the whole roster under
+    # the new capacity, so the row a write returned can describe a capacity
+    # that no longer applies - reporting a member as waitlisted when the
+    # rebalance has since seated them. One store read describes them all as
+    # they now stand. A member whose row has gone (the event was deleted) is
+    # left out of the waitlist entirely; the stop note below covers that.
+    outcome.waitlisted = [
+        user_id
+        for user_id in outcome.added
+        if _is_waitlisted(bot, current.occurrence_id, user_id)
+    ]
     # Each addition can flex seated members into another of their roles, and a
     # later addition can move someone an earlier one already moved. Merging
     # collapses each member's changes into one line describing the net result.
-    merged = merge_roster_updates(updates)
+    # A concurrent category change makes those moves obsolete - they were
+    # computed against the old capacity, and the edit announces its own
+    # rebalance in the same thread - so there is nothing left worth saying.
+    merged = (
+        RosterUpdate()
+        if outcome.stop is _AdditionStop.CHANGED
+        else merge_roster_updates(updates)
+    )
     await notify_roster_update(bot, current, merged)
     LOGGER.debug(
         "Applied roster addition; event_id=%s occurrence_id=%s user_id=%s "
@@ -2624,6 +2643,30 @@ async def apply_roster_addition(
         embeds=embeds,
         view=view,
     )
+
+
+def _is_waitlisted(bot: Gw2Bot, occurrence_id: int, user_id: int) -> bool:
+    seat = bot.event_store.get_signup(occurrence_id, user_id)
+    return seat is not None and seat.waitlisted
+
+
+def _addition_finished_note(stop: _AdditionStop) -> str:
+    """Say what became of the event once the whole batch had been applied.
+
+    Everyone picked was dealt with, so there is nobody to name; the commander
+    still has to be told, because the preview does not come back.
+    """
+    if stop is _AdditionStop.CHANGED:
+        return (
+            "Another leader changed this event's category while the members "
+            "were being added, so its roster may have been re-seated since."
+        )
+    if stop is _AdditionStop.RETIRED:
+        return (
+            "This event's post is no longer available; its message may have "
+            "been deleted."
+        )
+    return "The event ended while the members were being added."
 
 
 def _addition_stop_note(
@@ -2692,13 +2735,8 @@ def _addition_summary(outcome: _AdditionOutcome) -> str:
         )
     if outcome.left_off:
         lines.append(_addition_stop_note(outcome.stop, outcome.left_off))
-    elif outcome.stop is _AdditionStop.RETIRED:
-        # Everyone picked was dealt with, but the post they were added to has
-        # gone; the commander would otherwise have no idea.
-        lines.append(
-            "This event's post is no longer available; its message may have "
-            "been deleted."
-        )
+    elif outcome.stop is not None:
+        lines.append(_addition_finished_note(outcome.stop))
     if outcome.undelivered:
         # The addition itself went through; only the notice did not, which the
         # commander needs to know so they can pass the word along.
