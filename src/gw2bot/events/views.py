@@ -2353,10 +2353,21 @@ class EventDeleteConfirmView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        self._deleting = True
+        await interaction.response.edit_message(
+            content="Deleting the event…",
+            embeds=[],
+            view=None,
+        )
         if self._only_while_one_off:
+            # Checked after the acknowledgement, not before: that await is a
+            # Discord round-trip, and an edit landing inside it would make a
+            # check taken first stale by the time the deletion runs.
             from gw2bot.events.posting import leading_occurrence
 
             stored = self._bot.event_store.get_event(self._event.event_id)
+            refusal: str | None = None
+            reason = ""
             if stored is not None and (
                 leading_occurrence(self._bot, stored, datetime.now(UTC))
                 is None
@@ -2365,49 +2376,36 @@ class EventDeleteConfirmView(discord.ui.View):
                 # cancel` calls off runs still to come, so deleting now would
                 # erase a finished run's roster and post through a command
                 # that never offered to.
-                LOGGER.debug(
-                    "Event cancel deletion refused for a finished event; "
-                    "user_id=%s event_id=%s",
-                    interaction.user.id,
-                    self._event.event_id,
+                reason = "a finished event"
+                refusal = (
+                    "That event has already run, so there is nothing left to "
+                    "cancel. Use `/event delete` if you want to remove it."
                 )
-                await interaction.response.edit_message(
-                    content=(
-                        "That event has already run, so there is nothing left "
-                        "to cancel. Use `/event delete` if you want to remove "
-                        "it."
-                    ),
-                    embeds=[],
-                    view=None,
-                )
-                return
-            if (
+            elif (
                 stored is not None
                 and stored.repeat_frequency is not RepeatFrequency.NONE
             ):
+                reason = "an event that now repeats"
+                refusal = (
+                    "That event repeats now, so cancelling it would only call "
+                    "off its next run rather than delete it. Run "
+                    "`/event cancel` again to do that, or `/event delete` to "
+                    "remove the whole event."
+                )
+            if refusal is not None:
+                self._deleting = False
                 LOGGER.debug(
-                    "Event cancel deletion refused for an event that now "
-                    "repeats; user_id=%s event_id=%s",
+                    "Event cancel deletion refused for %s; user_id=%s "
+                    "event_id=%s",
+                    reason,
                     interaction.user.id,
                     self._event.event_id,
                 )
-                await interaction.response.edit_message(
-                    content=(
-                        "That event repeats now, so cancelling it would only "
-                        "call off its next run rather than delete it. Run "
-                        "`/event cancel` again to do that, or `/event delete` "
-                        "to remove the whole event."
-                    ),
-                    embeds=[],
+                await interaction.edit_original_response(
+                    content=refusal,
                     view=None,
                 )
                 return
-        self._deleting = True
-        await interaction.response.edit_message(
-            content="Deleting the event…",
-            embeds=[],
-            view=None,
-        )
         # Read the occurrences before the store rows are removed so their
         # messages can still be cleaned up afterwards.
         occurrences = self._bot.event_store.get_event_occurrences(

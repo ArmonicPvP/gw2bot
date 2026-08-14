@@ -3535,6 +3535,7 @@ class TestCancelDeleteFallbackView:
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
         )
+        interaction.edit_original_response = AsyncMock()
 
         await view.delete.callback(interaction)
 
@@ -3543,9 +3544,10 @@ class TestCancelDeleteFallbackView:
         assert store.get_event(event.event_id) is not None
         assert store.get_occurrence(occurrence.occurrence_id) is not None
         channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
         assert (
             "repeats now"
-            in interaction.response.edit_message.await_args.kwargs["content"]
+            in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
     async def test_delete_still_removes_a_one_off_event(
@@ -3591,6 +3593,7 @@ class TestCancelDeleteFallbackView:
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
         )
+        interaction.edit_original_response = AsyncMock()
 
         await view.delete.callback(interaction)
 
@@ -3598,9 +3601,10 @@ class TestCancelDeleteFallbackView:
         # now - `/event delete` removes it, `/event cancel` does not.
         assert store.get_event(event.event_id) is not None
         channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
         assert (
             "already run"
-            in interaction.response.edit_message.await_args.kwargs["content"]
+            in interaction.edit_original_response.await_args.kwargs["content"]
         )
 
     async def test_declining_the_deletion_is_logged(
