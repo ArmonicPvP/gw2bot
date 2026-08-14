@@ -5123,6 +5123,51 @@ class TestAddSignups:
         assert "ended before" in kwargs["content"]
         assert "<@12>, <@13> were left off." in kwargs["content"]
 
+    async def test_addition_stops_when_the_occurrence_is_retired(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Seating the first member refreshes the public message. A message that
+        # has been deleted retires the occurrence as OVER, so the rest of the
+        # batch must not be seated onto a roster nobody can see, nor sent a
+        # link to a message that is gone.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12, 13])
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        seated = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in seated} == {11}
+        assert 12 not in fake_bot.users
+        assert 13 not in fake_bot.users
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "Added <@11> to the roster." in kwargs["content"]
+        assert "<@12>, <@13> were left off." in kwargs["content"]
+
+    async def test_a_picker_that_outlives_its_event_is_logged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        store.delete_event(event.event_id)
+        interaction = self.make_add_interaction()
+
+        with caplog.at_level("DEBUG"):
+            await view.pick(interaction, [11])
+
+        assert "Roster addition picker outlived its target" in caplog.text
+
     async def test_addition_reports_a_deleted_event(
         self,
         fake_bot: Any,

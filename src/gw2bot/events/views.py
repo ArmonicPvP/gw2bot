@@ -1358,6 +1358,16 @@ async def _picked_roster_target(
     )
     occurrence = bot.event_store.get_occurrence(occurrence_id)
     if event is None or occurrence is None:
+        LOGGER.debug(
+            "Roster %s picker outlived its target; event_id=%s "
+            "occurrence_id=%s user_id=%s event_exists=%s occurrence_exists=%s",
+            action,
+            editing_event_id,
+            occurrence_id,
+            interaction.user.id,
+            event is not None,
+            occurrence is not None,
+        )
         await interaction.response.edit_message(
             content="This event no longer exists.",
             embeds=[],
@@ -2315,20 +2325,33 @@ async def apply_roster_addition(
     content = _addition_dm_content(interaction.user.id, event, link)
     for index, user_id in enumerate(user_ids):
         # The picker holds several members and seat_signup awaits Discord I/O
-        # between each, so the event can cross its end partway through the loop
-        # even though the pre-loop check passed. Re-check every iteration and
-        # stop the moment it has ended, so no addition ever lands on a finished
-        # roster.
-        if occurrence_has_ended(event, current, datetime.now(UTC)):
+        # between each, so the occurrence can go out from under the loop even
+        # though the pre-loop check passed. It can simply reach its end, but it
+        # can also be retired mid-loop: seating a member refreshes the public
+        # message, and a message or channel that has been deleted retires the
+        # occurrence as OVER and seeds the series' successor. So re-read it
+        # every iteration rather than trusting the row read before the loop -
+        # otherwise the rest of the batch is seated onto a roster nobody can
+        # see, and sent a link to a message that is gone.
+        refreshed = bot.event_store.get_occurrence(current.occurrence_id)
+        if (
+            refreshed is None
+            or refreshed.status is EventStatus.OVER
+            or occurrence_has_ended(event, refreshed, datetime.now(UTC))
+        ):
             kept_after_end = list(user_ids[index:])
             LOGGER.debug(
-                "Event ended mid-addition; stopping; occurrence_id=%s "
-                "user_id=%s left_off=%s",
+                "Occurrence is no longer live mid-addition; stopping; "
+                "occurrence_id=%s user_id=%s exists=%s left_off=%s",
                 current.occurrence_id,
                 interaction.user.id,
+                refreshed is not None,
                 len(kept_after_end),
             )
             break
+        # Carry the fresh row forward: seat_signup and the announcement below
+        # both read the occurrence, and the stored status can have moved on.
+        current = refreshed
         # add_signup would overwrite an existing row, resetting the member's
         # signed-up time and with it their seating priority, so a member who is
         # already on the roster is left exactly as they are.
