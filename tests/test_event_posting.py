@@ -3997,6 +3997,61 @@ class TestCancelOccurrence:
         assert stored is not None
         assert stored.message_id is not None
 
+    async def test_the_successor_is_claimed_before_anything_is_destroyed(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        claimed_before_delete: list[bool] = []
+        real_delete = store.delete_occurrence
+
+        def record_the_claim(occurrence_id: int) -> None:
+            stored = store.get_occurrence(successor.occurrence_id)
+            claimed_before_delete.append(
+                stored is not None and stored.needs_refresh
+            )
+            real_delete(occurrence_id)
+
+        store.delete_occurrence = (  # type: ignore[method-assign]
+            MagicMock(side_effect=record_the_claim)
+        )
+
+        await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # Everything from the delete onwards is what posts the successor, so
+        # the claim that lets the maintenance pass recover has to be in place
+        # before the first destructive step, not after it.
+        assert claimed_before_delete == [True]
+
+    async def test_a_failed_delete_gives_back_the_claim(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        store.delete_occurrence = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # The cancellation did not happen, so the run it claimed is a future
+        # one again: left claimed, the maintenance pass would post it while
+        # the run that failed to cancel is still live.
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        assert not stored.needs_refresh
+
     async def test_an_interrupted_cancellation_leaves_the_successor_postable(
         self,
         bot: Any,

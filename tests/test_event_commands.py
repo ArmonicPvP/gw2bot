@@ -4036,6 +4036,36 @@ class TestEventCancelConfirmView:
         assert "error_type=Forbidden" in caplog.text
         assert event.title not in caplog.text
 
+    async def test_a_failed_revalidation_is_reported(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        store.get_event = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        with caplog.at_level("ERROR", logger="gw2bot.events.views"):
+            await view.cancel_occurrence.callback(interaction)
+
+        # The buttons went with the acknowledgement, so a commander left on
+        # "Cancelling the occurrence…" has no way to tell it never happened.
+        assert not view._cancelling
+        assert "Could not re-read an event before cancelling" in caplog.text
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "could not be cancelled"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
     async def test_a_failed_decline_message_is_logged_without_its_body(
         self,
         fake_bot: Any,

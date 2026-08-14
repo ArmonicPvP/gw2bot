@@ -2434,13 +2434,30 @@ class EventDeleteConfirmView(discord.ui.View):
             # check taken first stale by the time the deletion runs.
             from gw2bot.events.posting import leading_occurrence
 
-            stored = self._bot.event_store.get_event(self._event.event_id)
+            try:
+                stored = self._bot.event_store.get_event(self._event.event_id)
+                still_upcoming = stored is not None and (
+                    leading_occurrence(self._bot, stored, datetime.now(UTC))
+                    is not None
+                )
+            except SQLAlchemyError as exc:
+                self._deleting = False
+                LOGGER.error(
+                    "Could not re-read an event before deleting; event_id=%s "
+                    "error_type=%s",
+                    self._event.event_id,
+                    type(exc).__name__,
+                )
+                await _send_flow_result(
+                    interaction,
+                    "The event could not be deleted. Try again later.",
+                    workflow="event deletion failure",
+                    event_id=self._event.event_id,
+                )
+                return
             refusal: str | None = None
             reason = ""
-            if stored is not None and (
-                leading_occurrence(self._bot, stored, datetime.now(UTC))
-                is None
-            ):
+            if stored is not None and not still_upcoming:
                 # The run ended while this confirmation sat open. `/event
                 # cancel` calls off runs still to come, so deleting now would
                 # erase a finished run's roster and post through a command
@@ -2626,10 +2643,30 @@ class EventCancelConfirmView(discord.ui.View):
         # event deleted, or the occurrence pruned or retired. Cancelling from
         # those stale copies would seed a successor for an event that no longer
         # exists, so re-read both and stop if the run has already gone.
-        event = self._bot.event_store.get_event(self._event.event_id)
-        occurrence = self._bot.event_store.get_occurrence(
-            self._occurrence.occurrence_id
-        )
+        try:
+            event = self._bot.event_store.get_event(self._event.event_id)
+            occurrence = self._bot.event_store.get_occurrence(
+                self._occurrence.occurrence_id
+            )
+        except SQLAlchemyError as exc:
+            # Nothing has been touched, so this is a plain retry - but the
+            # buttons are gone with the acknowledgement, so it has to be said
+            # rather than left on "Cancelling the occurrence…" forever.
+            self._cancelling = False
+            LOGGER.error(
+                "Could not re-read an event before cancelling; event_id=%s "
+                "occurrence_id=%s error_type=%s",
+                self._event.event_id,
+                self._occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            await _send_flow_result(
+                interaction,
+                "The occurrence could not be cancelled. Try again later.",
+                workflow="event cancellation failure",
+                event_id=self._event.event_id,
+            )
+            return
         if event is None or event.cancelled or occurrence is None:
             self._cancelling = False
             LOGGER.debug(

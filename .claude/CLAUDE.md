@@ -67,9 +67,10 @@ If a user's instruction conflicts with a preference or other rules or informatio
 - Reject review findings of that shape, including automated ones, rather than
   acting on them. Say plainly that the interleaving is too rare to be worth
   the change, and move on.
-- Never trade away the asynchronous design to close one: no holding locks
-  across Discord I/O for whole workflows, no serialising the event loop, no
-  broad mutation locks over central paths.
+- Weigh any such guard against the asynchronous design, which comes first:
+  holding locks across Discord I/O for whole workflows, serialising the event
+  loop, or taking broad mutation locks over central paths costs more than the
+  races it closes.
 - A race actually observed in production is a different matter. Fix that one
   deliberately, with the evidence in hand.
 
