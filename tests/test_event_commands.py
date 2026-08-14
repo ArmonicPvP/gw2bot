@@ -5120,8 +5120,11 @@ class TestAddSignups:
         # The edit session is void once the event ends, so no preview returns.
         assert kwargs["view"] is None
         assert "Added <@11> to the roster." in kwargs["content"]
-        assert "ended before" in kwargs["content"]
+        assert "The event ended before the rest could be added" in (
+            kwargs["content"]
+        )
         assert "<@12>, <@13> were left off." in kwargs["content"]
+        assert "post is no longer available" not in kwargs["content"]
 
     async def test_addition_stops_when_the_occurrence_is_retired(
         self,
@@ -5150,6 +5153,44 @@ class TestAddSignups:
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert kwargs["view"] is None
         assert "Added <@11> to the roster." in kwargs["content"]
+        assert "<@12>, <@13> were left off." in kwargs["content"]
+        # A retired occurrence is not a finished event, and saying so hides the
+        # actionable part: the post the commander is looking for is gone.
+        assert "This event's post is no longer available" in kwargs["content"]
+        assert "ended before" not in kwargs["content"]
+
+    async def test_addition_stops_when_another_leader_edits_the_category(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The category picks the capacity every seat is computed against, and
+        # the edit that changes it re-seats the whole roster under the new one.
+        # Seating the rest of the batch from the stale event would undo that
+        # with the old capacity - here, role-less members onto a fractal.
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        view = self.make_add_view(fake_bot, event, occurrence)
+
+        async def another_leaders_edit(**_fields: Any) -> None:
+            # Lands while the first member is being seated: seat_signup
+            # refreshes the public message partway through the batch.
+            self.change_event(store, event, category=EventCategory.FRACTAL)
+
+        channel.partial_message.edit = AsyncMock(
+            side_effect=another_leaders_edit
+        )
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12, 13])
+
+        seated = store.get_signups(occurrence.occurrence_id)
+        assert {signup.discord_user_id for signup in seated} == {11}
+        assert 12 not in fake_bot.users
+        assert 13 not in fake_bot.users
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "Another leader changed this event" in kwargs["content"]
         assert "<@12>, <@13> were left off." in kwargs["content"]
 
     async def test_a_picker_that_outlives_its_event_is_logged(

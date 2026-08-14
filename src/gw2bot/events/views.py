@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from math import ceil
 from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
@@ -2282,6 +2283,20 @@ def _addition_dm_content(
     return f"<@{commander_discord_id}> added you to {name}."
 
 
+class _AdditionStop(StrEnum):
+    """Why a batch addition stopped before it reached every picked member.
+
+    The three read very differently to the commander: an event that finished
+    is nobody's fault, a retired occurrence means its post was deleted and is
+    worth chasing, and a concurrent edit means the batch can simply be run
+    again.
+    """
+
+    ENDED = "ended"
+    RETIRED = "retired"
+    CHANGED = "changed"
+
+
 async def apply_roster_addition(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -2316,42 +2331,70 @@ async def apply_roster_addition(
     waitlisted: list[int] = []
     skipped: list[int] = []
     failed: list[int] = []
-    kept_after_end: list[int] = []
+    left_off: list[int] = []
     undelivered: list[int] = []
     updates: list[RosterUpdate] = []
-    # Resolved once, before the loop: every added member is pointed at the same
-    # post, and the link cannot change while the additions run.
+    stop: _AdditionStop | None = None
+    # Seeded from the rows the picker checked and recomputed from the fresh
+    # rows each iteration, so the notice always names the event as it stands
+    # when the member it goes to is seated.
     link = _event_message_link(interaction.guild_id, event, current)
     content = _addition_dm_content(interaction.user.id, event, link)
     for index, user_id in enumerate(user_ids):
         # The picker holds several members and seat_signup awaits Discord I/O
-        # between each, so the occurrence can go out from under the loop even
-        # though the pre-loop check passed. It can simply reach its end, but it
-        # can also be retired mid-loop: seating a member refreshes the public
-        # message, and a message or channel that has been deleted retires the
-        # occurrence as OVER and seeds the series' successor. So re-read it
-        # every iteration rather than trusting the row read before the loop -
-        # otherwise the rest of the batch is seated onto a roster nobody can
-        # see, and sent a link to a message that is gone.
-        refreshed = bot.event_store.get_occurrence(current.occurrence_id)
-        if (
-            refreshed is None
-            or refreshed.status is EventStatus.OVER
-            or occurrence_has_ended(event, refreshed, datetime.now(UTC))
+        # between each, so both rows can go out from under the loop even though
+        # the pre-loop check passed, in three ways worth telling apart:
+        #
+        # - the occurrence reaches its scheduled end;
+        # - seating a member refreshes the public message, and a message or
+        #   channel that has been deleted retires the occurrence as OVER and
+        #   seeds the series' successor;
+        # - another leader saves an edit. A category change is the one that
+        #   matters, because the category picks the capacity every seat is
+        #   computed against, and that edit re-seats the whole roster under the
+        #   new one. Seating the rest from the event read before the loop would
+        #   quietly undo that with the old capacity.
+        #
+        # So re-read both rather than trusting the rows read before the loop.
+        # The member being seated when the change lands is already past this
+        # check and keeps whatever seat the old capacity gave them; stopping
+        # here bounds the damage to that one member instead of the whole batch.
+        fresh_event = bot.event_store.get_event(event.event_id)
+        fresh_occurrence = bot.event_store.get_occurrence(
+            current.occurrence_id
+        )
+        if fresh_event is None or fresh_occurrence is None:
+            stop = _AdditionStop.RETIRED
+        elif fresh_event.category is not event.category:
+            stop = _AdditionStop.CHANGED
+        elif occurrence_has_ended(
+            fresh_event,
+            fresh_occurrence,
+            datetime.now(UTC),
         ):
-            kept_after_end = list(user_ids[index:])
+            # Checked before the stored status, so an occurrence that is OVER
+            # because it genuinely finished is not reported as a deleted post.
+            stop = _AdditionStop.ENDED
+        elif fresh_occurrence.status is EventStatus.OVER:
+            stop = _AdditionStop.RETIRED
+        else:
+            # Carry the fresh rows forward: seating reads both, and the message
+            # the notice links to moves with a channel change.
+            event = fresh_event
+            current = fresh_occurrence
+            link = _event_message_link(interaction.guild_id, event, current)
+            content = _addition_dm_content(interaction.user.id, event, link)
+        if stop is not None:
+            left_off = list(user_ids[index:])
             LOGGER.debug(
-                "Occurrence is no longer live mid-addition; stopping; "
-                "occurrence_id=%s user_id=%s exists=%s left_off=%s",
+                "Stopped a roster addition; occurrence_id=%s user_id=%s "
+                "reason=%s left_off=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                refreshed is not None,
-                len(kept_after_end),
+                stop.value,
+                len(left_off),
             )
             break
-        # Carry the fresh row forward: seat_signup and the announcement below
-        # both read the occurrence, and the stored status can have moved on.
-        current = refreshed
         # add_signup would overwrite an existing row, resetting the member's
         # signed-up time and with it their seating priority, so a member who is
         # already on the roster is left exactly as they are.
@@ -2400,7 +2443,7 @@ async def apply_roster_addition(
     LOGGER.debug(
         "Applied roster addition; event_id=%s occurrence_id=%s user_id=%s "
         "role=%s picked=%s added=%s waitlisted=%s already_signed_up=%s "
-        "failed=%s left_off=%s undelivered=%s reassigned=%s",
+        "failed=%s left_off=%s undelivered=%s reassigned=%s stop=%s",
         event.event_id,
         current.occurrence_id,
         interaction.user.id,
@@ -2410,23 +2453,24 @@ async def apply_roster_addition(
         len(waitlisted),
         len(skipped),
         len(failed),
-        len(kept_after_end),
+        len(left_off),
         len(undelivered),
         len(merged.reassigned),
+        stop.value if stop is not None else None,
     )
     summary = _addition_summary(
         added,
         waitlisted,
         skipped,
         failed,
-        kept_after_end,
+        left_off,
+        stop,
         undelivered,
     )
-    if kept_after_end:
-        # The event ended partway through, so the edit session is no longer
-        # valid (an ended event cannot be edited). Report what was applied and
-        # stop, rather than re-showing an edit preview that can no longer be
-        # saved.
+    if left_off:
+        # The event went out from under the batch, so this edit session is no
+        # longer valid. Report what was applied and stop, rather than
+        # re-showing an edit preview that can no longer be trusted.
         await interaction.edit_original_response(
             content=summary,
             embeds=[],
@@ -2441,12 +2485,40 @@ async def apply_roster_addition(
     )
 
 
+def _addition_stop_note(
+    stop: _AdditionStop | None,
+    left_off: list[int],
+) -> str:
+    """Say why the members after the stop were not added."""
+    who = _mention_list(left_off)
+    were = "was" if len(left_off) == 1 else "were"
+    if stop is _AdditionStop.CHANGED:
+        return (
+            "Another leader changed this event while the members were being "
+            f"added, so {who} {were} left off. Run `/event edit` again to add "
+            "them."
+        )
+    if stop is _AdditionStop.RETIRED:
+        # The occurrence was retired rather than finished, which happens when
+        # its message or channel has been deleted - worth saying, because the
+        # commander can go and look.
+        return (
+            f"This event's post is no longer available, so {who} {were} left "
+            "off. Its message may have been deleted."
+        )
+    return (
+        f"The event ended before the rest could be added, so {who} {were} "
+        "left off."
+    )
+
+
 def _addition_summary(
     added: list[int],
     waitlisted: list[int],
     skipped: list[int],
     failed: list[int],
-    kept_after_end: list[int],
+    left_off: list[int],
+    stop: _AdditionStop | None,
     undelivered: list[int],
 ) -> str:
     seated = [user_id for user_id in added if user_id not in waitlisted]
@@ -2476,16 +2548,8 @@ def _addition_summary(
         )
     if failed:
         lines.append(f"Could not add {_mention_list(failed)} to the roster.")
-    if kept_after_end:
-        lines.append(
-            "The event ended before the rest could be added, so "
-            + _mention_list(kept_after_end)
-            + (
-                " was left off."
-                if len(kept_after_end) == 1
-                else " were left off."
-            )
-        )
+    if left_off:
+        lines.append(_addition_stop_note(stop, left_off))
     if undelivered:
         # The addition itself went through; only the notice did not, which the
         # commander needs to know so they can pass the word along.
