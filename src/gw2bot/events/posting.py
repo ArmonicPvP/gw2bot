@@ -748,16 +748,7 @@ async def cancel_occurrence(
             _discard_seeded_successor(bot, seeded)
         raise
     await delete_event_posts(bot, event, [occurrence])
-    successor = next(
-        (
-            candidate
-            for candidate in bot.event_store.get_event_occurrences(
-                event.event_id
-            )
-            if candidate.status is not EventStatus.OVER
-        ),
-        None,
-    )
+    successor = _leading_occurrence(bot, event.event_id)
     LOGGER.debug(
         "Cancelled event occurrence; event_id=%s occurrence_id=%s "
         "successor_id=%s",
@@ -794,16 +785,44 @@ async def cancel_occurrence(
             successor_posted=False,
         )
     if posted is None:
-        # A maintenance pass posted it while this call was clearing the
-        # cancelled run's post, which is exactly what the shared lock is there
-        # to make safe: the series has its post either way.
+        # Declining has two causes: a maintenance pass posted this occurrence
+        # while the cancelled run's post was being cleared, or the row is gone
+        # because another cancellation (or a delete) reached it first. Report
+        # what the series actually has now rather than assuming the first -
+        # announcing a run that is not there would send the commander off to
+        # rebuild an event that is still going.
+        current = _leading_occurrence(bot, event.event_id)
+        LOGGER.debug(
+            "Cancelled occurrence's successor was settled elsewhere; "
+            "event_id=%s successor_id=%s leading_id=%s",
+            event.event_id,
+            successor.occurrence_id,
+            current.occurrence_id if current is not None else None,
+        )
         return OccurrenceCancellation(
-            successor=bot.event_store.get_occurrence(
-                successor.occurrence_id
+            successor=current,
+            successor_posted=(
+                current is not None and current.message_id is not None
             ),
-            successor_posted=True,
         )
     return OccurrenceCancellation(successor=posted, successor_posted=True)
+
+
+def _leading_occurrence(
+    bot: Gw2Bot,
+    event_id: int,
+) -> EventOccurrence | None:
+    # The run a series is on now: its earliest occurrence that is not finished.
+    # get_event_occurrences is ordered by start time, so the first match is the
+    # soonest.
+    return next(
+        (
+            candidate
+            for candidate in bot.event_store.get_event_occurrences(event_id)
+            if candidate.status is not EventStatus.OVER
+        ),
+        None,
+    )
 
 
 def _discard_seeded_successor(

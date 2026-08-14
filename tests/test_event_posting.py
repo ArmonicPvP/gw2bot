@@ -3770,6 +3770,68 @@ class TestCancelOccurrence:
         # nothing else would subscribe them to it.
         channel.thread.add_user.assert_awaited_once()
 
+    async def test_reports_the_run_another_cancellation_left_behind(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+
+        async def cancel_the_successor_too(*args: Any, **kwargs: Any) -> None:
+            # Another commander cancels the successor while this cancellation
+            # is clearing the first run's post, seeding and posting the run
+            # after it in its place.
+            store.delete_occurrence(successor.occurrence_id)
+            following = store.create_occurrence(
+                event.event_id,
+                START + timedelta(days=2),
+            )
+            await posting.post_occurrence(bot, event, following, BEFORE_START)
+
+        channel.thread.delete = AsyncMock(side_effect=cancel_the_successor_too)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # The run this cancellation seeded is gone, but the series is not: it
+        # has to name the run that is actually there, or the commander is told
+        # to rebuild an event that is still going.
+        assert cancellation.successor is not None
+        assert cancellation.successor.start_time == START + timedelta(days=2)
+        assert cancellation.successor_posted
+
+    async def test_reports_a_series_left_with_nothing(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+
+        async def take_the_successor_away(*args: Any, **kwargs: Any) -> None:
+            store.delete_occurrence(successor.occurrence_id)
+
+        channel.thread.delete = AsyncMock(side_effect=take_the_successor_away)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # Nothing was seeded in its place, so the series really has no next
+        # run and saying so is the honest answer.
+        assert cancellation.successor is None
+        assert not cancellation.successor_posted
+
     async def test_reports_a_successor_that_could_not_be_posted(
         self,
         bot: Any,
