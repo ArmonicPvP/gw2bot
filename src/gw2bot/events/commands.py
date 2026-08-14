@@ -9,7 +9,13 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import user_has_role
-from gw2bot.events.models import Event, EventOccurrence, EventStatus
+from gw2bot.events.formatting import format_event_datetime
+from gw2bot.events.models import (
+    Event,
+    EventOccurrence,
+    EventStatus,
+    RepeatFrequency,
+)
 from gw2bot.events.reminders import (
     occurrence_finished,
     reminder_participants,
@@ -17,6 +23,7 @@ from gw2bot.events.reminders import (
 )
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
+    EventCancelConfirmView,
     EventDeleteConfirmView,
     EventDetailsModal,
     EventDraft,
@@ -250,16 +257,16 @@ class EventCommands(app_commands.Group):
             departed_note is not None,
         )
 
-    def _reminder_occurrence(
+    def _next_occurrence(
         self,
         event: Event,
         now: datetime | None = None,
     ) -> EventOccurrence | None:
-        # The occurrence a manual reminder is about: the earliest one that has
-        # not finished, which is the one whose roster is being reminded. A
-        # recurring series can hold a later occurrence too, and pinging next
-        # week's roster about an event that has not come around yet would be
-        # noise.
+        # The occurrence an event is currently about: the earliest one that has
+        # not finished, which is the roster a manual reminder pings and the run
+        # `/event cancel` calls off. A recurring series can hold a later
+        # occurrence too, and pinging (or cancelling) next week's run while
+        # this week's has not come around yet is never what was meant.
         #
         # Finishing is judged on the clock as well as on the stored status: the
         # status only moves when a maintenance pass persists it, so an
@@ -311,7 +318,7 @@ class EventCommands(app_commands.Group):
             return
         event = self._bot.event_store.get_event(event_id)
         occurrence = (
-            self._reminder_occurrence(event)
+            self._next_occurrence(event)
             if event is not None and not event.cancelled
             else None
         )
@@ -381,6 +388,116 @@ class EventCommands(app_commands.Group):
             event_id,
             occurrence.occurrence_id,
             len(participants),
+        )
+
+    @app_commands.command(
+        name="cancel",
+        description="Cancel an event's next occurrence",
+    )
+    @app_commands.describe(
+        event_id="The event to cancel (shown as eventID in its footer)"
+    )
+    @app_commands.autocomplete(event_id=active_event_id_autocomplete)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        event_id: int,
+    ) -> None:
+        LOGGER.debug(
+            "Event cancel command invoked by Discord user %s; event_id=%s",
+            interaction.user.id,
+            event_id,
+        )
+        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+            LOGGER.warning(
+                "Rejected event cancel command from Discord user %s; "
+                "required role %s",
+                interaction.user.id,
+                EVENT_CREATE_ROLE_ID,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to cancel events.",
+                ephemeral=True,
+            )
+            return
+        event = self._bot.event_store.get_event(event_id)
+        if event is None or event.cancelled:
+            LOGGER.debug(
+                "Event cancel rejected for missing event; "
+                "user_id=%s event_id=%s exists=%s",
+                interaction.user.id,
+                event_id,
+                event is not None,
+            )
+            await interaction.response.send_message(
+                "That event does not exist.",
+                ephemeral=True,
+            )
+            return
+        # Resolve the run first, whether or not the event repeats. Cancelling
+        # is about a run still to come, and an event whose last run is behind
+        # it has none - offering to delete a one-off event in that state would
+        # erase a completed run's roster and post through a command that only
+        # ever promised to call off the next one.
+        occurrence = self._next_occurrence(event)
+        if occurrence is None:
+            LOGGER.debug(
+                "Event cancel rejected without an upcoming occurrence; "
+                "user_id=%s event_id=%s repeats=%s",
+                interaction.user.id,
+                event_id,
+                event.repeat_frequency is not RepeatFrequency.NONE,
+            )
+            await interaction.response.send_message(
+                "That event has no upcoming occurrence left to cancel.",
+                ephemeral=True,
+            )
+            return
+        if event.repeat_frequency is RepeatFrequency.NONE:
+            # A one-off event has nothing after the run being called off, so
+            # cancelling it is deleting it. Hand over to the delete
+            # confirmation rather than leaving an event row behind with no
+            # occurrence for the scheduler to ever post.
+            LOGGER.debug(
+                "Event cancel fell back to deletion for a one-off event; "
+                "user_id=%s event_id=%s",
+                interaction.user.id,
+                event_id,
+            )
+            await interaction.response.send_message(
+                f"**{event.title}** (event **{event.event_id}**) does not "
+                "repeat, so cancelling it deletes the event. This removes its "
+                "message(s), any signup thread(s) the bot opened for them and "
+                "everyone's sign-ups, and cannot be undone. A forum post the "
+                "event was posted into is kept.",
+                view=EventDeleteConfirmView(
+                    self._bot,
+                    event,
+                    only_while_one_off=True,
+                ),
+                ephemeral=True,
+            )
+            return
+        starts_at = format_event_datetime(
+            occurrence.start_time,
+            self._bot.event_timezone,
+        )
+        await interaction.response.send_message(
+            f"Cancel **{event.title}** (event **{event.event_id}**) on "
+            f"{starts_at}? This removes that occurrence's message, any signup "
+            "thread the bot opened for it and everyone's sign-ups for it, and "
+            "cannot be undone. A forum post the event was posted into is "
+            "kept. The event keeps repeating, so its next occurrence is "
+            "posted right away.",
+            view=EventCancelConfirmView(self._bot, event, occurrence),
+            ephemeral=True,
+        )
+        LOGGER.debug(
+            "Event cancel confirmation opened; user_id=%s event_id=%s "
+            "occurrence_id=%s",
+            interaction.user.id,
+            event_id,
+            occurrence.occurrence_id,
         )
 
     @app_commands.command(

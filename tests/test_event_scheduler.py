@@ -408,6 +408,39 @@ class TestRunEventMaintenance:
         assert channel.sent == []
         assert len(store.get_unposted_occurrences()) == 1
 
+    async def test_pending_occurrence_flagged_for_posting_is_retried(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A cancellation whose successor could not be posted leaves the series
+        # with no posted occurrence at all. The refresh flag is what separates
+        # that from a manual post in flight, so this one has to go out.
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_needs_refresh(occurrence.occurrence_id, True)
+
+        await run_event_maintenance(bot, BEFORE_START)
+
+        assert len(channel.sent) == 1
+        posted = store.get_occurrence(occurrence.occurrence_id)
+        assert posted is not None
+        assert posted.message_id is not None
+        # The flag asked for the posting and nothing else, so a later pass must
+        # not keep re-rendering the message it produced.
+        assert not posted.needs_refresh
+
     async def test_maintenance_logs_never_contain_user_content(
         self,
         bot: Any,

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,8 @@ from gw2bot.events.models import (
 from gw2bot.events.posting import (
     apply_auto_signups,
     apply_signup_edit,
+    cancel_occurrence,
+    post_pending_occurrence,
     complete_signup,
     delete_event_posts,
     departed_roster_members,
@@ -497,6 +500,34 @@ class TestPostOccurrence:
 
         assert posted.message_id == 555
         assert posted.thread_id is None
+
+    async def test_a_row_deleted_mid_post_deletes_the_orphaned_message(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        async def cancel_it_mid_flight(**kwargs: Any) -> Any:
+            # Someone deletes or cancels the run while the message is being
+            # sent, so the row this post belongs to is gone by the time it
+            # comes to be recorded.
+            message = await FakeChannel.send(channel, **kwargs)
+            store.delete_occurrence(occurrence.occurrence_id)
+            return message
+
+        channel.send = cancel_it_mid_flight  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError):
+            await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        # Nothing owns the message that was just sent, so leaving it in the
+        # channel would strand a post whose buttons point at a run that no
+        # longer exists.
+        channel.sent[-1]["message"].delete.assert_awaited_once()
+        channel.thread.delete.assert_awaited_once()
 
     async def test_persistence_failure_deletes_the_orphaned_message(
         self,
@@ -3580,6 +3611,705 @@ class TestPruneSupersededOccurrences:
         assert deleted == 0
         assert store.get_occurrence(posted_old.occurrence_id) is not None
         channel.partial_message.delete.assert_not_awaited()
+
+
+class TestCancelOccurrence:
+    async def make_series(
+        self,
+        bot: Any,
+        store: EventStore,
+        *,
+        delete_previous_on_repeat: bool = True,
+    ) -> Any:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            delete_previous_on_repeat=delete_previous_on_repeat,
+        )
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        return event, posted
+
+    async def test_removes_the_occurrence_and_posts_the_next_one(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        assert store.get_occurrence(posted.occurrence_id) is None
+        channel.partial_message.delete.assert_awaited_once()
+        channel.thread.delete.assert_awaited_once()
+        successor = cancellation.successor
+        assert successor is not None
+        assert successor.start_time == START + timedelta(days=1)
+        # The cancelled post was the series' only posted occurrence, so the
+        # scheduler would never pick the successor up: it has to be posted here
+        # or the series would stay invisible forever.
+        assert cancellation.successor_posted
+        assert successor.message_id is not None
+        assert len(channel.sent) == 2
+
+    async def test_removes_the_cancelled_occurrences_signups(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        assert store.get_signups(posted.occurrence_id) == []
+        successor = cancellation.successor
+        assert successor is not None
+        # The roster belonged to the cancelled run; the next one starts empty
+        # unless a member asked to be signed up automatically.
+        assert store.get_signups(successor.occurrence_id) == []
+
+    async def test_seeds_the_next_occurrence_with_auto_signups(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        successor = cancellation.successor
+        assert successor is not None
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(successor.occurrence_id)
+        ] == [11]
+
+    async def test_reuses_a_successor_that_already_exists(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        # The scheduler already seeded the next run (the cancelled occurrence
+        # is one it has moved past), so cancelling must not seed a second one.
+        existing = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        successor = cancellation.successor
+        assert successor is not None
+        assert successor.occurrence_id == existing.occurrence_id
+        assert len(store.get_event_occurrences(event.event_id)) == 1
+
+    async def test_keeps_a_successor_that_is_already_posted(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        following = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        await post_occurrence(bot, event, following, BEFORE_START)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # The successor's post is already live, so it is left alone rather than
+        # sent a second time.
+        assert cancellation.successor_posted
+        assert len(channel.sent) == 2
+
+    async def test_subscribes_auto_signed_members_to_the_new_post(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # A member carried onto the successor never touched its post, so
+        # nothing else would subscribe them to it.
+        channel.thread.add_user.assert_awaited_once()
+
+    async def test_a_half_seeded_successor_is_taken_back(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        store.add_signup = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # The successor's row commits before its roster is seeded, so a
+        # failure part-way leaves a run the caller never saw returned and
+        # cannot take back itself. Seeding has to land whole or not at all,
+        # or the next maintenance pass posts that run while the one that
+        # failed to cancel is still live.
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [posted.occurrence_id]
+
+    async def test_skips_a_run_that_ended_without_being_retired(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        # An earlier run that ended while its refresh was failing: the clock
+        # has passed it, but no maintenance pass has persisted OVER yet.
+        stale = store.create_occurrence(
+            event.event_id,
+            START - timedelta(hours=3),
+        )
+        store.set_occurrence_message(stale.occurrence_id, 1234, 501, 777)
+        target = store.create_occurrence(
+            event.event_id,
+            START + timedelta(hours=1),
+        )
+        posted = await post_occurrence(bot, event, target, START)
+
+        cancellation = await cancel_occurrence(bot, event, posted, START)
+
+        # The stale row still reads as live and still has a message, so taking
+        # it for the series' next run would report a date already behind us
+        # and leave the seeded run unposted.
+        successor = cancellation.successor
+        assert successor is not None
+        assert successor.start_time == START + timedelta(days=1, hours=1)
+        assert cancellation.successor_posted
+
+    async def test_a_successor_removed_mid_post_is_reported_as_settled(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        plain_send = channel.send
+
+        async def remove_the_successor_mid_send(**kwargs: Any) -> Any:
+            message = await plain_send(**kwargs)
+            # Another cancellation (or a delete) takes the successor while its
+            # message is in flight, so persisting that message raises.
+            pending = store.get_unposted_occurrences()
+            if pending:
+                store.delete_occurrence(pending[0].occurrence_id)
+            return message
+
+        channel.send = remove_the_successor_mid_send  # type: ignore
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # The cancellation itself is done, so it reports the series as it
+        # stands instead of raising a failure the commander would retry.
+        assert store.get_occurrence(posted.occurrence_id) is None
+        assert cancellation.successor is None
+        assert not cancellation.successor_posted
+
+    async def test_reports_the_run_another_cancellation_left_behind(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+
+        async def cancel_the_successor_too(*args: Any, **kwargs: Any) -> None:
+            # Another commander cancels the successor while this cancellation
+            # is clearing the first run's post, seeding and posting the run
+            # after it in its place.
+            store.delete_occurrence(successor.occurrence_id)
+            following = store.create_occurrence(
+                event.event_id,
+                START + timedelta(days=2),
+            )
+            await posting.post_occurrence(bot, event, following, BEFORE_START)
+
+        channel.thread.delete = AsyncMock(side_effect=cancel_the_successor_too)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # The run this cancellation seeded is gone, but the series is not: it
+        # has to name the run that is actually there, or the commander is told
+        # to rebuild an event that is still going.
+        assert cancellation.successor is not None
+        assert cancellation.successor.start_time == START + timedelta(days=2)
+        assert cancellation.successor_posted
+
+    async def test_reports_a_series_left_with_nothing(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+
+        async def take_the_successor_away(*args: Any, **kwargs: Any) -> None:
+            store.delete_occurrence(successor.occurrence_id)
+
+        channel.thread.delete = AsyncMock(side_effect=take_the_successor_away)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # Nothing was seeded in its place, so the series really has no next
+        # run and saying so is the honest answer.
+        assert cancellation.successor is None
+        assert not cancellation.successor_posted
+
+    async def test_a_posted_successor_survives_a_failed_roster_lookup(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        real_get_signups = store.get_signups
+
+        def fail_once_the_post_is_recorded(occurrence_id: int) -> Any:
+            stored = store.get_occurrence(occurrence_id)
+            if (
+                occurrence_id == successor.occurrence_id
+                and stored is not None
+                and stored.message_id is not None
+            ):
+                raise SQLAlchemyError("boom")
+            return real_get_signups(occurrence_id)
+
+        store.get_signups = (  # type: ignore[method-assign]
+            MagicMock(side_effect=fail_once_the_post_is_recorded)
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # Subscribing the roster follows delivery. Reporting the post as
+        # undelivered would promise a retry the scheduler cannot make, since
+        # it only posts rows that have no message.
+        assert cancellation.successor_posted
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        assert stored.message_id is not None
+
+    async def test_a_posted_successor_survives_failed_flag_cleanup(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        real_flag = store.set_occurrence_needs_refresh
+
+        def fail_only_when_clearing(
+            occurrence_id: int,
+            needs_refresh: bool,
+        ) -> None:
+            if not needs_refresh:
+                raise SQLAlchemyError("boom")
+            real_flag(occurrence_id, needs_refresh)
+
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=fail_only_when_clearing)
+        )
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # Clearing the claim is housekeeping after a delivered post. Failing
+        # the cancellation over it would report a live post as undelivered,
+        # and the commander would be told to cancel again - calling off the
+        # run now sitting in the channel.
+        successor = cancellation.successor
+        assert successor is not None
+        assert cancellation.successor_posted
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        assert stored.message_id is not None
+
+    async def test_the_successor_is_claimed_before_anything_is_destroyed(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        claimed_before_delete: list[bool] = []
+        real_delete = store.delete_occurrence
+
+        def record_the_claim(occurrence_id: int) -> None:
+            stored = store.get_occurrence(successor.occurrence_id)
+            claimed_before_delete.append(
+                stored is not None and stored.needs_refresh
+            )
+            real_delete(occurrence_id)
+
+        store.delete_occurrence = (  # type: ignore[method-assign]
+            MagicMock(side_effect=record_the_claim)
+        )
+
+        await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # Everything from the delete onwards is what posts the successor, so
+        # the claim that lets the maintenance pass recover has to be in place
+        # before the first destructive step, not after it.
+        assert claimed_before_delete == [True]
+
+    async def test_a_claim_that_will_not_write_stops_the_cancellation(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.create_occurrence(event.event_id, START + timedelta(days=1))
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # A claim that cannot be written means the store is unhealthy, and
+        # deleting rows against it risks a series with no posted run and
+        # nothing coming to post one. Nothing is touched; a retry is cheap.
+        assert store.get_occurrence(posted.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+
+    async def test_a_failed_claim_discards_the_seeded_successor(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # The run this cancellation seeded is committed before the claim is
+        # attempted. Left behind with the original still posted, the next
+        # maintenance pass would publish it even though the cancellation was
+        # reported as failed.
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [posted.occurrence_id]
+        channel.partial_message.delete.assert_not_awaited()
+
+    async def test_a_failed_delete_gives_back_the_claim(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        store.delete_occurrence = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # The cancellation did not happen, so the run it claimed is a future
+        # one again: left claimed, the maintenance pass would post it while
+        # the run that failed to cancel is still live.
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        assert not stored.needs_refresh
+
+    async def test_an_interrupted_cancellation_leaves_the_successor_postable(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        channel.partial_message.delete = AsyncMock(
+            side_effect=RuntimeError("the process went away")
+        )
+
+        with pytest.raises(RuntimeError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # Everything after the cancelled row is removed is what would have
+        # posted the successor, and a restart anywhere in there would leave a
+        # series with nothing posted - the one state the maintenance pass
+        # leaves alone. The claim is what lets it recover.
+        successor = store.get_event_occurrences(event.event_id)[0]
+        assert successor.message_id is None
+        assert successor.needs_refresh
+
+    async def test_reports_a_successor_that_could_not_be_posted(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        channel.send_error = forbidden_error(50013)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # The cancellation itself already stands, so the failure is reported
+        # rather than raised.
+        assert store.get_occurrence(posted.occurrence_id) is None
+        successor = cancellation.successor
+        assert successor is not None
+        assert not cancellation.successor_posted
+        stored = store.get_occurrence(successor.occurrence_id)
+        assert stored is not None
+        # The series has no posted occurrence left, which is what normally
+        # makes the scheduler leave a pending one alone; the flag is what lets
+        # it retry this posting instead of hiding the series for good.
+        assert stored.needs_refresh
+
+    async def test_a_store_failure_leaves_the_occurrence_in_place(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        real_delete = store.delete_occurrence
+
+        def delete_all_but_the_cancelled_row(occurrence_id: int) -> None:
+            if occurrence_id == posted.occurrence_id:
+                raise SQLAlchemyError("boom")
+            real_delete(occurrence_id)
+
+        store.delete_occurrence = MagicMock(  # type: ignore[method-assign]
+            side_effect=delete_all_but_the_cancelled_row
+        )
+
+        with pytest.raises(SQLAlchemyError):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        # Nothing public is touched before the row is gone, so the run is still
+        # posted and the commander can try again.
+        channel.partial_message.delete.assert_not_awaited()
+        channel.thread.delete.assert_not_awaited()
+        # The successor was committed in its own transaction before the delete
+        # failed. Left behind, a maintenance pass would post next week's run
+        # while this week's - which was never cancelled - is still live.
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [posted.occurrence_id]
+
+    async def test_a_racing_post_is_not_sent_twice(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+
+        # The maintenance pass and a cancellation both post pending
+        # occurrences, and each awaits Discord while the other can run.
+        results = await asyncio.gather(
+            post_pending_occurrence(bot, event, pending, BEFORE_START),
+            post_pending_occurrence(bot, event, pending, BEFORE_START),
+        )
+
+        assert len(channel.sent) == 1
+        assert sum(result is not None for result in results) == 1
+
+    async def test_posting_one_event_does_not_block_another(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        other_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot._channels[other_channel.id] = other_channel
+        bot._channels[other_channel.thread.id] = other_channel.thread
+        slow_event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        quick_event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            channel_id=other_channel.id,
+        )
+        slow = store.create_occurrence(slow_event.event_id, START)
+        quick = store.create_occurrence(quick_event.event_id, START)
+        quick_posted = asyncio.Event()
+        plain_send = channel.send
+
+        async def wait_for_the_other_post(**kwargs: Any) -> Any:
+            # The first send sits in what a Discord rate limit would feel
+            # like, and only finishes once the unrelated event has posted.
+            await quick_posted.wait()
+            return await plain_send(**kwargs)
+
+        channel.send = wait_for_the_other_post  # type: ignore
+
+        async def post_the_quick_one() -> Any:
+            try:
+                return await post_pending_occurrence(
+                    bot, quick_event, quick, BEFORE_START
+                )
+            finally:
+                quick_posted.set()
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                post_pending_occurrence(
+                    bot, slow_event, slow, BEFORE_START
+                ),
+                post_the_quick_one(),
+            ),
+            timeout=5,
+        )
+
+        # A shared lock would deadlock this: the stalled send would hold it
+        # while the unrelated post waited for it. Posting is per occurrence,
+        # so one event's delivery never holds up anyone else's.
+        assert all(result is not None for result in results)
+
+    async def test_a_successor_posted_by_the_scheduler_is_left_alone(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        successor = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        async def post_from_the_scheduler(*args: Any, **kwargs: Any) -> None:
+            # Stand in for a maintenance pass that posts the successor while
+            # the cancellation is clearing the cancelled run's post.
+            await posting.post_occurrence(bot, event, successor, BEFORE_START)
+
+        channel.thread.delete = AsyncMock(side_effect=post_from_the_scheduler)
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        # One post for the successor, and the cancellation reports the series
+        # as posted rather than as a failure.
+        assert len(channel.sent) == 2
+        assert cancellation.successor_posted
+        assert cancellation.successor is not None
+        assert (
+            cancellation.successor.occurrence_id == successor.occurrence_id
+        )
+
+    async def test_cancellation_logs_never_contain_user_content(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description=description,
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        with caplog.at_level("DEBUG"):
+            await cancel_occurrence(bot, event, posted, BEFORE_START)
+
+        assert title not in caplog.text
+        assert description not in caplog.text
 
 
 class TestPostingLoggingSafety:

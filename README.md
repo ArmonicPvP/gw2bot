@@ -100,9 +100,10 @@ is refused on submission and the picker reopens. An archived forum post may not
 appear in the picker at all until someone reopens it.
 
 A post the event was only sent into is never renamed and never deleted:
-`/event delete`, a channel move, and a superseded recurring occurrence each
-remove only the event's own message and leave the post (and everything else in
-it) standing. Each event in a shared post therefore manages just its own message.
+`/event delete`, `/event cancel`, a channel move, and a superseded recurring
+occurrence each remove only the event's own message and leave the post (and
+everything else in it) standing. Each event in a shared post therefore manages
+just its own message.
 
 Moving an event between a channel and a post works in both directions. Because
 the roster is keyed to the occurrence rather than to the message, the message is
@@ -117,13 +118,13 @@ the next maintenance pass.
 Any destination selected for an event needs `View Channel` and `Send Messages`.
 A text channel also needs `Create Public Threads` for the signup thread, and
 `Manage Threads`: moving an event to a new channel, pruning a superseded
-recurring occurrence, and deleting an event all delete that occurrence's signup
-thread explicitly, because Discord does not remove a thread on its own when its
-starter message is deleted. Without `Manage Threads` those operations still
-remove the message but log a `50013` (`missing_permissions`) error and leave the
-orphaned thread behind. A forum post destination needs `Send Messages in Threads`
-instead of `Send Messages`, and `Manage Threads` only to reopen it once Discord
-has archived it.
+recurring occurrence, cancelling an occurrence, and deleting an event all
+delete that occurrence's signup thread explicitly, because Discord does not
+remove a thread on its own when its starter message is deleted. Without
+`Manage Threads` those operations still remove the message but log a `50013`
+(`missing_permissions`) error and leave the orphaned thread behind. A forum
+post destination needs `Send Messages in Threads` instead of `Send Messages`,
+and `Manage Threads` only to reopen it once Discord has archived it.
 
 ## Event Reminders
 
@@ -175,6 +176,32 @@ unfinished occurrence and leaves the automatic reminders untouched, so a manual
 ping never costs the event one of its scheduled ones. It reports back privately
 how many members were pinged, and refuses when the event is over, has nobody
 signed up, or has no thread or forum post yet.
+
+## Cancelling An Event Occurrence
+
+`/event cancel event_id:<event>` calls off a single run of a repeating event
+and requires the event role `1318357141521825872`. It targets the event's
+earliest unfinished occurrence — the same run `/event remind` pings — and
+confirms which date it is about before anything is removed.
+
+Confirming removes that occurrence's message, the signup thread the bot opened
+for it, and everyone's sign-ups for it. A forum post the event was only posted
+into is kept, as everywhere else. The event itself survives: its next
+occurrence is created, seeded with the members who asked to be signed up
+automatically, and posted straight away, so the channel never sits without a
+post for the series.
+
+An event that does not repeat has nothing after the run being cancelled, so
+`/event cancel` offers the `/event delete` confirmation for one instead of
+leaving an event behind that can never be posted again.
+
+Nothing is removed until the next occurrence has been secured, so a
+cancellation that fails leaves the run posted and can simply be retried. If the
+next occurrence cannot be posted afterwards — the bot lost `Send Messages` in
+the channel, say — the cancellation still stands and the reply names the
+channel to check. That posting is then retried by every maintenance pass until
+it goes through, so fixing the permission is enough to bring the series back
+even though the cancellation removed its last post.
 
 ## Feast Stock Alerts
 

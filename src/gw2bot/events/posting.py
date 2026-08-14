@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -192,7 +194,12 @@ async def post_occurrence(
             message.id,
             thread_id,
         )
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, ValueError) as exc:
+        # A ValueError here means the row went away while the message was in
+        # flight - the event was deleted, or this run cancelled, by someone
+        # else in that window. It is the same situation as a failed write and
+        # needs the same recovery: without it the message just sent stays in
+        # the channel forever, referencing an occurrence that no longer exists.
         LOGGER.error(
             "Could not persist posted event occurrence; occurrence_id=%s "
             "error_type=%s",
@@ -643,6 +650,418 @@ async def delete_event_posts(
         deleted,
     )
     return deleted
+
+
+# Two paths post an occurrence that has no message yet: the maintenance pass,
+# and a cancellation posting the successor it just seeded. Each holds this
+# occurrence's lock while it sends, so the second to arrive re-reads the row
+# inside the lock and finds the message the first one stored instead of sending
+# the same run twice and orphaning one of the posts. The bot is a single
+# process, so process-local locks cover every poster there is.
+#
+# Keyed by occurrence rather than shared, because a send can sit in a Discord
+# rate limit for seconds and posting one event's run must not hold up anyone
+# else's. Entries live only while someone holds or waits on them.
+_POSTING_LOCKS: dict[int, asyncio.Lock] = {}
+_POSTING_LOCK_HOLDERS: dict[int, int] = {}
+
+
+@asynccontextmanager
+async def _posting_lock(occurrence_id: int) -> AsyncIterator[None]:
+    lock = _POSTING_LOCKS.setdefault(occurrence_id, asyncio.Lock())
+    _POSTING_LOCK_HOLDERS[occurrence_id] = (
+        _POSTING_LOCK_HOLDERS.get(occurrence_id, 0) + 1
+    )
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _POSTING_LOCK_HOLDERS[occurrence_id] - 1
+        if remaining:
+            _POSTING_LOCK_HOLDERS[occurrence_id] = remaining
+        else:
+            # Last one out drops the entry, so the table tracks what is in
+            # flight rather than every occurrence ever posted.
+            del _POSTING_LOCK_HOLDERS[occurrence_id]
+            del _POSTING_LOCKS[occurrence_id]
+
+
+async def post_pending_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime | None = None,
+) -> EventOccurrence | None:
+    """Post an occurrence that has no message yet, at most once.
+
+    Returns the posted occurrence, or None when it turned out to be posted
+    already (or gone). Members on its roster are subscribed to the post, which
+    is how a successor's auto-signups reach the thread they were seeded into.
+    """
+    async with _posting_lock(occurrence.occurrence_id):
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        if current is None or current.message_id is not None:
+            LOGGER.debug(
+                "Skipping a pending occurrence that is no longer pending; "
+                "occurrence_id=%s exists=%s",
+                occurrence.occurrence_id,
+                current is not None,
+            )
+            return None
+        posted = await post_occurrence(bot, event, current, now)
+        if current.needs_refresh:
+            # The flag only asked for this posting, and the message it produced
+            # is current, so clear it rather than leave every later maintenance
+            # pass re-rendering a post nothing has changed.
+            try:
+                bot.event_store.set_occurrence_needs_refresh(
+                    posted.occurrence_id,
+                    False,
+                )
+            except SQLAlchemyError as exc:
+                # The post is live and its message id is stored; this was
+                # housekeeping. Failing the call over it would tell the caller
+                # a delivered post never went out - and a cancellation would
+                # then offer to put the series back, which means calling off
+                # the run that is sitting in the channel. A flag left set only
+                # costs one redundant refresh on the next pass, which clears
+                # it.
+                LOGGER.error(
+                    "Could not clear the refresh flag after posting; "
+                    "occurrence_id=%s error_type=%s",
+                    posted.occurrence_id,
+                    type(exc).__name__,
+                )
+    try:
+        signups = bot.event_store.get_signups(posted.occurrence_id)
+    except SQLAlchemyError as exc:
+        # Delivery is done and recorded; subscribing the roster is what
+        # follows it. Failing the call over this would report a post that is
+        # in the channel as never sent, and a cancellation would then promise
+        # a retry that cannot happen - the scheduler only posts rows with no
+        # message. The members keep their seats and miss only the thread
+        # subscription, which signing up again would give them.
+        LOGGER.error(
+            "Could not read the roster to subscribe it after posting; "
+            "occurrence_id=%s error_type=%s",
+            posted.occurrence_id,
+            type(exc).__name__,
+        )
+        return posted
+    for signup in signups:
+        await update_thread_membership(
+            bot,
+            posted,
+            signup.discord_user_id,
+            add=True,
+        )
+    return posted
+
+
+@dataclass(frozen=True, slots=True)
+class OccurrenceCancellation:
+    """What cancelling one occurrence of a repeating series left behind.
+
+    ``successor`` is the occurrence the series continues with, and
+    ``successor_posted`` says whether its public message is live. A successor
+    that could not be posted is reported rather than raised: the cancellation
+    itself is already committed by then, so the caller has to tell the
+    commander what is (and is not) in the channel.
+    """
+
+    successor: EventOccurrence | None
+    successor_posted: bool
+    # Whether an unposted successor is queued for another attempt. False only
+    # when the retry marker could not be written either, which leaves the
+    # series with nothing in the channel and nothing coming to fix it.
+    retry_pending: bool = True
+
+
+async def cancel_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime | None = None,
+) -> OccurrenceCancellation:
+    """Cancel one occurrence of a repeating series, keeping the series alive.
+
+    The occurrence's roster, store rows and public post are removed, and the
+    series carries on from the next one. Store failures propagate before
+    anything is removed, so a cancellation that raises has changed nothing.
+    """
+    current_time = now if now is not None else datetime.now(UTC)
+    # Seed the successor before the cancelled row goes: its start is computed
+    # from the occurrence being cancelled, and has_later_occurrence can only
+    # tell that the series still needs one while that row is there. It is a
+    # no-op when a later occurrence already exists, which is the case when the
+    # occurrence being cancelled is one the scheduler has already moved past.
+    seeded = ensure_next_recurring_occurrence(
+        bot, event, occurrence, current_time
+    )
+    # Claim the run that takes over before anything is destroyed. Everything
+    # from the delete onwards is what would otherwise have posted it, and the
+    # bot can stop there for any reason - a restart, a database error, a
+    # Discord failure. The series would then have no posted occurrence and an
+    # unclaimed pending one, which is exactly the state the maintenance pass
+    # leaves alone, so it would quietly never come back. Posting clears the
+    # claim again.
+    successor = leading_occurrence(
+        bot,
+        event,
+        current_time,
+        excluding=occurrence.occurrence_id,
+    )
+    claimed = successor is not None and successor.message_id is None
+    try:
+        if claimed and successor is not None:
+            # Deliberately strict, unlike the re-claim after a failed post:
+            # nothing has been destroyed yet, and a claim that will not write
+            # means the store is unhealthy right now. Going on to delete rows
+            # against it risks the one state nothing recovers from - a series
+            # with no posted run and an unclaimed pending one. Refusing costs
+            # a retry.
+            _claim_cancellation_successor(bot, successor)
+        bot.event_store.delete_occurrence(occurrence.occurrence_id)
+    except SQLAlchemyError:
+        # The successor is committed in its own transaction, so it outlives a
+        # claim or a delete that fails. Leaving it behind would let the next
+        # maintenance pass post the following run while the one that failed to
+        # cancel is still live, so take it back out before reporting the
+        # failure. A successor that was already there keeps its row and gives
+        # back the claim, which would otherwise invite that same premature
+        # post.
+        if seeded is not None:
+            _discard_occurrence(
+                bot,
+                seeded,
+                "the successor of a failed cancellation",
+            )
+        elif claimed and successor is not None:
+            _release_cancellation_claim(bot, successor)
+        raise
+    await delete_event_posts(bot, event, [occurrence])
+    try:
+        successor = leading_occurrence(bot, event, current_time)
+    except SQLAlchemyError as exc:
+        # The cancellation is done - the row, its roster and its post are all
+        # gone - so this read failing is not a cancellation failure. The
+        # successor is claimed, so the maintenance pass will post it; report
+        # that rather than a failure the commander would retry.
+        LOGGER.error(
+            "Could not read the series after cancelling; event_id=%s "
+            "error_type=%s",
+            event.event_id,
+            type(exc).__name__,
+        )
+        return OccurrenceCancellation(
+            successor=successor,
+            successor_posted=False,
+            retry_pending=claimed,
+        )
+    LOGGER.debug(
+        "Cancelled event occurrence; event_id=%s occurrence_id=%s "
+        "successor_id=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        successor.occurrence_id if successor is not None else None,
+    )
+    if successor is None:
+        return OccurrenceCancellation(successor=None, successor_posted=False)
+    if successor.message_id is not None:
+        return OccurrenceCancellation(
+            successor=successor,
+            successor_posted=True,
+        )
+    # The successor is posted here rather than left to the scheduler, which
+    # only posts a pending occurrence for a series that already has a posted
+    # one. Cancelling the only posted occurrence of a series leaves none, so
+    # waiting for the scheduler would strand the series unposted forever.
+    try:
+        posted = await post_pending_occurrence(
+            bot, event, successor, current_time
+        )
+    except ValueError:
+        # The successor's row went away while its message was in flight,
+        # because another cancellation or a delete reached it first.
+        # post_occurrence has already removed the message it sent, and this
+        # cancellation is itself done, so this is not a failure to retry: fall
+        # through and report the series as it now stands.
+        LOGGER.debug(
+            "A cancelled occurrence's successor was removed mid-post; "
+            "event_id=%s occurrence_id=%s",
+            event.event_id,
+            successor.occurrence_id,
+        )
+        posted = None
+    except (discord.HTTPException, SQLAlchemyError, RuntimeError) as exc:
+        LOGGER.error(
+            "Could not post the successor of a cancelled occurrence; "
+            "event_id=%s occurrence_id=%s error_type=%s",
+            event.event_id,
+            successor.occurrence_id,
+            type(exc).__name__,
+        )
+        return OccurrenceCancellation(
+            successor=successor,
+            successor_posted=False,
+            retry_pending=_mark_cancellation_successor_pending(
+                bot,
+                successor,
+            ),
+        )
+    if posted is None:
+        # Declining has two causes: a maintenance pass posted this occurrence
+        # while the cancelled run's post was being cleared, or the row is gone
+        # because another cancellation (or a delete) reached it first. Report
+        # what the series actually has now rather than assuming the first -
+        # announcing a run that is not there would send the commander off to
+        # rebuild an event that is still going.
+        current = leading_occurrence(bot, event, current_time)
+        LOGGER.debug(
+            "Cancelled occurrence's successor was settled elsewhere; "
+            "event_id=%s successor_id=%s leading_id=%s",
+            event.event_id,
+            successor.occurrence_id,
+            current.occurrence_id if current is not None else None,
+        )
+        return OccurrenceCancellation(
+            successor=current,
+            successor_posted=(
+                current is not None and current.message_id is not None
+            ),
+        )
+    return OccurrenceCancellation(successor=posted, successor_posted=True)
+
+
+def leading_occurrence(
+    bot: Gw2Bot,
+    event: Event,
+    now: datetime,
+    *,
+    excluding: int | None = None,
+) -> EventOccurrence | None:
+    """The run a series is on now: its earliest occurrence still to happen.
+
+    Judged on the clock as well as on the stored status, the way `/event
+    cancel` picks its target. The status alone lags: it only moves when a
+    maintenance pass persists it, so a run that ended while its refresh was
+    failing still reads as live, and taking one of those for the series'
+    next run would report a date that has already passed.
+    """
+    duration = timedelta(minutes=event.duration_minutes)
+    return next(
+        (
+            candidate
+            for candidate in bot.event_store.get_event_occurrences(
+                event.event_id
+            )
+            if candidate.occurrence_id != excluding
+            and candidate.status is not EventStatus.OVER
+            and candidate.start_time + duration > now
+        ),
+        None,
+    )
+
+
+def _claim_cancellation_successor(
+    bot: Gw2Bot,
+    successor: EventOccurrence,
+) -> None:
+    # Raises rather than reporting: see the caller. Already-claimed rows need
+    # no write, which is what makes this safe to call again later.
+    if successor.needs_refresh:
+        return
+    bot.event_store.set_occurrence_needs_refresh(
+        successor.occurrence_id,
+        True,
+    )
+    LOGGER.debug(
+        "Claimed a cancelled occurrence's successor for posting; "
+        "occurrence_id=%s",
+        successor.occurrence_id,
+    )
+
+
+def _release_cancellation_claim(
+    bot: Gw2Bot,
+    successor: EventOccurrence,
+) -> None:
+    # The cancellation did not happen after all, so the run it claimed is a
+    # future one again and must not be posted ahead of the run that is still
+    # live. Best effort: the failure that brought us here is already being
+    # reported.
+    try:
+        bot.event_store.set_occurrence_needs_refresh(
+            successor.occurrence_id,
+            False,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not release a cancellation claim; occurrence_id=%s "
+            "error_type=%s",
+            successor.occurrence_id,
+            type(exc).__name__,
+        )
+
+
+def _discard_occurrence(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+    reason: str,
+) -> None:
+    # Take back an occurrence row whose creation could not be completed. Best
+    # effort: a failure here is logged rather than raised, because it is always
+    # reported alongside the original failure that made the row unwanted.
+    try:
+        bot.event_store.delete_occurrence(occurrence.occurrence_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not discard %s; occurrence_id=%s error_type=%s",
+            reason,
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return
+    LOGGER.debug(
+        "Discarded %s; occurrence_id=%s",
+        reason,
+        occurrence.occurrence_id,
+    )
+
+
+def _mark_cancellation_successor_pending(
+    bot: Gw2Bot,
+    successor: EventOccurrence,
+) -> bool:
+    # Claim the successor for the bot to post. The scheduler skips a pending
+    # occurrence whose series has no posted one, because that normally means a
+    # manual post is still in flight; the refresh flag is what tells it this
+    # one is its own to send instead. A cancellation removes the series' last
+    # post, so without the flag anything that stops this call short - a
+    # Discord failure, a restart - would hide the series for good.
+    #
+    # Set once before the Discord work and again if that work fails, so the
+    # second call is normally a no-op. Posting clears it.
+    if successor.needs_refresh:
+        return True
+    try:
+        bot.event_store.set_occurrence_needs_refresh(
+            successor.occurrence_id,
+            True,
+        )
+    except SQLAlchemyError as exc:
+        # Without the flag nothing will post this run: the series has no posted
+        # occurrence left, which is exactly what makes the scheduler leave a
+        # pending one alone. Report it so the commander is told the series
+        # needs a hand rather than promised a retry that is not coming.
+        LOGGER.error(
+            "Could not flag a cancelled occurrence's successor for posting; "
+            "occurrence_id=%s error_type=%s",
+            successor.occurrence_id,
+            type(exc).__name__,
+        )
+        return False
+    return True
 
 
 async def prune_superseded_occurrences(bot: Gw2Bot, event: Event) -> int:
@@ -1729,7 +2148,21 @@ def _create_next_occurrence(
         event.event_id,
         next_start,
     )
-    applied = apply_auto_signups(bot, event, new_occurrence)
+    try:
+        applied = apply_auto_signups(bot, event, new_occurrence)
+    except Exception:
+        # The row is committed but its roster is half-built. Leaving it would
+        # publish a run carrying an arbitrary slice of the members who asked to
+        # be signed up automatically - and a caller that never saw this
+        # occurrence returned cannot take it back, so a cancellation whose
+        # seeding failed here would report failure while the maintenance pass
+        # went on to post the run anyway. Seeding lands whole or not at all.
+        _discard_occurrence(
+            bot,
+            new_occurrence,
+            "a successor whose auto-signups failed",
+        )
+        raise
     LOGGER.debug(
         "Created next recurring event occurrence; event_id=%s "
         "occurrence_id=%s auto_signups=%s",
