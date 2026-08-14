@@ -773,6 +773,36 @@ async def complete_signup(
     flex_roles: tuple[EventRole, ...],
     now: datetime | None = None,
 ) -> EventSignup:
+    """Seat one member who signed themselves up, announcing what it moved."""
+    signup, _ = await seat_signup(
+        bot,
+        event,
+        occurrence,
+        discord_user_id,
+        role,
+        flex_roles,
+        now,
+    )
+    return signup
+
+
+async def seat_signup(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+    role: EventRole | None,
+    flex_roles: tuple[EventRole, ...],
+    now: datetime | None = None,
+    *,
+    notify: bool = True,
+) -> tuple[EventSignup, RosterUpdate]:
+    """Put one member on the roster and report what seating them moved.
+
+    A leader adding several members at once wants one announcement rather than
+    one per member, so it passes notify=False and merges the updates itself;
+    everything else takes the announcement here. Mirrors remove_signup.
+    """
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     # The role/flex/remember views can linger until their timeout, so the
     # occurrence may have ended between opening the flow and this click.
@@ -842,9 +872,10 @@ async def complete_signup(
         discord_user_id,
         add=True,
     )
-    await notify_roster_update(bot, occurrence, update)
+    if notify:
+        await notify_roster_update(bot, occurrence, update)
     await refresh_occurrence_message(bot, event, occurrence)
-    return signup
+    return signup, update
 
 
 async def remove_signup(
