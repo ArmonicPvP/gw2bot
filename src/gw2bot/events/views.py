@@ -2342,13 +2342,45 @@ class EventDeleteConfirmView(discord.ui.View):
         # Guard a double click racing two callbacks before the first removes the
         # buttons; the check and set are synchronous, so the second observes it.
         if self._deleting:
+            LOGGER.debug(
+                "Skipped a duplicate event deletion click; user_id=%s "
+                "event_id=%s",
+                interaction.user.id,
+                self._event.event_id,
+            )
             await interaction.response.send_message(
                 "This event is already being deleted.",
                 ephemeral=True,
             )
             return
         if self._only_while_one_off:
+            from gw2bot.events.posting import leading_occurrence
+
             stored = self._bot.event_store.get_event(self._event.event_id)
+            if stored is not None and (
+                leading_occurrence(self._bot, stored, datetime.now(UTC))
+                is None
+            ):
+                # The run ended while this confirmation sat open. `/event
+                # cancel` calls off runs still to come, so deleting now would
+                # erase a finished run's roster and post through a command
+                # that never offered to.
+                LOGGER.debug(
+                    "Event cancel deletion refused for a finished event; "
+                    "user_id=%s event_id=%s",
+                    interaction.user.id,
+                    self._event.event_id,
+                )
+                await interaction.response.edit_message(
+                    content=(
+                        "That event has already run, so there is nothing left "
+                        "to cancel. Use `/event delete` if you want to remove "
+                        "it."
+                    ),
+                    embeds=[],
+                    view=None,
+                )
+                return
             if (
                 stored is not None
                 and stored.repeat_frequency is not RepeatFrequency.NONE
@@ -2476,6 +2508,13 @@ class EventCancelConfirmView(discord.ui.View):
         # the buttons; the check and set are synchronous, so the second
         # observes it.
         if self._cancelling:
+            LOGGER.debug(
+                "Skipped a duplicate event cancellation click; user_id=%s "
+                "event_id=%s occurrence_id=%s",
+                interaction.user.id,
+                self._event.event_id,
+                self._occurrence.occurrence_id,
+            )
             await interaction.response.send_message(
                 "This occurrence is already being cancelled.",
                 ephemeral=True,
@@ -2630,6 +2669,16 @@ class EventCancelConfirmView(discord.ui.View):
             self._bot.event_timezone,
         )
         if not cancellation.successor_posted:
+            if not cancellation.retry_pending:
+                return (
+                    f"**{title}** on {cancelled_on} was cancelled, but its "
+                    f"next occurrence on {next_on} could not be posted in "
+                    f"<#{self._event.channel_id}> and could not be queued for "
+                    "another attempt either, so nothing will post it on its "
+                    "own. Check the bot's permissions there, then run "
+                    "`/event cancel` again to put the event back in the "
+                    "channel."
+                )
             return (
                 f"**{title}** on {cancelled_on} was cancelled, but its next "
                 f"occurrence on {next_on} could not be posted in "

@@ -714,6 +714,10 @@ class OccurrenceCancellation:
 
     successor: EventOccurrence | None
     successor_posted: bool
+    # Whether an unposted successor is queued for another attempt. False only
+    # when the retry marker could not be written either, which leaves the
+    # series with nothing in the channel and nothing coming to fix it.
+    retry_pending: bool = True
 
 
 async def cancel_occurrence(
@@ -752,7 +756,7 @@ async def cancel_occurrence(
             )
         raise
     await delete_event_posts(bot, event, [occurrence])
-    successor = _leading_occurrence(bot, event, current_time)
+    successor = leading_occurrence(bot, event, current_time)
     LOGGER.debug(
         "Cancelled event occurrence; event_id=%s occurrence_id=%s "
         "successor_id=%s",
@@ -796,10 +800,13 @@ async def cancel_occurrence(
             successor.occurrence_id,
             type(exc).__name__,
         )
-        _mark_cancellation_successor_pending(bot, successor)
         return OccurrenceCancellation(
             successor=successor,
             successor_posted=False,
+            retry_pending=_mark_cancellation_successor_pending(
+                bot,
+                successor,
+            ),
         )
     if posted is None:
         # Declining has two causes: a maintenance pass posted this occurrence
@@ -808,7 +815,7 @@ async def cancel_occurrence(
         # what the series actually has now rather than assuming the first -
         # announcing a run that is not there would send the commander off to
         # rebuild an event that is still going.
-        current = _leading_occurrence(bot, event, current_time)
+        current = leading_occurrence(bot, event, current_time)
         LOGGER.debug(
             "Cancelled occurrence's successor was settled elsewhere; "
             "event_id=%s successor_id=%s leading_id=%s",
@@ -825,7 +832,7 @@ async def cancel_occurrence(
     return OccurrenceCancellation(successor=posted, successor_posted=True)
 
 
-def _leading_occurrence(
+def leading_occurrence(
     bot: Gw2Bot,
     event: Event,
     now: datetime,
@@ -880,7 +887,7 @@ def _discard_occurrence(
 def _mark_cancellation_successor_pending(
     bot: Gw2Bot,
     successor: EventOccurrence,
-) -> None:
+) -> bool:
     # The cancellation stands but its successor never went out, and the
     # cancelled post it would have replaced is already gone, so the series has
     # nothing in the channel. The scheduler skips a pending occurrence whose
@@ -889,19 +896,25 @@ def _mark_cancellation_successor_pending(
     # to retry instead. Without it a transient Discord failure would hide the
     # series for good.
     if successor.needs_refresh:
-        return
+        return True
     try:
         bot.event_store.set_occurrence_needs_refresh(
             successor.occurrence_id,
             True,
         )
     except SQLAlchemyError as exc:
+        # Without the flag nothing will post this run: the series has no posted
+        # occurrence left, which is exactly what makes the scheduler leave a
+        # pending one alone. Report it so the commander is told the series
+        # needs a hand rather than promised a retry that is not coming.
         LOGGER.error(
             "Could not flag a cancelled occurrence's successor for posting; "
             "occurrence_id=%s error_type=%s",
             successor.occurrence_id,
             type(exc).__name__,
         )
+        return False
+    return True
 
 
 async def prune_superseded_occurrences(bot: Gw2Bot, event: Event) -> int:

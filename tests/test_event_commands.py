@@ -3566,6 +3566,43 @@ class TestCancelDeleteFallbackView:
         assert store.get_event(event.event_id) is None
         assert store.get_occurrence(occurrence.occurrence_id) is None
 
+    async def test_delete_is_refused_once_the_run_has_ended(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        started = datetime.now(UTC) - timedelta(hours=3)
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="One and done",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, started)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        await view.delete.callback(interaction)
+
+        # The run ended while the confirmation sat open, so this is history
+        # now - `/event delete` removes it, `/event cancel` does not.
+        assert store.get_event(event.event_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert (
+            "already run"
+            in interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
     async def test_declining_the_deletion_is_logged(
         self,
         fake_bot: Any,
@@ -3915,6 +3952,61 @@ class TestEventCancelConfirmView:
         assert "Event cancel declined" in caplog.text
         assert f"occurrence_id={occurrence.occurrence_id}" in caplog.text
         assert event.title not in caplog.text
+
+    async def test_cancel_says_so_when_no_retry_could_be_queued(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        channel.send_error = forbidden_error(50013)
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.cancel_occurrence.callback(interaction)
+
+        # Nothing will post the successor now, so promising an automatic retry
+        # would leave the commander waiting on a series that never comes back.
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "could not be queued" in content
+        assert "retried automatically" not in content
+
+    async def test_a_duplicate_cancellation_click_is_logged(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = make_posted_recurring_event(store)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        first = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        first.edit_original_response = AsyncMock()
+        await view.cancel_occurrence.callback(first)
+        second = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+
+        with caplog.at_level("DEBUG"):
+            await view.cancel_occurrence.callback(second)
+
+        # A skip is a decision the workflow's trail has to carry.
+        assert "Skipped a duplicate event cancellation click" in caplog.text
+        assert f"occurrence_id={occurrence.occurrence_id}" in caplog.text
 
     async def test_cancel_logging_keeps_the_event_out_of_the_log(
         self,
