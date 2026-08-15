@@ -272,6 +272,12 @@ class EventRecord(Base):
         nullable=False,
         default=False,
     )
+    # Comma-separated Discord role ids pinged when an occurrence is posted.
+    ping_role_ids: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="",
+    )
 
 
 class EventOccurrenceRecord(Base):
@@ -497,6 +503,20 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("delete_previous_on_repeat")
+
+        if "ping_role_ids" not in event_columns:
+            # Events created before role pinging existed ping nobody, which is
+            # exactly what the empty default records.
+            operations.add_column(
+                EventRecord.__tablename__,
+                Column(
+                    "ping_role_ids",
+                    String,
+                    nullable=False,
+                    server_default="",
+                ),
+            )
+            added_columns.add("ping_role_ids")
 
         signup_columns = {
             column["name"]

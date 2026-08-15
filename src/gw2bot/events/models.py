@@ -62,6 +62,21 @@ ROLE_EMOJI: dict[EventRole, str] = {
 }
 
 
+# Roles a commander may have the event post ping. Only roles whose name starts
+# with this marker are offered, so the picker shows the handful of opt-in
+# "ping me for this" roles rather than every role in the server. The brackets
+# are part of the marker; the comparison is case-insensitive so a role named
+# "[gw2] Raiders" is not silently left out of the picker.
+PING_ROLE_PREFIX = "[GW2]"
+# How many roles one event may ping. Kept small on purpose: an event post is an
+# announcement, and a post that pings half the server stops being one.
+MAX_PING_ROLES = 3
+
+
+def is_pingable_role_name(name: str) -> bool:
+    return name.casefold().startswith(PING_ROLE_PREFIX.casefold())
+
+
 class EventStatus(StrEnum):
     OPEN = "open"
     FULL = "full"
@@ -173,6 +188,10 @@ class Event:
     # thread) once the next occurrence is posted, so the channel keeps only the
     # current event. Ignored when the event does not repeat.
     delete_previous_on_repeat: bool = False
+    # Roles mentioned above the embed when an occurrence is posted, announcing
+    # the run to whoever opted into that role. Reminders never use them: those
+    # are addressed to the members actually on the roster.
+    ping_role_ids: tuple[int, ...] = ()
 
     @property
     def capacity(self) -> CategoryCapacity:

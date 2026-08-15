@@ -81,7 +81,14 @@ class FakeChannel:
         self.create_thread_error: Exception | None = None
         self.send_error: Exception | None = None
 
-    async def send(self, *, embed: Any = None, view: Any = None) -> Any:
+    async def send(
+        self,
+        *,
+        embed: Any = None,
+        view: Any = None,
+        content: Any = None,
+        allowed_mentions: Any = None,
+    ) -> Any:
         if self.send_error is not None:
             error = self.send_error
             self.send_error = None
@@ -95,7 +102,15 @@ class FakeChannel:
             message.create_thread = AsyncMock(
                 side_effect=self.create_thread_error
             )
-        self.sent.append({"embed": embed, "view": view, "message": message})
+        self.sent.append(
+            {
+                "embed": embed,
+                "view": view,
+                "content": content,
+                "allowed_mentions": allowed_mentions,
+                "message": message,
+            }
+        )
         return message
 
     def get_partial_message(self, message_id: int) -> Any:
@@ -226,6 +241,7 @@ def create_event(
     repeat_days: tuple[int, ...] = (),
     delete_previous_on_repeat: bool = False,
     channel_id: int = 1234,
+    ping_role_ids: tuple[int, ...] = (),
 ):
     return store.create_event(
         category=category,
@@ -238,6 +254,7 @@ def create_event(
         repeat_frequency=repeat_frequency,
         repeat_days=repeat_days,
         delete_previous_on_repeat=delete_previous_on_repeat,
+        ping_role_ids=ping_role_ids,
     )
 
 
@@ -487,6 +504,66 @@ class TestPostOccurrence:
             f"gw2bot:event-signout:{occurrence_id}",
             f"gw2bot:event-settings:{occurrence_id}",
         }
+
+    async def test_no_ping_roles_sends_the_post_without_any_content(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        await post_new_event(bot, store)
+
+        # An event that pings nobody must send exactly what it always sent, so
+        # no empty line appears above the embed.
+        assert channel.sent[0]["content"] is None
+        assert channel.sent[0]["allowed_mentions"] is None
+
+    async def test_ping_roles_are_mentioned_above_the_embed(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, ping_role_ids=(11, 22))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        # The mentions are the message content, which Discord renders above the
+        # embed and - unlike a mention inside the embed - actually notifies.
+        assert channel.sent[0]["content"] == "<@&11> <@&22>"
+        mentions = channel.sent[0]["allowed_mentions"]
+        assert [role.id for role in mentions.roles] == [11, 22]
+        # Nothing but those roles may be pinged by an event post.
+        assert mentions.everyone is False
+        assert mentions.users is False
+
+    async def test_each_repeat_occurrence_pings_the_roles_again(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            ping_role_ids=(11,),
+        )
+        first = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, first, BEFORE_START)
+        second = store.create_occurrence(
+            event.event_id,
+            event.start_time + timedelta(days=1),
+        )
+
+        await post_occurrence(bot, event, second, BEFORE_START)
+
+        # Every occurrence is its own announcement, so the roles hear about the
+        # run that is actually being posted.
+        assert [sent["content"] for sent in channel.sent] == [
+            "<@&11>",
+            "<@&11>",
+        ]
 
     async def test_thread_creation_failure_still_posts_the_event(
         self,
@@ -2735,6 +2812,25 @@ class TestDisableAutoSignup:
 
 
 class TestRefreshOccurrenceMessage:
+    async def test_a_refresh_leaves_the_role_ping_alone(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The roles are pinged once, when the post goes up. A refresh only
+        # re-renders the embed, so it must not touch the content - editing it
+        # would re-notify every one of those roles on every signup.
+        event = create_event(store, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        await refresh_occurrence_message(bot, event, posted, BEFORE_START)
+
+        edit = channel.partial_message.edit.await_args
+        assert edit is not None
+        assert "content" not in edit.kwargs
+
     async def test_status_transition_renames_thread_and_persists(
         self,
         bot: Any,

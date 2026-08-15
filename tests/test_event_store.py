@@ -45,10 +45,11 @@ def test_migration_adds_delete_previous_on_repeat_to_existing_db(
             text(
                 "INSERT INTO gw2_events (category, title, description, "
                 "channel_id, leader_discord_id, start_time, duration_minutes, "
-                "repeat_frequency, repeat_days, created_at, cancelled) VALUES "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "ping_role_ids) VALUES "
                 "('Fractal', 't', 'd', 1, 2, "
                 "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
-                "'2027-01-01T00:00:00+00:00', 0)"
+                "'2027-01-01T00:00:00+00:00', 0, '')"
             )
         )
 
@@ -62,6 +63,44 @@ def test_migration_adds_delete_previous_on_repeat_to_existing_db(
         assert legacy is not None
         # The backfilled column defaults to False for pre-existing rows.
         assert legacy.delete_previous_on_repeat is False
+    finally:
+        store.close()
+
+
+def test_migration_adds_ping_role_ids_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before events
+    # could ping roles by dropping the column and inserting a legacy row.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_events DROP COLUMN ping_role_ids")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat) VALUES "
+                "('Fractal', 't', 'd', 1, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "ping_role_ids" in added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_event(1)
+        assert legacy is not None
+        # An event created before the feature existed pings nobody.
+        assert legacy.ping_role_ids == ()
     finally:
         store.close()
 
@@ -126,10 +165,10 @@ def test_migration_backfills_occurrence_channel_id(tmp_path: Path) -> None:
                 "INSERT INTO gw2_events (category, title, description, "
                 "channel_id, leader_discord_id, start_time, duration_minutes, "
                 "repeat_frequency, repeat_days, created_at, cancelled, "
-                "delete_previous_on_repeat) VALUES "
+                "delete_previous_on_repeat, ping_role_ids) VALUES "
                 "('Fractal', 't', 'd', 4321, 2, "
                 "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
-                "'2027-01-01T00:00:00+00:00', 0, 0)"
+                "'2027-01-01T00:00:00+00:00', 0, 0, '')"
             )
         )
         connection.execute(
@@ -274,6 +313,75 @@ class TestEventStoreEvents:
         reloaded = store.get_event(event.event_id)
         assert reloaded is not None
         assert reloaded.delete_previous_on_repeat is True
+
+    def test_create_event_round_trips_the_ping_roles_in_order(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(store, ping_role_ids=(31, 12, 25))
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        # The order the commander picked them in is the order they are pinged.
+        assert loaded.ping_role_ids == (31, 12, 25)
+
+    def test_an_event_pings_nothing_by_default(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(store)
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        assert loaded.ping_role_ids == ()
+
+    def test_update_event_replaces_the_ping_roles(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, ping_role_ids=(31, 12))
+
+        updated = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            ping_role_ids=(99,),
+        )
+
+        assert updated.ping_role_ids == (99,)
+        reloaded = store.get_event(event.event_id)
+        assert reloaded is not None
+        assert reloaded.ping_role_ids == (99,)
+
+    def test_update_event_can_clear_the_ping_roles(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, ping_role_ids=(31,))
+
+        updated = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        assert updated.ping_role_ids == ()
 
     def test_update_event_unknown_id_raises(self, store: EventStore) -> None:
         with pytest.raises(ValueError, match="Unknown event"):

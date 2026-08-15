@@ -19,6 +19,7 @@ from gw2bot.discord_utils import (
 from gw2bot.events.formatting import (
     compute_status,
     event_embed,
+    event_ping_content,
     event_thread_name,
     next_occurrence_start,
     roster_update_message,
@@ -120,6 +121,30 @@ def occurrence_status(
     )
 
 
+def occurrence_ping_kwargs(event: Event) -> dict[str, Any]:
+    """Send arguments that ping the event's roles above the embed.
+
+    Empty for an event that pings nobody, so the send stays exactly what it was
+    before role pinging existed. The allowed mentions name the event's own
+    roles and nothing else, so a role id that ends up here can never widen
+    into an @everyone or a member ping, and a role that is not mentionable
+    by members still pings when the bot may mention roles.
+    """
+    content = event_ping_content(event)
+    if content is None:
+        return {}
+    return {
+        "content": content,
+        "allowed_mentions": discord.AllowedMentions(
+            everyone=False,
+            users=False,
+            roles=[
+                discord.Object(id=role_id) for role_id in event.ping_role_ids
+            ],
+        ),
+    }
+
+
 def occurrence_embed(
     event: Event,
     occurrence: EventOccurrence,
@@ -154,7 +179,10 @@ async def post_occurrence(
         # Discord refuses messages in an archived thread, and a forum post can
         # have been dormant for weeks before an event is posted into it.
         await _reopen_thread(channel, occurrence.occurrence_id)
-    message = await channel.send(embed=embed, view=view)
+    # The role pings ride on the message content, which Discord renders above
+    # the embed. Only the post pings them: reminders address the roster.
+    ping_kwargs = occurrence_ping_kwargs(event)
+    message = await channel.send(embed=embed, view=view, **ping_kwargs)
     if in_thread:
         # The event went into a forum post that already exists. Nothing is
         # created there - a forum post cannot hold threads of its own - and the
@@ -216,13 +244,14 @@ async def post_occurrence(
         raise
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
-        "in_existing_thread=%s thread_created=%s signups=%s",
+        "in_existing_thread=%s thread_created=%s signups=%s pinged_roles=%s",
         event.event_id,
         occurrence.occurrence_id,
         status.value,
         in_thread,
         thread_id is not None and not in_thread,
         len(signups),
+        len(event.ping_role_ids),
     )
     updated = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if updated is None:

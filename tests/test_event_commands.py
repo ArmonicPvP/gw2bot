@@ -25,6 +25,7 @@ from gw2bot.events.formatting import (
 from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
+    MAX_PING_ROLES,
     STATUS_COLORS,
     EventCategory,
     EventRole,
@@ -35,6 +36,7 @@ from gw2bot.events.models import (
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
+    PING_ROLE_OPTION_LIMIT,
     AutoSignupChoiceView,
     CategoryPickView,
     ChangeFieldSelect,
@@ -63,6 +65,8 @@ from gw2bot.events.views import (
     AddSignupsRoleView,
     AddSignupsSelect,
     AddSignupsView,
+    PingRolesPickView,
+    PingRolesSelect,
     RemoveSignupsSelect,
     RemoveSignupsView,
     RepeatChoiceView,
@@ -73,10 +77,12 @@ from gw2bot.events.views import (
     SignupSettingsView,
     UpdateRememberedRolesView,
     _departed_summary,
+    _ping_role_options,
     _signup_summary,
     build_event_preview,
     build_signup_view,
     draft_from_event,
+    pingable_roles,
     send_event_preview,
 )
 
@@ -184,6 +190,19 @@ class TestEventCommandGroup:
         assert interaction.response.send_modal.await_args is not None
         modal = interaction.response.send_modal.await_args.args[0]
         assert isinstance(modal, EventDetailsModal)
+
+    async def test_new_builds_the_ping_picker_from_the_server(self) -> None:
+        group = EventCommands(make_bot())
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=ping_guild(),
+        )
+
+        await cast(Any, group.new.callback)(group, interaction)
+
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert modal.ping_roles is not None
+        assert option_values(modal.ping_roles) == ["10", "20", "30"]
 
 
 class TestEventDraft:
@@ -366,6 +385,333 @@ class TestEventDetailsModal:
         assert isinstance(kwargs["view"], EventDetailsConfirmView)
 
 
+class FakeRole:
+    def __init__(self, role_id: int, name: str):
+        self.id = role_id
+        self.name = name
+
+
+class FakeRoleGuild:
+    """A guild that answers the role lookups the ping picker makes."""
+
+    def __init__(self, *roles: FakeRole):
+        # @everyone is always in a real guild's role list, so it is always in
+        # this one: the picker must never offer it.
+        self.roles = [FakeRole(1, "@everyone"), *roles]
+
+    def get_role(self, role_id: int) -> Any:
+        return next(
+            (role for role in self.roles if role.id == role_id),
+            None,
+        )
+
+
+def ping_guild() -> Any:
+    return cast(
+        Any,
+        FakeRoleGuild(
+            FakeRole(20, "[GW2] Raiders"),
+            FakeRole(10, "[GW2] Fractals"),
+            FakeRole(30, "[gw2] WvW"),
+            FakeRole(40, "Officers"),
+            FakeRole(50, "Raiders [GW2]"),
+        ),
+    )
+
+
+def values_of(options: list[discord.SelectOption]) -> list[str]:
+    return [option.value for option in options]
+
+
+def option_values(select: Any) -> list[str]:
+    return values_of(select.options)
+
+
+class TestPingRoleOptions:
+    def test_only_marked_roles_are_offered_sorted_by_name(self) -> None:
+        roles = pingable_roles(ping_guild())
+
+        # A role only counts when the marker starts its name, so "Raiders
+        # [GW2]" and the officer role are out, and @everyone can never be
+        # reached from here.
+        assert [role.id for role in roles] == [10, 20, 30]
+
+    def test_the_marker_is_matched_regardless_of_case(self) -> None:
+        assert 30 in {role.id for role in pingable_roles(ping_guild())}
+
+    def test_no_guild_offers_nothing(self) -> None:
+        assert pingable_roles(None) == []
+
+    def test_the_drafts_roles_are_preselected(self) -> None:
+        options = _ping_role_options(ping_guild(), (20,))
+
+        assert [option.default for option in options] == [False, True, False]
+
+    def test_a_picked_role_that_lost_the_marker_is_still_offered(self) -> None:
+        # It was a valid choice when it was picked, so an edit about something
+        # else must not quietly stop the event pinging it.
+        options = _ping_role_options(ping_guild(), (40,))
+
+        assert values_of(options)[0] == "40"
+        assert options[0].default is True
+
+    def test_a_picked_role_that_no_longer_exists_is_dropped(self) -> None:
+        # Discord would refuse the mention anyway.
+        options = _ping_role_options(ping_guild(), (999,))
+
+        assert "999" not in values_of(options)
+
+    def test_the_option_list_stays_within_what_discord_accepts(self) -> None:
+        guild = cast(
+            Any,
+            FakeRoleGuild(
+                *(
+                    FakeRole(100 + index, f"[GW2] Squad {index:03d}")
+                    for index in range(40)
+                )
+            ),
+        )
+
+        options = _ping_role_options(guild, ())
+
+        assert len(options) == PING_ROLE_OPTION_LIMIT
+
+
+class TestPingRolesInTheDetailsModal:
+    def test_the_picker_is_the_modals_fifth_question(self) -> None:
+        modal = EventDetailsModal(
+            make_bot(),
+            EventDraft(leader_discord_id=42),
+            ping_guild(),
+        )
+
+        # Discord allows a modal five components, so the roles are asked up
+        # front rather than behind "Change something".
+        assert len(modal.children) == 5
+        assert modal.ping_roles is not None
+        assert option_values(modal.ping_roles) == ["10", "20", "30"]
+
+    def test_no_more_than_three_roles_may_be_picked(self) -> None:
+        modal = EventDetailsModal(
+            make_bot(),
+            EventDraft(leader_discord_id=42),
+            ping_guild(),
+        )
+
+        assert modal.ping_roles is not None
+        assert modal.ping_roles.max_values == MAX_PING_ROLES
+        # Picking none is a valid answer, so the question stays optional.
+        assert modal.ping_roles.min_values == 0
+        assert modal.ping_roles.required is False
+
+    def test_a_server_without_marked_roles_gets_no_picker(self) -> None:
+        # Discord refuses a select with no options, and there is nothing to
+        # choose from anyway.
+        guild = cast(Any, FakeRoleGuild(FakeRole(40, "Officers")))
+
+        modal = EventDetailsModal(
+            make_bot(),
+            EventDraft(leader_discord_id=42),
+            guild,
+        )
+
+        assert modal.ping_roles is None
+        assert len(modal.children) == 4
+
+    def test_max_values_never_exceeds_the_offered_roles(self) -> None:
+        guild = cast(Any, FakeRoleGuild(FakeRole(10, "[GW2] Fractals")))
+
+        modal = EventDetailsModal(
+            make_bot(),
+            EventDraft(leader_discord_id=42),
+            guild,
+        )
+
+        assert modal.ping_roles is not None
+        assert modal.ping_roles.max_values == 1
+
+    async def test_submit_stores_the_picked_roles(self) -> None:
+        draft = EventDraft(leader_discord_id=42)
+        modal = EventDetailsModal(make_bot(), draft, ping_guild())
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [SimpleNamespace(id=1234)]
+        assert modal.ping_roles is not None
+        modal.ping_roles._values = ["20", "10"]
+
+        await modal.on_submit(make_interaction())
+
+        assert draft.ping_role_ids == (20, 10)
+
+    async def test_submit_with_nothing_picked_clears_the_roles(self) -> None:
+        draft = EventDraft(leader_discord_id=42, ping_role_ids=(20,))
+        modal = EventDetailsModal(make_bot(), draft, ping_guild())
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [SimpleNamespace(id=1234)]
+        assert modal.ping_roles is not None
+        modal.ping_roles._values = []
+
+        await modal.on_submit(make_interaction())
+
+        # The picker was shown with the roles pre-selected, so deselecting them
+        # is how they are taken off the event.
+        assert draft.ping_role_ids == ()
+
+    async def test_submit_without_a_picker_leaves_the_roles_alone(
+        self,
+    ) -> None:
+        # A server with no marked roles gets no picker, which must not be read
+        # as "the commander cleared the roles".
+        draft = EventDraft(leader_discord_id=42, ping_role_ids=(20,))
+        modal = EventDetailsModal(make_bot(), draft)
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [SimpleNamespace(id=1234)]
+
+        await modal.on_submit(make_interaction())
+
+        assert draft.ping_role_ids == (20,)
+
+    async def test_a_rejected_destination_keeps_the_picked_roles(self) -> None:
+        draft = EventDraft(leader_discord_id=42)
+        guild = ping_guild()
+        modal = EventDetailsModal(make_destination_bot(), draft, guild)
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [make_channel_thread()]
+        assert modal.ping_roles is not None
+        modal.ping_roles._values = ["20"]
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.ping_role_ids == (20,)
+        # The retry modal reopens with the roles still picked, so only the
+        # destination has to be answered again.
+        retry = interaction.response.send_message.await_args.kwargs["view"]
+        retried = retry.build_modal()
+        assert retried.ping_roles is not None
+        assert [
+            option.value
+            for option in retried.ping_roles.options
+            if option.default
+        ] == ["20"]
+
+
+class TestPingRolesInTheChangeFlow:
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+        )
+
+    def test_the_full_change_list_offers_the_roles(self) -> None:
+        assert "ping_roles" in [
+            option.value for option in ChangeFieldSelect().options
+        ]
+
+    async def test_choosing_it_opens_the_picker(self) -> None:
+        draft = self.make_draft()
+        view = ChangeFieldView(make_bot(), draft)
+        interaction = make_interaction(
+            message=ephemeral_message(),
+            guild=ping_guild(),
+        )
+
+        await view.handle_choice(interaction, "ping_roles")
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], PingRolesPickView)
+        select = next(
+            item
+            for item in kwargs["view"].children
+            if isinstance(item, PingRolesSelect)
+        )
+        assert option_values(select) == ["10", "20", "30"]
+
+    async def test_a_server_without_marked_roles_says_so(self) -> None:
+        draft = self.make_draft()
+        view = ChangeFieldView(make_bot(), draft)
+        interaction = make_interaction(
+            message=ephemeral_message(),
+            guild=cast(Any, FakeRoleGuild()),
+        )
+
+        await view.handle_choice(interaction, "ping_roles")
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        # A picker with no options is a payload Discord refuses, so the
+        # commander is told why and put back on the preview.
+        assert "[GW2]" in kwargs["content"]
+        assert isinstance(kwargs["view"], EventConfirmView)
+
+    async def test_picking_roles_returns_to_the_preview(self) -> None:
+        draft = self.make_draft()
+        view = PingRolesPickView(
+            make_bot(),
+            draft,
+            _ping_role_options(ping_guild(), ()),
+        )
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.pick(interaction, (10, 20))
+
+        assert draft.ping_role_ids == (10, 20)
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventConfirmView)
+
+    async def test_picking_nothing_clears_the_roles(self) -> None:
+        draft = replace(self.make_draft(), ping_role_ids=(10,))
+        view = PingRolesPickView(
+            make_bot(),
+            draft,
+            _ping_role_options(ping_guild(), (10,)),
+        )
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.pick(interaction, ())
+
+        assert draft.ping_role_ids == ()
+
+    def test_the_preview_says_which_roles_will_be_pinged(self) -> None:
+        draft = replace(self.make_draft(), ping_role_ids=(10, 20))
+
+        embeds, _ = build_event_preview(make_bot(), draft)
+
+        # Mentions inside an embed never notify anybody, so the preview can
+        # show them as role chips without pinging the server.
+        assert "<@&10> <@&20>" in cast(str, embeds[1].description)
+
+    def test_the_preview_says_when_nothing_will_be_pinged(self) -> None:
+        embeds, _ = build_event_preview(make_bot(), self.make_draft())
+
+        assert "No roles are pinged" in cast(str, embeds[1].description)
+
+    def test_the_step_one_preview_says_it_too(self) -> None:
+        draft = EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.RAID,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            ping_role_ids=(10,),
+        )
+
+        embeds, _ = build_event_preview(make_bot(), draft)
+
+        assert "<@&10>" in cast(str, embeds[1].description)
+
+
 class TestEventDetailsConfirmView:
     def make_draft(self) -> EventDraft:
         return EventDraft(
@@ -422,6 +768,7 @@ class TestEventDetailsConfirmView:
             "description",
             "channel",
             "leader",
+            "ping_roles",
         ]
 
     async def test_a_change_returns_to_the_details_preview(self) -> None:
@@ -2122,7 +2469,11 @@ class TestSignupViews:
 FAR_FUTURE = datetime(2107, 1, 30, 20, 0, tzinfo=UTC)
 
 
-def make_edit_event(store: EventStore, channel_id: int = 1234) -> Any:
+def make_edit_event(
+    store: EventStore,
+    channel_id: int = 1234,
+    ping_role_ids: tuple[int, ...] = (),
+) -> Any:
     return store.create_event(
         category=EventCategory.FRACTAL,
         title="Original Title",
@@ -2133,14 +2484,16 @@ def make_edit_event(store: EventStore, channel_id: int = 1234) -> Any:
         duration_minutes=90,
         repeat_frequency=RepeatFrequency.NONE,
         repeat_days=(),
+        ping_role_ids=ping_role_ids,
     )
 
 
 def make_posted_edit_event(
     store: EventStore,
     channel_id: int = 1234,
+    ping_role_ids: tuple[int, ...] = (),
 ) -> Any:
-    event = make_edit_event(store, channel_id)
+    event = make_edit_event(store, channel_id, ping_role_ids)
     occurrence = store.create_occurrence(event.event_id, event.start_time)
     store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
     return event, occurrence
@@ -2683,6 +3036,60 @@ class TestDepartedSummary:
         assert "other" not in summary
 
 
+class TestPingRolesEndToEnd:
+    async def test_posting_stores_the_roles_and_pings_them(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = replace(make_complete_draft(), ping_role_ids=(10, 20))
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        stored = store.get_event(1)
+        assert stored is not None
+        assert stored.ping_role_ids == (10, 20)
+        # The mentions are the message content, so they land above the embed.
+        assert channel.sent[0]["content"] == "<@&10> <@&20>"
+
+    async def test_editing_replaces_the_roles_without_re_pinging(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, _ = make_posted_edit_event(store, ping_role_ids=(10,))
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        # The edit session starts from what the event already pings.
+        assert draft.ping_role_ids == (10,)
+        draft.ping_role_ids = (20, 30)
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.ping_role_ids == (20, 30)
+        # An edit refreshes the existing message rather than posting a new one,
+        # so nobody is pinged a second time.
+        assert channel.sent == []
+        edit = channel.partial_message.edit.await_args
+        assert edit is not None
+        assert "content" not in edit.kwargs
+
+
 class TestEventEditConfirmView:
     async def test_save_changes_updates_event_and_refreshes_message(
         self,
@@ -2915,7 +3322,11 @@ class TestEventEditConfirmView:
         bot = cast(Any, FakeBot(store, old_channel))
         bot._channels[new_channel.id] = new_channel
         bot._channels[new_channel.thread.id] = new_channel.thread
-        event = make_edit_event(store, channel_id=old_channel.id)
+        event = make_edit_event(
+            store,
+            channel_id=old_channel.id,
+            ping_role_ids=(10,),
+        )
         occurrence = store.create_occurrence(event.event_id, event.start_time)
         posted = await post_occurrence(bot, event, occurrence)
         draft = draft_from_event(
@@ -2939,7 +3350,12 @@ class TestEventEditConfirmView:
         # channel_id on the new channel would send the next scheduler refresh
         # looking for this message there, get NotFound and retire a live event.
         old_channel.partial_message.delete.assert_not_awaited()
-        assert store.get_event(event.event_id).channel_id == old_channel.id  # type: ignore[union-attr]
+        restored = store.get_event(event.event_id)
+        assert restored is not None
+        assert restored.channel_id == old_channel.id
+        # Putting the channel back rewrites the whole row, so the rest of the
+        # event - its ping roles included - must survive that write.
+        assert restored.ping_role_ids == (10,)
         stored = store.get_occurrence(occurrence.occurrence_id)
         assert stored is not None
         assert stored.message_id == posted.message_id

@@ -126,6 +126,35 @@ remove a thread on its own when its starter message is deleted. Without
 post destination needs `Send Messages in Threads` instead of `Send Messages`,
 and `Manage Threads` only to reopen it once Discord has archived it.
 
+## Event Role Pings
+
+An event can announce itself to up to three roles. They are asked for on the
+first `/event new` screen, alongside the category, title, description and
+destination, and can be changed later from **Change something → Roles to ping**
+in either `/event new` or `/event edit`.
+
+Only roles whose name starts with `[GW2]` are offered — the brackets are part of
+the marker, and case does not matter, so `[gw2] WvW` is offered too. Everything
+else in the server, `@everyone` included, is unreachable from the picker, so an
+event post can only ever ping a role that was named to be pinged. The picker
+lists the marked roles alphabetically; a server with none of them simply shows no
+question, and the change flow says so instead of opening an empty picker.
+
+The mentions are sent as the message text carrying the event, so they appear
+above the embed and actually notify. Each occurrence is its own announcement: a
+repeating event pings the roles again when the next occurrence is posted, and a
+channel move pings them at the new destination, because that is where the post
+now is. Refreshing an embed — a sign-up, a status change, a rename — never
+re-sends the mentions, so nobody is pinged twice for one post.
+
+The bot needs the `Mention @everyone, @here and All Roles` permission where the
+event is posted to ping a role that members cannot mention themselves. Only the
+event's own roles are ever allowed to be mentioned, so nothing in a title or
+description can widen an event post into an `@everyone`.
+
+Role pings belong to the post alone. Reminders ping the members who signed up,
+never these roles.
+
 ## Event Reminders
 
 Members who hold a seat on an event are pinged where the event was posted — its
@@ -153,7 +182,9 @@ a member who signs up between two reminders is included in the later one.
 
 Each reminder names exactly the members it pings, so mention syntax in an event
 title — `@everyone`, a role, or another user — stays inert text and a reminder
-can only ever notify the roster it is for.
+can only ever notify the roster it is for. An event's ping roles are not
+reminded either: they were told the event exists when it was posted, and a
+reminder is for the people who answered.
 
 Each reminder is recorded once it has been resolved, so a restart, a second
 maintenance pass, or an event that is edited never pings a roster twice. A

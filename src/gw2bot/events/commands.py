@@ -84,12 +84,15 @@ class EventCommands(app_commands.Group):
             )
             return
         draft = EventDraft(leader_discord_id=interaction.user.id)
-        await interaction.response.send_modal(
-            EventDetailsModal(self._bot, draft)
-        )
+        # The guild is what the ping-role picker is built from; the command is
+        # guild-only, so it is only ever missing if Discord sends the
+        # interaction without one.
+        modal = EventDetailsModal(self._bot, draft, interaction.guild)
+        await interaction.response.send_modal(modal)
         LOGGER.debug(
-            "Event creation modal opened; user_id=%s",
+            "Event creation modal opened; user_id=%s ping_roles_offered=%s",
             interaction.user.id,
+            0 if modal.ping_roles is None else len(modal.ping_roles.options),
         )
 
     async def active_event_id_autocomplete(
