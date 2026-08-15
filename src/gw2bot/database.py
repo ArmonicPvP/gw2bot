@@ -352,6 +352,13 @@ class EventReminderRecord(Base):
 class EventSignupPreferenceRecord(Base):
     __tablename__ = "gw2_event_signup_preferences"
 
+    # Remembered roles are per event, like automatic sign-up: the role someone
+    # plays in a raid says nothing about the role they want in a fractal, so a
+    # member signing up for an event they have never joined is asked afresh.
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_events.event_id"),
+        primary_key=True,
+    )
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     role: Mapped[str | None] = mapped_column(String, nullable=True)
     flex_roles: Mapped[str] = mapped_column(String, nullable=False, default="")
@@ -521,6 +528,45 @@ def initialize_database(engine: Engine) -> set[str]:
                 Column("edit_tokens_updated_at", String, nullable=True),
             )
             added_columns.add("edit_tokens_updated_at")
+
+        preference_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                EventSignupPreferenceRecord.__tablename__
+            )
+        }
+        if "event_id" not in preference_columns:
+            # Legacy remembered roles were one global row per member. They are
+            # now keyed by event as well, which SQLite cannot express as an
+            # added column: the primary key changes, so the table is rebuilt.
+            # Legacy rows are fanned out over the events the member has
+            # already signed up for - exactly the events whose roles they had
+            # been asked about - so their memory survives where it was earned
+            # and every other event asks them once.
+            legacy_table = f"{EventSignupPreferenceRecord.__tablename__}_legacy"
+            operations.rename_table(
+                EventSignupPreferenceRecord.__tablename__,
+                legacy_table,
+            )
+            # The metadata lookup, rather than the mapped class's __table__,
+            # is the typed route to the Table this recreates.
+            Base.metadata.tables[
+                EventSignupPreferenceRecord.__tablename__
+            ].create(connection)
+            connection.exec_driver_sql(
+                "INSERT INTO gw2_event_signup_preferences "
+                "(event_id, discord_user_id, role, flex_roles, mode) "
+                "SELECT DISTINCT occurrences.event_id, "
+                "legacy.discord_user_id, legacy.role, legacy.flex_roles, "
+                "legacy.mode "
+                f"FROM {legacy_table} AS legacy "
+                "JOIN gw2_event_signups AS signups "
+                "ON signups.discord_user_id = legacy.discord_user_id "
+                "JOIN gw2_event_occurrences AS occurrences "
+                "ON occurrences.occurrence_id = signups.occurrence_id"
+            )
+            operations.drop_table(legacy_table)
+            added_columns.add("signup_preference_event_id")
 
         guild_leave_columns = {
             column["name"]

@@ -568,6 +568,13 @@ class EventStore:
                     EventAutoSignupRecord.event_id == event_id
                 )
             )
+            # Remembered roles are per event too, so they go with it rather
+            # than outliving the event they were remembered for.
+            session.execute(
+                delete(EventSignupPreferenceRecord).where(
+                    EventSignupPreferenceRecord.event_id == event_id
+                )
+            )
             session.execute(
                 delete(EventOccurrenceRecord).where(
                     EventOccurrenceRecord.event_id == event_id
@@ -808,16 +815,18 @@ class EventStore:
 
     def get_signup_preference(
         self,
+        event_id: int,
         discord_user_id: int,
     ) -> SignupPreference | None:
         with self._sessions() as session:
             record = session.get(
                 EventSignupPreferenceRecord,
-                discord_user_id,
+                (event_id, discord_user_id),
             )
             if record is None:
                 return None
             return SignupPreference(
+                event_id=record.event_id,
                 discord_user_id=record.discord_user_id,
                 role=EventRole(record.role) if record.role else None,
                 flex_roles=_parse_roles(record.flex_roles),
@@ -826,19 +835,37 @@ class EventStore:
 
     def set_signup_preference(
         self,
+        event_id: int,
         discord_user_id: int,
         role: EventRole | None,
         flex_roles: tuple[EventRole, ...],
         mode: PreferenceMode,
     ) -> None:
         with self._sessions() as session:
+            # A role-memory view can sit open until it times out, and the
+            # event can be deleted while it does. SQLite does not enforce the
+            # foreign key, and it hands a deleted event's id to the next event
+            # created, so a row written for the event that has gone would be
+            # inherited by an unrelated one - silently seating a member who
+            # was never asked. Re-read the event here and drop the write if it
+            # is gone.
+            if session.get(EventRecord, event_id) is None:
+                LOGGER.debug(
+                    "Skipped a signup preference for a deleted event; "
+                    "event_id=%s user_id=%s mode=%s",
+                    event_id,
+                    discord_user_id,
+                    mode.value,
+                )
+                return
             record = session.get(
                 EventSignupPreferenceRecord,
-                discord_user_id,
+                (event_id, discord_user_id),
             )
             if record is None:
                 record = EventSignupPreferenceRecord(
-                    discord_user_id=discord_user_id
+                    event_id=event_id,
+                    discord_user_id=discord_user_id,
                 )
                 session.add(record)
             record.role = role.value if role is not None else None
@@ -846,8 +873,9 @@ class EventStore:
             record.mode = mode.value
             session.commit()
         LOGGER.debug(
-            "Stored event signup preference; user_id=%s mode=%s "
+            "Stored event signup preference; event_id=%s user_id=%s mode=%s "
             "has_role=%s flex_count=%s",
+            event_id,
             discord_user_id,
             mode.value,
             role is not None,
