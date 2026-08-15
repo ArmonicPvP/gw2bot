@@ -65,6 +65,7 @@ from gw2bot.events.views import (
     AddSignupsView,
     RemoveSignupsSelect,
     RemoveSignupsView,
+    RememberChoiceView,
     RepeatChoiceView,
     RolePickSelect,
     RolePickView,
@@ -78,6 +79,7 @@ from gw2bot.events.views import (
     build_signup_view,
     draft_from_event,
     send_event_preview,
+    start_signup_flow,
 )
 
 from factories import forbidden_error, not_found_error
@@ -1673,6 +1675,140 @@ class TestAutoSignupPrompt:
         assert kwargs["view"] is None
 
 
+class TestRememberedRolesPerEvent:
+    # Remembered roles are scoped to one event, so a memory earned on one
+    # event neither seats nor silences the member on any other.
+
+    def make_role_event(self, store: EventStore, title: str) -> Any:
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        return event, occurrence
+
+    def make_flow_interaction(self) -> Any:
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def test_an_unfamiliar_event_asks_for_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        remembered, _ = self.make_role_event(store, "Remembered")
+        _, fresh = self.make_role_event(store, "Never joined")
+        store.set_signup_preference(
+            remembered.event_id,
+            42,
+            EventRole.ALACRITY_HEAL,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        interaction = make_interaction()
+
+        await start_signup_flow(
+            fake_bot,
+            interaction,
+            fresh.occurrence_id,
+        )
+
+        await_args = interaction.response.send_message.await_args
+        assert await_args is not None
+        assert "Pick your role" in await_args.args[0]
+        assert isinstance(await_args.kwargs["view"], RolePickView)
+        # Nothing was seated: the flow is waiting on the role pickers.
+        assert store.get_signup(fresh.occurrence_id, 42) is None
+
+    async def test_remembered_roles_still_seat_their_own_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(store, "Remembered")
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.ALACRITY_HEAL,
+            (EventRole.DPS,),
+            PreferenceMode.REMEMBER,
+        )
+        interaction = make_interaction()
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.edit_original_response = AsyncMock()
+
+        await start_signup_flow(
+            fake_bot,
+            interaction,
+            occurrence.occurrence_id,
+        )
+
+        interaction.response.send_message.assert_not_awaited()
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert signup.role is EventRole.ALACRITY_HEAL
+        assert signup.flex_roles == (EventRole.DPS,)
+
+    async def test_remembering_stores_the_choice_against_one_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(store, "Remembered")
+        other, _ = self.make_role_event(store, "Never joined")
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_DPS
+
+        await RememberChoiceView(flow).remember_yes.callback(
+            self.make_flow_interaction()
+        )
+
+        preference = store.get_signup_preference(event.event_id, 42)
+        assert preference is not None
+        assert preference.mode is PreferenceMode.REMEMBER
+        assert preference.role is EventRole.QUICKNESS_DPS
+        assert store.get_signup_preference(other.event_id, 42) is None
+
+    async def test_never_ask_again_covers_only_its_own_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(store, "Quietened")
+        other, fresh = self.make_role_event(store, "Never joined")
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.DPS
+        await RememberChoiceView(flow).remember_never.callback(
+            self.make_flow_interaction()
+        )
+
+        quietened = store.get_signup_preference(event.event_id, 42)
+        assert quietened is not None
+        assert quietened.mode is PreferenceMode.NEVER_ASK
+
+        # The other event has never asked, so it asks now.
+        interaction = make_interaction()
+        await start_signup_flow(
+            fake_bot,
+            interaction,
+            fresh.occurrence_id,
+        )
+        await_args = interaction.response.send_message.await_args
+        assert await_args is not None
+        assert isinstance(await_args.kwargs["view"], RolePickView)
+        assert store.get_signup_preference(other.event_id, 42) is None
+
+
 class TestEditSignupFlow:
     def make_signed_up_event(
         self,
@@ -1934,6 +2070,7 @@ class TestEditSignupFlow:
     ) -> None:
         event, occurrence = self.make_signed_up_event(store)
         store.set_signup_preference(
+            event.event_id,
             42,
             EventRole.QUICKNESS_DPS,
             (),
@@ -1953,7 +2090,7 @@ class TestEditSignupFlow:
         second = make_interaction(message=ephemeral_message())
         await prompt.update.callback(second)
 
-        preference = store.get_signup_preference(42)
+        preference = store.get_signup_preference(event.event_id, 42)
         assert preference is not None
         assert preference.mode is PreferenceMode.REMEMBER
         assert preference.role is EventRole.ALACRITY_DPS
@@ -1969,6 +2106,7 @@ class TestEditSignupFlow:
     ) -> None:
         event, occurrence = self.make_signed_up_event(store)
         store.set_signup_preference(
+            event.event_id,
             42,
             EventRole.QUICKNESS_DPS,
             (),
@@ -1984,7 +2122,7 @@ class TestEditSignupFlow:
         second = make_interaction(message=ephemeral_message())
         await prompt.keep.callback(second)
 
-        preference = store.get_signup_preference(42)
+        preference = store.get_signup_preference(event.event_id, 42)
         assert preference is not None
         assert preference.role is EventRole.QUICKNESS_DPS
         assert (
@@ -1999,6 +2137,7 @@ class TestEditSignupFlow:
     ) -> None:
         event, occurrence = self.make_signed_up_event(store)
         store.set_signup_preference(
+            event.event_id,
             42,
             EventRole.ALACRITY_DPS,
             (EventRole.DPS,),

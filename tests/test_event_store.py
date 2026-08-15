@@ -163,6 +163,90 @@ def test_migration_backfills_occurrence_channel_id(tmp_path: Path) -> None:
         store.close()
 
 
+def test_migration_scopes_legacy_signup_preferences_to_events(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created while
+    # remembered roles were a single global row per member.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE gw2_event_signup_preferences"))
+        connection.execute(
+            text(
+                "CREATE TABLE gw2_event_signup_preferences ("
+                "discord_user_id INTEGER NOT NULL PRIMARY KEY, "
+                "role VARCHAR, flex_roles VARCHAR NOT NULL, "
+                "mode VARCHAR NOT NULL)"
+            )
+        )
+        for title in ("Signed up", "Never joined"):
+            connection.execute(
+                text(
+                    "INSERT INTO gw2_events (category, title, description, "
+                    "channel_id, leader_discord_id, start_time, "
+                    "duration_minutes, repeat_frequency, repeat_days, "
+                    "created_at, cancelled, delete_previous_on_repeat) VALUES "
+                    f"('Fractal', '{title}', 'd', 1, 2, "
+                    "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                    "'2027-01-01T00:00:00+00:00', 0, 0)"
+                )
+            )
+        # Two occurrences of the first event, so the fan-out must not write a
+        # duplicate row for the member seated in both.
+        for start in ("2027-01-30T20:00:00+00:00", "2027-01-31T20:00:00+00:00"):
+            connection.execute(
+                text(
+                    "INSERT INTO gw2_event_occurrences (event_id, start_time, "
+                    "channel_id, message_id, thread_id, status, "
+                    "needs_refresh) VALUES "
+                    f"(1, '{start}', 1, NULL, NULL, 'open', 0)"
+                )
+            )
+        for occurrence_id in (1, 2):
+            connection.execute(
+                text(
+                    "INSERT INTO gw2_event_signups (occurrence_id, "
+                    "discord_user_id, role, assigned_role, flex_roles, "
+                    "signed_up_at, waitlisted, edit_tokens, "
+                    "edit_tokens_updated_at) VALUES "
+                    f"({occurrence_id}, 42, 'Alacrity Heal', "
+                    "'Alacrity Heal', 'Just DPS', "
+                    "'2027-01-01T00:00:00+00:00', 0, 3.0, NULL)"
+                )
+            )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_event_signup_preferences (discord_user_id, "
+                "role, flex_roles, mode) VALUES "
+                "(42, 'Alacrity Heal', 'Just DPS', 'remember'), "
+                "(7, NULL, '', 'never_ask')"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "signup_preference_event_id" in added
+    store = EventStore(db_path)
+    try:
+        # The member kept their memory for the event they had signed up for.
+        remembered = store.get_signup_preference(1, 42)
+        assert remembered is not None
+        assert remembered.role is EventRole.ALACRITY_HEAL
+        assert remembered.flex_roles == (EventRole.DPS,)
+        assert remembered.mode is PreferenceMode.REMEMBER
+        # An event they never joined starts fresh, so their first signup for
+        # it asks for roles.
+        assert store.get_signup_preference(2, 42) is None
+        # A legacy row for someone with no signups at all has no event to
+        # belong to and is dropped.
+        assert store.get_signup_preference(1, 7) is None
+    finally:
+        store.close()
+
+
 def create_event(store: EventStore, **overrides: object):
     parameters: dict = {
         "category": EventCategory.FRACTAL,
@@ -826,27 +910,83 @@ class TestEventStorePreferences:
         self,
         store: EventStore,
     ) -> None:
-        assert store.get_signup_preference(1) is None
+        event = create_event(store)
+
+        assert store.get_signup_preference(event.event_id, 1) is None
 
         store.set_signup_preference(
+            event.event_id,
             1,
             EventRole.ALACRITY_HEAL,
             (EventRole.DPS,),
             PreferenceMode.REMEMBER,
         )
-        preference = store.get_signup_preference(1)
+        preference = store.get_signup_preference(event.event_id, 1)
 
         assert preference is not None
+        assert preference.event_id == event.event_id
         assert preference.role is EventRole.ALACRITY_HEAL
         assert preference.flex_roles == (EventRole.DPS,)
         assert preference.mode is PreferenceMode.REMEMBER
 
-        store.set_signup_preference(1, None, (), PreferenceMode.NEVER_ASK)
-        preference = store.get_signup_preference(1)
+        store.set_signup_preference(
+            event.event_id,
+            1,
+            None,
+            (),
+            PreferenceMode.NEVER_ASK,
+        )
+        preference = store.get_signup_preference(event.event_id, 1)
 
         assert preference is not None
         assert preference.role is None
         assert preference.mode is PreferenceMode.NEVER_ASK
+
+    def test_preferences_are_kept_per_event(self, store: EventStore) -> None:
+        remembered = create_event(store)
+        other = create_event(store, title="Another Run")
+        store.set_signup_preference(
+            remembered.event_id,
+            1,
+            EventRole.ALACRITY_HEAL,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+
+        # The memory belongs to the event it was recorded for, so the member
+        # is still asked the first time they sign up for anything else.
+        assert store.get_signup_preference(other.event_id, 1) is None
+        assert store.get_signup_preference(remembered.event_id, 2) is None
+
+        store.set_signup_preference(
+            other.event_id,
+            1,
+            EventRole.DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        first = store.get_signup_preference(remembered.event_id, 1)
+        second = store.get_signup_preference(other.event_id, 1)
+
+        assert first is not None and first.role is EventRole.ALACRITY_HEAL
+        assert second is not None and second.role is EventRole.DPS
+
+    def test_deleting_an_event_drops_its_preferences(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        store.set_signup_preference(
+            event.event_id,
+            1,
+            EventRole.DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+
+        store.delete_event(event.event_id)
+
+        assert store.get_signup_preference(event.event_id, 1) is None
 
 
 class TestEventStoreAutoSignups:

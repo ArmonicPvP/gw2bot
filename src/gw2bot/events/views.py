@@ -4191,16 +4191,19 @@ def _describe_signup_settings(
         lines.append(f"Automatic sign-up for this event: **{auto_text}**")
     else:
         lines.append("This event does not repeat, so it has no automatic sign-up.")
-    preference = bot.event_store.get_signup_preference(discord_user_id)
+    preference = bot.event_store.get_signup_preference(
+        event.event_id,
+        discord_user_id,
+    )
     if preference is not None and preference.mode is PreferenceMode.REMEMBER:
         remembered = (
             preference.role.value if preference.role is not None else "none"
         )
-        lines.append(f"Remembered role: **{remembered}**")
+        lines.append(f"Remembered role for this event: **{remembered}**")
     elif preference is not None and preference.mode is PreferenceMode.NEVER_ASK:
-        lines.append("Role memory: **never ask**")
+        lines.append("Role memory for this event: **never ask**")
     else:
-        lines.append("Role memory: **ask every time**")
+        lines.append("Role memory for this event: **ask every time**")
     return "\n".join(lines)
 
 
@@ -4269,7 +4272,7 @@ class SignupSettingsView(discord.ui.View):
             )
         self.add_item(
             _SignupSettingsButton(
-                "Reset role memory",
+                "Reset role memory for this event",
                 discord.ButtonStyle.secondary,
                 "reset_preference",
             )
@@ -4338,7 +4341,8 @@ class SignupSettingsView(discord.ui.View):
             interaction.user.id,
         )
         preference = self._bot.event_store.get_signup_preference(
-            interaction.user.id
+            self._event.event_id,
+            interaction.user.id,
         )
         role: EventRole | None = None
         flex_roles: tuple[EventRole, ...] = ()
@@ -4409,6 +4413,7 @@ class SignupSettingsView(discord.ui.View):
         interaction: discord.Interaction,
     ) -> None:
         self._bot.event_store.set_signup_preference(
+            self._event.event_id,
             interaction.user.id,
             None,
             (),
@@ -4688,7 +4693,13 @@ async def start_signup_flow(
     if not event.capacity.has_roles:
         await flow.finalize(interaction)
         return
-    preference = bot.event_store.get_signup_preference(interaction.user.id)
+    # Remembered roles are per event: a member signing up for an event they
+    # have never signed up for has no preference row for it and is asked for
+    # their roles, however many other events they have memories for.
+    preference = bot.event_store.get_signup_preference(
+        event.event_id,
+        interaction.user.id,
+    )
     if (
         preference is not None
         and preference.mode is PreferenceMode.REMEMBER
@@ -4743,7 +4754,7 @@ class SignupFlow:
         await interaction.response.edit_message(
             content=(
                 "Would you like to remember your selection for future "
-                "events?"
+                "sign-ups for this event?"
             ),
             view=RememberChoiceView(self),
         )
@@ -4916,11 +4927,12 @@ class EditSignupFlow(SignupFlow):
             return
         content = _signup_edit_summary(signup)
         preference = self.bot.event_store.get_signup_preference(
-            self.discord_user_id
+            self.event.event_id,
+            self.discord_user_id,
         )
-        # A member with remembered roles just declared a different
-        # selection; offer to bring the memory along so their next signup
-        # does not resurrect the old roles.
+        # A member with remembered roles for this event just declared a
+        # different selection; offer to bring the memory along so their next
+        # signup for it does not resurrect the old roles.
         if (
             preference is not None
             and preference.mode is PreferenceMode.REMEMBER
@@ -4931,8 +4943,9 @@ class EditSignupFlow(SignupFlow):
         ):
             await edit(
                 content=(
-                    f"{content}\n\nYour remembered roles still hold your "
-                    "old selection. Update them to this new one?"
+                    f"{content}\n\nYour remembered roles for this event "
+                    "still hold your old selection. Update them to this "
+                    "new one?"
                 ),
                 view=UpdateRememberedRolesView(self),
             )
@@ -4994,20 +5007,22 @@ class UpdateRememberedRolesView(discord.ui.View):
         button: discord.ui.Button[UpdateRememberedRolesView],
     ) -> None:
         self._flow.bot.event_store.set_signup_preference(
+            self._flow.event.event_id,
             self._flow.discord_user_id,
             self._flow.role,
             self._flow.flex_roles,
             PreferenceMode.REMEMBER,
         )
         LOGGER.debug(
-            "Updated remembered roles after a signup edit; user_id=%s "
-            "role=%s flex_count=%s",
+            "Updated remembered roles after a signup edit; event_id=%s "
+            "user_id=%s role=%s flex_count=%s",
+            self._flow.event.event_id,
             self._flow.discord_user_id,
             self._flow.role.value if self._flow.role is not None else None,
             len(self._flow.flex_roles),
         )
         await interaction.response.edit_message(
-            content="Your remembered roles were updated.",
+            content="Your remembered roles for this event were updated.",
             view=None,
         )
 
@@ -5021,7 +5036,9 @@ class UpdateRememberedRolesView(discord.ui.View):
         button: discord.ui.Button[UpdateRememberedRolesView],
     ) -> None:
         await interaction.response.edit_message(
-            content="Your remembered roles were left unchanged.",
+            content=(
+                "Your remembered roles for this event were left unchanged."
+            ),
             view=None,
         )
 
@@ -5173,6 +5190,10 @@ class FlexRolesView(discord.ui.View):
 
 
 class RememberChoiceView(discord.ui.View):
+    # Every choice here is stored against the flow's event alone, so a member
+    # who never wants to be asked about one event is still asked the first
+    # time they sign up for another.
+
     def __init__(self, flow: SignupFlow):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._flow = flow
@@ -5184,6 +5205,7 @@ class RememberChoiceView(discord.ui.View):
         button: discord.ui.Button[RememberChoiceView],
     ) -> None:
         self._flow.bot.event_store.set_signup_preference(
+            self._flow.event.event_id,
             self._flow.discord_user_id,
             self._flow.role,
             self._flow.flex_roles,
@@ -5198,6 +5220,7 @@ class RememberChoiceView(discord.ui.View):
         button: discord.ui.Button[RememberChoiceView],
     ) -> None:
         self._flow.bot.event_store.set_signup_preference(
+            self._flow.event.event_id,
             self._flow.discord_user_id,
             None,
             (),
@@ -5206,7 +5229,7 @@ class RememberChoiceView(discord.ui.View):
         await self._flow.finalize(interaction)
 
     @discord.ui.button(
-        label="No, never ask again",
+        label="No, never ask again for this event",
         style=discord.ButtonStyle.secondary,
     )
     async def remember_never(
@@ -5215,6 +5238,7 @@ class RememberChoiceView(discord.ui.View):
         button: discord.ui.Button[RememberChoiceView],
     ) -> None:
         self._flow.bot.event_store.set_signup_preference(
+            self._flow.event.event_id,
             self._flow.discord_user_id,
             None,
             (),
