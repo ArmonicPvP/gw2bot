@@ -4171,26 +4171,41 @@ class EventSettingsButton(
         )
 
 
+def _role_memory_offered(event: Event) -> bool:
+    """Whether remembered roles are in play for this event.
+
+    Remembered roles are per event, so they only pay off where the member
+    signs up more than once - which is what a repeat is. Automatic sign-up is
+    gated the same way, and for the same reason a stored choice on a one-off
+    event is inert: an event that has stopped repeating must not go on seating
+    members from a memory they can no longer see or reset.
+    """
+    return event.repeat_frequency is not RepeatFrequency.NONE
+
+
 def _describe_signup_settings(
     bot: Gw2Bot,
     event: Event,
     discord_user_id: int,
 ) -> str:
     lines = ["**Your sign-up settings**"]
-    if event.repeat_frequency is not RepeatFrequency.NONE:
-        auto = bot.event_store.get_auto_signup(
-            event.event_id,
-            discord_user_id,
+    if event.repeat_frequency is RepeatFrequency.NONE:
+        lines.append(
+            "This event does not repeat, so it has no automatic sign-up "
+            "or role memory."
         )
-        if auto is not None and auto.choice is AutoSignupChoice.YES:
-            auto_text = "enabled"
-        elif auto is not None and auto.choice is AutoSignupChoice.NEVER_ASK:
-            auto_text = "disabled (never ask again)"
-        else:
-            auto_text = "disabled"
-        lines.append(f"Automatic sign-up for this event: **{auto_text}**")
+        return "\n".join(lines)
+    auto = bot.event_store.get_auto_signup(
+        event.event_id,
+        discord_user_id,
+    )
+    if auto is not None and auto.choice is AutoSignupChoice.YES:
+        auto_text = "enabled"
+    elif auto is not None and auto.choice is AutoSignupChoice.NEVER_ASK:
+        auto_text = "disabled (never ask again)"
     else:
-        lines.append("This event does not repeat, so it has no automatic sign-up.")
+        auto_text = "disabled"
+    lines.append(f"Automatic sign-up for this event: **{auto_text}**")
     preference = bot.event_store.get_signup_preference(
         event.event_id,
         discord_user_id,
@@ -4270,13 +4285,15 @@ class SignupSettingsView(discord.ui.View):
                     "disable_auto",
                 )
             )
-        self.add_item(
-            _SignupSettingsButton(
-                "Reset role memory for this event",
-                discord.ButtonStyle.secondary,
-                "reset_preference",
+            # Role memory follows automatic sign-up: nothing to reset on an
+            # event that only happens once.
+            self.add_item(
+                _SignupSettingsButton(
+                    "Reset role memory for this event",
+                    discord.ButtonStyle.secondary,
+                    "reset_preference",
+                )
             )
-        )
 
     async def _edit_signup(self, interaction: discord.Interaction) -> None:
         # The settings message can sit open, so re-check the signup and the
@@ -4696,9 +4713,13 @@ async def start_signup_flow(
     # Remembered roles are per event: a member signing up for an event they
     # have never signed up for has no preference row for it and is asked for
     # their roles, however many other events they have memories for.
-    preference = bot.event_store.get_signup_preference(
-        event.event_id,
-        interaction.user.id,
+    preference = (
+        bot.event_store.get_signup_preference(
+            event.event_id,
+            interaction.user.id,
+        )
+        if _role_memory_offered(event)
+        else None
     )
     if (
         preference is not None
@@ -4748,7 +4769,7 @@ class SignupFlow:
         self,
         interaction: discord.Interaction,
     ) -> None:
-        if self.skip_remember_prompt:
+        if self.skip_remember_prompt or not _role_memory_offered(self.event):
             await self.finalize(interaction)
             return
         await interaction.response.edit_message(
@@ -4926,9 +4947,13 @@ class EditSignupFlow(SignupFlow):
             await edit(content="Your signup was updated.", view=None)
             return
         content = _signup_edit_summary(signup)
-        preference = self.bot.event_store.get_signup_preference(
-            self.event.event_id,
-            self.discord_user_id,
+        preference = (
+            self.bot.event_store.get_signup_preference(
+                self.event.event_id,
+                self.discord_user_id,
+            )
+            if _role_memory_offered(self.event)
+            else None
         )
         # A member with remembered roles for this event just declared a
         # different selection; offer to bring the memory along so their next

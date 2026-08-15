@@ -74,6 +74,7 @@ from gw2bot.events.views import (
     SignupSettingsView,
     UpdateRememberedRolesView,
     _departed_summary,
+    _describe_signup_settings,
     _signup_summary,
     build_event_preview,
     build_signup_view,
@@ -1679,7 +1680,13 @@ class TestRememberedRolesPerEvent:
     # Remembered roles are scoped to one event, so a memory earned on one
     # event neither seats nor silences the member on any other.
 
-    def make_role_event(self, store: EventStore, title: str) -> Any:
+    def make_role_event(
+        self,
+        store: EventStore,
+        title: str,
+        *,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.DAILY,
+    ) -> Any:
         event = store.create_event(
             category=EventCategory.FRACTAL,
             title=title,
@@ -1688,7 +1695,7 @@ class TestRememberedRolesPerEvent:
             leader_discord_id=42,
             start_time=FAR_FUTURE,
             duration_minutes=90,
-            repeat_frequency=RepeatFrequency.NONE,
+            repeat_frequency=repeat_frequency,
             repeat_days=(),
         )
         occurrence = store.create_occurrence(event.event_id, event.start_time)
@@ -1808,6 +1815,119 @@ class TestRememberedRolesPerEvent:
         assert isinstance(await_args.kwargs["view"], RolePickView)
         assert store.get_signup_preference(other.event_id, 42) is None
 
+    async def test_a_one_off_event_never_asks_to_remember(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(
+            store,
+            "One-off",
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.DPS
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        # There is no second occurrence for a memory to serve, so the flow
+        # signs the member up instead of asking - as automatic sign-up does.
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+
+    async def test_a_memory_left_by_a_dropped_repeat_is_inert(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A leader can turn a repeat off, leaving memories behind that the
+        # settings panel no longer offers to reset. Those must stop seating
+        # people rather than silently outliving the repeat.
+        event, occurrence = self.make_role_event(
+            store,
+            "No longer repeating",
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.ALACRITY_HEAL,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        interaction = make_interaction()
+
+        await start_signup_flow(
+            fake_bot,
+            interaction,
+            occurrence.occurrence_id,
+        )
+
+        await_args = interaction.response.send_message.await_args
+        assert await_args is not None
+        assert isinstance(await_args.kwargs["view"], RolePickView)
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+
+    def test_a_one_off_event_offers_no_role_memory_settings(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(
+            store,
+            "One-off",
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+        labels = [
+            item.label
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ]
+
+        assert "Reset role memory for this event" not in labels
+        description = _describe_signup_settings(fake_bot, event, 42)
+        assert "does not repeat" in description
+        assert "role memory" in description
+        assert "ask every time" not in description
+
+    async def test_editing_a_one_off_signup_skips_the_memory_prompt(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(
+            store,
+            "One-off",
+            repeat_frequency=RepeatFrequency.NONE,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=EventRole.QUICKNESS_DPS,
+            assigned_role=EventRole.QUICKNESS_DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.QUICKNESS_DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "remembered roles" not in kwargs["content"]
+        assert kwargs["view"] is None
+
 
 class TestEditSignupFlow:
     def make_signed_up_event(
@@ -1817,8 +1937,12 @@ class TestEditSignupFlow:
         user_id: int = 42,
         role: EventRole = EventRole.QUICKNESS_DPS,
         flex_roles: tuple[EventRole, ...] = (),
+        repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     ) -> Any:
-        event, occurrence = make_posted_edit_event(store)
+        event, occurrence = make_posted_edit_event(
+            store,
+            repeat_frequency=repeat_frequency,
+        )
         store.add_signup(
             occurrence_id=occurrence.occurrence_id,
             discord_user_id=user_id,
@@ -2068,7 +2192,10 @@ class TestEditSignupFlow:
         fake_bot: Any,
         store: EventStore,
     ) -> None:
-        event, occurrence = self.make_signed_up_event(store)
+        event, occurrence = self.make_signed_up_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
         store.set_signup_preference(
             event.event_id,
             42,
@@ -2104,7 +2231,10 @@ class TestEditSignupFlow:
         fake_bot: Any,
         store: EventStore,
     ) -> None:
-        event, occurrence = self.make_signed_up_event(store)
+        event, occurrence = self.make_signed_up_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
         store.set_signup_preference(
             event.event_id,
             42,
@@ -2135,7 +2265,10 @@ class TestEditSignupFlow:
         fake_bot: Any,
         store: EventStore,
     ) -> None:
-        event, occurrence = self.make_signed_up_event(store)
+        event, occurrence = self.make_signed_up_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
         store.set_signup_preference(
             event.event_id,
             42,
@@ -2261,7 +2394,12 @@ class TestSignupViews:
 FAR_FUTURE = datetime(2107, 1, 30, 20, 0, tzinfo=UTC)
 
 
-def make_edit_event(store: EventStore, channel_id: int = 1234) -> Any:
+def make_edit_event(
+    store: EventStore,
+    channel_id: int = 1234,
+    *,
+    repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+) -> Any:
     return store.create_event(
         category=EventCategory.FRACTAL,
         title="Original Title",
@@ -2270,7 +2408,7 @@ def make_edit_event(store: EventStore, channel_id: int = 1234) -> Any:
         leader_discord_id=42,
         start_time=FAR_FUTURE,
         duration_minutes=90,
-        repeat_frequency=RepeatFrequency.NONE,
+        repeat_frequency=repeat_frequency,
         repeat_days=(),
     )
 
@@ -2278,8 +2416,14 @@ def make_edit_event(store: EventStore, channel_id: int = 1234) -> Any:
 def make_posted_edit_event(
     store: EventStore,
     channel_id: int = 1234,
+    *,
+    repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
 ) -> Any:
-    event = make_edit_event(store, channel_id)
+    event = make_edit_event(
+        store,
+        channel_id,
+        repeat_frequency=repeat_frequency,
+    )
     occurrence = store.create_occurrence(event.event_id, event.start_time)
     store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
     return event, occurrence
