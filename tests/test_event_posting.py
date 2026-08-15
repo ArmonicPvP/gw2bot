@@ -68,10 +68,36 @@ class FakeThread:
         self.send = AsyncMock()
 
 
+class FakePingGuild:
+    """Answers the role lookups the ping check makes before a post goes out.
+
+    Permissive by default: every id resolves to a role carrying the marker,
+    which is what the ordinary posting tests want. Pass explicit roles to
+    exercise one that is gone or no longer marked.
+    """
+
+    def __init__(self, roles: dict[int, str] | None = None):
+        self._roles = roles
+
+    def get_role(self, role_id: int) -> Any:
+        if self._roles is None:
+            return SimpleNamespace(id=role_id, name=f"[GW2] Role {role_id}")
+        name = self._roles.get(role_id)
+        if name is None:
+            return None
+        return SimpleNamespace(id=role_id, name=name)
+
+
 class FakeChannel:
-    def __init__(self, channel_id: int = 1234, thread: FakeThread | None = None):
+    def __init__(
+        self,
+        channel_id: int = 1234,
+        thread: FakeThread | None = None,
+        guild: Any = None,
+    ):
         self.id = channel_id
         self.type = discord.ChannelType.text
+        self.guild = guild if guild is not None else FakePingGuild()
         self.thread = thread if thread is not None else FakeThread()
         self.sent: list[dict[str, Any]] = []
         self.partial_message = SimpleNamespace(
@@ -120,9 +146,15 @@ class FakeChannel:
 class FakeForumPost(FakeThread):
     """A forum post that already exists: the bot may only post messages in it."""
 
-    def __init__(self, thread_id: int = 901, archived: bool = False):
+    def __init__(
+        self,
+        thread_id: int = 901,
+        archived: bool = False,
+        guild: Any = None,
+    ):
         super().__init__(thread_id)
         self.type = discord.ChannelType.public_thread
+        self.guild = guild if guild is not None else FakePingGuild()
         self.archived = archived
         self.sent: list[dict[str, Any]] = []
         self.send_error: Exception | None = None
@@ -537,6 +569,75 @@ class TestPostOccurrence:
         # Nothing but those roles may be pinged by an event post.
         assert mentions.everyone is False
         assert mentions.users is False
+
+    async def test_a_role_renamed_off_the_marker_is_no_longer_pinged(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The stored ids are a snapshot of what the picker offered months
+        # earlier. A role renamed and repurposed since then would otherwise be
+        # notified by every occurrence, which is exactly what the marker is
+        # supposed to prevent.
+        channel = FakeChannel(
+            guild=FakePingGuild({11: "[GW2] Raiders", 22: "Moderators"})
+        )
+        bot = cast(Any, FakeBot(store, channel))
+        event = create_event(store, ping_role_ids=(11, 22))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert channel.sent[0]["content"] == "<@&11>"
+        mentions = channel.sent[0]["allowed_mentions"]
+        assert [role.id for role in mentions.roles] == [11]
+
+    async def test_a_deleted_role_is_no_longer_pinged(
+        self,
+        store: EventStore,
+    ) -> None:
+        channel = FakeChannel(guild=FakePingGuild({11: "[GW2] Raiders"}))
+        bot = cast(Any, FakeBot(store, channel))
+        event = create_event(store, ping_role_ids=(11, 22))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert channel.sent[0]["content"] == "<@&11>"
+
+    async def test_the_post_still_goes_out_when_no_role_qualifies(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Losing the ping must not cost the event its post.
+        channel = FakeChannel(guild=FakePingGuild({}))
+        bot = cast(Any, FakeBot(store, channel))
+        event = create_event(store, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert posted.message_id == 555
+        assert channel.sent[0]["content"] is None
+        # The ids stay on the event, so renaming the role back resumes it.
+        stored = store.get_event(event.event_id)
+        assert stored is not None
+        assert stored.ping_role_ids == (11,)
+
+    async def test_an_unresolvable_guild_pings_nobody(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Nothing can be checked, so nothing is notified.
+        channel = FakeChannel(guild=None)
+        channel.guild = None
+        bot = cast(Any, FakeBot(store, channel))
+        event = create_event(store, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert posted.message_id == 555
+        assert channel.sent[0]["content"] is None
 
     async def test_each_repeat_occurrence_pings_the_roles_again(
         self,

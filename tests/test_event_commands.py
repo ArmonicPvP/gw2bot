@@ -576,6 +576,23 @@ class TestPingRolesInTheDetailsModal:
 
         assert draft.ping_role_ids == (20,)
 
+    async def test_a_role_that_was_not_offered_is_refused(self) -> None:
+        # A modal submission is a client-supplied payload, so the picker's
+        # options - not the payload - decide which roles an event may carry.
+        draft = EventDraft(leader_discord_id=42)
+        modal = EventDetailsModal(make_bot(), draft, ping_guild())
+        modal.category._values = ["Raid"]
+        modal.title_input._value = "Kitty Cleanup"
+        modal.description_input._value = "Bring food."
+        cast(Any, modal.channel)._values = [SimpleNamespace(id=1234)]
+        assert modal.ping_roles is not None
+        # 40 is the officer role, which the picker never offered.
+        modal.ping_roles._values = ["40", "20"]
+
+        await modal.on_submit(make_interaction())
+
+        assert draft.ping_role_ids == (20,)
+
     async def test_a_rejected_destination_keeps_the_picked_roles(self) -> None:
         draft = EventDraft(leader_discord_id=42)
         guild = ping_guild()
@@ -669,6 +686,41 @@ class TestPingRolesInTheChangeFlow:
         assert draft.ping_role_ids == (10, 20)
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert isinstance(kwargs["view"], EventConfirmView)
+
+    async def test_the_picker_refuses_a_role_it_did_not_offer(self) -> None:
+        draft = self.make_draft()
+        view = PingRolesPickView(
+            make_bot(),
+            draft,
+            _ping_role_options(ping_guild(), ()),
+        )
+        select = next(
+            item for item in view.children if isinstance(item, PingRolesSelect)
+        )
+        select._values = ["40", "10"]
+
+        await select.callback(make_interaction(message=ephemeral_message()))
+
+        assert draft.ping_role_ids == (10,)
+
+    async def test_a_retained_role_may_still_be_picked(self) -> None:
+        # It lost the marker but the event already pings it, so the picker
+        # offers it and picking it is honoured. Whether it is still *notified*
+        # is settled against the server when the post goes out.
+        draft = replace(self.make_draft(), ping_role_ids=(40,))
+        view = PingRolesPickView(
+            make_bot(),
+            draft,
+            _ping_role_options(ping_guild(), (40,)),
+        )
+        select = next(
+            item for item in view.children if isinstance(item, PingRolesSelect)
+        )
+        select._values = ["40"]
+
+        await select.callback(make_interaction(message=ephemeral_message()))
+
+        assert draft.ping_role_ids == (40,)
 
     async def test_picking_nothing_clears_the_roles(self) -> None:
         draft = replace(self.make_draft(), ping_role_ids=(10,))

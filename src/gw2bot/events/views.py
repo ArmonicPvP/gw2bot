@@ -385,12 +385,26 @@ def _ping_role_options(
     ]
 
 
-def _picked_ping_role_ids(values: Sequence[str]) -> tuple[int, ...]:
-    # Discord returns the option values as strings; every one of them was
-    # minted from a role id by _ping_role_options, so an unparsable value can
-    # only mean a payload the bot did not build.
+def _picked_ping_role_ids(
+    values: Sequence[str],
+    options: Sequence[discord.SelectOption],
+) -> tuple[int, ...]:
+    """Read a ping-role pick, keeping only what the picker actually offered.
+
+    Every value was minted from a role id by _ping_role_options, so anything
+    else is a payload the bot did not build - a submission is a client-supplied
+    message, and this is the boundary that decides which roles an event may
+    carry rather than trusting what came back. The check is against the offered
+    options, not the marker: a role that was retained because the event already
+    pings it stays pickable here, and whether it may still be *notified* is
+    settled against the server at send time.
+    """
+    offered = {option.value for option in options}
     picked: list[int] = []
     for value in values:
+        if value not in offered:
+            LOGGER.warning("Ignoring a picked role that was not offered")
+            continue
         role_id = safe_int(value)
         if role_id is None:
             LOGGER.warning("Ignoring an unreadable picked role value")
@@ -823,7 +837,8 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
             # The picker was shown, so what it returns is the whole answer -
             # including an empty one, which clears roles picked earlier.
             self._draft.ping_role_ids = _picked_ping_role_ids(
-                self.ping_roles.values
+                self.ping_roles.values,
+                self.ping_roles.options,
             )
         destination = self.channel.values[0]
         rejection = await _destination_error(self._bot, destination)
@@ -4104,7 +4119,10 @@ class PingRolesSelect(discord.ui.Select["PingRolesPickView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if view is not None:
-            await view.pick(interaction, _picked_ping_role_ids(self.values))
+            await view.pick(
+                interaction,
+                _picked_ping_role_ids(self.values, self.options),
+            )
 
 
 class PingRolesPickView(discord.ui.View):

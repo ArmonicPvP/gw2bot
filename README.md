@@ -135,10 +135,18 @@ in either `/event new` or `/event edit`.
 
 Only roles whose name starts with `[GW2]` are offered — the brackets are part of
 the marker, and case does not matter, so `[gw2] WvW` is offered too. Everything
-else in the server, `@everyone` included, is unreachable from the picker, so an
-event post can only ever ping a role that was named to be pinged. The picker
-lists the marked roles alphabetically; a server with none of them simply shows no
-question, and the change flow says so instead of opening an empty picker.
+else in the server, `@everyone` included, is unreachable from the picker, and a
+pick that was never offered is refused rather than trusted. The picker lists the
+marked roles alphabetically; a server with none of them simply shows no question,
+and the change flow says so instead of opening an empty picker.
+
+The marker is checked again against the server immediately before each post goes
+out, so it describes the roles actually notified rather than only what the picker
+once offered. An event outlives that pick — a weekly series carries its roles for
+months — so a role that has since been deleted, or renamed and repurposed out of
+`[GW2]`, is skipped and the rest of the post goes up as usual. The role is
+skipped, not forgotten: its id stays on the event, so renaming it back resumes
+its pings.
 
 The mentions are sent as the message text carrying the event, so they appear
 above the embed and actually notify. Each occurrence is its own announcement: a
