@@ -842,6 +842,22 @@ class EventStore:
         mode: PreferenceMode,
     ) -> None:
         with self._sessions() as session:
+            # A role-memory view can sit open until it times out, and the
+            # event can be deleted while it does. SQLite does not enforce the
+            # foreign key, and it hands a deleted event's id to the next event
+            # created, so a row written for the event that has gone would be
+            # inherited by an unrelated one - silently seating a member who
+            # was never asked. Re-read the event here and drop the write if it
+            # is gone.
+            if session.get(EventRecord, event_id) is None:
+                LOGGER.debug(
+                    "Skipped a signup preference for a deleted event; "
+                    "event_id=%s user_id=%s mode=%s",
+                    event_id,
+                    discord_user_id,
+                    mode.value,
+                )
+                return
             record = session.get(
                 EventSignupPreferenceRecord,
                 (event_id, discord_user_id),

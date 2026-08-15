@@ -971,6 +971,31 @@ class TestEventStorePreferences:
         assert first is not None and first.role is EventRole.ALACRITY_HEAL
         assert second is not None and second.role is EventRole.DPS
 
+    def test_a_deleted_event_cannot_be_given_a_preference(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A remember prompt can sit open until it times out, so the event it
+        # speaks for can be deleted before the member answers.
+        event = create_event(store)
+        store.delete_event(event.event_id)
+
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.ALACRITY_HEAL,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+
+        assert store.get_signup_preference(event.event_id, 42) is None
+        # SQLite hands a deleted event's id to the next event created, and it
+        # does not enforce the foreign key, so an orphan row would have been
+        # inherited here - seating a member who was never asked.
+        replacement = create_event(store, title="Reused id")
+        assert replacement.event_id == event.event_id
+        assert store.get_signup_preference(replacement.event_id, 42) is None
+
     def test_deleting_an_event_drops_its_preferences(
         self,
         store: EventStore,
