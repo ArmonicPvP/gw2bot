@@ -660,6 +660,24 @@ def roster_edit_embed() -> discord.Embed:
     )
 
 
+def format_role_mentions(role_ids: Sequence[int]) -> str:
+    """The mentions carrying an event post's role pings.
+
+    Sent as the message content rather than as part of the embed, which is what
+    puts them above the embed - and what makes them actually ping, since
+    Discord never notifies for a mention inside an embed.
+    """
+    return " ".join(f"<@&{role_id}>" for role_id in role_ids)
+
+
+def describe_ping_roles(role_ids: Sequence[int]) -> str:
+    # Shown in the preview's confirmation embed, where the mentions render as
+    # role chips without notifying anybody.
+    if not role_ids:
+        return "No roles are pinged when it is posted"
+    return f"Pings {format_role_mentions(role_ids)} when it is posted"
+
+
 def describe_repeat(
     frequency: RepeatFrequency,
     repeat_days: tuple[int, ...],

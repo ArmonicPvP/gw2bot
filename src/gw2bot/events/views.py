@@ -26,6 +26,7 @@ from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
     compute_status,
     confirm_embed,
+    describe_ping_roles,
     describe_repeat,
     details_confirm_embed,
     details_preview_embed,
@@ -43,6 +44,8 @@ from gw2bot.events.formatting import (
 from gw2bot.events.models import (
     AutoSignupChoice,
     CATEGORY_EMOJI,
+    MAX_PING_ROLES,
+    PING_ROLE_PREFIX,
     Event,
     EventCategory,
     EventOccurrence,
@@ -55,6 +58,7 @@ from gw2bot.events.models import (
     RosterUpdate,
     available_edit_tokens,
     fitting_roles,
+    is_pingable_role_name,
     is_roster_full,
 )
 from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
@@ -116,6 +120,22 @@ EVENT_CHANNEL_REJECTION = (
 # picker pages the roster at this size.
 REMOVE_SELECT_PAGE_SIZE = 25
 
+# The same cap applied to the ping-role picker. Every offered role is opt-in
+# and named for a kind of run, so a server is not expected to hold more than
+# a handful; a server that somehow does gets the first page of them rather
+# than a picker Discord would refuse outright.
+PING_ROLE_OPTION_LIMIT = 25
+PING_ROLE_PROMPT = "Which roles should the post ping?"
+# Discord caps a Label's text at 45 characters, so the details ride along in
+# the Label description, as the channel picker's hint does.
+PING_ROLE_HINT = (
+    f"Optional. Up to {MAX_PING_ROLES} roles named {PING_ROLE_PREFIX}…"
+)
+PING_ROLE_NONE_AVAILABLE = (
+    f"No roles in this server start with `{PING_ROLE_PREFIX}`, so there is "
+    "nothing to ping. Ask an admin to create one, then try again."
+)
+
 # Discord's cap on a select option's label; a longer display name is truncated
 # rather than rejected by the API.
 REMOVE_OPTION_LABEL_MAX_LENGTH = 100
@@ -147,6 +167,8 @@ class EventDraft:
     repeat_days: tuple[int, ...] = field(default_factory=tuple)
     repeat_days_text: str = ""
     delete_previous_on_repeat: bool = False
+    # Roles the event post pings, in the order they were picked.
+    ping_role_ids: tuple[int, ...] = field(default_factory=tuple)
     posted: bool = False
     # Set when the draft edits an existing event rather than creating one. The
     # whole "Change something" flow reuses this draft, so a single flag steers
@@ -199,6 +221,7 @@ class EventDraft:
             repeat_frequency=self.repeat_frequency,
             repeat_days=self.repeat_days,
             delete_previous_on_repeat=self.delete_previous_on_repeat,
+            ping_role_ids=self.ping_role_ids,
         )
 
 
@@ -237,6 +260,7 @@ def draft_from_event(
             event.repeat_frequency, event.repeat_days
         ),
         delete_previous_on_repeat=event.delete_previous_on_repeat,
+        ping_role_ids=event.ping_role_ids,
         editing_event_id=event.event_id,
         roster_only=roster_only,
         editing_occurrence_id=editing_occurrence_id,
@@ -306,6 +330,89 @@ def _frequency_options(
     ]
 
 
+def pingable_roles(guild: discord.Guild | None) -> list[discord.Role]:
+    """The server's opt-in ping roles, in the order the picker offers them.
+
+    Only roles whose name carries the marker are offered, so a commander cannot
+    aim an event post at an admin role or at @everyone. Sorting by name keeps
+    the picker stable as the server's role hierarchy is rearranged.
+    """
+    if guild is None:
+        return []
+    roles = [role for role in guild.roles if is_pingable_role_name(role.name)]
+    roles.sort(key=lambda role: (role.name.casefold(), role.id))
+    return roles
+
+
+def _ping_role_options(
+    guild: discord.Guild | None,
+    selected: Sequence[int],
+) -> list[discord.SelectOption]:
+    """Options for the ping-role picker, with the draft's roles pre-selected.
+
+    A role already on the draft is offered even when it no longer carries the
+    marker, because it was a valid choice when it was picked and an unrelated
+    edit must not quietly drop it. One that no longer exists in the server is
+    dropped: Discord would refuse a mention of it anyway.
+    """
+    roles = pingable_roles(guild)
+    known = {role.id for role in roles}
+    # A retained role is listed first so the truncation below can never be what
+    # drops one of the event's own roles.
+    retained: list[discord.Role] = []
+    for role_id in selected:
+        if role_id in known or guild is None:
+            continue
+        role = guild.get_role(role_id)
+        if role is not None:
+            retained.append(role)
+    offered = retained + roles
+    if len(offered) > PING_ROLE_OPTION_LIMIT:
+        LOGGER.debug(
+            "Truncating the ping role picker; roles=%s offered=%s",
+            len(offered),
+            PING_ROLE_OPTION_LIMIT,
+        )
+        offered = offered[:PING_ROLE_OPTION_LIMIT]
+    chosen = set(selected)
+    return [
+        discord.SelectOption(
+            label=role.name[:REMOVE_OPTION_LABEL_MAX_LENGTH],
+            value=str(role.id),
+            default=role.id in chosen,
+        )
+        for role in offered
+    ]
+
+
+def _picked_ping_role_ids(
+    values: Sequence[str],
+    options: Sequence[discord.SelectOption],
+) -> tuple[int, ...]:
+    """Read a ping-role pick, keeping only what the picker actually offered.
+
+    Every value was minted from a role id by _ping_role_options, so anything
+    else is a payload the bot did not build - a submission is a client-supplied
+    message, and this is the boundary that decides which roles an event may
+    carry rather than trusting what came back. The check is against the offered
+    options, not the marker: a role that was retained because the event already
+    pings it stays pickable here, and whether it may still be *notified* is
+    settled against the server at send time.
+    """
+    offered = {option.value for option in options}
+    picked: list[int] = []
+    for value in values:
+        if value not in offered:
+            LOGGER.warning("Ignoring a picked role that was not offered")
+            continue
+        role_id = safe_int(value)
+        if role_id is None:
+            LOGGER.warning("Ignoring an unreadable picked role value")
+            continue
+        picked.append(role_id)
+    return tuple(picked[:MAX_PING_ROLES])
+
+
 def _is_ephemeral_component_interaction(
     interaction: discord.Interaction,
 ) -> bool:
@@ -353,8 +460,17 @@ def build_details_preview(
         draft.leader_discord_id,
         PREVIEW_EVENT_ID_TEXT,
     )
-    return [preview, details_confirm_embed()], EventDetailsConfirmView(
-        bot, draft
+    confirmation = details_confirm_embed()
+    _append_ping_note(confirmation, draft)
+    return [preview, confirmation], EventDetailsConfirmView(bot, draft)
+
+
+def _append_ping_note(embed: discord.Embed, draft: EventDraft) -> None:
+    # The mentions render as role chips here without notifying anybody: Discord
+    # never pings for a mention inside an embed, which is exactly why the real
+    # post carries them as message content instead.
+    embed.description = (
+        f"{embed.description}\n\n*{describe_ping_roles(draft.ping_role_ids)}.*"
     )
 
 
@@ -461,6 +577,10 @@ def build_event_preview(
     confirmation.description = (
         f"{confirmation.description}\n\n*{repeat_text}.*"
     )
+    if not draft.roster_only:
+        # A running event's details are frozen, so its ping roles are no longer
+        # something the roster editor can act on.
+        _append_ping_note(confirmation, draft)
     return [preview, confirmation], view
 
 
@@ -636,10 +756,16 @@ class RetryRepeatView(_ModalOpenView):
 
 
 class EventDetailsModal(discord.ui.Modal, title="Create new event"):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        guild: discord.Guild | None = None,
+    ):
         super().__init__()
         self._bot = bot
         self._draft = draft
+        self._guild = guild
         self.category = discord.ui.Select["EventDetailsModal"](
             options=_category_options(draft.category),
         )
@@ -681,11 +807,39 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
                 component=self.channel,
             )
         )
+        # The fifth and last component Discord allows a modal, which is what
+        # lets the ping roles be asked here rather than behind
+        # "Change something". A server with no ping roles gets no picker at
+        # all: Discord refuses a select with no options, and there is nothing
+        # to choose from anyway.
+        options = _ping_role_options(guild, draft.ping_role_ids)
+        self.ping_roles: discord.ui.Select[EventDetailsModal] | None = None
+        if options:
+            self.ping_roles = discord.ui.Select["EventDetailsModal"](
+                options=options,
+                min_values=0,
+                max_values=min(MAX_PING_ROLES, len(options)),
+                required=False,
+            )
+            self.add_item(
+                discord.ui.Label(
+                    text=PING_ROLE_PROMPT,
+                    description=PING_ROLE_HINT,
+                    component=self.ping_roles,
+                )
+            )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         self._draft.category = EventCategory(self.category.values[0])
         self._draft.title = self.title_input.value.strip()
         self._draft.description = self.description_input.value.strip()
+        if self.ping_roles is not None:
+            # The picker was shown, so what it returns is the whole answer -
+            # including an empty one, which clears roles picked earlier.
+            self._draft.ping_role_ids = _picked_ping_role_ids(
+                self.ping_roles.values,
+                self.ping_roles.options,
+            )
         destination = self.channel.values[0]
         rejection = await _destination_error(self._bot, destination)
         if rejection is not None:
@@ -695,27 +849,34 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
             await _send_validation_error(
                 interaction,
                 ValueError(rejection),
-                RetryDetailsView(self._bot, self._draft),
+                RetryDetailsView(self._bot, self._draft, self._guild),
             )
             return
         self._draft.channel_id = destination.id
         LOGGER.debug(
             "Event details step submitted; user_id=%s category=%s "
-            "title_characters=%s description_characters=%s",
+            "title_characters=%s description_characters=%s ping_roles=%s",
             interaction.user.id,
             self._draft.category.value,
             len(self._draft.title),
             len(self._draft.description),
+            len(self._draft.ping_role_ids),
         )
         await send_event_preview(self._bot, interaction, self._draft)
 
 
 class RetryDetailsView(_ModalOpenView):
-    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        guild: discord.Guild | None = None,
+    ):
         super().__init__(bot, draft, "Try again")
+        self._guild = guild
 
     def build_modal(self) -> discord.ui.Modal:
-        return EventDetailsModal(self._bot, self._draft)
+        return EventDetailsModal(self._bot, self._draft, self._guild)
 
 
 class EventScheduleModal(discord.ui.Modal, title="Create new event"):
@@ -1033,6 +1194,7 @@ class EventConfirmView(_PreviewConfirmView):
                 delete_previous_on_repeat=(
                     draft_event.delete_previous_on_repeat
                 ),
+                ping_role_ids=draft_event.ping_role_ids,
             )
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,
@@ -2923,6 +3085,7 @@ async def apply_event_edit(
             repeat_frequency=edited.repeat_frequency,
             repeat_days=edited.repeat_days,
             delete_previous_on_repeat=edited.delete_previous_on_repeat,
+            ping_role_ids=edited.ping_role_ids,
         )
     except SQLAlchemyError as exc:
         # The save did not happen, so clear the guard to allow a fresh retry.
@@ -3122,6 +3285,7 @@ def _restore_event_channel(
             repeat_frequency=event.repeat_frequency,
             repeat_days=event.repeat_days,
             delete_previous_on_repeat=event.delete_previous_on_repeat,
+            ping_role_ids=event.ping_role_ids,
         )
     except SQLAlchemyError as exc:
         LOGGER.error(
@@ -3697,6 +3861,7 @@ _CHANGE_FIELDS = (
     ("duration", "Duration"),
     ("repeat", "Repeat settings"),
     ("leader", "Leader"),
+    ("ping_roles", "Roles to ping"),
 )
 
 # What the step-one preview may change: the details that have been entered by
@@ -3704,7 +3869,8 @@ _CHANGE_FIELDS = (
 _DETAILS_CHANGE_FIELDS = tuple(
     entry
     for entry in _CHANGE_FIELDS
-    if entry[0] in ("category", "title", "description", "channel", "leader")
+    if entry[0]
+    in ("category", "title", "description", "channel", "leader", "ping_roles")
 )
 
 
@@ -3768,6 +3934,31 @@ class ChangeFieldView(discord.ui.View):
             await interaction.response.edit_message(
                 content="Who should lead this event?",
                 view=LeaderPickView(self._bot, self._draft),
+            )
+            return
+        if choice == "ping_roles":
+            options = _ping_role_options(
+                interaction.guild,
+                self._draft.ping_role_ids,
+            )
+            if not options:
+                # Nothing to offer, and a select with no options is a payload
+                # Discord refuses. Say why and go back to the preview rather
+                # than leaving the commander on a dead end.
+                LOGGER.debug(
+                    "Ping role picker has nothing to offer; user_id=%s",
+                    interaction.user.id,
+                )
+                await send_event_preview(
+                    self._bot,
+                    interaction,
+                    self._draft,
+                    content=PING_ROLE_NONE_AVAILABLE,
+                )
+                return
+            await interaction.response.edit_message(
+                content=f"{PING_ROLE_PROMPT} {PING_ROLE_HINT}",
+                view=PingRolesPickView(self._bot, self._draft, options),
             )
             return
         await interaction.response.edit_message(
@@ -3911,6 +4102,52 @@ class ChannelPickView(discord.ui.View):
             )
             return
         self._draft.channel_id = channel.id
+        await send_event_preview(self._bot, interaction, self._draft)
+
+
+class PingRolesSelect(discord.ui.Select["PingRolesPickView"]):
+    def __init__(self, options: list[discord.SelectOption]):
+        super().__init__(
+            placeholder=PING_ROLE_PROMPT,
+            options=options,
+            # Nothing picked is a valid answer: it is how the roles are taken
+            # off an event that used to ping them.
+            min_values=0,
+            max_values=min(MAX_PING_ROLES, len(options)),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is not None:
+            await view.pick(
+                interaction,
+                _picked_ping_role_ids(self.values, self.options),
+            )
+
+
+class PingRolesPickView(discord.ui.View):
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        draft: EventDraft,
+        options: list[discord.SelectOption],
+    ):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._draft = draft
+        self.add_item(PingRolesSelect(options))
+
+    async def pick(
+        self,
+        interaction: discord.Interaction,
+        role_ids: tuple[int, ...],
+    ) -> None:
+        self._draft.ping_role_ids = role_ids
+        LOGGER.debug(
+            "Event ping roles picked; user_id=%s ping_roles=%s",
+            interaction.user.id,
+            len(role_ids),
+        )
         await send_event_preview(self._bot, interaction, self._draft)
 
 

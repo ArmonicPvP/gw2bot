@@ -88,6 +88,7 @@ def create_event(
     *,
     title: str = "Kitty Cleanup",
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+    ping_role_ids: tuple[int, ...] = (),
 ):
     return store.create_event(
         category=EventCategory.FRACTAL,
@@ -99,6 +100,7 @@ def create_event(
         duration_minutes=90,
         repeat_frequency=repeat_frequency,
         repeat_days=(),
+        ping_role_ids=ping_role_ids,
     )
 
 
@@ -128,8 +130,9 @@ async def post_event(
     title: str = "Kitty Cleanup",
     participants: tuple[int, ...] = (11, 22),
     waitlisted: tuple[int, ...] = (),
+    ping_role_ids: tuple[int, ...] = (),
 ):
-    event = create_event(store, title=title)
+    event = create_event(store, title=title, ping_role_ids=ping_role_ids)
     occurrence = store.create_occurrence(event.event_id, event.start_time)
     posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
     for discord_user_id in participants:
@@ -313,6 +316,30 @@ class TestSendReminder:
             "<@11> <@22>: Kitty Cleanup starts "
             f"<t:{int(START.timestamp())}:R>"
         ]
+
+    async def test_the_events_ping_roles_are_never_reminded(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The ping roles announce the event when it is posted. A reminder is
+        # for the members who actually signed up, so pinging the roles again
+        # would notify people who never joined and are not expected to show
+        # up.
+        event, occurrence = await post_event(
+            bot,
+            store,
+            ping_role_ids=(999,),
+        )
+        signups = store.get_signups(occurrence.occurrence_id)
+
+        await send_reminder(bot, event, occurrence, signups)
+
+        assert "<@&999>" not in sent_contents(channel.thread.send)[0]
+        assert channel.thread.send.await_args is not None
+        allowed = channel.thread.send.await_args.kwargs["allowed_mentions"]
+        assert allowed.roles is False
 
     async def test_only_the_pinged_members_are_allowed_to_be_mentioned(
         self,

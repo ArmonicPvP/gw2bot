@@ -20,6 +20,7 @@ from gw2bot.events.formatting import (
     compute_status,
     event_embed,
     event_thread_name,
+    format_role_mentions,
     next_occurrence_start,
     roster_update_message,
     signup_edit_limit_message,
@@ -38,6 +39,7 @@ from gw2bot.events.models import (
     RosterUpdate,
     available_edit_tokens,
     can_admit,
+    is_pingable_role_name,
     is_roster_full,
     preferred_role_order,
     rebalance_signups,
@@ -120,6 +122,76 @@ def occurrence_status(
     )
 
 
+def verified_ping_role_ids(
+    guild: Any,
+    event: Event,
+) -> tuple[int, ...]:
+    """The event's ping roles that still qualify, checked against the server.
+
+    The stored ids are a snapshot of what the picker offered, and an event
+    outlives that snapshot: a weekly series keeps its roles for months, during
+    which one can be deleted, or renamed and repurposed into something the
+    picker would never have offered - an admin role that then gets pinged by
+    every occurrence. The marker is re-checked here, immediately before the
+    send, so it is a property of the roles actually notified rather than of
+    the picker alone.
+
+    A role that stops qualifying is skipped rather than erased: the id stays on
+    the event, so renaming the role back resumes its pings. A guild that cannot
+    be resolved pings nothing, because nothing can be checked.
+    """
+    if not event.ping_role_ids:
+        return ()
+    if guild is None:
+        LOGGER.warning(
+            "Cannot check an event's ping roles without a guild; pinging "
+            "nobody; event_id=%s ping_roles=%s",
+            event.event_id,
+            len(event.ping_role_ids),
+        )
+        return ()
+    verified: list[int] = []
+    for role_id in event.ping_role_ids:
+        role = guild.get_role(role_id)
+        if role is None:
+            LOGGER.debug(
+                "Skipping an event ping role that no longer exists; "
+                "event_id=%s",
+                event.event_id,
+            )
+            continue
+        if not is_pingable_role_name(role.name):
+            LOGGER.warning(
+                "Skipping an event ping role that no longer carries the "
+                "marker; event_id=%s",
+                event.event_id,
+            )
+            continue
+        verified.append(role_id)
+    return tuple(verified)
+
+
+def ping_send_kwargs(role_ids: Sequence[int]) -> dict[str, Any]:
+    """Send arguments that mention the given roles above the embed.
+
+    Empty when there is nothing to ping, so the send stays exactly what it was
+    before role pinging existed. The allowed mentions name these roles and
+    nothing else, so a role id that ends up here can never widen into an
+    @everyone or a member ping, and a role that is not mentionable by members
+    still pings when the bot may mention roles.
+    """
+    if not role_ids:
+        return {}
+    return {
+        "content": format_role_mentions(role_ids),
+        "allowed_mentions": discord.AllowedMentions(
+            everyone=False,
+            users=False,
+            roles=[discord.Object(id=role_id) for role_id in role_ids],
+        ),
+    }
+
+
 def occurrence_embed(
     event: Event,
     occurrence: EventOccurrence,
@@ -154,7 +226,16 @@ async def post_occurrence(
         # Discord refuses messages in an archived thread, and a forum post can
         # have been dormant for weeks before an event is posted into it.
         await _reopen_thread(channel, occurrence.occurrence_id)
-    message = await channel.send(embed=embed, view=view)
+    # The role pings ride on the message content, which Discord renders above
+    # the embed. Only the post pings them: reminders address the roster. The
+    # roles are checked against the server the event is going to, which is the
+    # one whose roles the mentions would notify.
+    ping_role_ids = verified_ping_role_ids(
+        getattr(channel, "guild", None),
+        event,
+    )
+    ping_kwargs = ping_send_kwargs(ping_role_ids)
+    message = await channel.send(embed=embed, view=view, **ping_kwargs)
     if in_thread:
         # The event went into a forum post that already exists. Nothing is
         # created there - a forum post cannot hold threads of its own - and the
@@ -216,13 +297,18 @@ async def post_occurrence(
         raise
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
-        "in_existing_thread=%s thread_created=%s signups=%s",
+        "in_existing_thread=%s thread_created=%s signups=%s "
+        "stored_ping_roles=%s pinged_roles=%s",
         event.event_id,
         occurrence.occurrence_id,
         status.value,
         in_thread,
         thread_id is not None and not in_thread,
         len(signups),
+        len(event.ping_role_ids),
+        # How many of the stored roles survived the check, so a ping that
+        # silently stopped going out is visible in the log.
+        len(ping_role_ids),
     )
     updated = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if updated is None:

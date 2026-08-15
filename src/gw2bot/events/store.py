@@ -61,6 +61,28 @@ def _parse_days(value: str) -> tuple[int, ...]:
     return tuple(int(entry) for entry in value.split(",") if entry)
 
 
+def _serialize_ids(ids: tuple[int, ...]) -> str:
+    return ",".join(str(value) for value in ids)
+
+
+def _parse_ids(value: str) -> tuple[int, ...]:
+    # A stored id that is not a number can only come from a hand-edited row.
+    # Skip it rather than raising: one bad entry must not make the whole event
+    # unreadable, which would take the scheduler's maintenance pass down with
+    # it.
+    ids: list[int] = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            ids.append(int(entry))
+        except ValueError:
+            LOGGER.warning("Skipping an unreadable stored role id")
+            continue
+    return tuple(ids)
+
+
 def _event_from_record(record: EventRecord) -> Event:
     return Event(
         event_id=record.event_id,
@@ -75,6 +97,7 @@ def _event_from_record(record: EventRecord) -> Event:
         repeat_days=_parse_days(record.repeat_days),
         cancelled=record.cancelled,
         delete_previous_on_repeat=record.delete_previous_on_repeat,
+        ping_role_ids=_parse_ids(record.ping_role_ids),
     )
 
 
@@ -138,6 +161,7 @@ class EventStore:
         repeat_frequency: RepeatFrequency,
         repeat_days: tuple[int, ...],
         delete_previous_on_repeat: bool = False,
+        ping_role_ids: tuple[int, ...] = (),
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -155,16 +179,18 @@ class EventStore:
                 created_at=_serialize_time(created_at),
                 cancelled=False,
                 delete_previous_on_repeat=delete_previous_on_repeat,
+                ping_role_ids=_serialize_ids(ping_role_ids),
             )
             session.add(record)
             session.commit()
             LOGGER.debug(
                 "Created event; event_id=%s category=%s repeat=%s "
-                "title_characters=%s",
+                "title_characters=%s ping_roles=%s",
                 record.event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
+                len(ping_role_ids),
             )
             return _event_from_record(record)
 
@@ -182,6 +208,7 @@ class EventStore:
         repeat_frequency: RepeatFrequency,
         repeat_days: tuple[int, ...],
         delete_previous_on_repeat: bool = False,
+        ping_role_ids: tuple[int, ...] = (),
     ) -> Event:
         with self._sessions() as session:
             record = session.get(EventRecord, event_id)
@@ -197,14 +224,16 @@ class EventStore:
             record.repeat_frequency = repeat_frequency.value
             record.repeat_days = _serialize_days(repeat_days)
             record.delete_previous_on_repeat = delete_previous_on_repeat
+            record.ping_role_ids = _serialize_ids(ping_role_ids)
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "
-                "title_characters=%s",
+                "title_characters=%s ping_roles=%s",
                 event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
+                len(ping_role_ids),
             )
             return _event_from_record(record)
 
