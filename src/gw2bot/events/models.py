@@ -279,6 +279,7 @@ def reminder_offset_minutes(offset: timedelta) -> int:
 
 @dataclass(frozen=True, slots=True)
 class SignupPreference:
+    event_id: int
     discord_user_id: int
     role: EventRole | None
     flex_roles: tuple[EventRole, ...]
