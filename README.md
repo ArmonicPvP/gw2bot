@@ -1,8 +1,10 @@
 # GW2 Discord Bot
 
-A small Python service that monitors Guild Storage and the guild log, then posts
-notifications to a Discord server channel. The API client also supports the
-account, token, and guild endpoints documented in
+A Python service for one Guild Wars 2 guild's Discord server. It polls Guild
+Storage and the guild log and posts notifications to a server channel, runs the
+guild's ticket raffle off gold deposits, reports overdue Trial members, manages
+guild events with sign-up rosters, and optionally serves a web calendar. The API
+client supports the account, token, and guild endpoints documented in
 [docs/gw2-api.md](docs/gw2-api.md).
 
 ## Configuration
@@ -75,6 +77,150 @@ The bot also needs `View Channel` and `Read Message History` permissions for
 forum channel `1317206104727621693` so it can link Trial applications to
 Discord members. Grant `Manage Threads` in that forum channel so the bot can
 automatically tag new posts as `In Review`.
+
+## Guild Events
+
+`/event` runs guild events end to end: a commander creates one, the bot posts it
+with a live roster embed, members sign themselves up from that post, and a
+one-minute maintenance pass keeps the status, the thread name, the reminders,
+and a repeating series moving without anyone touching it again.
+
+Every `/event` subcommand requires the event role `1318357141521825872`. The
+sign-up buttons on a posted event are open to everyone who can see it.
+
+| Command | What it does |
+| --- | --- |
+| `/event new` | Builds an event through a three-step flow and posts it. |
+| `/event edit` | Reopens that flow for an existing event, and its roster with it. |
+| `/event remind` | Pings the next occurrence's roster on demand (see [Event Reminders](#event-reminders)). |
+| `/event cancel` | Calls off a repeating event's next occurrence (see [Cancelling An Event Occurrence](#cancelling-an-event-occurrence)). |
+| `/event delete` | Removes an event, its messages, its signup threads, and its sign-ups. |
+
+Every subcommand except `/event new` takes an `event_id`, autocompleted from the
+active events as `[Category] Title — id N`. That id is also printed in the footer
+of each event post as `eventID: N`, so it can be read off the message itself.
+
+### Creating An Event
+
+`/event new` walks three modals:
+
+1. **Details** — category, title, description, destination channel or forum
+   post, and the roles to ping (see [Event Role Pings](#event-role-pings)).
+2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, and whether
+   the event repeats. Typed times are read in the server's `TZ` timezone and
+   must be in the future.
+3. **Repeat** — only when the event repeats: frequency, which days, and whether
+   posting the next occurrence should delete the previous one.
+
+A private preview of the finished post follows each step. **Change something**
+reopens any single field — category, title, description, channel, date & time,
+duration, repeat settings, leader, or roles to ping — without walking the flow
+again, and **Post event** sends it. Nothing is written to the database until the
+event is posted, so abandoning the flow leaves nothing behind.
+
+`/event edit` opens the same preview for an existing event, with **Save changes**
+in place of **Post event**. Changing the channel re-posts the event at the new
+destination and is confirmed first, because it deletes the current message and
+any signup thread the bot opened for it. An event that has already started is
+frozen: its stored details can no longer be changed, and the edit session opens
+with its roster buttons alone. An event that is over cannot be edited at all.
+
+### Squad Size And Roles
+
+The category fixes the squad, and the bot enforces it:
+
+| Category | Squad | Healers | DPS | Quickness | Alacrity |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Raid | 10 | 2 | 8 | 2 | 2 |
+| Strike | 10 | 2 | 8 | 2 | 2 |
+| Fractal | 5 | 1 | 4 | 1 | 1 |
+| World vs. World | 50 | — | — | — | — |
+| Open World | 50 | — | — | — | — |
+
+Raid, Strike, and Fractal events are role-based: members pick one of Just DPS,
+Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and the healer,
+DPS, quickness, and alacrity caps are all honoured at once. World vs. World and
+Open World events are a plain headcount with no roles to pick.
+
+### Signing Up
+
+A posted event carries three buttons: **Sign up**, **Sign out**, and a ⚙️
+settings button. Everything they open is private to the member who clicked.
+
+On a role-based event, **Sign up** asks for a main role and then any flex roles
+— other roles the member is willing to take. The picker marks each role as full,
+or as a waitlist-only pick, before it is chosen. A member is seated in their
+main role when it still fits; otherwise a flex role is used, and the bot fills
+the scarcer seats first, so a flexer lands on an open heal or boon seat before a
+plain DPS one. When no acceptable seat is free the member joins the waitlist,
+marked ⌛️ in the embed. A World vs. World or Open World event has no roles to
+pick, so one click seats the member or waitlists them.
+
+Seats are re-shuffled on every roster change: signing out promotes waitlisted
+members and can move seated members between their acceptable roles to make room,
+and each mutation posts one batched note in the signup thread naming who moved.
+**Sign out** confirms first, and on a repeating event with automatic sign-up
+still on it offers to switch that off too, so signing out of one occurrence does
+not leave the member seated for the next.
+
+The ⚙️ button shows the member's settings for that event and offers
+**Edit my signup** (role-based events only), **Enable**/**Disable auto sign-up**,
+and **Reset role memory for this event**. Editing a signup is rate limited to
+three edits back to back, refilling one every three hours, so a roster is not
+churned by one member re-picking repeatedly. Signing out and back in resets the
+allowance but costs the member their queue position. An edit that no longer fits
+the roster asks before dropping the member to the waitlist.
+
+### Status
+
+An occurrence's status drives both its embed colour and the name of its signup
+thread, `<status> | MM.dd.yyyy | HH:mm`:
+
+| Status | Meaning |
+| --- | --- |
+| 🟢 open | Seats or boon coverage still missing. |
+| 🔴 full | Every seat taken **and** the required boon coverage present. |
+| 🟡 ongoing | Started, not yet finished. |
+| ⚫️ over | Past its start plus duration. |
+
+A roster that occupies every seat without covering its required boons keeps
+reading as open rather than full, because it is still short of a squad.
+
+### Repeating Events
+
+A repeating event recurs daily, weekly on named days, or monthly on numbered
+days; a monthly day past the end of a short month lands on that month's last
+day. The next occurrence is created when the current one ends and posted by the
+maintenance pass, carrying a fresh roster.
+
+**Delete the previous post on repeat** is asked when the repeat is set up. With
+it on, posting a new occurrence removes the superseded message and its signup
+thread, so the channel holds only the current run; with it off, the old posts
+stay as a record. A forum post the event was only sent into is never removed
+either way.
+
+### Automatic Sign-Up And Role Memory
+
+Both are per event and offered only on repeating events, where signing up more
+than once is the point. After a sign-up the bot offers to remember the roles
+picked and to sign the member up automatically for later occurrences; either
+prompt can be answered with "never ask again for this event". Remembered roles
+are re-applied when a new occurrence is seeded, subject to the same capacity
+rules as a manual sign-up, so a member can still land on the waitlist. Both
+settings are visible and resettable behind the ⚙️ button, and a preference
+stored for an event that is later deleted is dropped with it.
+
+### Editing A Roster
+
+The `/event edit` preview also carries **Add sign-ups** and **Remove sign-ups**,
+so a commander can seat a member who cannot click the button themselves and
+remove one who is not coming. Added members are picked from the server and then
+given a role; the reply says who was seated and who went to the waitlist.
+
+A removed member is sent a direct message telling them so, and automatic
+sign-up for that event is switched off for them at the same time — otherwise the
+next occurrence would simply seat them again. Opening `/event edit` also checks
+the roster against the server and drops members who have left it.
 
 ## Guild Event Destinations
 
@@ -479,6 +625,14 @@ registration is unavailable.
   zero. A completed draw remains pending until Discord accepts its winner
   announcement; running the command again retries that announcement before
   allowing another draw.
+- `/raffle audit run_id:<run>`: publicly shows everything needed to verify a
+  past draw — every entrant's ticket range in the numbered line the winners were
+  picked from, alphabetical by username, and each draw's winning ticket number
+  and range. `run_id` is autocompleted from the recorded runs. After each draw
+  one ticket left that winner and the line was renumbered, so each draw shows
+  the winner's range at that moment. Entrant ranges are paged when more than a
+  screenful of players entered. Runs drawn before entrant snapshots were kept
+  show their recorded results with a note that the snapshot is unavailable.
 - `/raffle addticket username:<account> [amount:<number>]`: without `amount`,
   adds one manual ticket to a current guild member and requires role
   `1318357141521825872`. Supplying `amount` requires Officer role
@@ -583,10 +737,14 @@ in `DISCORD_NOTIFICATION_CHANNEL_ID`, the bot posts read-only previews of:
 
 - the next six-hour raffle contribution report using contributions currently
   recorded in its active interval, including free tickets;
-- a gold-deposit ticket purchase, guild join, guild leave, guild invite, guild
-  rank change, and next reward-tier message;
-- a low feast-stock alert, overdue Trial member report, Trial 7-day warning
-  report, and polling failure/recovery messages.
+- a gold-deposit ticket purchase embed, a raffle draw announcement, and a raffle
+  audit;
+- a guild join, guild leave, guild invite, guild rank change, gold-deposit audit
+  log, manual ticket audit, purchased-ticket removal audit, and next
+  reward-tier message;
+- a low feast-stock alert, overdue Trial member report, and Trial 7-day warning
+  report;
+- the guild member count channel description as it currently stands.
 
 If the raffle is already at the highest configured reward tier, the highest-tier
 message is shown with a note that it has already been reached. Running `diag`
@@ -655,6 +813,22 @@ Times are shown in each viewer's local timezone. Weekly repeat days are
 defined in the server's `TZ` timezone, so viewers far from that timezone may
 correctly see a repeating event land on an adjacent local weekday.
 
+### Feast Usage Dashboard
+
+The same site serves a **Feast Usage** page at `/food`, built from the per-feast
+stock history described under
+[Feast Stock Count History](#feast-stock-count-history). It charts each tracked
+feast's on-hand count over the last 24 hours, 7 days, or 30 days, and lists the
+removals in that window — when each drop happened, how large it was, and what
+was left afterwards — with one tab per feast.
+
+Access is narrower than the calendar's: on top of being a signed-in guild
+member, the viewer must hold role `1317124663847157880`, the role that also
+gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
+officers-only page. Membership and the role are re-checked on the same schedule
+as calendar access, so a member who loses the role loses the page within
+minutes. The page is not linked from the calendar; browse to `/food` directly.
+
 ## Run With Docker
 
 ```powershell
@@ -711,9 +885,13 @@ the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets before merging
 
 Add GW2 API methods in `src/gw2bot/gw2_api.py` and notification decisions in
 the matching feature module: `src/gw2bot/guild_log.py` for guild-log events,
-`src/gw2bot/guild_storage.py` for feast stock alerts, `src/gw2bot/raffle/` for
-raffle reports and commands, `src/gw2bot/trials/` for Trial member tracking,
-and `src/gw2bot/notifications.py` for delivery to the notification channel.
-`src/gw2bot/bot.py` wires the pollers together and `src/gw2bot/main.py` is the
-entrypoint. Secrets are read only from environment variables and are
-excluded from both Git and the Docker build context.
+`src/gw2bot/guild_storage.py` and `src/gw2bot/feast_stock.py` for feast stock
+alerts and history, `src/gw2bot/raffle/` for raffle reports and commands,
+`src/gw2bot/trials/` for Trial member tracking, `src/gw2bot/events/` for guild
+events, `src/gw2bot/web/` for the calendar and feast usage site, and
+`src/gw2bot/notifications.py` for delivery to the notification channel.
+`src/gw2bot/database.py` owns the SQLite schema and its migrations,
+`src/gw2bot/bot.py` wires the pollers and commands together, and
+`src/gw2bot/main.py` is the entrypoint that loads configuration and installs
+the redacting log formatter. Secrets are read only from environment variables
+and are excluded from both Git and the Docker build context.

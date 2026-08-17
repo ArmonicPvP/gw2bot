@@ -93,3 +93,36 @@ If a user's instruction conflicts with a preference or other rules or informatio
   globally to hide a local typing problem.
 - Keep `.vscode/settings.json` and `pyrightconfig.json` aligned so local
   Pylance diagnostics match CI and command-line verification.
+
+## Repository Overview
+
+`gw2bot` is a Discord bot and poller for one Guild Wars 2 guild's server. It
+watches Guild Storage and the guild log through the GW2 API, posts notifications
+to a single configured channel, runs the guild's ticket raffle, reports overdue
+Trial members, manages guild events with sign-up rosters, and optionally serves
+a web calendar and feast usage dashboard.
+
+Source lives under `src/gw2bot`, and `tests/` mirrors it one test module per
+production module. Run the bot with `python -m gw2bot` and `PYTHONPATH=src`;
+`pytest.ini` and `pyrightconfig.json` already put `src` on the path for tests
+and type checking.
+
+| Path | Responsibility |
+| --- | --- |
+| `main.py` | Entrypoint: loads `Config`, installs the redacting log formatter, starts the bot. |
+| `config.py` | `Config.from_env`, the single source of truth for every environment variable. |
+| `logging_setup.py` | `configure_logging` and `RedactingFormatter`, re-exported from `main`. |
+| `bot.py` | The `discord.py` client: wires pollers, background tasks, and command groups. |
+| `database.py` | SQLite engine, schema, and in-place migrations (Alembic operations). |
+| `gw2_api.py` | GW2 API client. Endpoint notes are in `docs/gw2-api.md`. |
+| `guild_log.py`, `guild_storage.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
+| `notifications.py`, `poll_status.py` | Delivery to the notification channel, plus the `diag` previews. |
+| `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
+| `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
+| `events/` | Guild events: models, store, posting, scheduler, reminders, views, `/event` commands. |
+| `web/` | Optional aiohttp site: Discord OAuth, calendar, and feast usage pages. |
+| `discord_utils.py` | Shared role checks and Discord failure logging helpers. |
+
+Feature behaviour, every environment variable, and the hard-coded Discord role
+and channel IDs are documented in `README.md`. It is the reference a server
+operator reads, so a change a member or operator would notice belongs there too.
