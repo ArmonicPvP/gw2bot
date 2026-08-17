@@ -255,7 +255,7 @@ class RaffleCommands(app_commands.Group):
         if result is None:
             LOGGER.debug("No pending raffle result; refreshing guild log")
             try:
-                await self._bot.refresh_guild_log()
+                refreshed = await self._bot.refresh_guild_log()
             except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError):
                 LOGGER.exception("Could not refresh the guild log before raffle draw")
                 await interaction.followup.send(
@@ -263,6 +263,10 @@ class RaffleCommands(app_commands.Group):
                     ephemeral=True,
                 )
                 return
+            LOGGER.debug(
+                "Raffle draw guild log refresh completed; refreshed=%s",
+                refreshed,
+            )
             result = self._bot.run_raffle()
         if result is None:
             LOGGER.debug("Raffle draw command found no tickets")

@@ -21,8 +21,11 @@ class TestGuildLogRefresh:
             ),
         )
 
-        await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
+        refreshed = await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
 
+        # The caller's diagnostics need to record that the report it goes on
+        # to post came from persisted data alone.
+        assert not refreshed
         store.get_cursor.assert_not_called()
         store.process_events.assert_not_called()
 
@@ -49,8 +52,9 @@ class TestGuildLogRefresh:
             _config=SimpleNamespace(gw2_guild_id="guild-id"),
         )
 
-        await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
+        refreshed = await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
 
+        assert refreshed
         api.get_guild_log.assert_awaited_once_with("guild-id", 100)
         guild_members.usernames_with_rank.assert_awaited_once_with(
             "Officer",

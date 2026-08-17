@@ -513,8 +513,8 @@ class Gw2Bot(discord.Client):
     def mark_raffle_announcement_sent(self, run_id: int) -> None:
         self._raffle_store.mark_raffle_announcement_sent(run_id)
 
-    async def refresh_guild_log(self) -> None:
-        await guild_log.refresh_guild_log(self)
+    async def refresh_guild_log(self) -> bool:
+        return await guild_log.refresh_guild_log(self)
 
     async def _sync_commands(self) -> None:
         guild_id = self._config.discord_command_guild_id

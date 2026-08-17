@@ -16,17 +16,23 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
-async def refresh_guild_log(bot: Gw2Bot) -> None:
+async def refresh_guild_log(bot: Gw2Bot) -> bool:
+    """Read the guild log, reporting whether it was actually read.
+
+    Callers that only want fresh deposits before reading the persisted ledger
+    keep working when the GW2 API is unconfigured, so the return value is what
+    tells them - and their diagnostics - that they are working from stored
+    data alone.
+    """
     guild_id = bot._config.gw2_guild_id
     if bot._api is None or guild_id is None:
-        # Callers that only want fresh deposits before reading the persisted
-        # ledger keep working; the startup warning already reported why the
-        # guild log itself is not being read.
+        # The startup warning already reported why the guild log itself is
+        # not being read.
         LOGGER.debug(
             "Skipped guild log refresh; unset environment variables: %s",
             ", ".join(bot._config.missing_gw2_api_variables),
         )
-        return
+        return False
     cursor = bot._raffle_store.get_cursor()
     events = await bot._api.get_guild_log(
         guild_id,
@@ -47,7 +53,7 @@ async def refresh_guild_log(bot: Gw2Bot) -> None:
             "Initialized guild log cursor at event %s",
             latest_event_id,
         )
-        return
+        return True
     officer_usernames: set[str] = set()
     if any(
         int(event["id"]) > cursor and parse_gold_deposit(event) is not None
@@ -61,6 +67,7 @@ async def refresh_guild_log(bot: Gw2Bot) -> None:
         )
     bot._raffle_store.process_events(events, officer_usernames)
     LOGGER.debug("Processed %s fetched guild log events", len(events))
+    return True
 
 
 async def poll_guild_log(bot: Gw2Bot) -> None:

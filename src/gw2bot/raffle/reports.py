@@ -53,11 +53,13 @@ async def poll_raffle_contributions(bot: Gw2Bot) -> None:
             return
 
         report_end = raffle_contribution_report_end(datetime.now(UTC))
-        refreshed = True
+        # An unconfigured GW2 API reports False without raising, so the
+        # diagnostic below records a skipped refresh as faithfully as a
+        # failed one.
+        refreshed = False
         try:
-            await bot.refresh_guild_log()
+            refreshed = await bot.refresh_guild_log()
         except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError) as exc:
-            refreshed = False
             LOGGER.warning(
                 "Raffle Contributions guild-log refresh failed; posting "
                 "persisted report; error_type=%s",
