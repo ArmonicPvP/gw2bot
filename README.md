@@ -69,8 +69,9 @@ of it, because every Guild Wars 2 request needs both:
   `/raffle removetickets`, `/raffle tickets <username>`, the GW2 account link
   prompt, `/check` and `/track` answer privately with the variables to set,
   and their account-name autocompletes offer no choices. `/raffle draw`,
-  `/raffle audit`, `/raffle list` and `/raffle leaderboard` keep working from
-  the recorded ledger.
+  `/raffle audit`, `/raffle list`, `/raffle leaderboard`, and `/raffle
+  tickets` for a member who has already linked their account keep working
+  from the recorded ledger.
 
 The raffle database records which guild it belongs to the first time a guild id
 is configured, so a database created without `GW2_GUILD_ID` is claimed by the
