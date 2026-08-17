@@ -27,26 +27,6 @@ def user_has_role(user: Any, required_role_id: int) -> bool:
     )
 
 
-async def send_interaction_notice(
-    interaction: discord.Interaction,
-    message: str,
-) -> None:
-    """Reply privately whether or not the interaction was already answered.
-
-    Commands reach a disabled feature both before and after deferring, so the
-    notice has to pick the response or the followup accordingly.
-    """
-    LOGGER.debug(
-        "Sending interaction notice; deferred=%s characters=%s",
-        interaction.response.is_done(),
-        len(message),
-    )
-    if interaction.response.is_done():
-        await interaction.followup.send(message, ephemeral=True)
-        return
-    await interaction.response.send_message(message, ephemeral=True)
-
-
 def log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
     LOGGER.error(
         message + " (type=%s status=%s code=%s)",
@@ -64,6 +44,40 @@ def discord_failure_reason(error: discord.DiscordException) -> str:
     if code == 50013:
         return "missing_permissions"
     return "discord_error"
+
+
+async def send_interaction_notice(
+    interaction: discord.Interaction,
+    message: str,
+) -> bool:
+    """Reply privately, reporting whether the notice reached the caller.
+
+    Commands reach a disabled feature both before and after deferring, so the
+    notice has to pick the response or the followup accordingly. Discord can
+    refuse either one, and a notice that cannot be delivered must not turn a
+    guarded command into an unhandled error, so the failure is logged and
+    reported instead of raised.
+    """
+    deferred = interaction.response.is_done()
+    LOGGER.debug(
+        "Sending interaction notice; deferred=%s characters=%s",
+        deferred,
+        len(message),
+    )
+    try:
+        if deferred:
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.DiscordException as error:
+        log_discord_failure(
+            "Could not deliver an interaction notice; deferred=%s",
+            error,
+            deferred,
+        )
+        return False
+    LOGGER.debug("Delivered interaction notice; deferred=%s", deferred)
+    return True
 
 
 def discord_failure_signature(error: discord.DiscordException) -> str:

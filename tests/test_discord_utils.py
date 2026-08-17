@@ -1,7 +1,9 @@
+import logging
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 
 from gw2bot.discord_utils import (
@@ -326,8 +328,9 @@ class TestSendInteractionNotice:
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
-        await send_interaction_notice(cast(Any, interaction), "notice")
+        delivered = await send_interaction_notice(cast(Any, interaction), "notice")
 
+        assert delivered
         interaction.response.send_message.assert_awaited_once_with(
             "notice",
             ephemeral=True,
@@ -343,13 +346,73 @@ class TestSendInteractionNotice:
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
-        await send_interaction_notice(cast(Any, interaction), "notice")
+        delivered = await send_interaction_notice(cast(Any, interaction), "notice")
 
+        assert delivered
         interaction.followup.send.assert_awaited_once_with(
             "notice",
             ephemeral=True,
         )
         interaction.response.send_message.assert_not_awaited()
+
+    async def test_logs_delivery_without_the_notice_text(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=False),
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await send_interaction_notice(cast(Any, interaction), "notice text")
+
+        assert "notice text" not in caplog.text
+        assert (
+            "Sending interaction notice; deferred=False characters=11"
+            in caplog.text
+        )
+        assert "Delivered interaction notice; deferred=False" in caplog.text
+
+    async def test_a_refused_notice_is_logged_rather_than_raised(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A command that is already being turned away must not become an
+        # unhandled error because Discord also refused the explanation.
+        secret = "raw-notice-response-secret"
+
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50013
+
+            def __str__(self) -> str:
+                return secret
+
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=True),
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock(side_effect=DiscordFailure())),
+        )
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            delivered = await send_interaction_notice(
+                cast(Any, interaction),
+                "notice",
+            )
+
+        assert not delivered
+        assert secret not in caplog.text
+        assert (
+            "Could not deliver an interaction notice; deferred=True "
+            "(type=DiscordFailure status=403 code=50013)"
+            in caplog.text
+        )
 
 
 class TestSendDirectMessage:

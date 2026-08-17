@@ -252,9 +252,14 @@ class Gw2Bot(discord.Client):
             getattr(getattr(interaction, "user", None), "id", "unknown"),
             ", ".join(missing),
         )
-        await send_interaction_notice(
+        delivered = await send_interaction_notice(
             interaction,
             missing_configuration_message(missing),
+        )
+        LOGGER.debug(
+            "Reported disabled command configuration; action=%s delivered=%s",
+            action,
+            delivered,
         )
         return True
 

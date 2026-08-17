@@ -496,6 +496,34 @@ class TestOptionalConfiguration:
             ephemeral=True,
         )
 
+    async def test_a_command_stays_rejected_when_the_reply_cannot_be_sent(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(missing_gw2_api_variables=("GW2_API_KEY",)),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=False),
+                send_message=AsyncMock(side_effect=forbidden_error(50013)),
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            rejected = await Gw2Bot.reject_without_gw2_api(
+                cast(Gw2Bot, bot),
+                cast(discord.Interaction, interaction),
+                "raffle ticket addition",
+            )
+
+        assert rejected
+        assert (
+            "Reported disabled command configuration; "
+            "action=raffle ticket addition delivered=False" in caplog.text
+        )
+
     async def test_configured_commands_are_not_rejected(self) -> None:
         bot = SimpleNamespace(
             _config=SimpleNamespace(missing_gw2_api_variables=()),
