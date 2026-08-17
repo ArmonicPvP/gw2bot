@@ -95,6 +95,15 @@ class RaffleCommands(app_commands.Group):
                 "Skipped purchased ticket holder autocomplete; authorized=false"
             )
             return []
+        if not self._bot.gw2_api_enabled:
+            # These names come from the persisted ledger rather than the GW2
+            # API, but /raffle removetickets canonicalizes the choice against
+            # the in-game roster, so offering one would only lead to a refusal.
+            LOGGER.debug(
+                "Skipped purchased ticket holder autocomplete; "
+                "gw2_api_enabled=false"
+            )
+            return []
         try:
             totals = self._bot.get_raffle_totals()
         except SQLAlchemyError:

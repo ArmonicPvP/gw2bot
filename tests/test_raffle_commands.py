@@ -267,7 +267,7 @@ class TestPurchasedTicketHolderAutocomplete:
         )
 
     async def test_returns_only_purchased_ticket_holders(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_raffle_totals=MagicMock(
                 return_value=[
                     raffle_total("Zeta.9999", purchased=3),
@@ -290,7 +290,7 @@ class TestPurchasedTicketHolderAutocomplete:
         ]
 
     async def test_filters_holders_by_case_insensitive_substring(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_raffle_totals=MagicMock(
                 return_value=[
                     raffle_total("Alpha.1234", purchased=1),
@@ -308,7 +308,7 @@ class TestPurchasedTicketHolderAutocomplete:
         assert [choice.value for choice in choices] == ["Beta.5678"]
 
     async def test_does_not_expose_holders_to_unauthorized_user(self) -> None:
-        bot = SimpleNamespace(get_raffle_totals=MagicMock())
+        bot = configured_bot(get_raffle_totals=MagicMock())
         interaction = SimpleNamespace(
             user=SimpleNamespace(
                 roles=[
@@ -327,12 +327,27 @@ class TestPurchasedTicketHolderAutocomplete:
         assert choices == []
         bot.get_raffle_totals.assert_not_called()
 
+    async def test_offers_no_holders_without_gw2_credentials(self) -> None:
+        # The names come from the ledger, but /raffle removetickets checks the
+        # chosen one against the in-game roster, so a choice offered here
+        # could only end in the disabled-command notice.
+        bot = unconfigured_bot(get_raffle_totals=MagicMock())
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.purchased_ticket_holder_autocomplete(
+            self._draw_interaction(),  # type: ignore[arg-type]
+            "",
+        )
+
+        assert choices == []
+        bot.get_raffle_totals.assert_not_called()
+
     async def test_failure_logging_omits_secret_bearing_exception(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         secret = "totals-autocomplete-secret"
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_raffle_totals=MagicMock(
                 side_effect=SQLAlchemyError(
                     f"database failed with password={secret}"
