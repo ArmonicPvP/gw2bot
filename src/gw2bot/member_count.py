@@ -65,9 +65,10 @@ async def poll_guild_member_count_topic(bot: Gw2Bot) -> None:
         await asyncio.sleep(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
 
 async def update_guild_member_count_topic(bot: Gw2Bot) -> bool:
-    if bot._api is None:
+    guild_id = bot._config.gw2_guild_id
+    if bot._api is None or guild_id is None:
         raise RuntimeError("GW2 API client was not initialized")
-    members = await bot._api.get_guild_members(bot._config.gw2_guild_id)
+    members = await bot._api.get_guild_members(guild_id)
     member_count, pending_invite_count = count_active_guild_members(members)
     bot._last_guild_member_count = member_count
     bot._last_pending_guild_invite_count = pending_invite_count

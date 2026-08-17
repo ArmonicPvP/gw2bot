@@ -1523,6 +1523,20 @@ class TestRaffleStore:
             assert store.get_pending_notifications() == []
             store.close()
 
+    def test_unset_guild_id_leaves_the_database_unbound(self) -> None:
+        # The bot runs without GW2_GUILD_ID, and the first guild id it is
+        # later given must still be able to claim the database.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, None)
+            store.close()
+
+            bound = RaffleStore(database_path, "guild-id")
+            bound.close()
+
+            with pytest.raises(ValueError, match="different guild"):
+                RaffleStore(database_path, "other-guild")
+
     def test_database_cannot_be_reused_for_another_guild(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")

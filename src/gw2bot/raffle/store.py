@@ -81,7 +81,7 @@ class RaffleStore:
     def __init__(
         self,
         database_path: str,
-        guild_id: str,
+        guild_id: str | None,
         reward_tiers: tuple[RaffleRewardTier, ...] = RAFFLE_REWARD_TIERS,
         draw_tiers: tuple[RaffleDrawTier, ...] = RAFFLE_DRAW_TIERS,
     ):
@@ -1250,7 +1250,12 @@ class RaffleStore:
             )
         LOGGER.info("Applied one-time free-ticket cap; updated_users=%s", updated)
 
-    def _bind_guild(self, guild_id: str) -> None:
+    def _bind_guild(self, guild_id: str | None) -> None:
+        if guild_id is None:
+            # Leave the database unbound so the first configured guild id
+            # claims it, rather than binding it to a placeholder.
+            LOGGER.debug("Skipped raffle database guild binding; guild id unset")
+            return
         with self._sessions.begin() as session:
             record = session.get(SettingRecord, "guild_id")
             if record is not None and record.value != guild_id:

@@ -17,14 +17,16 @@ For local development, copy `.env.example` to `.env`.
 | --- | --- |
 | `DISCORD_TOKEN` | Token for the Discord bot application. |
 | `DISCORD_COMMAND_GUILD_ID` | Positive integer ID of the Discord server where commands are registered. |
-| `DISCORD_NOTIFICATION_CHANNEL_ID` | Positive integer ID of the Discord text channel that receives all automated notifications. The channel must belong to `DISCORD_COMMAND_GUILD_ID`. |
-| `GW2_API_KEY` | Guild Wars 2 API key with `account` and `guilds` permissions. |
-| `GW2_GUILD_ID` | Guild ID listed in `/v2/account.guild_leader`. |
+
+These two are the only variables the bot refuses to start without.
 
 ### Optional Environment Variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `DISCORD_NOTIFICATION_CHANNEL_ID` | unset | Positive integer ID of the Discord text channel that receives all automated notifications. The channel must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
+| `GW2_API_KEY` | unset | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `GW2_GUILD_ID`. |
+| `GW2_GUILD_ID` | unset | Guild ID listed in `/v2/account.guild_leader`. Set it together with `GW2_API_KEY`. |
 | `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs. |
 | `DISCORD_FEAST_NOTIFICATION_USER_ID` | unset | Discord user ID that also receives feast stock alerts by private message. |
 | `GW2_POLL_INTERVAL_SECONDS` | `300` | Guild Storage polling interval in seconds. Must be a positive integer of at least `30`. |
@@ -45,6 +47,58 @@ The application loads `.env` automatically. Existing environment variables take
 precedence over `.env`, so an Unraid container can inject the same variables at
 runtime without using or mounting a `.env` file. The `.env` file is excluded
 from Git and the Docker build context.
+
+### Running Without The Optional Credentials
+
+The bot starts with only `DISCORD_TOKEN` and `DISCORD_COMMAND_GUILD_ID`. It
+registers its commands, serves guild events, and keeps the raffle ledger it
+already has, while every feature that needs a value you did not set is switched
+off instead of stopping the bot. Each disabled feature is named in a startup
+warning in the console.
+
+Without `GW2_API_KEY` **and** `GW2_GUILD_ID` — either one missing disables all
+of it, because every Guild Wars 2 request needs both:
+
+- Guild Storage polling stops, so there are no feast stock alerts and no feast
+  count history.
+- Guild log polling stops, so there are no join, leave, invite or rank-change
+  messages, and no gold deposits are turned into raffle tickets.
+- The overdue Trial member report and the guild member count channel
+  description stop.
+- `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`,
+  `/raffle removetickets`, `/raffle tickets <username>`, the GW2 account link
+  prompt, `/check` and `/track` answer privately with the variables to set,
+  and their account-name autocompletes offer no choices. `/raffle draw`,
+  `/raffle audit`, `/raffle list`, `/raffle leaderboard`, and `/raffle
+  tickets` for a member who has already linked their account keep working
+  from the recorded ledger.
+
+The raffle database records which guild it belongs to the first time a guild id
+is configured, so a database created without `GW2_GUILD_ID` is claimed by the
+first guild id you set afterwards.
+
+Without `DISCORD_NOTIFICATION_CHANNEL_ID`, nothing is posted to the
+notification channel:
+
+- Guild membership messages, raffle deposit audit lines, raffle command audit
+  lines, feast stock alerts and Trial member reports are skipped.
+- The channel description is not updated with the guild member count.
+- The `diag` message is ignored, so the previews in
+  [Automated Message Diagnostics](#automated-message-diagnostics) do not run.
+- Commands that post an audit line still do their work and report that the
+  audit log could not be delivered.
+
+The bot is not silent, though: the raffle contribution channel is a separate,
+hard-coded destination that `DISCORD_NOTIFICATION_CHANNEL_ID` does not control.
+With `GW2_API_KEY` and `GW2_GUILD_ID` set, every guild-log poll still posts
+gold-deposit ticket purchase embeds and reward-tier milestone announcements
+there, and the six-hourly contribution report is posted there whether or not
+the GW2 credentials are set. Raffle draw announcements and the replies to every
+`/raffle`, `/check` and `/track` command go to the channel the command was run
+in and are likewise unaffected.
+
+Set the missing variables and restart the bot to enable the feature; nothing
+else has to be reconfigured.
 
 When `DEBUG=true`, detailed `gw2bot` diagnostics are written to the console.
 Third-party library debug logging remains disabled, and credentials and full

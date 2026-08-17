@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 
+from gw2bot.config import NOTIFICATION_CHANNEL_VARIABLE
 from gw2bot.discord_utils import discord_failure_reason, log_discord_failure
 from gw2bot.feast_stock import FeastAlert
 from gw2bot.guild_members import (
@@ -357,6 +358,15 @@ async def send_automated_message_diagnostics(
 
 
 async def try_send_notification(bot: Gw2Bot, message: str) -> bool:
+    if not bot._config.notifications_enabled:
+        # The startup warning already named the variable; each skipped
+        # delivery only needs to be traceable, not repeated at warning level.
+        LOGGER.debug(
+            "Skipped Discord notification; %s is not set; characters=%s",
+            NOTIFICATION_CHANNEL_VARIABLE,
+            len(message),
+        )
+        return False
     LOGGER.debug("Sending Discord notification; characters=%s", len(message))
     try:
         await bot._send_notification(message)
@@ -379,13 +389,15 @@ async def send_notification(bot: Gw2Bot, message: str) -> None:
 
 async def get_notification_channel(bot: Gw2Bot) -> Any:
     if bot._notification_channel is None:
-        LOGGER.debug(
-            "Fetching Discord notification channel %s",
-            bot._config.discord_notification_channel_id,
-        )
-        channel = await bot.fetch_channel(
-            bot._config.discord_notification_channel_id
-        )
+        channel_id = bot._config.discord_notification_channel_id
+        if channel_id is None:
+            # Raised as a Discord error so every caller's existing failure
+            # handling reports it instead of crashing a poll task.
+            raise discord.ClientException(
+                f"{NOTIFICATION_CHANNEL_VARIABLE} is not set"
+            )
+        LOGGER.debug("Fetching Discord notification channel %s", channel_id)
+        channel = await bot.fetch_channel(channel_id)
         if (
             getattr(getattr(channel, "guild", None), "id", None)
             != bot._config.discord_command_guild_id

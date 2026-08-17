@@ -1,6 +1,10 @@
 from unittest.mock import patch
 
-from gw2bot.config import Config, ConfigurationError
+from gw2bot.config import (
+    Config,
+    ConfigurationError,
+    missing_configuration_message,
+)
 import pytest
 
 
@@ -119,12 +123,102 @@ class TestConfig:
     def test_reports_all_missing_required_values(self) -> None:
         with pytest.raises(
             ConfigurationError,
-            match=(
-                "DISCORD_TOKEN, DISCORD_COMMAND_GUILD_ID, "
-                "DISCORD_NOTIFICATION_CHANNEL_ID, GW2_API_KEY, GW2_GUILD_ID"
-            ),
+            match="DISCORD_TOKEN, DISCORD_COMMAND_GUILD_ID",
         ):
             Config.from_env({})
+
+    def test_starts_without_notification_channel_and_gw2_credentials(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+            }
+        )
+
+        assert config.discord_notification_channel_id is None
+        assert config.gw2_api_key is None
+        assert config.gw2_guild_id is None
+        assert not config.notifications_enabled
+        assert not config.gw2_api_enabled
+        assert config.missing_gw2_api_variables == ("GW2_API_KEY", "GW2_GUILD_ID")
+
+    def test_blank_optional_credentials_are_treated_as_unset(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "DISCORD_NOTIFICATION_CHANNEL_ID": "   ",
+                "GW2_API_KEY": "\t",
+                "GW2_GUILD_ID": " ",
+            }
+        )
+
+        assert config.discord_notification_channel_id is None
+        assert config.gw2_api_key is None
+        assert config.gw2_guild_id is None
+
+    def test_reports_only_the_unset_half_of_the_gw2_credentials(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "GW2_API_KEY": "gw2-key",
+            }
+        )
+
+        assert config.missing_gw2_api_variables == ("GW2_GUILD_ID",)
+        assert not config.gw2_api_enabled
+
+    def test_all_features_are_enabled_when_every_value_is_set(self) -> None:
+        config = Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+                "GW2_API_KEY": "gw2-key",
+                "GW2_GUILD_ID": "guild-id",
+            }
+        )
+
+        assert config.notifications_enabled
+        assert config.gw2_api_enabled
+        assert config.missing_gw2_api_variables == ()
+
+    def test_rejects_invalid_notification_channel_id(self) -> None:
+        with pytest.raises(
+            ConfigurationError,
+            match="DISCORD_NOTIFICATION_CHANNEL_ID must be greater than zero",
+        ):
+            Config.from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                    "DISCORD_NOTIFICATION_CHANNEL_ID": "0",
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("variables", "expected"),
+        (
+            (
+                ("GW2_API_KEY", "GW2_GUILD_ID"),
+                "This command is disabled. Set the GW2_API_KEY, GW2_GUILD_ID "
+                "environment variables for the bot and restart it to enable "
+                "this command.",
+            ),
+            (
+                ("GW2_GUILD_ID",),
+                "This command is disabled. Set the GW2_GUILD_ID environment "
+                "variable for the bot and restart it to enable this command.",
+            ),
+        ),
+    )
+    def test_missing_configuration_message_names_every_unset_variable(
+        self,
+        variables: tuple[str, ...],
+        expected: str,
+    ) -> None:
+        assert missing_configuration_message(variables) == expected
 
     def test_rejects_short_poll_interval(self) -> None:
         with pytest.raises(ConfigurationError, match="must be at least 30"):

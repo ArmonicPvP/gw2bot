@@ -93,10 +93,11 @@ async def build_trial_report_messages(
     bot: Gw2Bot,
     now: datetime | None = None,
 ) -> list[str]:
-    if bot._api is None:
+    guild_id = bot._config.gw2_guild_id
+    if bot._api is None or guild_id is None:
         raise RuntimeError("GW2 API client was not initialized")
     now = now or datetime.now(UTC)
-    members = await bot._api.get_guild_members(bot._config.gw2_guild_id)
+    members = await bot._api.get_guild_members(guild_id)
     overdue = get_overdue_trial_members(members, now)
     recent = get_recent_trial_members(members, now)
     tracked_times = bot.get_tracked_trial_member_times()

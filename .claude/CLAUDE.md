@@ -109,7 +109,8 @@ ones share a single module (all of `trials/` is covered by
 files, and the `views.py` modules is exercised through the modules that drive
 it. Put a new test in the module that already covers its feature instead of
 adding a path per source file. `tests/factories.py` holds the shared builders
-for fake guild-log events, Discord errors, and raffle totals.
+for fake guild-log events, Discord errors, raffle totals, and the fake
+bots that answer the optional-configuration guards.
 
 Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 `pyrightconfig.json` already put `src` on the path for tests and type checking.
@@ -128,8 +129,32 @@ Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 | `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
 | `events/` | Guild events: models, store, posting, scheduler, reminders, views, `/event` commands. |
 | `web/` | Optional aiohttp site: Discord OAuth, calendar, and feast usage pages. |
-| `discord_utils.py` | Shared role checks and Discord failure logging helpers. |
+| `discord_utils.py` | Shared role checks, ephemeral interaction notices, and Discord failure logging helpers. |
 
 Feature behaviour, every environment variable, and the hard-coded Discord role
 and channel IDs are documented in `README.md`. It is the reference a server
 operator reads, so a change a member or operator would notice belongs there too.
+
+### Optional Configuration
+
+`DISCORD_TOKEN` and `DISCORD_COMMAND_GUILD_ID` are the only variables the bot
+refuses to start without. `DISCORD_NOTIFICATION_CHANNEL_ID`, `GW2_API_KEY` and
+`GW2_GUILD_ID` are optional, and the features that need them are disabled
+rather than fatal:
+
+- `Config` answers `notifications_enabled`, `gw2_api_enabled` and
+  `missing_gw2_api_variables`; nothing else re-derives that from the raw
+  values.
+- `Gw2Bot.setup_hook` creates only the pollers whose configuration is present,
+  and `Gw2Bot._log_disabled_features` names every feature it switched off as a
+  startup warning.
+- A command that needs the GW2 API calls `Gw2Bot.reject_without_gw2_api` before
+  doing any work, which replies with the variables to set; an autocomplete
+  checks `Gw2Bot.gw2_api_enabled` and offers no choices instead.
+- Delivery to an unconfigured notification channel is skipped and logged at
+  debug, not retried at warning level, because the startup warning already
+  named the variable.
+
+A new feature that depends on one of these values follows the same shape: gate
+it on the `Config` property, warn once at startup, and tell the caller which
+variable to set.

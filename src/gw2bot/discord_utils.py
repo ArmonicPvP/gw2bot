@@ -46,6 +46,40 @@ def discord_failure_reason(error: discord.DiscordException) -> str:
     return "discord_error"
 
 
+async def send_interaction_notice(
+    interaction: discord.Interaction,
+    message: str,
+) -> bool:
+    """Reply privately, reporting whether the notice reached the caller.
+
+    Commands reach a disabled feature both before and after deferring, so the
+    notice has to pick the response or the followup accordingly. Discord can
+    refuse either one, and a notice that cannot be delivered must not turn a
+    guarded command into an unhandled error, so the failure is logged and
+    reported instead of raised.
+    """
+    deferred = interaction.response.is_done()
+    LOGGER.debug(
+        "Sending interaction notice; deferred=%s characters=%s",
+        deferred,
+        len(message),
+    )
+    try:
+        if deferred:
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.DiscordException as error:
+        log_discord_failure(
+            "Could not deliver an interaction notice; deferred=%s",
+            error,
+            deferred,
+        )
+        return False
+    LOGGER.debug("Delivered interaction notice; deferred=%s", deferred)
+    return True
+
+
 def discord_failure_signature(error: discord.DiscordException) -> str:
     # Sanitized identity (no raw response body) used to deduplicate repeated
     # failure logs; mirrors the fields emitted by log_discord_failure.

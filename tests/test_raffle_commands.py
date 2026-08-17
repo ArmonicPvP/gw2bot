@@ -52,7 +52,7 @@ from gw2bot.raffle.views import (
 )
 from gw2bot.discord_utils import user_has_role
 
-from factories import raffle_total
+from factories import configured_bot, raffle_total, unconfigured_bot
 
 
 class AddTicketsCallback(Protocol):
@@ -170,7 +170,7 @@ class TestRaffleCommandGroup:
 
 class TestRaffleGuildMemberAutocomplete:
     async def test_returns_matching_guild_members_for_authorized_user(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             search_guild_members=AsyncMock(
                 return_value=["Member One.1234", "Member Two.5678"]
             )
@@ -232,7 +232,7 @@ class TestRaffleGuildMemberAutocomplete:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         secret = "autocomplete-failure-secret"
-        bot = SimpleNamespace(
+        bot = configured_bot(
             search_guild_members=AsyncMock(
                 side_effect=aiohttp.ClientError(
                     f"request failed with access_token={secret}"
@@ -267,7 +267,7 @@ class TestPurchasedTicketHolderAutocomplete:
         )
 
     async def test_returns_only_purchased_ticket_holders(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_raffle_totals=MagicMock(
                 return_value=[
                     raffle_total("Zeta.9999", purchased=3),
@@ -290,7 +290,7 @@ class TestPurchasedTicketHolderAutocomplete:
         ]
 
     async def test_filters_holders_by_case_insensitive_substring(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_raffle_totals=MagicMock(
                 return_value=[
                     raffle_total("Alpha.1234", purchased=1),
@@ -308,7 +308,7 @@ class TestPurchasedTicketHolderAutocomplete:
         assert [choice.value for choice in choices] == ["Beta.5678"]
 
     async def test_does_not_expose_holders_to_unauthorized_user(self) -> None:
-        bot = SimpleNamespace(get_raffle_totals=MagicMock())
+        bot = configured_bot(get_raffle_totals=MagicMock())
         interaction = SimpleNamespace(
             user=SimpleNamespace(
                 roles=[
@@ -327,12 +327,27 @@ class TestPurchasedTicketHolderAutocomplete:
         assert choices == []
         bot.get_raffle_totals.assert_not_called()
 
+    async def test_offers_no_holders_without_gw2_credentials(self) -> None:
+        # The names come from the ledger, but /raffle removetickets checks the
+        # chosen one against the in-game roster, so a choice offered here
+        # could only end in the disabled-command notice.
+        bot = unconfigured_bot(get_raffle_totals=MagicMock())
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.purchased_ticket_holder_autocomplete(
+            self._draw_interaction(),  # type: ignore[arg-type]
+            "",
+        )
+
+        assert choices == []
+        bot.get_raffle_totals.assert_not_called()
+
     async def test_failure_logging_omits_secret_bearing_exception(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         secret = "totals-autocomplete-secret"
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_raffle_totals=MagicMock(
                 side_effect=SQLAlchemyError(
                     f"database failed with password={secret}"
@@ -352,10 +367,104 @@ class TestPurchasedTicketHolderAutocomplete:
         assert "Could not load raffle totals for autocomplete" in caplog.text
 
 
+class TestRaffleCommandsWithoutGw2Credentials:
+    @staticmethod
+    def _interaction() -> SimpleNamespace:
+        return SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock(), send_modal=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+    @pytest.mark.parametrize(
+        ("command_name", "arguments"),
+        (
+            ("addticket", ("member.1234",)),
+            ("addtickets", ("member.1234",)),
+            ("removetickets", ("member.1234",)),
+            ("tickets", ("member.1234",)),
+        ),
+    )
+    async def test_guild_member_commands_report_the_unset_variables(
+        self,
+        command_name: str,
+        arguments: tuple[str, ...],
+    ) -> None:
+        bot = unconfigured_bot(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(),
+            add_manual_raffle_ticket=MagicMock(),
+            remove_gold_raffle_tickets=MagicMock(),
+            get_raffle_total=MagicMock(),
+        )
+        interaction = self._interaction()
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == command_name
+        )
+        assert isinstance(command, app_commands.Command)
+
+        await command.callback(group, interaction, *arguments)  # type: ignore[arg-type]
+
+        bot.reject_without_gw2_api.assert_awaited_once()
+        bot.resolve_guild_member.assert_not_awaited()
+        bot.add_manual_raffle_ticket.assert_not_called()
+        bot.remove_gold_raffle_tickets.assert_not_called()
+
+    async def test_account_link_modal_is_not_offered(self) -> None:
+        # Linking checks the name against the in-game roster, so the modal
+        # would only be able to fail.
+        bot = unconfigured_bot(
+            get_linked_raffle_username=MagicMock(return_value=None),
+        )
+        interaction = self._interaction()
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "tickets"
+        )
+
+        await command.callback(group, interaction)  # type: ignore[arg-type]
+
+        bot.reject_without_gw2_api.assert_awaited_once()
+        interaction.response.send_modal.assert_not_awaited()
+
+    async def test_bulk_attendance_modal_reports_the_unset_variables(self) -> None:
+        bot = unconfigured_bot(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(),
+        )
+        interaction = self._interaction()
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        modal = RaffleBulkAddTicketsModal(group)
+        modal.attendance._value = ":Member.1234, Character Name"
+
+        await modal.on_submit(cast(discord.Interaction, interaction))
+
+        bot.reject_without_gw2_api.assert_awaited_once()
+        bot.resolve_guild_member.assert_not_awaited()
+
+    async def test_guild_member_autocomplete_offers_no_choices(self) -> None:
+        bot = unconfigured_bot(search_guild_members=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                roles=[SimpleNamespace(id=GUILD_ROSTER_ROLE_ID)]
+            )
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+
+        choices = await group.guild_member_autocomplete(
+            interaction,  # type: ignore[arg-type]
+            "member",
+        )
+
+        assert choices == []
+        bot.search_guild_members.assert_not_awaited()
+
+
 class TestAddRaffleTicketsCommand:
     async def test_addticket_without_amount_adds_one_manual_ticket(self) -> None:
         total = raffle_total("Member.1234", free=1)
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(return_value=total.username),
             add_manual_raffle_ticket=MagicMock(return_value=total),
@@ -382,7 +491,7 @@ class TestAddRaffleTicketsCommand:
 
     async def test_officer_amount_records_purchased_ticket_event(self) -> None:
         total = raffle_total("Member.1234", purchased=4, free=1)
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(return_value=total.username),
             add_officer_raffle_purchase=AsyncMock(return_value=total),
@@ -438,7 +547,7 @@ class TestAddRaffleTicketsCommand:
         bot.add_officer_raffle_purchase.assert_not_awaited()
 
     async def test_rejects_officer_purchase_over_cap(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(return_value="Member.1234"),
             add_officer_raffle_purchase=AsyncMock(
@@ -525,7 +634,7 @@ class TestAddRaffleTicketsCommand:
         assert modal.attendance.placeholder == ":Username.1234, Character Name"
 
     async def test_bulk_attendance_modal_adds_parsed_unique_members(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(
                 side_effect=[
@@ -609,7 +718,7 @@ class TestAddRaffleTicketsCommand:
     async def test_adds_valid_unique_members_and_reports_all_other_results(
         self,
     ) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(
                 side_effect=[
@@ -693,7 +802,7 @@ class TestAddRaffleTicketsCommand:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         secret = "bulk-member-cache-secret"
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(
                 side_effect=aiohttp.ClientError(
@@ -756,7 +865,7 @@ class TestAddRaffleTicketsCommand:
 
 class TestRaffleTicketsCommand:
     async def test_prompts_unlinked_user_for_gw2_account(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             get_linked_raffle_username=MagicMock(return_value=None),
         )
         interaction = SimpleNamespace(
@@ -849,7 +958,7 @@ class TestRaffleTicketsCommand:
 
     async def test_any_user_can_search_a_guild_member(self) -> None:
         total = raffle_total("Member.1234", purchased=3, free=1)
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value=total.username),
             get_raffle_total=MagicMock(return_value=total),
         )
@@ -874,7 +983,7 @@ class TestRaffleTicketsCommand:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         secret = "ticket-lookup-secret"
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(
                 side_effect=aiohttp.ClientError(
                     f"request failed with access_token={secret}"
@@ -1419,7 +1528,7 @@ class TestRemoveRaffleTicketsCommand:
         self,
     ) -> None:
         total = raffle_total("Member.1234", purchased=2, free=1)
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(return_value=total.username),
             remove_gold_raffle_tickets=MagicMock(return_value=total),
@@ -1457,7 +1566,7 @@ class TestRemoveRaffleTicketsCommand:
         )
 
     async def test_rejects_excess_ticket_removal_without_audit(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(return_value="Member.1234"),
             remove_gold_raffle_tickets=MagicMock(
@@ -1492,7 +1601,7 @@ class TestRemoveRaffleTicketsCommand:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         secret = "removal-lookup-secret"
-        bot = SimpleNamespace(
+        bot = configured_bot(
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(
                 side_effect=aiohttp.ClientError(

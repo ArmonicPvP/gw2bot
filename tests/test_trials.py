@@ -11,7 +11,7 @@ import discord
 import pytest
 from discord import app_commands
 
-from factories import not_found_error
+from factories import configured_bot, not_found_error, unconfigured_bot
 from gw2bot.guild_members import TrialMemberReportEntry
 from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleStore, TrialForumPost
@@ -551,7 +551,7 @@ class TestCheckCommand:
         }
 
     async def test_sends_report_messages_ephemerally_to_officer(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             _build_trial_report_messages=AsyncMock(
                 return_value=["before mark", "past mark"]
             ),
@@ -576,8 +576,28 @@ class TestCheckCommand:
             call("past mark", ephemeral=True),
         ]
 
+    async def test_reports_the_unset_gw2_variables_to_an_officer(self) -> None:
+        bot = unconfigured_bot(_build_trial_report_messages=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_check_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        bot.reject_without_gw2_api.assert_awaited_once()
+        bot._build_trial_report_messages.assert_not_awaited()
+        interaction.response.defer.assert_not_awaited()
+
     async def test_reports_when_no_members_to_report(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             _build_trial_report_messages=AsyncMock(return_value=[]),
         )
         interaction = SimpleNamespace(
@@ -659,7 +679,7 @@ class TestTrackCommand:
         }
 
     async def test_rejects_non_guild_member(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value=None),
             toggle_trial_member_tracking=MagicMock(),
         )
@@ -682,8 +702,32 @@ class TestTrackCommand:
         message = interaction.followup.send.await_args.args[0]
         assert "is not a member of the configured guild" in message
 
+    async def test_reports_the_unset_gw2_variables_before_any_lookup(self) -> None:
+        bot = unconfigured_bot(
+            resolve_guild_member=AsyncMock(),
+            toggle_trial_member_tracking=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=99,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "username.1234",
+        )
+
+        bot.reject_without_gw2_api.assert_awaited_once()
+        bot.resolve_guild_member.assert_not_awaited()
+        bot.toggle_trial_member_tracking.assert_not_called()
+
     async def test_tracks_member_and_posts_audit(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value="Username.1234"),
             toggle_trial_member_tracking=MagicMock(return_value=True),
             send_notification=AsyncMock(return_value=True),
@@ -715,7 +759,7 @@ class TestTrackCommand:
         assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
 
     async def test_untracks_member_and_posts_audit(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value="Username.1234"),
             toggle_trial_member_tracking=MagicMock(return_value=False),
             send_notification=AsyncMock(return_value=True),
@@ -742,7 +786,7 @@ class TestTrackCommand:
         assert "Stopped tracking **Username.1234**" in reply
 
     async def test_notes_when_audit_delivery_fails(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value="Username.1234"),
             toggle_trial_member_tracking=MagicMock(return_value=True),
             send_notification=AsyncMock(return_value=False),
@@ -766,7 +810,7 @@ class TestTrackCommand:
         assert "The audit log could not be delivered." in reply
 
     async def test_reports_membership_lookup_failure(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             resolve_guild_member=AsyncMock(side_effect=aiohttp.ClientError()),
             toggle_trial_member_tracking=MagicMock(),
         )
@@ -802,8 +846,28 @@ class TestTrackCommand:
         assert choices == []
         bot.search_guild_members.assert_not_awaited()
 
+    async def test_autocomplete_offers_no_choices_without_gw2_credentials(
+        self,
+    ) -> None:
+        bot = unconfigured_bot(search_guild_members=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+        )
+
+        choices = await Gw2Bot._track_member_autocomplete(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "User",
+        )
+
+        assert choices == []
+        bot.search_guild_members.assert_not_awaited()
+
     async def test_autocomplete_returns_officer_choices(self) -> None:
-        bot = SimpleNamespace(
+        bot = configured_bot(
             search_guild_members=AsyncMock(return_value=["Username.1234"]),
         )
         interaction = SimpleNamespace(

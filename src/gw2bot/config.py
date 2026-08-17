@@ -1,24 +1,39 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
+
+GW2_API_VARIABLES = ("GW2_API_KEY", "GW2_GUILD_ID")
+NOTIFICATION_CHANNEL_VARIABLE = "DISCORD_NOTIFICATION_CHANNEL_ID"
 
 
 class ConfigurationError(ValueError):
     """Raised when required application configuration is invalid."""
 
 
+def missing_configuration_message(variables: Sequence[str]) -> str:
+    """Explain to a command's caller which variables switch the feature on."""
+    plural = "s" if len(variables) != 1 else ""
+    return (
+        "This command is disabled. Set the "
+        f"{', '.join(variables)} environment variable{plural} for the bot "
+        "and restart it to enable this command."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     discord_token: str
     discord_command_guild_id: int
-    discord_notification_channel_id: int
-    gw2_api_key: str
-    gw2_guild_id: str
+    # The three values below are optional: the bot starts without them and
+    # disables the features that need them instead of refusing to run.
+    discord_notification_channel_id: int | None = None
+    gw2_api_key: str | None = None
+    gw2_guild_id: str | None = None
     discord_feast_notification_user_id: int | None = None
     poll_interval_seconds: int = 300
     guild_log_poll_interval_seconds: int = 60
@@ -35,6 +50,29 @@ class Config:
     web_session_secret: str | None = None
     web_session_ttl_seconds: int = 604800
 
+    @property
+    def missing_gw2_api_variables(self) -> tuple[str, ...]:
+        """Names of the unset variables that Guild Wars 2 lookups need."""
+        return tuple(
+            name
+            for name, value in zip(
+                GW2_API_VARIABLES,
+                (self.gw2_api_key, self.gw2_guild_id),
+                strict=True,
+            )
+            if value is None
+        )
+
+    @property
+    def gw2_api_enabled(self) -> bool:
+        """Whether the bot can call the Guild Wars 2 API for its guild."""
+        return not self.missing_gw2_api_variables
+
+    @property
+    def notifications_enabled(self) -> bool:
+        """Whether a channel is configured for automated notifications."""
+        return self.discord_notification_channel_id is not None
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
         if env is None:
@@ -44,9 +82,6 @@ class Config:
         required = (
             "DISCORD_TOKEN",
             "DISCORD_COMMAND_GUILD_ID",
-            "DISCORD_NOTIFICATION_CHANNEL_ID",
-            "GW2_API_KEY",
-            "GW2_GUILD_ID",
         )
         missing = [name for name in required if not values.get(name, "").strip()]
         if missing:
@@ -58,8 +93,8 @@ class Config:
             values["DISCORD_COMMAND_GUILD_ID"],
             "DISCORD_COMMAND_GUILD_ID",
         )
-        discord_notification_channel_id = _positive_int(
-            values["DISCORD_NOTIFICATION_CHANNEL_ID"],
+        discord_notification_channel_id = _optional_positive_int(
+            values.get("DISCORD_NOTIFICATION_CHANNEL_ID"),
             "DISCORD_NOTIFICATION_CHANNEL_ID",
         )
         discord_feast_notification_user_id = _optional_positive_int(
@@ -138,8 +173,8 @@ class Config:
             discord_command_guild_id=discord_command_guild_id,
             discord_notification_channel_id=discord_notification_channel_id,
             discord_feast_notification_user_id=discord_feast_notification_user_id,
-            gw2_api_key=values["GW2_API_KEY"].strip(),
-            gw2_guild_id=values["GW2_GUILD_ID"].strip(),
+            gw2_api_key=_optional_stripped(values.get("GW2_API_KEY")),
+            gw2_guild_id=_optional_stripped(values.get("GW2_GUILD_ID")),
             poll_interval_seconds=poll_interval,
             guild_log_poll_interval_seconds=guild_log_poll_interval,
             guild_member_cache_seconds=guild_member_cache,
@@ -177,6 +212,12 @@ def _optional_positive_int(value: str | None, name: str) -> int | None:
     if value is None or not value.strip():
         return None
     return _positive_int(value, name)
+
+
+def _optional_stripped(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return value.strip()
 
 
 def _optional_string(value: str | None, default: str) -> str:

@@ -66,6 +66,11 @@ class RaffleCommands(app_commands.Group):
                 "Skipped raffle guild member autocomplete; authorized=false"
             )
             return []
+        if not self._bot.gw2_api_enabled:
+            LOGGER.debug(
+                "Skipped raffle guild member autocomplete; gw2_api_enabled=false"
+            )
+            return []
         try:
             usernames = await self._bot.search_guild_members(current, limit=25)
         except (aiohttp.ClientError, asyncio.TimeoutError):
@@ -88,6 +93,15 @@ class RaffleCommands(app_commands.Group):
         if not user_has_role(interaction.user, RAFFLE_DRAW_ROLE_ID):
             LOGGER.debug(
                 "Skipped purchased ticket holder autocomplete; authorized=false"
+            )
+            return []
+        if not self._bot.gw2_api_enabled:
+            # These names come from the persisted ledger rather than the GW2
+            # API, but /raffle removetickets canonicalizes the choice against
+            # the in-game roster, so offering one would only lead to a refusal.
+            LOGGER.debug(
+                "Skipped purchased ticket holder autocomplete; "
+                "gw2_api_enabled=false"
             )
             return []
         try:
@@ -159,6 +173,11 @@ class RaffleCommands(app_commands.Group):
             "Bulk manual raffle ticket processing started; requested=%s",
             len(requested_usernames),
         )
+        if await self._bot.reject_without_gw2_api(
+            interaction,
+            "bulk manual raffle ticket command",
+        ):
+            return
         canonical_usernames: list[str] = []
         invalid_usernames: list[str] = []
         duplicate_usernames: list[str] = []
@@ -245,7 +264,7 @@ class RaffleCommands(app_commands.Group):
         if result is None:
             LOGGER.debug("No pending raffle result; refreshing guild log")
             try:
-                await self._bot.refresh_guild_log()
+                refreshed = await self._bot.refresh_guild_log()
             except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError):
                 LOGGER.exception("Could not refresh the guild log before raffle draw")
                 await interaction.followup.send(
@@ -253,6 +272,10 @@ class RaffleCommands(app_commands.Group):
                     ephemeral=True,
                 )
                 return
+            LOGGER.debug(
+                "Raffle draw guild log refresh completed; refreshed=%s",
+                refreshed,
+            )
             result = self._bot.run_raffle()
         if result is None:
             LOGGER.debug("Raffle draw command found no tickets")
@@ -340,6 +363,12 @@ class RaffleCommands(app_commands.Group):
         if not await self._bot.authorize_raffle_command(
             interaction,
             required_role_id,
+        ):
+            return
+
+        if await self._bot.reject_without_gw2_api(
+            interaction,
+            "raffle ticket addition",
         ):
             return
 
@@ -524,6 +553,12 @@ class RaffleCommands(app_commands.Group):
         ):
             return
 
+        if await self._bot.reject_without_gw2_api(
+            interaction,
+            "purchased raffle ticket removal",
+        ):
+            return
+
         await interaction.response.defer(ephemeral=True)
         try:
             canonical_username = await self._bot.resolve_guild_member(username)
@@ -586,6 +621,13 @@ class RaffleCommands(app_commands.Group):
                 interaction.user.id
             )
             if linked_username is None:
+                # Linking verifies the account against the in-game roster, so
+                # the modal is pointless without the GW2 API.
+                if await self._bot.reject_without_gw2_api(
+                    interaction,
+                    "raffle account link",
+                ):
+                    return
                 await interaction.response.send_modal(
                     RaffleAccountLinkModal(self._bot)
                 )
@@ -596,6 +638,12 @@ class RaffleCommands(app_commands.Group):
                 ),
                 ephemeral=True,
             )
+            return
+
+        if await self._bot.reject_without_gw2_api(
+            interaction,
+            "raffle tickets lookup",
+        ):
             return
 
         await interaction.response.defer(ephemeral=True)

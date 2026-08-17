@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
 
 import discord
 
@@ -94,6 +96,29 @@ def guild_rank_change(
         "new_rank": new_rank,
         "changed_by": changed_by,
     }
+
+def configured_bot(**attributes: Any) -> SimpleNamespace:
+    """Fake bot whose GW2 configuration guards let a command run.
+
+    Commands that look guild members up ask the bot whether GW2_API_KEY and
+    GW2_GUILD_ID are set before doing any work, so every fake bot driving one
+    of those commands has to answer.
+    """
+    return SimpleNamespace(
+        gw2_api_enabled=True,
+        reject_without_gw2_api=AsyncMock(return_value=False),
+        **attributes,
+    )
+
+
+def unconfigured_bot(**attributes: Any) -> SimpleNamespace:
+    """Fake bot that reports GW2_API_KEY and GW2_GUILD_ID as unset."""
+    return SimpleNamespace(
+        gw2_api_enabled=False,
+        reject_without_gw2_api=AsyncMock(return_value=True),
+        **attributes,
+    )
+
 
 def forbidden_error(code: int) -> discord.Forbidden:
     response = SimpleNamespace(status=403, reason="Forbidden")

@@ -550,7 +550,7 @@ class TestRaffleContributionNotification:
         bot = SimpleNamespace(
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
-            refresh_guild_log=AsyncMock(),
+            refresh_guild_log=AsyncMock(return_value=True),
             _send_raffle_contribution_report=AsyncMock(),
             _poll_status=SimpleNamespace(
                 record_error=MagicMock(),
@@ -565,6 +565,43 @@ class TestRaffleContributionNotification:
         bot._send_raffle_contribution_report.assert_awaited_once_with(boundary)
         bot._poll_status.record_success.assert_called_once_with("Raffle Contributions")
         bot._poll_status.record_error.assert_not_called()
+
+    @patch("gw2bot.raffle.reports.raffle_contribution_report_end")
+    @patch("gw2bot.raffle.reports.seconds_until_raffle_contribution_report", return_value=123)
+    @patch("gw2bot.raffle.reports.asyncio.sleep", new_callable=AsyncMock)
+    async def test_poller_records_a_skipped_refresh_as_not_refreshed(
+        self,
+        sleep: AsyncMock,
+        seconds_until_report: MagicMock,
+        report_end: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # An unconfigured GW2 API skips the refresh without raising, and the
+        # report is then built from persisted data alone; the diagnostic has
+        # to say so rather than claim a refresh that never happened.
+        boundary = datetime(2026, 6, 7, 6, tzinfo=UTC)
+        report_end.return_value = boundary
+        bot = SimpleNamespace(
+            wait_until_ready=AsyncMock(),
+            is_closed=MagicMock(side_effect=[False, False, True]),
+            refresh_guild_log=AsyncMock(return_value=False),
+            _send_raffle_contribution_report=AsyncMock(),
+            _poll_status=SimpleNamespace(
+                record_error=MagicMock(),
+                record_success=MagicMock(),
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await Gw2Bot._poll_raffle_contributions(bot)  # type: ignore[arg-type]
+
+        bot._send_raffle_contribution_report.assert_awaited_once_with(boundary)
+        assert "guild-log refresh failed" not in caplog.text
+        assert (
+            "Raffle Contributions poll completed successfully; "
+            "guild_log_refreshed=False"
+            in caplog.text
+        )
 
     @patch("gw2bot.raffle.reports.raffle_contribution_report_end")
     @patch("gw2bot.raffle.reports.seconds_until_raffle_contribution_report", return_value=123)
