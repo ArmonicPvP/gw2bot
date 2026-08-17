@@ -102,10 +102,17 @@ to a single configured channel, runs the guild's ticket raffle, reports overdue
 Trial members, manages guild events with sign-up rosters, and optionally serves
 a web calendar and feast usage dashboard.
 
-Source lives under `src/gw2bot`, and `tests/` mirrors it one test module per
-production module. Run the bot with `python -m gw2bot` and `PYTHONPATH=src`;
-`pytest.ini` and `pyrightconfig.json` already put `src` on the path for tests
-and type checking.
+Source lives under `src/gw2bot`, and `tests/` mirrors it by feature rather than
+file. Most modules have a matching `tests/test_<module>.py`, closely related
+ones share a single module (all of `trials/` is covered by
+`tests/test_trials.py`), and support code such as `database.py`, the `models.py`
+files, and the `views.py` modules is exercised through the modules that drive
+it. Put a new test in the module that already covers its feature instead of
+adding a path per source file. `tests/factories.py` holds the shared builders
+for fake guild-log events, Discord errors, and raffle totals.
+
+Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
+`pyrightconfig.json` already put `src` on the path for tests and type checking.
 
 | Path | Responsibility |
 | --- | --- |
