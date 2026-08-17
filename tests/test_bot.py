@@ -310,6 +310,229 @@ class TestBotWebServer:
                 await bot.close()
 
 
+class TestOptionalConfiguration:
+    ALWAYS_RUNNING = {
+        "gw2-raffle-contribution-poller",
+        "gw2-event-scheduler",
+    }
+    GW2_POLLERS = {
+        "gw2-guild-storage-poller",
+        "gw2-guild-log-poller",
+    }
+    NOTIFICATION_POLLERS = {
+        "gw2-overdue-trial-poller",
+        "gw2-guild-member-count-topic-poller",
+    }
+
+    def _config(self, tmp_path: Path, **values: str) -> Config:
+        return Config.from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "RAFFLE_DB_PATH": str(tmp_path / "raffle.db"),
+                **values,
+            }
+        )
+
+    def _quiet_bot_patches(self):
+        return patch.multiple(
+            Gw2Bot,
+            _sync_commands=AsyncMock(),
+            _poll_guild_storage=AsyncMock(),
+            _poll_guild_log=AsyncMock(),
+            _poll_overdue_trials=AsyncMock(),
+            _poll_raffle_contributions=AsyncMock(),
+            _poll_guild_member_count_topic=AsyncMock(),
+            _poll_event_updates=AsyncMock(),
+        )
+
+    async def _started_poll_task_names(self, config: Config) -> tuple[set[str], Gw2Bot]:
+        bot = Gw2Bot(config)
+        with self._quiet_bot_patches():
+            await bot.setup_hook()
+        return {task.get_name() for task in bot._poll_tasks}, bot
+
+    async def _close(self, bot: Gw2Bot) -> None:
+        with patch.object(discord.Client, "close", AsyncMock()):
+            await bot.close()
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_unset_gw2_credentials_start_the_bot_without_gw2_pollers(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        names, bot = await self._started_poll_task_names(
+            self._config(tmp_path, DISCORD_NOTIFICATION_CHANNEL_ID="9012")
+        )
+
+        assert names == self.ALWAYS_RUNNING
+        assert bot._api is None
+        assert bot._guild_members is None
+        member_cache.assert_not_called()
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_unset_notification_channel_keeps_the_gw2_pollers(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Guild Storage and the guild log feed the raffle ledger and the feast
+        # history, so they still earn their keep with nowhere to post.
+        member_cache.return_value.close = AsyncMock()
+        names, bot = await self._started_poll_task_names(
+            self._config(
+                tmp_path,
+                GW2_API_KEY="gw2-key",
+                GW2_GUILD_ID="guild-id",
+            )
+        )
+
+        assert names == self.ALWAYS_RUNNING | self.GW2_POLLERS
+        assert bot._api is not None
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_full_configuration_starts_every_poller(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        names, bot = await self._started_poll_task_names(
+            self._config(
+                tmp_path,
+                DISCORD_NOTIFICATION_CHANNEL_ID="9012",
+                GW2_API_KEY="gw2-key",
+                GW2_GUILD_ID="guild-id",
+            )
+        )
+
+        assert names == (
+            self.ALWAYS_RUNNING | self.GW2_POLLERS | self.NOTIFICATION_POLLERS
+        )
+
+        await self._close(bot)
+
+    def test_disabled_features_are_logged_as_warnings(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = Gw2Bot(self._config(tmp_path))
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            bot._log_disabled_features()
+        bot.event_store.close()
+        bot.raffle_store.close()
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 2
+        assert (
+            "Guild Wars 2 features are disabled because GW2_API_KEY, "
+            "GW2_GUILD_ID are not set" in warnings[0]
+        )
+        assert "Guild Storage polling" in warnings[0]
+        assert (
+            "Automated notifications are disabled because "
+            "DISCORD_NOTIFICATION_CHANNEL_ID is not set" in warnings[1]
+        )
+
+    def test_no_warning_is_logged_when_everything_is_configured(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = Gw2Bot(
+            self._config(
+                tmp_path,
+                DISCORD_NOTIFICATION_CHANNEL_ID="9012",
+                GW2_API_KEY="gw2-key",
+                GW2_GUILD_ID="guild-id",
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            bot._log_disabled_features()
+        bot.event_store.close()
+        bot.raffle_store.close()
+
+        assert caplog.records == []
+        assert bot.gw2_api_enabled
+
+    async def test_disabled_command_reply_names_the_unset_variables(self) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(
+                missing_gw2_api_variables=("GW2_API_KEY", "GW2_GUILD_ID"),
+            )
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=False),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        rejected = await Gw2Bot.reject_without_gw2_api(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "raffle ticket addition",
+        )
+
+        assert rejected
+        interaction.response.send_message.assert_awaited_once_with(
+            "This command is disabled. Set the GW2_API_KEY, GW2_GUILD_ID "
+            "environment variables for the bot and restart it to enable "
+            "this command.",
+            ephemeral=True,
+        )
+
+    async def test_configured_commands_are_not_rejected(self) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(missing_gw2_api_variables=()),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=False),
+                send_message=AsyncMock(),
+            ),
+        )
+
+        rejected = await Gw2Bot.reject_without_gw2_api(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "raffle ticket addition",
+        )
+
+        assert not rejected
+        interaction.response.send_message.assert_not_awaited()
+
+    async def test_diag_is_ignored_when_no_notification_channel_is_set(self) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=None),
+            _send_automated_message_diagnostics=AsyncMock(),
+        )
+        message = SimpleNamespace(
+            author=SimpleNamespace(bot=False),
+            channel=SimpleNamespace(id=9012),
+            content="diag",
+        )
+
+        await Gw2Bot.on_message(cast(Gw2Bot, bot), message)  # type: ignore[arg-type]
+
+        bot._send_automated_message_diagnostics.assert_not_awaited()
+
+
 class TestStartupStatus:
     async def test_startup_status_is_logged_once_without_channel_notification(
         self,
@@ -321,7 +544,10 @@ class TestStartupStatus:
             _config=SimpleNamespace(
                 poll_interval_seconds=300,
                 guild_log_poll_interval_seconds=60,
+                gw2_api_enabled=True,
+                notifications_enabled=True,
             ),
+            _startup_status=lambda: Gw2Bot._startup_status(cast(Gw2Bot, bot)),
             _try_send_notification=AsyncMock(),
         )
 
@@ -341,3 +567,32 @@ class TestStartupStatus:
             == 1
         )
         assert bot._ready_announced
+
+    def test_startup_status_omits_the_disabled_schedules(self) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(
+                poll_interval_seconds=300,
+                guild_log_poll_interval_seconds=60,
+                gw2_api_enabled=False,
+                notifications_enabled=False,
+            ),
+        )
+
+        assert Gw2Bot._startup_status(cast(Gw2Bot, bot)) == (
+            "Raffle contribution reporting every 6 hours UTC."
+        )
+
+    def test_startup_status_keeps_gw2_polling_without_a_channel(self) -> None:
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(
+                poll_interval_seconds=300,
+                guild_log_poll_interval_seconds=60,
+                gw2_api_enabled=True,
+                notifications_enabled=False,
+            ),
+        )
+
+        assert Gw2Bot._startup_status(cast(Gw2Bot, bot)) == (
+            "Storage polling every 300 seconds; guild log polling every 60 "
+            "seconds; raffle contribution reporting every 6 hours UTC."
+        )

@@ -50,6 +50,9 @@ async def handle_check_command(
         )
         return
 
+    if await bot.reject_without_gw2_api(interaction, "Trial member check command"):
+        return
+
     await interaction.response.defer(ephemeral=True)
     messages = await bot._build_trial_report_messages()
     if not messages:
@@ -93,6 +96,9 @@ async def track_member_autocomplete(
     if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
         LOGGER.debug("Skipped track guild member autocomplete; authorized=false")
         return []
+    if not bot.gw2_api_enabled:
+        LOGGER.debug("Skipped track guild member autocomplete; gw2_api_enabled=false")
+        return []
     try:
         usernames = await bot.search_guild_members(current, limit=25)
     except (aiohttp.ClientError, asyncio.TimeoutError):
@@ -127,6 +133,9 @@ async def handle_track_command(
             "You do not have the required role for this command.",
             ephemeral=True,
         )
+        return
+
+    if await bot.reject_without_gw2_api(interaction, "Trial member track command"):
         return
 
     await interaction.response.defer(ephemeral=True)

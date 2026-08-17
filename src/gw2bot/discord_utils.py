@@ -27,6 +27,26 @@ def user_has_role(user: Any, required_role_id: int) -> bool:
     )
 
 
+async def send_interaction_notice(
+    interaction: discord.Interaction,
+    message: str,
+) -> None:
+    """Reply privately whether or not the interaction was already answered.
+
+    Commands reach a disabled feature both before and after deferring, so the
+    notice has to pick the response or the followup accordingly.
+    """
+    LOGGER.debug(
+        "Sending interaction notice; deferred=%s characters=%s",
+        interaction.response.is_done(),
+        len(message),
+    )
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+        return
+    await interaction.response.send_message(message, ephemeral=True)
+
+
 def log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
     LOGGER.error(
         message + " (type=%s status=%s code=%s)",

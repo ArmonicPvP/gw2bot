@@ -11,8 +11,12 @@ import discord
 from discord import app_commands
 
 from gw2bot import guild_log, guild_storage, member_count, notifications
-from gw2bot.config import Config
-from gw2bot.discord_utils import user_has_role
+from gw2bot.config import (
+    NOTIFICATION_CHANNEL_VARIABLE,
+    Config,
+    missing_configuration_message,
+)
+from gw2bot.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.events import scheduler as event_scheduler
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.store import EventStore
@@ -81,7 +85,7 @@ class Gw2Bot(discord.Client):
         self._feast_notification_user: Any | None = None
         self._feast_counts: dict[int, int] | None = None
         self._poll_status = PollStatusTracker(
-            (config.gw2_api_key, config.discord_token)
+            (config.gw2_api_key or "", config.discord_token)
         )
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._event_store = EventStore(config.raffle_db_path)
@@ -121,45 +125,70 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Initializing HTTP session and GW2 API client")
         timeout = aiohttp.ClientTimeout(total=30)
         self._session = aiohttp.ClientSession(timeout=timeout)
-        self._api = Gw2ApiClient(
-            self._session,
-            self._config.gw2_api_base_url,
-            self._config.gw2_api_key,
-        )
-        self._guild_members = GuildMemberCache(
-            self._api,
-            self._config.gw2_guild_id,
-            self._config.guild_member_cache_seconds,
-        )
-        self._guild_members.start_background_refresh()
+        gw2_api_enabled = self._config.gw2_api_enabled
+        notifications_enabled = self._config.notifications_enabled
+        self._log_disabled_features()
+        api_key = self._config.gw2_api_key
+        guild_id = self._config.gw2_guild_id
+        if api_key is not None and guild_id is not None:
+            self._api = Gw2ApiClient(
+                self._session,
+                self._config.gw2_api_base_url,
+                api_key,
+            )
+            self._guild_members = GuildMemberCache(
+                self._api,
+                guild_id,
+                self._config.guild_member_cache_seconds,
+            )
+            self._guild_members.start_background_refresh()
         await self._sync_commands()
-        LOGGER.debug("Starting background poll tasks")
+        LOGGER.debug(
+            "Starting background poll tasks; gw2_api_enabled=%s "
+            "notifications_enabled=%s",
+            gw2_api_enabled,
+            notifications_enabled,
+        )
         self._poll_tasks = [
-            asyncio.create_task(
-                self._poll_guild_storage(),
-                name="gw2-guild-storage-poller",
-            ),
-            asyncio.create_task(
-                self._poll_guild_log(),
-                name="gw2-guild-log-poller",
-            ),
-            asyncio.create_task(
-                self._poll_overdue_trials(),
-                name="gw2-overdue-trial-poller",
-            ),
             asyncio.create_task(
                 self._poll_raffle_contributions(),
                 name="gw2-raffle-contribution-poller",
-            ),
-            asyncio.create_task(
-                self._poll_guild_member_count_topic(),
-                name="gw2-guild-member-count-topic-poller",
             ),
             asyncio.create_task(
                 self._poll_event_updates(),
                 name="gw2-event-scheduler",
             ),
         ]
+        if gw2_api_enabled:
+            # These read the GW2 API on every pass, so without a key and a
+            # guild id they have nothing to poll.
+            self._poll_tasks.extend(
+                (
+                    asyncio.create_task(
+                        self._poll_guild_storage(),
+                        name="gw2-guild-storage-poller",
+                    ),
+                    asyncio.create_task(
+                        self._poll_guild_log(),
+                        name="gw2-guild-log-poller",
+                    ),
+                )
+            )
+        if gw2_api_enabled and notifications_enabled:
+            # Both read the GW2 API and exist only to write to the
+            # notification channel, so either half being unset stops them.
+            self._poll_tasks.extend(
+                (
+                    asyncio.create_task(
+                        self._poll_overdue_trials(),
+                        name="gw2-overdue-trial-poller",
+                    ),
+                    asyncio.create_task(
+                        self._poll_guild_member_count_topic(),
+                        name="gw2-guild-member-count-topic-poller",
+                    ),
+                )
+            )
         if self._config.web_enabled:
             # Imported lazily so the web layer only loads when enabled.
             from gw2bot.web.server import WebServer
@@ -182,6 +211,53 @@ class Gw2Bot(discord.Client):
         else:
             LOGGER.debug("Web calendar disabled")
 
+    def _log_disabled_features(self) -> None:
+        missing_gw2 = self._config.missing_gw2_api_variables
+        if missing_gw2:
+            LOGGER.warning(
+                "Guild Wars 2 features are disabled because %s %s not set: "
+                "Guild Storage polling, feast stock alerts, guild log polling, "
+                "guild join, leave, invite and rank-change notifications, "
+                "raffle deposit tracking, the overdue Trial member report, the "
+                "guild member count channel description, and guild member "
+                "lookups in /raffle, /check and /track",
+                ", ".join(missing_gw2),
+                "is" if len(missing_gw2) == 1 else "are",
+            )
+        if not self._config.notifications_enabled:
+            LOGGER.warning(
+                "Automated notifications are disabled because %s is not set: "
+                "no guild log, raffle audit, feast stock or Trial member "
+                "message is delivered, the guild member count channel "
+                "description is not updated, and the diag previews do not run",
+                NOTIFICATION_CHANNEL_VARIABLE,
+            )
+
+    @property
+    def gw2_api_enabled(self) -> bool:
+        return self._config.gw2_api_enabled
+
+    async def reject_without_gw2_api(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+    ) -> bool:
+        """Tell a caller how to enable a command that needs the GW2 API."""
+        missing = self._config.missing_gw2_api_variables
+        if not missing:
+            return False
+        LOGGER.warning(
+            "Rejected %s from Discord user %s; unset environment variables: %s",
+            action,
+            getattr(getattr(interaction, "user", None), "id", "unknown"),
+            ", ".join(missing),
+        )
+        await send_interaction_notice(
+            interaction,
+            missing_configuration_message(missing),
+        )
+        return True
+
     async def close(self) -> None:
         LOGGER.debug("Closing bot and cancelling %s poll tasks", len(self._poll_tasks))
         for task in self._poll_tasks:
@@ -201,24 +277,38 @@ class Gw2Bot(discord.Client):
         LOGGER.info("Discord bot connected as %s", self.user)
         if self._ready_announced:
             return
-        LOGGER.info(
-            "GW2 bot connected to Discord. "
-            f"Storage polling every {self._config.poll_interval_seconds} seconds; "
-            "guild log polling every "
-            f"{self._config.guild_log_poll_interval_seconds} seconds; "
-            "overdue Trial member reporting daily at 17:00 UTC; "
-            "raffle contribution reporting every 6 hours UTC; "
-            "guild member count topic updates every 60 seconds."
-        )
+        LOGGER.info("GW2 bot connected to Discord. %s", self._startup_status())
         self._ready_announced = True
+
+    def _startup_status(self) -> str:
+        """Describe only the schedules that this configuration actually runs."""
+        gw2_api_enabled = self._config.gw2_api_enabled
+        reporting_enabled = gw2_api_enabled and self._config.notifications_enabled
+        schedules: list[str] = []
+        if gw2_api_enabled:
+            schedules.append(
+                "Storage polling every "
+                f"{self._config.poll_interval_seconds} seconds"
+            )
+            schedules.append(
+                "guild log polling every "
+                f"{self._config.guild_log_poll_interval_seconds} seconds"
+            )
+        if reporting_enabled:
+            schedules.append("overdue Trial member reporting daily at 17:00 UTC")
+        schedules.append("raffle contribution reporting every 6 hours UTC")
+        if reporting_enabled:
+            schedules.append("guild member count topic updates every 60 seconds")
+        status = "; ".join(schedules) + "."
+        return status[0].upper() + status[1:]
 
     async def on_message(self, message: discord.Message) -> None:
         author_is_bot = bool(getattr(message.author, "bot", False))
         content = message.content.strip()
         diag_candidate = content.casefold() == "diag"
-        channel_matches = (
-            getattr(message.channel, "id", None)
-            == self._config.discord_notification_channel_id
+        notification_channel_id = self._config.discord_notification_channel_id
+        channel_matches = notification_channel_id is not None and (
+            getattr(message.channel, "id", None) == notification_channel_id
         )
         LOGGER.debug(
             "Discord message received; author_is_bot=%s notification_channel=%s "

@@ -7,6 +7,25 @@ from gw2bot.raffle import RaffleDeposit
 
 
 class TestGuildLogRefresh:
+    async def test_unset_gw2_credentials_skip_the_refresh(self) -> None:
+        # /raffle draw and the six-hourly report both refresh first, so an
+        # unconfigured API has to leave them reading the persisted ledger
+        # instead of raising.
+        store = MagicMock()
+        bot = SimpleNamespace(
+            _api=None,
+            _raffle_store=store,
+            _config=SimpleNamespace(
+                gw2_guild_id=None,
+                missing_gw2_api_variables=("GW2_API_KEY", "GW2_GUILD_ID"),
+            ),
+        )
+
+        await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
+
+        store.get_cursor.assert_not_called()
+        store.process_events.assert_not_called()
+
     async def test_processes_new_events_before_returning(self) -> None:
         events = [
             {

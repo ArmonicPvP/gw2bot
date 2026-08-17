@@ -27,12 +27,13 @@ async def poll_guild_storage(bot: Gw2Bot) -> None:
     if bot._session is None:
         raise RuntimeError("HTTP session was not initialized")
 
-    if bot._api is None:
+    guild_id = bot._config.gw2_guild_id
+    if bot._api is None or guild_id is None:
         raise RuntimeError("GW2 API client was not initialized")
     while not bot.is_closed():
         LOGGER.debug("Starting Guild Storage poll")
         try:
-            storage = await bot._api.get_guild_storage(bot._config.gw2_guild_id)
+            storage = await bot._api.get_guild_storage(guild_id)
             await bot._handle_storage(storage)
         except (aiohttp.ClientError, asyncio.TimeoutError, SQLAlchemyError) as exc:
             bot._poll_status.record_error("Guild Storage", exc)

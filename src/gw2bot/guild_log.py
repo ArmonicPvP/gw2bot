@@ -17,11 +17,19 @@ LOGGER = logging.getLogger(__name__)
 
 
 async def refresh_guild_log(bot: Gw2Bot) -> None:
-    if bot._api is None:
-        raise RuntimeError("GW2 API client was not initialized")
+    guild_id = bot._config.gw2_guild_id
+    if bot._api is None or guild_id is None:
+        # Callers that only want fresh deposits before reading the persisted
+        # ledger keep working; the startup warning already reported why the
+        # guild log itself is not being read.
+        LOGGER.debug(
+            "Skipped guild log refresh; unset environment variables: %s",
+            ", ".join(bot._config.missing_gw2_api_variables),
+        )
+        return
     cursor = bot._raffle_store.get_cursor()
     events = await bot._api.get_guild_log(
-        bot._config.gw2_guild_id,
+        guild_id,
         cursor,
     )
     LOGGER.debug(

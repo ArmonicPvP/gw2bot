@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -11,6 +11,7 @@ from gw2bot.discord_utils import (
     resolve_guild_membership,
     resolve_guild_memberships,
     send_direct_message,
+    send_interaction_notice,
 )
 
 from factories import forbidden_error, not_found_error
@@ -313,6 +314,42 @@ class TestResolveGuildMembership:
 
         assert memberships == {}
         assert guild.fetched == []
+
+
+class TestSendInteractionNotice:
+    async def test_answers_an_untouched_interaction_privately(self) -> None:
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=False),
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await send_interaction_notice(cast(Any, interaction), "notice")
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "notice",
+            ephemeral=True,
+        )
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_follows_up_on_a_deferred_interaction(self) -> None:
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(
+                is_done=MagicMock(return_value=True),
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await send_interaction_notice(cast(Any, interaction), "notice")
+
+        interaction.followup.send.assert_awaited_once_with(
+            "notice",
+            ephemeral=True,
+        )
+        interaction.response.send_message.assert_not_awaited()
 
 
 class TestSendDirectMessage:

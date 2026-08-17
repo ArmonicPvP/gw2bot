@@ -349,7 +349,10 @@ class TestDiscordNotificationDelivery:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         bot = SimpleNamespace(
-            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _config=SimpleNamespace(
+                discord_notification_channel_id=9012,
+                notifications_enabled=True,
+            ),
             _send_notification=AsyncMock(side_effect=forbidden_error(50013)),
         )
 
@@ -381,7 +384,10 @@ class TestDiscordNotificationDelivery:
                 return secret
 
         bot = SimpleNamespace(
-            _config=SimpleNamespace(discord_notification_channel_id=9012),
+            _config=SimpleNamespace(
+                discord_notification_channel_id=9012,
+                notifications_enabled=True,
+            ),
             _send_notification=AsyncMock(side_effect=DiscordFailure()),
         )
 
@@ -395,3 +401,50 @@ class TestDiscordNotificationDelivery:
         assert secret not in caplog.text
         assert "reason=missing_access" in caplog.text
         assert "type=DiscordFailure status=403 code=50001" in caplog.text
+
+    async def test_unset_notification_channel_skips_delivery_without_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "unset-channel-message-secret"
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(
+                discord_notification_channel_id=None,
+                notifications_enabled=False,
+            ),
+            _send_notification=AsyncMock(),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            sent = await Gw2Bot._try_send_notification(
+                cast(Gw2Bot, bot),
+                secret,
+            )
+
+        assert not sent
+        bot._send_notification.assert_not_awaited()
+        assert secret not in caplog.text
+        assert (
+            "Skipped Discord notification; DISCORD_NOTIFICATION_CHANNEL_ID is "
+            f"not set; characters={len(secret)}"
+            in caplog.text
+        )
+
+    async def test_unset_notification_channel_is_reported_as_a_discord_error(
+        self,
+    ) -> None:
+        # Every caller already handles Discord failures, so an unset channel
+        # must not surface as an unhandled crash inside a poll task.
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(discord_notification_channel_id=None),
+            _notification_channel=None,
+            fetch_channel=AsyncMock(),
+        )
+
+        with pytest.raises(
+            discord.ClientException,
+            match="DISCORD_NOTIFICATION_CHANNEL_ID is not set",
+        ):
+            await Gw2Bot._get_notification_channel(cast(Gw2Bot, bot))
+
+        bot.fetch_channel.assert_not_awaited()

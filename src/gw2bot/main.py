@@ -18,7 +18,7 @@ def main() -> None:
     configure_logging(
         config.debug,
         (
-            config.gw2_api_key,
+            config.gw2_api_key or "",
             config.discord_token,
             config.discord_oauth_client_secret or "",
             config.web_session_secret or "",
