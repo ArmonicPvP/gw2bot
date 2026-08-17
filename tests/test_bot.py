@@ -442,9 +442,12 @@ class TestOptionalConfiguration:
         )
         assert "Guild Storage polling" in warnings[0]
         assert (
-            "Automated notifications are disabled because "
+            "Notification channel delivery is disabled because "
             "DISCORD_NOTIFICATION_CHANNEL_ID is not set" in warnings[1]
         )
+        # The raffle contribution channel keeps posting, so the warning must
+        # not read as "the bot has gone silent".
+        assert "raffle contribution channel is unaffected" in warnings[1]
 
     def test_no_warning_is_logged_when_everything_is_configured(
         self,

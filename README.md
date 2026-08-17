@@ -76,9 +76,10 @@ The raffle database records which guild it belongs to the first time a guild id
 is configured, so a database created without `GW2_GUILD_ID` is claimed by the
 first guild id you set afterwards.
 
-Without `DISCORD_NOTIFICATION_CHANNEL_ID`:
+Without `DISCORD_NOTIFICATION_CHANNEL_ID`, nothing is posted to the
+notification channel:
 
-- No automated message is delivered: guild membership messages, raffle audit
+- Guild membership messages, raffle deposit audit lines, raffle command audit
   lines, feast stock alerts and Trial member reports are skipped.
 - The channel description is not updated with the guild member count.
 - The `diag` message is ignored, so the previews in
@@ -86,8 +87,14 @@ Without `DISCORD_NOTIFICATION_CHANNEL_ID`:
 - Commands that post an audit line still do their work and report that the
   audit log could not be delivered.
 
-The six-hourly raffle contribution report posts to its own channel and is
-unaffected by `DISCORD_NOTIFICATION_CHANNEL_ID`.
+The bot is not silent, though: the raffle contribution channel is a separate,
+hard-coded destination that `DISCORD_NOTIFICATION_CHANNEL_ID` does not control.
+With `GW2_API_KEY` and `GW2_GUILD_ID` set, every guild-log poll still posts
+gold-deposit ticket purchase embeds and reward-tier milestone announcements
+there, and the six-hourly contribution report is posted there whether or not
+the GW2 credentials are set. Raffle draw announcements and the replies to every
+`/raffle`, `/check` and `/track` command go to the channel the command was run
+in and are likewise unaffected.
 
 Set the missing variables and restart the bot to enable the feature; nothing
 else has to be reconfigured.

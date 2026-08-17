@@ -226,10 +226,11 @@ class Gw2Bot(discord.Client):
             )
         if not self._config.notifications_enabled:
             LOGGER.warning(
-                "Automated notifications are disabled because %s is not set: "
-                "no guild log, raffle audit, feast stock or Trial member "
-                "message is delivered, the guild member count channel "
-                "description is not updated, and the diag previews do not run",
+                "Notification channel delivery is disabled because %s is not "
+                "set: no guild membership, raffle audit, feast stock or Trial "
+                "member message is delivered there, the guild member count "
+                "channel description is not updated, and the diag previews do "
+                "not run; the raffle contribution channel is unaffected",
                 NOTIFICATION_CHANNEL_VARIABLE,
             )
 
