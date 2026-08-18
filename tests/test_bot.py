@@ -3,7 +3,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -1032,6 +1032,96 @@ class TestSettingsHotApply:
         with self._quiet_bot_patches():
             with pytest.raises(ValueError, match="belongs to a different guild"):
                 await bot.apply_settings_change({"gw2_guild_id"})
+
+        await self._close(bot)
+
+
+class TestWebCalendarReconcile:
+    """What /settings is told about the calendar has to match reality."""
+
+    def _config(self, tmp_path: Path, **values: str) -> Config:
+        return config_from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "RAFFLE_DB_PATH": str(tmp_path / "raffle.db"),
+                "WEB_ENABLED": "true",
+                "WEB_BASE_URL": "http://localhost:8080",
+                "DISCORD_OAUTH_CLIENT_ID": "client-id",
+                "DISCORD_OAUTH_CLIENT_SECRET": "client-secret",
+                "WEB_SESSION_SECRET": "s" * 32,
+                **values,
+            }
+        )
+
+    async def _bot(self, config: Config) -> Gw2Bot:
+        bot = Gw2Bot(config)
+        bot._session = cast(Any, object())
+        return bot
+
+    async def _close(self, bot: Gw2Bot) -> None:
+        bot._session = None
+        with patch.object(discord.Client, "close", AsyncMock()):
+            await bot.close()
+
+    async def test_reports_a_started_calendar(self, tmp_path: Path) -> None:
+        bot = await self._bot(self._config(tmp_path))
+
+        with patch("gw2bot.web.server.WebServer") as web_server:
+            web_server.return_value.start = AsyncMock()
+            web_server.return_value.stop = AsyncMock()
+            outcome = await bot._reconcile_web_server()
+
+        assert outcome == "the web calendar"
+        assert bot._web_server is not None
+        await self._close(bot)
+
+    async def test_reports_a_calendar_that_could_not_start(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A taken port must not be reported as a successful restart: the
+        # calendar is offline, and the reply is the only place anyone finds
+        # that out without reading the console.
+        bot = await self._bot(self._config(tmp_path))
+
+        with patch("gw2bot.web.server.WebServer") as web_server:
+            web_server.return_value.start = AsyncMock(
+                side_effect=OSError("address already in use")
+            )
+            with caplog.at_level(logging.ERROR, logger="gw2bot"):
+                outcome = await bot._reconcile_web_server()
+
+        assert outcome is not None
+        assert "could not be started" in outcome
+        assert "offline" in outcome
+        # The bot keeps running: the calendar is an optional extra.
+        assert bot._web_server is None
+        assert "Could not start the web calendar" in caplog.text
+        await self._close(bot)
+
+    async def test_reports_nothing_when_the_calendar_is_off(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bot = await self._bot(self._config(tmp_path, WEB_ENABLED="false"))
+
+        assert await bot._reconcile_web_server() is None
+        assert bot._web_server is None
+        await self._close(bot)
+
+    async def test_reports_nothing_when_an_unrelated_setting_changed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bot = await self._bot(self._config(tmp_path))
+        with patch("gw2bot.web.server.WebServer") as web_server:
+            web_server.return_value.start = AsyncMock()
+            web_server.return_value.stop = AsyncMock()
+            await bot._reconcile_web_server()
+
+            assert await bot._reconcile_web_server() is None
 
         await self._close(bot)
 

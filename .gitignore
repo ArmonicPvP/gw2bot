@@ -388,6 +388,9 @@ dmypy.json
 
 # Local runtime state
 data/
+# The settings encryption key. Normally generated inside data/, but a local
+# RAFFLE_DB_PATH can put it anywhere, and it decrypts every stored credential.
+settings.key
 *.db
 *.db-shm
 *.db-wal

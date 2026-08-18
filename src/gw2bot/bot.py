@@ -270,32 +270,34 @@ class Gw2Bot(discord.Client):
         )
         return sorted(changed)
 
-    async def _reconcile_web_server(self, restart: bool = False) -> bool:
+    async def _reconcile_web_server(self, restart: bool = False) -> str | None:
         """Bring the calendar up, down, or back up on new settings.
 
-        Returns whether anything actually changed, so /settings can say the
-        calendar was restarted only when it was.
+        Returns what to tell the caller, or None when nothing changed, so
+        /settings names the calendar only when it actually moved - and says so
+        plainly when it tried to start and could not, rather than reporting a
+        restart that left the calendar offline.
         """
         wanted = self._config.web_calendar_enabled
         running = self._web_server is not None
         if wanted and running and not restart:
-            return False
+            return None
         if running:
             assert self._web_server is not None
             await self._web_server.stop()
             self._web_server = None
             LOGGER.debug("Web calendar stopped")
             if not wanted:
-                return True
+                return "the web calendar (stopped)"
         if not wanted:
             LOGGER.debug(
                 "Web calendar disabled; web_enabled=%s missing_settings=%s",
                 self._config.web_enabled,
                 ", ".join(self._config.missing_web_settings) or "none",
             )
-            return running
+            return None
         if self._session is None:
-            return False
+            return None
         # Imported lazily so the web layer only loads when enabled.
         from gw2bot.web.server import WebServer
 
@@ -305,16 +307,21 @@ class Gw2Bot(discord.Client):
         except OSError as exc:
             # The calendar is an optional read-only extra. A port conflict
             # must not cost the guild its raffles, trials and events, so
-            # log loudly and carry on without it.
+            # log loudly and carry on without it - but the caller has to hear
+            # that it is off, not that it was restarted.
             LOGGER.error(
                 "Could not start the web calendar; the bot continues "
                 "without it; port=%s error_type=%s",
                 self._config.web_port,
                 type(exc).__name__,
             )
-            return True
+            return (
+                "the web calendar — but it could not be started, so it is "
+                "offline; check the console log"
+            )
         self._web_server = web_server
-        return True
+        LOGGER.debug("Web calendar started; port=%s", self._config.web_port)
+        return "the web calendar"
 
     @property
     def settings_store(self) -> SettingsStore:
@@ -405,8 +412,9 @@ class Gw2Bot(discord.Client):
             "food_page_role_id",
             "raffle_draw_role_id",
         }
-        if await self._reconcile_web_server(bool(changed & web_fields)):
-            restarted.append("the web calendar")
+        web_outcome = await self._reconcile_web_server(bool(changed & web_fields))
+        if web_outcome is not None:
+            restarted.append(web_outcome)
 
         LOGGER.debug(
             "Applied settings change; fields=%s restarted=%s",
