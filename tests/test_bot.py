@@ -885,6 +885,45 @@ class TestSettingsHotApply:
         await self._close(bot)
 
     @patch("gw2bot.bot.GuildMemberCache")
+    async def test_a_new_poll_interval_replaces_its_poller(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The loop reads the interval when it next sleeps, so one already
+        # sleeping on the old value would not pick up a lower one until the
+        # old sleep ran out - hours, for the intervals people actually set.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            gw2_api_key="gw2-key",
+            gw2_guild_id="guild-id",
+        )
+        before = {
+            task.get_name(): task
+            for task in bot._poll_tasks
+            if task.get_name() in self.GW2_POLLERS
+        }
+
+        bot.settings_store.set_raw(
+            definition_for("gw2_poll_interval_seconds"),
+            "60",
+        )
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"poll_interval_seconds"})
+
+        after = {
+            task.get_name(): task
+            for task in bot._poll_tasks
+            if task.get_name() in self.GW2_POLLERS
+        }
+        assert after["gw2-guild-storage-poller"] is not before["gw2-guild-storage-poller"]
+        # Only the poller whose interval changed is disturbed.
+        assert after["gw2-guild-log-poller"] is before["gw2-guild-log-poller"]
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
     async def test_an_unrelated_change_leaves_the_pollers_alone(
         self,
         member_cache: MagicMock,

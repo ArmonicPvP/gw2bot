@@ -367,6 +367,14 @@ class Gw2Bot(discord.Client):
                 "gw2-guild-log-poller",
             }
 
+        # Each loop reads its interval when it next sleeps, but one already
+        # sleeping on the old value will not wake early - so lowering a long
+        # interval would not take effect for as long as the old one had left.
+        if "poll_interval_seconds" in changed:
+            restart_tasks.add("gw2-guild-storage-poller")
+        if "guild_log_poll_interval_seconds" in changed:
+            restart_tasks.add("gw2-guild-log-poller")
+
         if "gw2_guild_id" in changed:
             self._raffle_store.bind_guild(self._config.gw2_guild_id)
 

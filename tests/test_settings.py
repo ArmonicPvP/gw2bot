@@ -1030,6 +1030,25 @@ class TestEncryptionKeyFile:
 
         assert caplog.records == []
 
+    def test_refuses_a_key_file_whose_mode_cannot_be_narrowed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Reading it anyway would leave every stored credential available to
+        # any other local user, which is the whole reason for the mode.
+        database = tmp_path / "gw2bot.db"
+        key_file = key_file_path(str(database))
+        key_file.write_bytes(Fernet.generate_key())
+        key_file.chmod(0o644)
+
+        with patch.object(Path, "chmod", side_effect=PermissionError("read-only")):
+            with pytest.raises(ConfigurationError) as failure:
+                SettingsCipher.for_database(str(database), {})
+
+        message = str(failure.value)
+        assert "readable beyond its owner" in message
+        assert ENCRYPTION_KEY_VARIABLE in message
+
     def test_a_corrupt_key_file_is_reported_rather_than_crashing(
         self,
         tmp_path: Path,

@@ -131,7 +131,9 @@ There is no command that reveals the value — set it again to change it.
 The key comes from `SETTINGS_ENCRYPTION_KEY` if you set it, and otherwise from
 `settings.key`, generated beside the database on first run with `0600`
 permissions. If a key file you restored or wrote yourself is readable by
-anyone else, the bot narrows it to `0600` and says so.
+anyone else, the bot narrows it to `0600` and says so — and refuses to start
+if it cannot, rather than protecting your credentials with a key other local
+users can read.
 
 Back it up with the database: without the key the secrets cannot be read.
 

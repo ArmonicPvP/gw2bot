@@ -151,10 +151,10 @@ def _require_private(path: Path) -> None:
     try:
         path.chmod(KEY_FILE_MODE)
     except OSError as exc:
-        LOGGER.error(
-            "Could not narrow the settings encryption key file; every "
-            "encrypted setting is readable by anyone who can read %s. "
-            "error_type=%s",
-            path,
-            type(exc).__name__,
-        )
+        raise ConfigurationError(
+            f"{path} is readable beyond its owner and its permissions could "
+            f"not be narrowed ({type(exc).__name__}). Every encrypted setting "
+            "would be readable by anyone who can read that file. Set its mode "
+            "to 0600, or move the key off this filesystem by setting "
+            f"{ENCRYPTION_KEY_VARIABLE}."
+        ) from exc
