@@ -33,7 +33,7 @@ def main() -> None:
     try:
         cipher = SettingsCipher.for_database(bootstrap.raffle_db_path)
         settings_store = SettingsStore(bootstrap.raffle_db_path, cipher)
-    except OSError as exc:
+    except (ConfigurationError, OSError) as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
 
     # This is the last thing that reads the environment for configuration, and

@@ -959,3 +959,37 @@ class TestCommandText:
         bot.settings_store.close()
 
         assert interaction.response.send_message.await_count == 1
+
+
+class TestSecretHandlingGuards:
+    def test_a_malformed_environment_key_is_reported_without_echoing_it(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with pytest.raises(ConfigurationError) as failure:
+            SettingsCipher.for_database(
+                str(tmp_path / "gw2bot.db"),
+                {ENCRYPTION_KEY_VARIABLE: "not-a-fernet-key"},
+            )
+
+        message = str(failure.value)
+        assert ENCRYPTION_KEY_VARIABLE in message
+        assert "url-safe base64-encoded" in message
+        # It says what shape the key must have, never the one that was given.
+        assert "not-a-fernet-key" not in message
+
+    async def test_unsetting_a_secret_never_names_a_fallback_value(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # No secret has a default today, so this guards the day one gains
+        # one rather than the code as it stands.
+        commands, bot = _commands(tmp_path)
+        definition = definition_for("gw2_api_key")
+        bot.settings_store.set_raw(definition, "gw2-secret")
+        bot._config = default_config(gw2_api_key="gw2-secret")
+
+        note = commands._fallback_note(definition)
+        bot.settings_store.close()
+
+        assert note == ""

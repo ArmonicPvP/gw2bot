@@ -6,6 +6,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from gw2bot.config import ConfigurationError
+
 LOGGER = logging.getLogger(__name__)
 
 ENCRYPTION_KEY_VARIABLE = "SETTINGS_ENCRYPTION_KEY"
@@ -42,7 +44,18 @@ class SettingsCipher:
         configured = values.get(ENCRYPTION_KEY_VARIABLE, "").strip()
         if configured:
             LOGGER.debug("Settings encryption key source=env")
-            return cls(configured.encode("utf-8"))
+            try:
+                return cls(configured.encode("utf-8"))
+            except (ValueError, TypeError) as exc:
+                # Report the shape the key has to have without echoing the one
+                # that was supplied, and fail here rather than several frames
+                # deep with a traceback nobody can act on.
+                raise ConfigurationError(
+                    f"{ENCRYPTION_KEY_VARIABLE} must be 32 url-safe "
+                    "base64-encoded bytes. Generate one with: python -c "
+                    '"from cryptography.fernet import Fernet; '
+                    'print(Fernet.generate_key().decode())"'
+                ) from exc
         return cls(_load_or_create_key(key_file_path(database_path)))
 
     def encrypt(self, value: str) -> str:

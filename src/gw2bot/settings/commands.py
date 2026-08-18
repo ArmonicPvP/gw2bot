@@ -386,6 +386,11 @@ class SettingsCommands(app_commands.Group):
         return f"`{current}`" if is_set else f"`{current}` (default)"
 
     def _fallback_note(self, definition: SettingDefinition) -> str:
+        # No secret's value is printed here either. None of them has a
+        # fallback today, so this guards the day one gains a default rather
+        # than the code as it stands.
+        if definition.secret:
+            return ""
         current = getattr(self._bot._config, definition.field, None)
         if current is None:
             return ""
