@@ -173,7 +173,7 @@ class TestComposedConfiguration:
     def test_ships_the_discord_ids_as_defaults(self) -> None:
         config = config_from_env(environment())
 
-        assert config.raffle_officer_role_id == 1317359168285573171
+        assert config.raffle_officer_role_id == 1317638909735342201
         assert config.trial_forum_channel_id == 1317206104727621693
         # The feast dashboard has always been gated on the raffle draw role.
         assert config.food_page_role_id == config.raffle_draw_role_id

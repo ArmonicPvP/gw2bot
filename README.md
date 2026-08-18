@@ -18,9 +18,9 @@ For local development, copy `.env.example` to `.env`.
 
 ### Required Environment Variables
 
-| Variable | Description |
-| --- | --- |
-| `DISCORD_TOKEN` | Token for the Discord bot application. |
+| Variable                   | Description                                                               |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`            | Token for the Discord bot application.                                    |
 | `DISCORD_COMMAND_GUILD_ID` | Positive integer ID of the Discord server where commands are registered. |
 
 These two are the only variables the bot refuses to start without.
@@ -106,7 +106,7 @@ that nothing answers to is how a guild silently loses a feature.
 | --- | --- | --- |
 | `/settings roles raffle_draw` | `1317124663847157880` | `/raffle draw` and `/raffle removetickets`. |
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
-| `/settings roles raffle_officer` | `1317359168285573171` | Recording a gold purchase for someone, `/check`, `/track`, and `/settings`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, and `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
 | `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. |
 | `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
@@ -571,12 +571,12 @@ even though the cancellation removed its last post.
 
 The monitor tracks these fixed Guild Storage consumable IDs:
 
-| Guild Storage ID | Feast |
-| --- | --- |
-| `1078` | Bowl of Fruit Salad with Mint Garnish |
-| `1089` | Cilantro and Cured Meat Flatbread |
-| `1102` | Cilantro Lime Sous-Vide Steak |
-| `1112` | Spherified Cilantro Oyster Soup |
+| Guild Storage ID | Feast                                 |
+| ---------------- | ------------------------------------- |
+| `1078`           | Bowl of Fruit Salad with Mint Garnish |
+| `1089`           | Cilantro and Cured Meat Flatbread     |
+| `1102`           | Cilantro Lime Sous-Vide Steak         |
+| `1112`           | Spherified Cilantro Oyster Soup       |
 
 `/v2/guild/:id/storage` reports a genuinely empty consumable as an entry with
 `count: 0`; it does not omit depleted items. A tracked feast missing from the
@@ -639,7 +639,7 @@ notification channel:
   example after promotion to Sunborne or leaving the guild), so they drop off
   both reports.
 
-~~~text
+````text
 Trial members before the 14-day mark
 These users are still Trial in-game but already Sunborne in Discord:
 * EarlySunborne.1234 - @DiscordUser
@@ -653,7 +653,7 @@ Trial members past the 14-day mark
 Please confirm whether these users have completed the challenges and can be ranked up to Sunborne:
 * Linked.1234 - @DiscordUser - Sunborne
 * Unresolved.5678
-~~~
+````
 
 To match each reported account to its application, the bot maintains a
 persistent index of the `Accepted` posts in the Trial application forum
@@ -687,11 +687,11 @@ report has any members.
 
 - `/check`: builds the same before-, past-14-day, and 7-day warning reports on
   demand and returns them only to the invoker as ephemeral replies, without
-  posting to the notification channel. It requires Officer role
-  `1317359168285573171`, and replies "No Trial members to report." when no report
+  posting to the notification channel. It requires GW2 Leadershiop role
+  `1317638909735342201`, and replies "No Trial members to report." when no report
   has any members.
 - `/track username:<account>`: toggles 7-day warning tracking for a guild
-  member and requires Officer role `1317359168285573171`. Username autocomplete
+  member and requires GW2 Leadership role `1317638909735342201`. Username autocomplete
   and submission resolve against the case-insensitive guild-member cache and
   reject accounts outside the configured guild. Running it for an untracked
   member starts tracking them (moving them from the past-14-day report to the
@@ -750,11 +750,11 @@ Purchased-ticket reward milestones are also posted to the raffle contribution
 channel once per raffle. The defaults are:
 
 | Purchased tickets | Reward tier |
-| ---: | --- |
-| 50 | Tier 1 |
-| 100 | Tier 2 |
-| 150 | Tier 3 |
-| 200 | Tier 4 |
+| ----------------: | ----------- |
+|                50 | Tier 1      |
+|               100 | Tier 2      |
+|               150 | Tier 3      |
+|               200 | Tier 4      |
 
 Modify `RAFFLE_REWARD_TIERS` in `gw2bot.raffle` to add tiers or change their
 thresholds and labels. Pending milestone announcements persist across restarts
@@ -763,12 +763,12 @@ and retry after Discord delivery failures.
 The raffle draw count is also data-driven through `RAFFLE_DRAW_TIERS`:
 
 | Current purchased-ticket tier | Winners drawn |
-| --- | ---: |
-| Guaranteed / Tier 0 | 2 |
-| Tier 1 | 2 |
-| Tier 2 | 3 |
-| Tier 3 | 4 |
-| Tier 4 | 5 |
+| ----------------------------- | ------------: |
+| Guaranteed / Tier 0           |             2 |
+| Tier 1                        |             2 |
+| Tier 2                        |             3 |
+| Tier 3                        |             4 |
+| Tier 4                        |             5 |
 
 Each winner is selected from the remaining weighted ticket pool, then exactly
 one of that winner's tickets is removed before the next draw. A player may win
@@ -815,8 +815,8 @@ registration is unavailable.
   show their recorded results with a note that the snapshot is unavailable.
 - `/raffle addticket username:<account> [amount:<number>]`: without `amount`,
   adds one manual ticket to a current guild member and requires role
-  `1318357141521825872`. Supplying `amount` requires Officer role
-  `1317359168285573171` and records that many gold-purchased tickets as a real
+  `1318357141521825872`. Supplying `amount` requires GW2 Leadership role
+  `1317638909735342201` and records that many gold-purchased tickets as a real
   deposit event, including lifetime deposited gold, purchase notifications,
   contribution reports, and reward milestones. The purchase fails without
   adding tickets if it would exceed the per-user purchased-ticket cap. The
@@ -947,9 +947,9 @@ docker compose exec bot python -m gw2bot.raffle_totals
 
 For Unraid, map persistent app data to `/app/data`:
 
-| Host path | Container path | Access mode |
-| --- | --- | --- |
-| `/mnt/user/appdata/gw2bot` | `/app/data` | Read/Write |
+| Host path                  | Container path | Access mode |
+| -------------------------- | -------------- | ----------- |
+| `/mnt/user/appdata/gw2bot` | `/app/data`    | Read/Write  |
 
 Leave `RAFFLE_DB_PATH` unset, or set it to `/app/data/gw2bot.db`. Do not set it
 to the host path. The image runs as UID `99` and GID `100`, matching Unraid's
