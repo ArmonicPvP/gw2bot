@@ -475,6 +475,19 @@ class Gw2Bot(discord.Client):
                 "not run; the raffle contribution channel is unaffected",
                 f"/settings {NOTIFICATION_CHANNEL_SETTING}",
             )
+        missing_web = self._config.missing_web_settings
+        if self._config.web_enabled and missing_web:
+            # WEB_ENABLED asked for the calendar, so silence here would leave
+            # an operator watching a port that never answers. The debug line
+            # in _reconcile_web_server covers the case nobody asked for.
+            LOGGER.warning(
+                "The web calendar is disabled because %s %s not set, even "
+                "though WEB_ENABLED is true: the calendar and the feast usage "
+                "page are not served and nothing listens on port %s",
+                ", ".join(f"/settings {name}" for name in missing_web),
+                "is" if len(missing_web) == 1 else "are",
+                self._config.web_port,
+            )
 
     @property
     def gw2_api_enabled(self) -> bool:

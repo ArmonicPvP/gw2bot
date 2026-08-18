@@ -562,6 +562,67 @@ class TestOptionalConfiguration:
         # not read as "the bot has gone silent".
         assert "raffle contribution channel is unaffected" in warnings[1]
 
+    def test_an_enabled_calendar_missing_its_settings_warns(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = Gw2Bot(
+            self._config(
+                tmp_path,
+                DISCORD_NOTIFICATION_CHANNEL_ID="9012",
+                GW2_API_KEY="gw2-key",
+                GW2_GUILD_ID="guild-id",
+                WEB_ENABLED="true",
+                WEB_BASE_URL="http://localhost:8080",
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            bot._log_disabled_features()
+        bot.event_store.close()
+        bot.raffle_store.close()
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and record.name.startswith("gw2bot")
+        ]
+        assert len(warnings) == 1
+        # WEB_ENABLED asked for the calendar, so the operator has to be told
+        # which settings are keeping it off rather than left watching a port
+        # that never answers.
+        assert (
+            "The web calendar is disabled because /settings "
+            "discord_oauth_client_id, /settings discord_oauth_client_secret, "
+            "/settings web_session_secret are not set" in warnings[0]
+        )
+        assert "WEB_ENABLED is true" in warnings[0]
+
+    def test_a_calendar_nobody_asked_for_stays_quiet(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = Gw2Bot(
+            self._config(
+                tmp_path,
+                DISCORD_NOTIFICATION_CHANNEL_ID="9012",
+                GW2_API_KEY="gw2-key",
+                GW2_GUILD_ID="guild-id",
+            )
+        )
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            bot._log_disabled_features()
+        bot.event_store.close()
+        bot.raffle_store.close()
+
+        # WEB_ENABLED is false, so the four settings being unset is the
+        # normal state of an install that never wanted the calendar.
+        assert caplog.records == []
+
     def test_no_warning_is_logged_when_everything_is_configured(
         self,
         tmp_path: Path,
