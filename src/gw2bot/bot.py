@@ -128,17 +128,18 @@ class Gw2Bot(discord.Client):
         # Tested against None rather than truthiness: an empty SecretRegistry
         # is falsy, and replacing one would leave the formatter holding a
         # registry nothing ever registers into.
-        self._secrets = (
-            SecretRegistry(
-                (
-                    config.gw2_api_key,
-                    config.discord_token,
-                    config.discord_oauth_client_secret,
-                    config.web_session_secret,
-                )
+        self._secrets = SecretRegistry() if secrets is None else secrets
+        # Seeded outside that choice on purpose. A caller that built the
+        # registry for the formatter need not have known which Config fields
+        # hold credentials, and registering is idempotent and one-way, so
+        # doing it here costs nothing and cannot be forgotten.
+        self._secrets.update(
+            (
+                config.gw2_api_key,
+                config.discord_token,
+                config.discord_oauth_client_secret,
+                config.web_session_secret,
             )
-            if secrets is None
-            else secrets
         )
         self._session: aiohttp.ClientSession | None = None
         self._poll_tasks: list[asyncio.Task[None]] = []

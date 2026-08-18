@@ -1175,13 +1175,21 @@ class TestSettingsHotApply:
         registry = SecretRegistry()
         assert not registry
 
-        bot = Gw2Bot(self._config(tmp_path), secrets=registry)
+        bot = Gw2Bot(
+            self._config(tmp_path, GW2_API_KEY="gw2-secret"),
+            secrets=registry,
+        )
 
         assert bot.secrets is registry
         assert bot._poll_status._secrets is registry
+        # The caller built the registry for the formatter and need not have
+        # known which Config fields hold credentials, so the bot seeds it
+        # whether it made the registry or was handed one.
+        assert "gw2-secret" in registry.current()
+        assert "discord-token" in registry.current()
 
-        registry.add("gw2-secret")
-        assert "gw2-secret" in bot.secrets.current()
+        registry.add("later-secret")
+        assert "later-secret" in bot.secrets.current()
 
         bot.event_store.close()
         bot.raffle_store.close()
