@@ -75,6 +75,10 @@ MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
 OFFICER_PURCHASE_EVENT_ID_KEY = "officer_purchase_event_id"
 OFFICER_PURCHASE_EVENT_ID_START = -(2**63)
 TRIAL_FORUM_INDEX_WATERMARK_KEY = "trial_forum_index_watermark"
+# Which forum and tag the stored index was built from. Kept so a refresh can
+# tell that the settings moved underneath it and rebuild, even when the change
+# happened in a process that stopped before it could clear the cache.
+TRIAL_FORUM_INDEX_SOURCE_KEY = "trial_forum_index_source"
 
 
 class RaffleStore:
@@ -1143,10 +1147,34 @@ class RaffleStore:
     def clear_trial_forum_index(self) -> None:
         with self._sessions.begin() as session:
             session.execute(delete(TrialForumPostRecord))
-            watermark = session.get(SettingRecord, TRIAL_FORUM_INDEX_WATERMARK_KEY)
-            if watermark is not None:
-                session.delete(watermark)
+            for key in (
+                TRIAL_FORUM_INDEX_WATERMARK_KEY,
+                TRIAL_FORUM_INDEX_SOURCE_KEY,
+            ):
+                record = session.get(SettingRecord, key)
+                if record is not None:
+                    session.delete(record)
         LOGGER.debug("Cleared Trial forum index")
+
+    def get_trial_forum_index_source(self) -> str | None:
+        """The forum and tag the stored index was built from, if recorded."""
+        with self._sessions() as session:
+            record = session.get(SettingRecord, TRIAL_FORUM_INDEX_SOURCE_KEY)
+            return record.value if record is not None else None
+
+    def set_trial_forum_index_source(self, source: str) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(SettingRecord, TRIAL_FORUM_INDEX_SOURCE_KEY)
+            if record is None:
+                session.add(
+                    SettingRecord(
+                        key=TRIAL_FORUM_INDEX_SOURCE_KEY,
+                        value=source,
+                    )
+                )
+            else:
+                record.value = source
+        LOGGER.debug("Recorded Trial forum index source")
 
     def mark_milestone_notification_sent(self, threshold: int) -> None:
         with self._sessions.begin() as session:

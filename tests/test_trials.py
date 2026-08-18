@@ -28,6 +28,7 @@ from gw2bot.config import (
     DEFAULT_TRIAL_IN_REVIEW_TAG_ID as TRIAL_IN_REVIEW_TAG_ID,
     DEFAULT_TRIAL_ROLE_ID as TRIAL_ROLE_ID,
 )
+from gw2bot.trials.forum import refresh_trial_forum_index
 from gw2bot.trials.reports import format_track_audit
 
 
@@ -1164,6 +1165,49 @@ class TestTrialMemberStatusResolution:
             rejected.history.assert_not_called()
             store.close()
 
+    async def test_a_moved_forum_rebuilds_the_index_at_the_next_refresh(
+        self,
+    ) -> None:
+        """The index self-heals when a settings change did not get to clear it.
+
+        apply_settings_change drops the cache, but the process can stop
+        between the settings row being written and that running. Without the
+        recorded source the next startup would refresh incrementally against
+        the new forum and keep every row from the old one forever.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.upsert_trial_forum_posts(
+                [TrialForumPost(1, 101, "stale.1234 application", "t")]
+            )
+            store.set_trial_forum_watermark(datetime(2026, 6, 10, tzinfo=UTC))
+            store.set_trial_forum_index_source("999:888")
+
+            forum = SimpleNamespace(
+                id=TRIAL_FORUM_CHANNEL_ID,
+                guild=SimpleNamespace(
+                    id=5678,
+                    active_threads=AsyncMock(return_value=[]),
+                ),
+                threads=[],
+                archived_threads=lambda **_: _empty_threads(),
+            )
+            bot = SimpleNamespace(
+                _config=default_config(),
+                _raffle_store=store,
+            )
+
+            await refresh_trial_forum_index(
+                cast(Gw2Bot, bot),
+                cast(discord.ForumChannel, forum),
+            )
+
+            assert store.get_trial_forum_index() == {}
+            assert store.get_trial_forum_index_source() == (
+                f"{TRIAL_FORUM_CHANNEL_ID}:{TRIAL_ACCEPTED_TAG_ID}"
+            )
+            store.close()
+
     async def test_incremental_refresh_skips_unmodified_and_purges_unaccepted(
         self,
     ) -> None:
@@ -1184,6 +1228,12 @@ class TestTrialMemberStatusResolution:
             )
             watermark = datetime(2026, 6, 10, tzinfo=UTC)
             store.set_trial_forum_watermark(watermark)
+            # An earlier run against this same forum and tag would have
+            # recorded them; without that the refresh correctly treats the
+            # index as built from somewhere else and rebuilds it cold.
+            store.set_trial_forum_index_source(
+                f"{TRIAL_FORUM_CHANNEL_ID}:{TRIAL_ACCEPTED_TAG_ID}"
+            )
 
             unchanged_history = MagicMock()
             unchanged = SimpleNamespace(
@@ -1328,3 +1378,10 @@ class TestTrialMemberStatusResolution:
         bot._check_overdue_trials.assert_awaited_once()
         bot._poll_status.record_error.assert_called_once_with("Trial Members", error)
         bot._poll_status.record_success.assert_not_called()
+
+
+async def _empty_threads() -> Any:
+    # An async generator that yields nothing, standing in for a forum whose
+    # archived threads the rebuild finds empty.
+    return
+    yield  # pragma: no cover

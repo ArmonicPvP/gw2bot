@@ -130,10 +130,19 @@ There is no command that reveals the value — set it again to change it.
 
 The key comes from `SETTINGS_ENCRYPTION_KEY` if you set it, and otherwise from
 `settings.key`, generated beside the database on first run with `0600`
-permissions. Back it up with the database: without the key the secrets cannot
-be read. Losing it is recoverable — the bot reports each unreadable secret,
-treats it as unset, and carries on — but you have to set those three values
-again.
+permissions. If a key file you restored or wrote yourself is readable by
+anyone else, the bot narrows it to `0600` and says so.
+
+Back it up with the database: without the key the secrets cannot be read.
+
+- **Replacing the key** is recoverable. The bot reports each secret it can no
+  longer read, treats it as unset, and carries on; set those three values
+  again.
+- **A key file that is corrupt or truncated** — a half-finished restore, say —
+  stops the bot with a message naming the file. It is not overwritten, because
+  that would destroy the one thing that can read your stored secrets. Restore
+  it from a backup, or delete it to start with a new key and set the three
+  values again.
 
 Setting the key yourself is what keeps it off the data volume. Everything else
 about the feature works without it.

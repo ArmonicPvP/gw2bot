@@ -161,6 +161,19 @@ async def refresh_trial_forum_index(
     forum: discord.ForumChannel,
 ) -> None:
     accepted_tag_id = bot._config.trial_accepted_tag_id
+    # The index is a cache of one forum's posts under one tag. If either has
+    # moved since it was built, every row in it describes somewhere else, and
+    # an incremental refresh would never revisit them. The recorded source is
+    # what makes that survive a restart between the settings write and the
+    # cache being dropped.
+    source = f"{bot._config.trial_forum_channel_id}:{accepted_tag_id}"
+    if bot._raffle_store.get_trial_forum_index_source() != source:
+        LOGGER.info(
+            "Trial application forum or tag changed since the index was "
+            "built; rebuilding it from scratch"
+        )
+        bot._raffle_store.clear_trial_forum_index()
+    bot._raffle_store.set_trial_forum_index_source(source)
     cached = bot._raffle_store.get_trial_forum_index()
     watermark = bot._raffle_store.get_trial_forum_watermark()
     run_start = datetime.now(UTC)

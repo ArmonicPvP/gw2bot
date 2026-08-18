@@ -995,6 +995,70 @@ class TestSecretHandlingGuards:
         assert note == ""
 
 
+class TestEncryptionKeyFile:
+    def test_narrows_a_key_file_that_arrives_world_readable(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # One restored from a backup or dropped in by hand keeps whatever mode
+        # it had, and a readable key hands over every stored credential.
+        database = tmp_path / "gw2bot.db"
+        key_file = key_file_path(str(database))
+        key_file.write_bytes(Fernet.generate_key())
+        key_file.chmod(0o644)
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            SettingsCipher.for_database(str(database), {})
+
+        assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+        assert "readable beyond its owner" in caplog.text
+
+    def test_leaves_an_already_private_key_file_alone(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        database = tmp_path / "gw2bot.db"
+        SettingsCipher.for_database(str(database), {})
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            SettingsCipher.for_database(str(database), {})
+
+        assert caplog.records == []
+
+    def test_a_corrupt_key_file_is_reported_rather_than_crashing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # A truncated file from a half-finished restore used to raise a
+        # ValueError several frames deep that main() did not catch, so the bot
+        # would not start and nothing said why.
+        database = tmp_path / "gw2bot.db"
+        key_file = key_file_path(str(database))
+        key_file.write_bytes(b"not-a-key")
+
+        with pytest.raises(ConfigurationError) as failure:
+            SettingsCipher.for_database(str(database), {})
+
+        message = str(failure.value)
+        assert "not a usable encryption key" in message
+        # Non-destructive: the remedy is restore-or-delete, never a silent
+        # overwrite of the only thing that can read the stored secrets.
+        assert "Restore it from a backup" in message
+        assert key_file.read_bytes() == b"not-a-key"
+
+    def test_an_empty_key_file_is_reported_the_same_way(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database = tmp_path / "gw2bot.db"
+        key_file_path(str(database)).write_bytes(b"")
+
+        with pytest.raises(ConfigurationError):
+            SettingsCipher.for_database(str(database), {})
+
+
 class TestReviewFindings:
     """Cases for the four problems the PR review turned up."""
 

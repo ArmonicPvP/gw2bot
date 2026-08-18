@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -44,19 +45,34 @@ class SettingsCipher:
         configured = values.get(ENCRYPTION_KEY_VARIABLE, "").strip()
         if configured:
             LOGGER.debug("Settings encryption key source=env")
-            try:
-                return cls(configured.encode("utf-8"))
-            except (ValueError, TypeError) as exc:
-                # Report the shape the key has to have without echoing the one
-                # that was supplied, and fail here rather than several frames
-                # deep with a traceback nobody can act on.
-                raise ConfigurationError(
-                    f"{ENCRYPTION_KEY_VARIABLE} must be 32 url-safe "
-                    "base64-encoded bytes. Generate one with: python -c "
-                    '"from cryptography.fernet import Fernet; '
-                    'print(Fernet.generate_key().decode())"'
-                ) from exc
-        return cls(_load_or_create_key(key_file_path(database_path)))
+            return cls._from_key(
+                configured.encode("utf-8"),
+                f"{ENCRYPTION_KEY_VARIABLE} must be 32 url-safe "
+                "base64-encoded bytes. Generate one with: python -c "
+                '"from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"',
+            )
+        path = key_file_path(database_path)
+        return cls._from_key(
+            _load_or_create_key(path),
+            f"{path} is not a usable encryption key. Restore it from a "
+            "backup, or delete it to start with a new one and set the "
+            "encrypted settings again.",
+        )
+
+    @classmethod
+    def _from_key(cls, key: bytes, remedy: str) -> SettingsCipher:
+        """Build the cipher, reporting an unusable key as configuration.
+
+        Both sources come through here so a corrupt key file fails the same
+        way a malformed variable does - with a message naming the remedy,
+        rather than a ValueError several frames deep that main() does not
+        catch. The key itself is never echoed.
+        """
+        try:
+            return cls(key)
+        except (ValueError, TypeError) as exc:
+            raise ConfigurationError(remedy) from exc
 
     def encrypt(self, value: str) -> str:
         return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
@@ -83,6 +99,7 @@ def key_file_path(database_path: str) -> Path:
 def _load_or_create_key(path: Path) -> bytes:
     if path.exists():
         LOGGER.debug("Settings encryption key source=file")
+        _require_private(path)
         return path.read_bytes().strip()
     path.parent.mkdir(parents=True, exist_ok=True)
     key = Fernet.generate_key()
@@ -103,3 +120,41 @@ def _load_or_create_key(path: Path) -> bytes:
     )
     LOGGER.debug("Settings encryption key source=generated")
     return key
+
+
+def _require_private(path: Path) -> None:
+    """Narrow a key file the bot did not create to owner-only.
+
+    The bot writes the file 0600, but one restored from a backup or dropped in
+    by hand arrives with whatever mode it had, and a group- or world-readable
+    key hands every stored credential to any other local user. Tightening it
+    beats refusing to start over a permissions bit; a filesystem that cannot
+    represent the mode is reported and the bot carries on.
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        LOGGER.warning(
+            "Could not read the settings encryption key file's permissions; "
+            "error_type=%s",
+            type(exc).__name__,
+        )
+        return
+    if not mode & ~KEY_FILE_MODE:
+        return
+    LOGGER.warning(
+        "The settings encryption key file was readable beyond its owner; "
+        "narrowing it. path=%s previous_mode=%s",
+        path,
+        oct(mode),
+    )
+    try:
+        path.chmod(KEY_FILE_MODE)
+    except OSError as exc:
+        LOGGER.error(
+            "Could not narrow the settings encryption key file; every "
+            "encrypted setting is readable by anyone who can read %s. "
+            "error_type=%s",
+            path,
+            type(exc).__name__,
+        )
