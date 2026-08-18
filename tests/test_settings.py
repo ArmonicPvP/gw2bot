@@ -19,7 +19,7 @@ from factories import (
 )
 from gw2bot.config import BootstrapConfig, ConfigurationError
 from gw2bot.logging_setup import RedactingFormatter, SecretRegistry
-from gw2bot.settings.commands import SettingsCommands
+from gw2bot.settings.commands import SettingsCommands, chunk_lines
 from gw2bot.settings.composition import compose_config
 from gw2bot.settings.crypto import (
     ENCRYPTION_KEY_VARIABLE,
@@ -917,3 +917,45 @@ def _forum_channel(channel_id: int, tags: dict[int, str] | None = None) -> Any:
         None,
     )
     return channel
+
+
+class TestCommandText:
+    def test_a_renamed_subcommand_names_the_variable_it_replaced(self) -> None:
+        # Discord's 32-character name limit forced three renames, and the
+        # command list is where an operator would otherwise have to guess.
+        commands = SettingsCommands(cast(Any, _fake_bot()))
+        renamed = cast(Any, commands.get_command("timezone"))
+
+        assert renamed.description == "Was the TZ environment variable"
+
+    def test_an_unrenamed_subcommand_describes_what_it_does(self) -> None:
+        commands = SettingsCommands(cast(Any, _fake_bot()))
+        command = cast(Any, commands.get_command("gw2_guild_id"))
+
+        assert command.description.startswith("Guild id listed in")
+
+    def test_the_list_is_split_into_messages_discord_accepts(self) -> None:
+        # It grows with every setting added, and one character over the limit
+        # fails the whole reply rather than printing a little less.
+        lines = [f"line {index} " + "x" * 80 for index in range(60)]
+
+        messages = chunk_lines(lines)
+
+        assert len(messages) > 1
+        assert all(len(message) <= 1900 for message in messages)
+        assert "\n".join(messages) == "\n".join(lines)
+
+    def test_a_short_list_stays_one_message(self) -> None:
+        assert chunk_lines(["one", "two"]) == ["one\ntwo"]
+
+    async def test_the_real_list_fits_in_one_message_today(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await cast(Any, commands.get_command("list")).callback(interaction)
+        bot.settings_store.close()
+
+        assert interaction.response.send_message.await_count == 1

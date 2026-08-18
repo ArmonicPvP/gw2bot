@@ -33,6 +33,10 @@ LOGGER = logging.getLogger(__name__)
 
 AUTOCOMPLETE_LIMIT = 25
 CHOICE_NAME_LIMIT = 100
+DESCRIPTION_LIMIT = 100
+# Discord rejects a message over 2000 characters outright, which would make
+# /settings list fail as a whole rather than print a little less.
+MESSAGE_LIMIT = 1900
 
 # Anything that is only whitespace clears the setting, which is how the
 # request describes it: "a space or nothing means unset".
@@ -334,8 +338,14 @@ class SettingsCommands(app_commands.Group):
                 "moment.",
             )
             return
-        await send_interaction_notice(interaction, "\n".join(lines))
-        LOGGER.debug("Reported the settings list; settings=%s", len(lines))
+        messages = chunk_lines(lines)
+        for message in messages:
+            await send_interaction_notice(interaction, message)
+        LOGGER.debug(
+            "Reported the settings list; settings=%s messages=%s",
+            len(lines),
+            len(messages),
+        )
 
     def _list_lines(self) -> list[str]:
         lines = ["**Bot settings**"]
@@ -459,14 +469,23 @@ class SettingsCommands(app_commands.Group):
 
 
 def _short_description(definition: SettingDefinition) -> str:
-    """Discord caps a command description at 100 characters."""
-    if definition.legacy_variable is not None:
-        text = f"Set {definition.legacy_variable.lower()} (was {definition.legacy_variable})"
-    else:
-        text = definition.description
-    if len(text) <= CHOICE_NAME_LIMIT:
+    """The first sentence of the description, within Discord's 100 characters.
+
+    A setting whose subcommand had to be renamed to fit Discord's 32-character
+    name limit names the variable it replaced instead, because that rename is
+    the one thing an operator reading the command list cannot guess.
+    """
+    variable = definition.legacy_variable
+    if variable is not None and variable.lower() != definition.name:
+        return _truncate(f"Was the {variable} environment variable")
+    sentence = definition.description.split(". ")[0].rstrip(".")
+    return _truncate(sentence)
+
+
+def _truncate(text: str, limit: int = DESCRIPTION_LIMIT) -> str:
+    if len(text) <= limit:
         return text
-    return text[: CHOICE_NAME_LIMIT - 1].rstrip() + "…"
+    return text[: limit - 1].rstrip() + "…"
 
 
 def _restart_note(restarted: list[str]) -> str:
@@ -562,6 +581,26 @@ async def _suggestions(
 
 
 def _choice_name(name: str) -> str:
-    if len(name) <= CHOICE_NAME_LIMIT:
-        return name
-    return name[: CHOICE_NAME_LIMIT - 1].rstrip() + "…"
+    return _truncate(name, CHOICE_NAME_LIMIT)
+
+
+def chunk_lines(lines: list[str], limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Split a report into messages Discord will accept.
+
+    The settings list grows with every setting added, so it is split by length
+    rather than trusting it to stay under the limit; going over would fail the
+    whole reply.
+    """
+    messages: list[str] = []
+    current: list[str] = []
+    length = 0
+    for line in lines:
+        addition = len(line) + 1
+        if current and length + addition > limit:
+            messages.append("\n".join(current))
+            current, length = [], 0
+        current.append(line)
+        length += addition
+    if current:
+        messages.append("\n".join(current))
+    return messages

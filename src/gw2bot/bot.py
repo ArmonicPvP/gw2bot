@@ -334,7 +334,6 @@ class Gw2Bot(discord.Client):
         lists what was actually restarted rather than everything considered.
         """
         LOGGER.debug("Applying settings change; fields=%s", sorted(changed))
-        previous = self._config
         self._config = compose_from_store(self._bootstrap, self._settings_store)
         # A credential set while the bot is running has to be redacted by the
         # handler that is already installed, so it is registered before
@@ -398,8 +397,6 @@ class Gw2Bot(discord.Client):
         if await self._reconcile_web_server(bool(changed & web_fields)):
             restarted.append("the web calendar")
 
-        if previous.debug != self._config.debug:
-            LOGGER.debug("Debug logging is a bootstrap variable and unchanged")
         LOGGER.debug(
             "Applied settings change; fields=%s restarted=%s",
             sorted(changed),
