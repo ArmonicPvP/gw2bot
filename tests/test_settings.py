@@ -859,9 +859,10 @@ def _fake_bot(tmp_path: Path | None = None) -> Any:
     return SimpleNamespace(
         _config=default_config(),
         settings_store=store,
-        # No API client by default: the guild id check skips its API arm
-        # rather than reaching for a network nothing has configured.
+        # No API client and no key by default: the guild id check skips its
+        # API arm rather than reaching for a network nothing has configured.
         _api=None,
+        _session=object(),
         # An unclaimed ledger, which is the state a fresh install is in and
         # the one the guild id check has to get right.
         raffle_store=SimpleNamespace(bound_guild=MagicMock(return_value=None)),
@@ -1704,3 +1705,141 @@ class TestGuildIdVerification:
         assert not stored
         assert "already belongs to a different guild" in settings_reply(interaction)
         bot._api.get_account.assert_not_awaited()
+
+
+class TestGuildIdVerificationOnACleanInstall:
+    """The first guild id is the one that matters, and it had no client.
+
+    Gw2Bot builds _api only once the key and the guild id are both set, so
+    after setting just the key there is none - and that is precisely when the
+    next command claims the ledger for good.
+    """
+
+    async def test_a_wrong_id_is_refused_with_only_a_key_configured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        # The state a clean install is in between the two commands.
+        bot._api = None
+        bot._config = default_config(gw2_api_key="gw2-key")
+        account = AsyncMock(return_value={"guild_leader": [SECOND_GUILD]})
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        with patch(
+            "gw2bot.settings.commands.Gw2ApiClient",
+            return_value=SimpleNamespace(get_account=account),
+        ):
+            await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert not stored
+        assert "does not lead a guild with that id" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()
+
+    async def test_a_correct_id_is_accepted_with_only_a_key_configured(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot._api = None
+        bot._config = default_config(gw2_api_key="gw2-key")
+        account = AsyncMock(return_value={"guild_leader": [FIRST_GUILD]})
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        with patch(
+            "gw2bot.settings.commands.Gw2ApiClient",
+            return_value=SimpleNamespace(get_account=account),
+        ):
+            await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+        assert "could not be checked" not in settings_reply(interaction)
+
+    async def test_with_no_key_at_all_the_reply_says_it_was_not_checked(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Nothing can be asked, so the id binds on shape alone. That cannot be
+        # helped; it can stop being silent.
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert stored == FIRST_GUILD
+        assert "could not be checked" in reply
+        assert "gw2_api_key" in reply
+        assert "cannot be pointed at another one" in reply
+
+
+class TestGuildIdSpelling:
+    """One guild written several ways has to stay one guild."""
+
+    @pytest.mark.parametrize(
+        "typed",
+        [
+            "116E0C0E-0035-44A9-BB22-4AE3E23127E5",
+            "{116e0c0e-0035-44a9-bb22-4ae3e23127e5}",
+            "116e0c0e003544a9bb224ae3e23127e5",
+            "  116e0c0e-0035-44a9-bb22-4ae3e23127e5  ",
+        ],
+        ids=["upper", "braces", "unhyphenated", "padded"],
+    )
+    async def test_every_accepted_form_stores_the_same_text(
+        self,
+        tmp_path: Path,
+        typed: str,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, typed)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+
+    async def test_an_upper_case_api_answer_matches_a_lower_case_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # /v2/account.guild_leader answers in upper case, so comparing the raw
+        # text would refuse the operator's own correct guild.
+        commands, bot = _commands(tmp_path)
+        bot._api = SimpleNamespace(
+            get_account=AsyncMock(
+                return_value={"guild_leader": [FIRST_GUILD.upper()]}
+            )
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+        bot.apply_settings_change.assert_awaited_once()
+
+    async def test_a_ledger_bound_in_upper_case_is_the_same_guild(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot.raffle_store = SimpleNamespace(
+            bound_guild=MagicMock(return_value=FIRST_GUILD.upper())
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+        assert "different guild" not in settings_reply(interaction)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -18,6 +17,7 @@ from gw2bot.config import (
     DEFAULT_TRIAL_IN_REVIEW_TAG_ID,
     DEFAULT_TRIAL_ROLE_ID,
     ConfigurationError,
+    normalize_guild_id,
 )
 
 # Discord rejects a command name longer than this, and it rejects the whole
@@ -133,16 +133,16 @@ def _parse_guild_id(value: str) -> object:
     a typo claims the database for a guild that does not exist and the correct
     id is refused from then on.
     """
-    guild_id = value.strip()
-    try:
-        uuid.UUID(guild_id)
-    except ValueError as exc:
+    canonical = normalize_guild_id(value)
+    if canonical is None:
         raise ConfigurationError(
             "gw2_guild_id must be the guild's id from "
             "/v2/account.guild_leader, which looks like "
             "116E0C0E-0035-44A9-BB22-4AE3E23127E5"
-        ) from exc
-    return guild_id
+        )
+    # Stored in one spelling so the value on screen, the value compared
+    # against the API and the value that claims the ledger are the same text.
+    return canonical
 
 
 def _parse_text(name: str) -> Callable[[str], object]:

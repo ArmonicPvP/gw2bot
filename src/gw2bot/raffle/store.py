@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from gw2bot.config import same_guild_id
 from gw2bot.database import (
     PENDING_LEGACY_TOTALS_KEY,
     FeastAlertRecord,
@@ -1320,7 +1321,12 @@ class RaffleStore:
             return
         with self._sessions.begin() as session:
             record = session.get(SettingRecord, "guild_id")
-            if record is not None and record.value != guild_id:
+            if record is not None and not same_guild_id(record.value, guild_id):
+                # Compared as guilds rather than as text: the row holds
+                # whatever spelling claimed it, which for an install upgraded
+                # from GW2_GUILD_ID is whatever the operator typed. This runs
+                # in __init__ and raises, so calling one guild two names would
+                # stop the bot from starting.
                 raise ValueError(
                     "This database belongs to a different guild. Point "
                     "RAFFLE_DB_PATH at a different file to run a second "

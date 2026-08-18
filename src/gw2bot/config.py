@@ -1,10 +1,48 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+
+def normalize_guild_id(value: str | None) -> str | None:
+    """One spelling of a Guild Wars 2 guild id, for comparing two of them.
+
+    uuid.UUID accepts upper and lower case, braces, a urn:uuid: prefix and no
+    hyphens at all, so the same guild reaches the bot written several ways:
+    the API returns uppercase, an operator pastes whatever they copied, and
+    the raffle ledger holds whatever an earlier release stored. Comparing the
+    raw text would call those different guilds - which, for the ledger, means
+    refusing to start.
+
+    Returns None for anything that is not a UUID, so callers can fall back to
+    comparing the original strings rather than treating unparsable values as
+    equal.
+    """
+    if value is None:
+        return None
+    try:
+        return str(uuid.UUID(value.strip()))
+    except (ValueError, AttributeError):
+        return None
+
+
+def same_guild_id(left: str | None, right: str | None) -> bool:
+    """Whether two guild ids name the same guild, however they are written.
+
+    Falls back to exact text when either side is not a UUID, so a ledger some
+    earlier release bound to a non-UUID value keeps the behaviour it has.
+    """
+    if left is None or right is None:
+        return left == right
+    normalized_left = normalize_guild_id(left)
+    normalized_right = normalize_guild_id(right)
+    if normalized_left is None or normalized_right is None:
+        return left.strip() == right.strip()
+    return normalized_left == normalized_right
 
 # The settings a Guild Wars 2 lookup needs, and the one that decides whether
 # anything is delivered to the notification channel. Named here rather than

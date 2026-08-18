@@ -9,7 +9,8 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.config import ConfigurationError
+from gw2bot.config import ConfigurationError, same_guild_id
+from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.discord_utils import (
     forum_tags_for_ids,
     log_discord_failure,
@@ -334,7 +335,8 @@ class SettingsCommands(app_commands.Group):
         await send_interaction_notice(
             interaction,
             f"**{definition.command_path}** is now {shown}."
-            + _restart_note(applied),
+            + _restart_note(applied)
+            + self._unverified_guild_note(definition),
         )
         LOGGER.debug(
             "Stored a setting from Discord; setting=%s encrypted=%s "
@@ -575,7 +577,7 @@ class SettingsCommands(app_commands.Group):
                 "checked against it. Nothing was changed; try again in a "
                 "moment."
             )
-        if bound is not None and bound != guild_id:
+        if bound is not None and not same_guild_id(bound, guild_id):
             return (
                 "The raffle ledger already belongs to a different guild, so "
                 "its tickets and history could not be read as this one's. "
@@ -593,13 +595,12 @@ class SettingsCommands(app_commands.Group):
         docs/gw2-api.md already names this as the check to make before polling
         a guild, and here it is the one thing standing between a well-formed
         but wrong id and a ledger permanently claimed by it. Without a key
-        there is nothing to ask, so the id's shape is all that guards it.
+        there is nothing to ask, so the id's shape is all that guards it -
+        and _store says so in the reply rather than letting it pass silently.
         """
-        api = self._bot._api
+        api = self._guild_api_client()
         if api is None:
-            LOGGER.debug(
-                "Skipped the guild id API check; no Guild Wars 2 API client"
-            )
+            LOGGER.debug("Skipped the guild id API check; no API key is set")
             return None
         try:
             account = await api.get_account()
@@ -613,7 +614,9 @@ class SettingsCommands(app_commands.Group):
             )
             return None
         led = account.get("guild_leader") or ()
-        if guild_id in led:
+        # The API answers in upper case; the stored value is canonical lower
+        # case. Comparing the raw text would refuse a correct id.
+        if any(same_guild_id(candidate, guild_id) for candidate in led):
             LOGGER.debug("Guild id confirmed against guild_leader")
             return None
         LOGGER.debug(
@@ -626,6 +629,47 @@ class SettingsCommands(app_commands.Group):
             "/v2/account.guild_leader. Nothing was changed - the raffle "
             "ledger records the first guild id it is given and refuses a "
             "different one afterwards, so a wrong one is worth catching here."
+        )
+
+    def _guild_api_client(self) -> Gw2ApiClient | None:
+        """The client to ask about a guild id, building one if need be.
+
+        Gw2Bot builds self._api only once the key and the guild id are both
+        set, so on a clean install there is none - which is exactly when the
+        first guild id is about to claim the ledger for good. Borrowing the
+        running client when there is one and building a throwaway from the
+        stored key otherwise makes the check run in the order the README
+        recommends, key first.
+        """
+        if self._bot._api is not None:
+            return self._bot._api
+        config = self._bot._config
+        session = self._bot._session
+        if session is None or config.gw2_api_key is None:
+            return None
+        LOGGER.debug("Built a temporary API client to check a guild id")
+        return Gw2ApiClient(
+            session,
+            config.gw2_api_base_url,
+            config.gw2_api_key,
+        )
+
+    def _unverified_guild_note(self, definition: SettingDefinition) -> str:
+        """Say when a guild id was stored without being checked.
+
+        The ledger is claimed by it and cannot be re-pointed from Discord, so
+        an officer who mistyped has to hear about it now rather than when the
+        first poll fails.
+        """
+        if definition.field != "gw2_guild_id":
+            return ""
+        if self._guild_api_client() is not None:
+            return ""
+        return (
+            "\nIt could not be checked against the Guild Wars 2 API, because "
+            "no `/settings gw2_api_key` is set. The raffle ledger now belongs "
+            "to this guild id and cannot be pointed at another one from "
+            "Discord, so check it is right."
         )
 
     async def _validate_channel(

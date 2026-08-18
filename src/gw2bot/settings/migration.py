@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 
+from gw2bot.config import same_guild_id
+
 from gw2bot.settings.definitions import (
     LEGACY_SETTINGS,
     SettingDefinition,
@@ -97,7 +99,7 @@ def _conflicts_with_ledger(
     return (
         definition.field == "gw2_guild_id"
         and ledger_guild_id is not None
-        and ledger_guild_id != value
+        and not same_guild_id(ledger_guild_id, value)
     )
 
 

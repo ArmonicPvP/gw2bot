@@ -1713,3 +1713,49 @@ class TestRaffleStore:
             ] == [300.0, 400.0, 500.0]
             assert series[1102].prior_count is None
             store.close()
+
+
+class TestGuildBindingSpelling:
+    """The ledger binding is compared, and it outlives how it was written.
+
+    _bind_guild runs inside RaffleStore.__init__ and raises, so a comparison
+    that calls the same guild by two names does not degrade a feature - it
+    stops the bot from starting.
+    """
+
+    UPPER = "116E0C0E-0035-44A9-BB22-4AE3E23127E5"
+    CANONICAL = "116e0c0e-0035-44a9-bb22-4ae3e23127e5"
+
+    def test_a_ledger_bound_in_upper_case_still_opens(self) -> None:
+        # The upgrade path: an install whose old GW2_GUILD_ID was uppercase
+        # has an uppercase row, and the setting now composes to the canonical
+        # lowercase form. These are the same guild and must stay so.
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "raffle.db")
+            RaffleStore(database, self.UPPER).close()
+
+            reopened = RaffleStore(database, self.CANONICAL)
+
+            assert reopened.bound_guild() == self.UPPER
+            reopened.close()
+
+    def test_a_genuinely_different_guild_is_still_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "raffle.db")
+            RaffleStore(database, self.CANONICAL).close()
+
+            with pytest.raises(ValueError, match="different guild"):
+                RaffleStore(database, "22c7b3a1-9f4e-4d18-8a05-6b1c0f2d7e93")
+
+    def test_a_ledger_bound_to_a_non_uuid_keeps_its_behaviour(self) -> None:
+        # Nothing writes these any more, but a database an earlier release
+        # bound must not start failing because the comparison changed.
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "raffle.db")
+            RaffleStore(database, "legacy-guild").close()
+
+            reopened = RaffleStore(database, "legacy-guild")
+            reopened.close()
+
+            with pytest.raises(ValueError, match="different guild"):
+                RaffleStore(database, "another-legacy-guild")
