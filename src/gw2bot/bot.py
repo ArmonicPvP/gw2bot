@@ -116,18 +116,29 @@ class Gw2Bot(discord.Client):
         # Kept so a settings change can be recomposed onto the same bootstrap
         # values rather than re-read from an environment that no longer owns
         # them.
-        self._bootstrap = bootstrap or _bootstrap_from(config)
-        self._settings_store = settings_store or SettingsStore(
-            config.raffle_db_path,
-            SettingsCipher.for_database(config.raffle_db_path),
-        )
-        self._secrets = secrets or SecretRegistry(
-            (
-                config.gw2_api_key,
-                config.discord_token,
-                config.discord_oauth_client_secret,
-                config.web_session_secret,
+        self._bootstrap = _bootstrap_from(config) if bootstrap is None else bootstrap
+        self._settings_store = (
+            SettingsStore(
+                config.raffle_db_path,
+                SettingsCipher.for_database(config.raffle_db_path),
             )
+            if settings_store is None
+            else settings_store
+        )
+        # Tested against None rather than truthiness: an empty SecretRegistry
+        # is falsy, and replacing one would leave the formatter holding a
+        # registry nothing ever registers into.
+        self._secrets = (
+            SecretRegistry(
+                (
+                    config.gw2_api_key,
+                    config.discord_token,
+                    config.discord_oauth_client_secret,
+                    config.web_session_secret,
+                )
+            )
+            if secrets is None
+            else secrets
         )
         self._session: aiohttp.ClientSession | None = None
         self._poll_tasks: list[asyncio.Task[None]] = []

@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 from factories import config_from_env, default_config, forbidden_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
+from gw2bot.logging_setup import SecretRegistry
 from gw2bot.main import main as run_main
 from gw2bot.raffle import TrialForumPost
 from gw2bot.settings.definitions import definition_for
@@ -1162,6 +1163,28 @@ class TestSettingsHotApply:
         assert "gw2-secret" in bot.secrets.current()
 
         await self._close(bot)
+
+    def test_an_empty_registry_it_was_handed_is_the_one_it_keeps(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # configure_logging installs its handler holding the caller's
+        # registry, so the bot has to register into that same object. An
+        # empty SecretRegistry is falsy, and truthiness-testing it would
+        # swap in a second one the formatter never sees.
+        registry = SecretRegistry()
+        assert not registry
+
+        bot = Gw2Bot(self._config(tmp_path), secrets=registry)
+
+        assert bot.secrets is registry
+        assert bot._poll_status._secrets is registry
+
+        registry.add("gw2-secret")
+        assert "gw2-secret" in bot.secrets.current()
+
+        bot.event_store.close()
+        bot.raffle_store.close()
 
     @patch("gw2bot.bot.GuildMemberCache")
     async def test_a_new_guild_id_rebinds_the_raffle_database(
