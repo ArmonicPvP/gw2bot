@@ -13,35 +13,35 @@ For local development, copy `.env.example` to `.env`.
 
 ### Required Environment Variables
 
-| Variable | Description |
-| --- | --- |
-| `DISCORD_TOKEN` | Token for the Discord bot application. |
+| Variable                   | Description                                                               |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `DISCORD_TOKEN`            | Token for the Discord bot application.                                    |
 | `DISCORD_COMMAND_GUILD_ID` | Positive integer ID of the Discord server where commands are registered. |
 
 These two are the only variables the bot refuses to start without.
 
 ### Optional Environment Variables
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DISCORD_NOTIFICATION_CHANNEL_ID` | unset | Positive integer ID of the Discord text channel that receives all automated notifications. The channel must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
-| `GW2_API_KEY` | unset | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `GW2_GUILD_ID`. |
-| `GW2_GUILD_ID` | unset | Guild ID listed in `/v2/account.guild_leader`. Set it together with `GW2_API_KEY`. |
-| `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs. |
-| `DISCORD_FEAST_NOTIFICATION_USER_ID` | unset | Discord user ID that also receives feast stock alerts by private message. |
-| `GW2_POLL_INTERVAL_SECONDS` | `300` | Guild Storage polling interval in seconds. Must be a positive integer of at least `30`. |
-| `GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` | `60` | Guild log polling interval in seconds. Must be a positive integer of at least `30`. |
-| `GW2_GUILD_MEMBER_CACHE_SECONDS` | `900` | Guild member cache lifetime in seconds. Must be a positive integer. |
-| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. The Docker image overrides this default with `/app/data/gw2bot.db`. |
-| `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. |
-| `TZ` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times and to format event thread names. |
-| `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). Requires the four variables below. |
-| `WEB_PORT` | `2222` | Port the web calendar listens on. |
-| `WEB_BASE_URL` | unset | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed. |
-| `DISCORD_OAUTH_CLIENT_ID` | unset | OAuth2 client ID of the bot's Discord application. |
-| `DISCORD_OAUTH_CLIENT_SECRET` | unset | OAuth2 client secret of the bot's Discord application. |
-| `WEB_SESSION_SECRET` | unset | Random secret of at least 32 characters that signs web session cookies. |
-| `WEB_SESSION_TTL_SECONDS` | `604800` | How long a web sign-in stays valid. Guild membership is re-checked periodically regardless, so a departed member loses access without waiting for the session to expire. |
+| Variable                              | Default                      | Description                                                                                                                                                              |
+| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DISCORD_NOTIFICATION_CHANNEL_ID`     | unset                        | Positive integer ID of the Discord text channel that receives all automated notifications. The channel must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
+| `GW2_API_KEY`                         | unset                        | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `GW2_GUILD_ID`.                                                                       |
+| `GW2_GUILD_ID`                        | unset                        | Guild ID listed in `/v2/account.guild_leader`. Set it together with `GW2_API_KEY`.                                                                                       |
+| `DEBUG`                               | `false`                      | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs.                                                                                       |
+| `DISCORD_FEAST_NOTIFICATION_USER_ID`  | unset                        | Discord user ID that also receives feast stock alerts by private message.                                                                                                |
+| `GW2_POLL_INTERVAL_SECONDS`           | `300`                        | Guild Storage polling interval in seconds. Must be a positive integer of at least `30`.                                                                                  |
+| `GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` | `60`                         | Guild log polling interval in seconds. Must be a positive integer of at least `30`.                                                                                      |
+| `GW2_GUILD_MEMBER_CACHE_SECONDS`      | `900`                        | Guild member cache lifetime in seconds. Must be a positive integer.                                                                                                      |
+| `RAFFLE_DB_PATH`                      | `data/gw2bot.db`             | SQLite database path. The Docker image overrides this default with `/app/data/gw2bot.db`.                                                                                |
+| `GW2_API_BASE_URL`                    | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed.                                                                                               |
+| `TZ`                                  | `UTC`                        | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times and to format event thread names.                                         |
+| `WEB_ENABLED`                         | `false`                      | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). Requires the four variables below.                                                          |
+| `WEB_PORT`                            | `2222`                       | Port the web calendar listens on.                                                                                                                                        |
+| `WEB_BASE_URL`                        | unset                        | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed.                                                           |
+| `DISCORD_OAUTH_CLIENT_ID`             | unset                        | OAuth2 client ID of the bot's Discord application.                                                                                                                       |
+| `DISCORD_OAUTH_CLIENT_SECRET`         | unset                        | OAuth2 client secret of the bot's Discord application.                                                                                                                   |
+| `WEB_SESSION_SECRET`                  | unset                        | Random secret of at least 32 characters that signs web session cookies.                                                                                                  |
+| `WEB_SESSION_TTL_SECONDS`             | `604800`                     | How long a web sign-in stays valid. Guild membership is re-checked periodically regardless, so a departed member loses access without waiting for the session to expire. |
 
 The application loads `.env` automatically. Existing environment variables take
 precedence over `.env`, so an Unraid container can inject the same variables at
@@ -446,12 +446,12 @@ even though the cancellation removed its last post.
 
 The monitor tracks these fixed Guild Storage consumable IDs:
 
-| Guild Storage ID | Feast |
-| --- | --- |
-| `1078` | Bowl of Fruit Salad with Mint Garnish |
-| `1089` | Cilantro and Cured Meat Flatbread |
-| `1102` | Cilantro Lime Sous-Vide Steak |
-| `1112` | Spherified Cilantro Oyster Soup |
+| Guild Storage ID | Feast                                 |
+| ---------------- | ------------------------------------- |
+| `1078`           | Bowl of Fruit Salad with Mint Garnish |
+| `1089`           | Cilantro and Cured Meat Flatbread     |
+| `1102`           | Cilantro Lime Sous-Vide Steak         |
+| `1112`           | Spherified Cilantro Oyster Soup       |
 
 `/v2/guild/:id/storage` reports a genuinely empty consumable as an entry with
 `count: 0`; it does not omit depleted items. A tracked feast missing from the
@@ -514,7 +514,7 @@ notification channel:
   example after promotion to Sunborne or leaving the guild), so they drop off
   both reports.
 
-~~~text
+````text
 Trial members before the 14-day mark
 These users are still Trial in-game but already Sunborne in Discord:
 * EarlySunborne.1234 - @DiscordUser
@@ -528,7 +528,7 @@ Trial members past the 14-day mark
 Please confirm whether these users have completed the challenges and can be ranked up to Sunborne:
 * Linked.1234 - @DiscordUser - Sunborne
 * Unresolved.5678
-~~~
+````
 
 To match each reported account to its application, the bot maintains a
 persistent index of the `Accepted` posts in forum channel
@@ -561,11 +561,11 @@ report has any members.
 
 - `/check`: builds the same before-, past-14-day, and 7-day warning reports on
   demand and returns them only to the invoker as ephemeral replies, without
-  posting to the notification channel. It requires Officer role
-  `1317359168285573171`, and replies "No Trial members to report." when no report
+  posting to the notification channel. It requires GW2 Leadershiop role
+  `1317638909735342201`, and replies "No Trial members to report." when no report
   has any members.
 - `/track username:<account>`: toggles 7-day warning tracking for a guild
-  member and requires Officer role `1317359168285573171`. Username autocomplete
+  member and requires GW2 Leadership role `1317638909735342201`. Username autocomplete
   and submission resolve against the case-insensitive guild-member cache and
   reject accounts outside the configured guild. Running it for an untracked
   member starts tracking them (moving them from the past-14-day report to the
@@ -624,11 +624,11 @@ Purchased-ticket reward milestones are also posted to the raffle contribution
 channel once per raffle. The defaults are:
 
 | Purchased tickets | Reward tier |
-| ---: | --- |
-| 50 | Tier 1 |
-| 100 | Tier 2 |
-| 150 | Tier 3 |
-| 200 | Tier 4 |
+| ----------------: | ----------- |
+|                50 | Tier 1      |
+|               100 | Tier 2      |
+|               150 | Tier 3      |
+|               200 | Tier 4      |
 
 Modify `RAFFLE_REWARD_TIERS` in `gw2bot.raffle` to add tiers or change their
 thresholds and labels. Pending milestone announcements persist across restarts
@@ -637,12 +637,12 @@ and retry after Discord delivery failures.
 The raffle draw count is also data-driven through `RAFFLE_DRAW_TIERS`:
 
 | Current purchased-ticket tier | Winners drawn |
-| --- | ---: |
-| Guaranteed / Tier 0 | 2 |
-| Tier 1 | 2 |
-| Tier 2 | 3 |
-| Tier 3 | 4 |
-| Tier 4 | 5 |
+| ----------------------------- | ------------: |
+| Guaranteed / Tier 0           |             2 |
+| Tier 1                        |             2 |
+| Tier 2                        |             3 |
+| Tier 3                        |             4 |
+| Tier 4                        |             5 |
 
 Each winner is selected from the remaining weighted ticket pool, then exactly
 one of that winner's tickets is removed before the next draw. A player may win
@@ -689,8 +689,8 @@ registration is unavailable.
   show their recorded results with a note that the snapshot is unavailable.
 - `/raffle addticket username:<account> [amount:<number>]`: without `amount`,
   adds one manual ticket to a current guild member and requires role
-  `1318357141521825872`. Supplying `amount` requires Officer role
-  `1317359168285573171` and records that many gold-purchased tickets as a real
+  `1318357141521825872`. Supplying `amount` requires GW2 Leadership role
+  `1317638909735342201` and records that many gold-purchased tickets as a real
   deposit event, including lifetime deposited gold, purchase notifications,
   contribution reports, and reward milestones. The purchase fails without
   adding tickets if it would exceed the per-user purchased-ticket cap. The
@@ -818,9 +818,9 @@ docker compose exec bot python -m gw2bot.raffle_totals
 
 For Unraid, map persistent app data to `/app/data`:
 
-| Host path | Container path | Access mode |
-| --- | --- | --- |
-| `/mnt/user/appdata/gw2bot` | `/app/data` | Read/Write |
+| Host path                  | Container path | Access mode |
+| -------------------------- | -------------- | ----------- |
+| `/mnt/user/appdata/gw2bot` | `/app/data`    | Read/Write  |
 
 Leave `RAFFLE_DB_PATH` unset, or set it to `/app/data/gw2bot.db`. Do not set it
 to the host path. The image runs as UID `99` and GID `100`, matching Unraid's
