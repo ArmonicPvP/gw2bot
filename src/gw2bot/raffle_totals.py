@@ -6,12 +6,13 @@ from gw2bot.raffle import RaffleStore, format_gold
 
 
 def main() -> None:
+    # RAFFLE_DB_PATH is still an environment variable; the guild id is not.
+    # The ledger already records which guild it belongs to, and reading totals
+    # out of it needs no guild id at all, so this asks for nothing that the
+    # migration told the operator to delete.
     database_path = os.getenv("RAFFLE_DB_PATH", "data/gw2bot.db")
-    guild_id = os.environ.get("GW2_GUILD_ID")
-    if guild_id is None:
-        raise RuntimeError("GW2_GUILD_ID must be set to read raffle totals")
 
-    store = RaffleStore(database_path, guild_id)
+    store = RaffleStore(database_path, None)
     try:
         totals = sorted(
             store.get_totals(),
