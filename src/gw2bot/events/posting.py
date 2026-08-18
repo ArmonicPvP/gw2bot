@@ -22,7 +22,7 @@ from gw2bot.events.formatting import (
     event_thread_name,
     format_role_mentions,
     next_occurrence_start,
-    roster_update_message,
+    roster_update_messages,
     signup_edit_limit_message,
 )
 from gw2bot.events.models import (
@@ -1777,8 +1777,8 @@ async def notify_roster_update(
     # A failure here must never fail the signup or removal that produced the
     # update: the roster is already persisted and the embed refresh that
     # follows does not depend on this message landing.
-    content = roster_update_message(update)
-    if content is None:
+    contents = roster_update_messages(update)
+    if not contents:
         return
     if occurrence.thread_id is None:
         LOGGER.debug(
@@ -1795,24 +1795,45 @@ async def notify_roster_update(
     await reopen_occurrence_thread(bot, occurrence)
     try:
         thread = await resolve_channel(bot, occurrence.thread_id)
-        await thread.send(content)
     except discord.HTTPException as exc:
         LOGGER.error(
-            "Could not send roster update notification; occurrence_id=%s "
-            "reassigned=%s promoted=%s error_type=%s",
+            "Could not resolve thread for roster update notification; "
+            "occurrence_id=%s reassigned=%s promoted=%s error_type=%s",
             occurrence.occurrence_id,
             len(update.reassigned),
             len(update.promoted),
             type(exc).__name__,
         )
-    else:
-        LOGGER.debug(
-            "Sent roster update notification; occurrence_id=%s reassigned=%s "
-            "promoted=%s",
-            occurrence.occurrence_id,
-            len(update.reassigned),
-            len(update.promoted),
-        )
+        return
+    # A large update is split over several messages; one that fails is logged
+    # and the rest are still attempted, so a single rejection does not cost
+    # every other member their notification.
+    sent = 0
+    for part, content in enumerate(contents, start=1):
+        try:
+            await thread.send(content)
+        except discord.HTTPException as exc:
+            LOGGER.error(
+                "Could not send roster update notification; occurrence_id=%s "
+                "part=%s parts=%s reassigned=%s promoted=%s error_type=%s",
+                occurrence.occurrence_id,
+                part,
+                len(contents),
+                len(update.reassigned),
+                len(update.promoted),
+                type(exc).__name__,
+            )
+        else:
+            sent += 1
+    LOGGER.debug(
+        "Sent roster update notification; occurrence_id=%s sent=%s parts=%s "
+        "reassigned=%s promoted=%s",
+        occurrence.occurrence_id,
+        sent,
+        len(contents),
+        len(update.reassigned),
+        len(update.promoted),
+    )
 
 
 def merge_roster_updates(

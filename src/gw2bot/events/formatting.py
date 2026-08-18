@@ -257,15 +257,25 @@ def format_role_groups(roles: tuple[EventRole, ...]) -> str:
     return " | ".join(parts)
 
 
-def roster_update_message(update: RosterUpdate) -> str | None:
-    # One batched thread message per roster mutation: every reassigned member
-    # and waitlist promotion is listed once, so a single signup or departure
-    # never produces more than one ping. A roster holds at most ten members
-    # plus a handful of promotions, so the message cannot approach Discord's
-    # length limit.
+ROSTER_UPDATE_HEADER = "🔀 **Roster update**"
+
+
+def roster_update_messages(update: RosterUpdate) -> list[str]:
+    """Announce a roster mutation, split to stay inside Discord's limit.
+
+    One batched thread message per roster mutation: every reassigned member
+    and waitlist promotion is listed once, so a single signup or departure
+    never produces more than one ping. That is almost always a single message
+    - a mutation moves a handful of members - but an uncapped category
+    (General) has no bound on its roster, and switching a capped event to one
+    promotes the whole waitlist at once, which can outgrow a single message.
+    The lines are therefore split over as many messages as they need, each
+    repeating the header so every part reads as a roster update on its own.
+    Returns an empty list when there is nothing to announce.
+    """
     if not update.has_changes:
-        return None
-    lines = ["🔀 **Roster update**"]
+        return []
+    lines: list[str] = []
     for change in update.reassigned:
         lines.append(
             f"└ <@{change.discord_user_id}>: "
@@ -283,7 +293,25 @@ def roster_update_message(update: RosterUpdate) -> str | None:
         lines.append(
             f"└ <@{signup.discord_user_id}> moved up from the waitlist{seat}"
         )
-    return "\n".join(lines)
+    return _chunk_message_lines(ROSTER_UPDATE_HEADER, lines)
+
+
+def _chunk_message_lines(header: str, lines: list[str]) -> list[str]:
+    # Splits on line boundaries, never mid-entry, and repeats the header on
+    # each message. A single line is a mention plus a role name, far below the
+    # limit, so an unsplittable line is only a theoretical case; it is sent on
+    # its own rather than dropped, and Discord rejects that one message alone.
+    messages: list[str] = []
+    current = header
+    for line in lines:
+        candidate = f"{current}\n{line}"
+        if len(candidate) > DISCORD_MESSAGE_LIMIT and current != header:
+            messages.append(current)
+            current = f"{header}\n{line}"
+        else:
+            current = candidate
+    messages.append(current)
+    return messages
 
 
 @dataclass(frozen=True, slots=True)
