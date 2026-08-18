@@ -10,6 +10,7 @@ import discord
 import pytest
 from cryptography.fernet import Fernet
 from discord import app_commands
+from sqlalchemy.exc import SQLAlchemyError
 
 from factories import (
     default_config,
@@ -19,6 +20,7 @@ from factories import (
 )
 from gw2bot.config import BootstrapConfig, ConfigurationError
 from gw2bot.logging_setup import RedactingFormatter, SecretRegistry
+from gw2bot.raffle import RaffleStore
 from gw2bot.settings.commands import SettingsCommands, chunk_lines
 from gw2bot.settings.composition import compose_config
 from gw2bot.settings.crypto import (
@@ -1175,3 +1177,101 @@ class TestReviewFindings:
 
         assert stored == "Europe/Berlin"
         assert bot.apply_settings_change.await_count == 1
+
+
+class TestGuildIdImportGuard:
+    """The one-time import must not store a guild id that stops startup.
+
+    RaffleStore refuses to open against a ledger bound to another guild, and
+    that happens before any command exists to report it. With the import
+    marker already written, a corrected variable would never be read again, so
+    storing the conflicting value would leave a bot that cannot start and no
+    way to fix it from Discord.
+    """
+
+    def _bound_store(self, tmp_path: Path, guild_id: str) -> SettingsStore:
+        # Claim the ledger the way RaffleStore does on first use.
+        RaffleStore(str(tmp_path / "gw2bot.db"), guild_id).close()
+        return settings_store(tmp_path)
+
+    def test_refuses_a_guild_id_the_ledger_contradicts(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store = self._bound_store(tmp_path, "first-guild")
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            imported = import_legacy_environment(
+                store,
+                {"GW2_GUILD_ID": "second-guild", "GW2_API_KEY": "gw2-secret"},
+            )
+        guild_id = store.get_raw(definition_for("gw2_guild_id"))
+        api_key = store.get_raw(definition_for("gw2_api_key"))
+        store.close()
+
+        assert guild_id is None
+        assert imported == ("GW2_API_KEY",)
+        # One bad variable must not cost the others their import.
+        assert api_key == "gw2-secret"
+        assert "already belongs to a different guild" in caplog.text
+
+    def test_imports_a_guild_id_the_ledger_agrees_with(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        store = self._bound_store(tmp_path, "first-guild")
+
+        imported = import_legacy_environment(store, {"GW2_GUILD_ID": "first-guild"})
+        guild_id = store.get_raw(definition_for("gw2_guild_id"))
+        store.close()
+
+        assert imported == ("GW2_GUILD_ID",)
+        assert guild_id == "first-guild"
+
+    def test_imports_a_guild_id_when_the_ledger_is_unclaimed(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        assert import_legacy_environment(store, {"GW2_GUILD_ID": "any-guild"}) == (
+            "GW2_GUILD_ID",
+        )
+        assert store.get_raw(definition_for("gw2_guild_id")) == "any-guild"
+
+
+class TestDatabaseFailuresDuringAChange:
+    """A database that cannot be read must still reach the caller privately."""
+
+    def _broken(self, tmp_path: Path) -> Any:
+        bot = _fake_bot(tmp_path)
+        store = bot.settings_store
+        store.get_raw = MagicMock(side_effect=SQLAlchemyError("read failed"))
+        return bot
+
+    async def test_a_failed_snapshot_read_is_reported_when_storing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bot = self._broken(tmp_path)
+        commands = SettingsCommands(cast(Any, bot))
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        bot.settings_store.close()
+
+        assert "could not be written" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()
+
+    async def test_a_failed_snapshot_read_is_reported_when_unsetting(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bot = self._broken(tmp_path)
+        commands = SettingsCommands(cast(Any, bot))
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, " ")
+        bot.settings_store.close()
+
+        assert "could not be written" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()

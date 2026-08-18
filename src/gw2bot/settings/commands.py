@@ -226,8 +226,11 @@ class SettingsCommands(app_commands.Group):
         definition: SettingDefinition,
     ) -> None:
         key = setting_key(definition)
-        previous = self._bot.settings_store.get_raw(definition)
         try:
+            # Inside the guard with the write it protects: a database that
+            # cannot be read cannot be rolled back to either, and the caller
+            # still has to be told rather than meeting an unhandled error.
+            previous = self._bot.settings_store.get_raw(definition)
             removed = self._bot.settings_store.unset(definition)
         except SQLAlchemyError:
             LOGGER.error("Could not unset a setting; setting=%s", key)
@@ -276,11 +279,12 @@ class SettingsCommands(app_commands.Group):
             await send_interaction_notice(interaction, problem)
             return
         stored = str(parsed)
-        # Kept so a change that cannot be applied can be put back. Leaving a
-        # value the running bot rejected in the database would apply it on the
-        # next restart, where no command is there to report the problem.
-        previous = self._bot.settings_store.get_raw(definition)
         try:
+            # The snapshot is kept so a change that cannot be applied can be
+            # put back; leaving a value the running bot rejected would apply
+            # it on the next restart, with no command there to report why.
+            # It is read inside the guard with the write it protects.
+            previous = self._bot.settings_store.get_raw(definition)
             self._bot.settings_store.set_raw(definition, stored)
         except SQLAlchemyError:
             LOGGER.error("Could not store a setting; setting=%s", key)

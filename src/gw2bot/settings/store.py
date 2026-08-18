@@ -23,6 +23,10 @@ LOGGER = logging.getLogger(__name__)
 # Marker in the bot's own bookkeeping table recording that the environment has
 # already been read once. See gw2bot.settings.migration.
 ENV_IMPORT_MARKER_KEY = "settings_env_import_v1"
+# The raffle ledger's own record of which guild it belongs to. Owned by
+# RaffleStore; read here so the environment import cannot store a guild id
+# that would stop the bot from starting.
+LEDGER_GUILD_KEY = "guild_id"
 
 
 class SettingsStore:
@@ -148,6 +152,19 @@ class SettingsStore:
             unreadable,
         )
         return values
+
+    def ledger_guild_id(self) -> str | None:
+        """The guild the raffle ledger in this database already belongs to.
+
+        The ledger records it under its own key in the bookkeeping table this
+        store already uses for the import marker. Reading it here lets the
+        one-time environment import refuse a guild id that would make
+        RaffleStore refuse to open, which happens before any command exists to
+        report it.
+        """
+        with self._sessions() as session:
+            record = session.get(SettingRecord, LEDGER_GUILD_KEY)
+            return record.value if record is not None else None
 
     def env_import_completed(self) -> bool:
         with self._sessions() as session:

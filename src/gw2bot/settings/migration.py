@@ -31,6 +31,7 @@ def import_legacy_environment(
         LOGGER.debug("Skipped the legacy environment import; already recorded")
         return ()
 
+    ledger_guild_id = store.ledger_guild_id()
     imported: list[str] = []
     skipped_unset = 0
     skipped_stored = 0
@@ -50,6 +51,20 @@ def import_legacy_environment(
         if not _importable(definition, value, variable):
             rejected.append(variable)
             continue
+        if _conflicts_with_ledger(definition, value, ledger_guild_id):
+            # Storing it would make RaffleStore refuse to open on this and
+            # every later startup, and the marker below would stop a corrected
+            # variable from ever being read again - so the guild would be left
+            # with a bot that cannot start and no command able to fix it.
+            LOGGER.warning(
+                "Not importing %s: the raffle ledger already belongs to a "
+                "different guild. Set /settings gw2_guild_id if this database "
+                "should follow the new one, or point RAFFLE_DB_PATH at a "
+                "different file.",
+                variable,
+            )
+            rejected.append(variable)
+            continue
         store.set_raw(definition, value)
         imported.append(variable)
 
@@ -63,12 +78,27 @@ def import_legacy_environment(
         len(rejected),
     )
     if rejected:
+        # Each rejection has already been logged with its own reason; this
+        # is the one line that names them together.
         LOGGER.warning(
-            "These environment variables could not be imported because their "
-            "values are no longer valid; set them with /settings: %s",
+            "These environment variables were not imported and are not "
+            "configuring anything; set them with /settings: %s",
             ", ".join(rejected),
         )
     return tuple(imported)
+
+
+def _conflicts_with_ledger(
+    definition: SettingDefinition,
+    value: str,
+    ledger_guild_id: str | None,
+) -> bool:
+    """Whether importing this value would claim a ledger for another guild."""
+    return (
+        definition.field == "gw2_guild_id"
+        and ledger_guild_id is not None
+        and ledger_guild_id != value
+    )
 
 
 def _importable(
