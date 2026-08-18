@@ -26,15 +26,12 @@ from gw2bot.guild_members import (
     select_pending_warning_members,
     select_warned_overdue_members,
 )
-from gw2bot.trials.forum import TRIAL_FORUM_CHANNEL_ID
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
 
-TRIAL_ROLE_ID = 1450164501696741597
-SUNBORNE_ROLE_ID = 1317140660188352584
 
 
 def format_track_audit(
@@ -47,11 +44,15 @@ def format_track_audit(
     return f"{username} warning {verb} by <@{discord_user_id}>"
 
 
-def get_trial_member_discord_status(member: Any) -> str | None:
+def get_trial_member_discord_status(
+    member: Any,
+    trial_role_id: int,
+    sunborne_role_id: int,
+) -> str | None:
     role_ids = {role.id for role in getattr(member, "roles", ())}
-    if SUNBORNE_ROLE_ID in role_ids:
+    if sunborne_role_id in role_ids:
         return "Sunborne"
-    if TRIAL_ROLE_ID in role_ids:
+    if trial_role_id in role_ids:
         return "Trial"
     return None
 
@@ -189,6 +190,9 @@ async def resolve_trial_member_discord_statuses(
     bot: Gw2Bot,
     usernames: list[str],
 ) -> list[TrialMemberReportEntry]:
+    forum_channel_id = bot._config.trial_forum_channel_id
+    trial_role_id = bot._config.trial_role_id
+    sunborne_role_id = bot._config.sunborne_role_id
     entries = [TrialMemberReportEntry(username) for username in usernames]
     unresolved = {username.casefold(): username for username in usernames}
     if not unresolved:
@@ -196,14 +200,14 @@ async def resolve_trial_member_discord_statuses(
 
     LOGGER.debug("Resolving %s Trial members from application forum", len(unresolved))
     try:
-        forum = await bot.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
+        forum = await bot.fetch_channel(forum_channel_id)
     except discord.DiscordException as error:
         log_discord_failure("Could not access the Trial application forum", error)
         return entries
     if not hasattr(forum, "archived_threads") or not hasattr(forum, "guild"):
         LOGGER.error(
             "Trial application channel %s is not a forum channel",
-            TRIAL_FORUM_CHANNEL_ID,
+            forum_channel_id,
         )
         return entries
     forum = cast(discord.ForumChannel, forum)
@@ -226,7 +230,11 @@ async def resolve_trial_member_discord_statuses(
         status: str | None = None
         get_member = getattr(forum.guild, "get_member", None)
         if callable(get_member):
-            status = get_trial_member_discord_status(get_member(owner_id))
+            status = get_trial_member_discord_status(
+                get_member(owner_id),
+                trial_role_id,
+                sunborne_role_id,
+            )
         if status is None:
             LOGGER.debug(
                 "Fetching role data for matched Trial application creator %s",
@@ -246,7 +254,11 @@ async def resolve_trial_member_discord_statuses(
                     owner_id,
                 )
             else:
-                status = get_trial_member_discord_status(member)
+                status = get_trial_member_discord_status(
+                    member,
+                    trial_role_id,
+                    sunborne_role_id,
+                )
 
         owner_statuses[owner_id] = status
         LOGGER.debug(

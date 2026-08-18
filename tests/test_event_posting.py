@@ -52,7 +52,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.events.store import EventStore
 
-from factories import forbidden_error, not_found_error
+from factories import default_config, forbidden_error, not_found_error
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 BEFORE_START = START - timedelta(hours=2)
@@ -211,6 +211,9 @@ class FakeBot:
     def __init__(self, store: EventStore, channel: FakeChannel):
         self.event_store = store
         self.event_timezone = ZoneInfo("UTC")
+        # Role gates read their id off the config now, so the double carries
+        # one with the shipped defaults.
+        self._config = default_config()
         self._channels: dict[int, Any] = {
             channel.id: channel,
             channel.thread.id: channel.thread,

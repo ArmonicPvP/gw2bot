@@ -10,6 +10,22 @@ from dotenv import load_dotenv
 GW2_API_VARIABLES = ("GW2_API_KEY", "GW2_GUILD_ID")
 NOTIFICATION_CHANNEL_VARIABLE = "DISCORD_NOTIFICATION_CHANNEL_ID"
 
+# Discord role, channel and forum-tag ids. These were literals scattered through
+# the feature modules until they became settings; they stay here as the values a
+# guild falls back to when the matching setting is unset, so an install that
+# never touches /settings behaves exactly as it did before.
+DEFAULT_RAFFLE_DRAW_ROLE_ID = 1317124663847157880
+DEFAULT_RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
+DEFAULT_RAFFLE_OFFICER_ROLE_ID = 1317359168285573171
+DEFAULT_GUILD_ROSTER_ROLE_ID = 1317202210152513606
+DEFAULT_EVENT_CREATE_ROLE_ID = 1318357141521825872
+DEFAULT_TRIAL_ROLE_ID = 1450164501696741597
+DEFAULT_SUNBORNE_ROLE_ID = 1317140660188352584
+DEFAULT_RAFFLE_CONTRIBUTION_CHANNEL_ID = 856343628984746014
+DEFAULT_TRIAL_FORUM_CHANNEL_ID = 1317206104727621693
+DEFAULT_TRIAL_ACCEPTED_TAG_ID = 1317349209619562587
+DEFAULT_TRIAL_IN_REVIEW_TAG_ID = 1317349421821726790
+
 
 class ConfigurationError(ValueError):
     """Raised when required application configuration is invalid."""
@@ -49,6 +65,21 @@ class Config:
     discord_oauth_client_secret: str | None = None
     web_session_secret: str | None = None
     web_session_ttl_seconds: int = 604800
+    # Discord ids. The food page has no default of its own: it has always been
+    # whichever role draws the raffle, and composing the settings is what keeps
+    # it following that role until someone sets it apart.
+    raffle_draw_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
+    raffle_addticket_role_id: int = DEFAULT_RAFFLE_ADDTICKET_ROLE_ID
+    raffle_officer_role_id: int = DEFAULT_RAFFLE_OFFICER_ROLE_ID
+    guild_roster_role_id: int = DEFAULT_GUILD_ROSTER_ROLE_ID
+    event_create_role_id: int = DEFAULT_EVENT_CREATE_ROLE_ID
+    trial_role_id: int = DEFAULT_TRIAL_ROLE_ID
+    sunborne_role_id: int = DEFAULT_SUNBORNE_ROLE_ID
+    food_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
+    raffle_contribution_channel_id: int = DEFAULT_RAFFLE_CONTRIBUTION_CHANNEL_ID
+    trial_forum_channel_id: int = DEFAULT_TRIAL_FORUM_CHANNEL_ID
+    trial_accepted_tag_id: int = DEFAULT_TRIAL_ACCEPTED_TAG_ID
+    trial_in_review_tag_id: int = DEFAULT_TRIAL_IN_REVIEW_TAG_ID
 
     @property
     def missing_gw2_api_variables(self) -> tuple[str, ...]:

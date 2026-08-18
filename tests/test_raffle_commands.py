@@ -18,13 +18,13 @@ from gw2bot.raffle import (
     RaffleRunSummary,
     RaffleWinner,
 )
-from gw2bot.raffle.commands import (
-    GUILD_ROSTER_ROLE_ID,
-    RAFFLE_ADDTICKET_ROLE_ID,
-    RAFFLE_DRAW_ROLE_ID,
-    RAFFLE_OFFICER_ROLE_ID,
-    RaffleCommands,
+from gw2bot.config import (
+    DEFAULT_GUILD_ROSTER_ROLE_ID as GUILD_ROSTER_ROLE_ID,
+    DEFAULT_RAFFLE_ADDTICKET_ROLE_ID as RAFFLE_ADDTICKET_ROLE_ID,
+    DEFAULT_RAFFLE_DRAW_ROLE_ID as RAFFLE_DRAW_ROLE_ID,
+    DEFAULT_RAFFLE_OFFICER_ROLE_ID as RAFFLE_OFFICER_ROLE_ID,
 )
+from gw2bot.raffle.commands import RaffleCommands
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
@@ -52,7 +52,12 @@ from gw2bot.raffle.views import (
 )
 from gw2bot.discord_utils import user_has_role
 
-from factories import configured_bot, raffle_total, unconfigured_bot
+from factories import (
+    configured_bot,
+    default_config,
+    raffle_total,
+    unconfigured_bot,
+)
 
 
 class AddTicketsCallback(Protocol):
@@ -194,7 +199,10 @@ class TestRaffleGuildMemberAutocomplete:
         ]
 
     async def test_does_not_expose_guild_members_to_unauthorized_user(self) -> None:
-        bot = SimpleNamespace(search_guild_members=AsyncMock())
+        bot = SimpleNamespace(
+            _config=default_config(),
+            search_guild_members=AsyncMock(),
+        )
         interaction = SimpleNamespace(user=SimpleNamespace(roles=[]))
         group = RaffleCommands(bot)  # type: ignore[arg-type]
 
@@ -207,7 +215,10 @@ class TestRaffleGuildMemberAutocomplete:
         bot.search_guild_members.assert_not_awaited()
 
     async def test_raffle_roles_alone_do_not_expose_guild_members(self) -> None:
-        bot = SimpleNamespace(search_guild_members=AsyncMock())
+        bot = SimpleNamespace(
+            _config=default_config(),
+            search_guild_members=AsyncMock(),
+        )
         interaction = SimpleNamespace(
             user=SimpleNamespace(
                 roles=[
@@ -527,6 +538,7 @@ class TestAddRaffleTicketsCommand:
 
     async def test_amount_requires_officer_role(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=False),
             resolve_guild_member=AsyncMock(),
             add_officer_raffle_purchase=AsyncMock(),
@@ -609,6 +621,7 @@ class TestAddRaffleTicketsCommand:
 
     async def test_bulk_attendance_command_opens_paragraph_modal(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
         )
         interaction = SimpleNamespace(
@@ -674,6 +687,7 @@ class TestAddRaffleTicketsCommand:
 
     async def test_bulk_attendance_modal_rechecks_authorization(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=False),
             resolve_guild_member=AsyncMock(),
         )
@@ -696,6 +710,7 @@ class TestAddRaffleTicketsCommand:
 
     async def test_bulk_attendance_modal_rejects_empty_parsed_input(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
             resolve_guild_member=AsyncMock(),
         )
@@ -840,6 +855,7 @@ class TestAddRaffleTicketsCommand:
 
     async def test_requires_at_least_one_selection(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
         )
         interaction = SimpleNamespace(
@@ -886,6 +902,7 @@ class TestRaffleTicketsCommand:
     async def test_shows_linked_users_purchased_and_free_tickets(self) -> None:
         total = raffle_total("Linked.1234", purchased=4, free=2)
         bot = SimpleNamespace(
+            _config=default_config(),
             get_linked_raffle_username=MagicMock(return_value=total.username),
             get_raffle_total=MagicMock(return_value=total),
         )
@@ -909,6 +926,7 @@ class TestRaffleTicketsCommand:
     async def test_link_modal_verifies_and_persists_gw2_account(self) -> None:
         total = raffle_total("Canonical.1234", purchased=2, free=1)
         bot = SimpleNamespace(
+            _config=default_config(),
             resolve_guild_member=AsyncMock(return_value=total.username),
             link_raffle_account=MagicMock(),
             get_raffle_total=MagicMock(return_value=total),
@@ -933,6 +951,7 @@ class TestRaffleTicketsCommand:
 
     async def test_link_modal_rejects_account_outside_guild(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             resolve_guild_member=AsyncMock(return_value=None),
             link_raffle_account=MagicMock(),
         )
@@ -1010,7 +1029,10 @@ class TestRaffleTicketsCommand:
         )
 
     async def test_list_only_includes_buttons_for_multiple_pages(self) -> None:
-        bot = SimpleNamespace(get_raffle_totals=MagicMock(return_value=[]))
+        bot = SimpleNamespace(
+            _config=default_config(),
+            get_raffle_totals=MagicMock(return_value=[]),
+        )
         group = RaffleCommands(bot)  # type: ignore[arg-type]
         tickets_list = next(
             command for command in group.commands if command.name == "list"
@@ -1056,6 +1078,7 @@ class TestRaffleTicketsCommand:
 
     async def test_leaderboard_lists_split_and_paginates(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_lifetime_raffle_contributions=MagicMock(return_value=[])
         )
         group = RaffleCommands(bot)  # type: ignore[arg-type]
@@ -1100,6 +1123,7 @@ class TestRaffleTicketsCommand:
 
     async def test_leaderboard_sortby_reorders_rows(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_lifetime_raffle_contributions=MagicMock(
                 return_value=[
                     RaffleContribution("Buyer.1234", 5, 0),
@@ -1134,6 +1158,7 @@ class TestRaffleTicketsCommand:
 
     async def test_leaderboard_reports_when_no_history(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_lifetime_raffle_contributions=MagicMock(return_value=[])
         )
         group = RaffleCommands(bot)  # type: ignore[arg-type]
@@ -1193,6 +1218,7 @@ class TestRaffleTicketsCommand:
 
     async def test_list_omits_retained_zero_ticket_records(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_totals=MagicMock(
                 return_value=[
                     raffle_total(f"Former Member {index:02d}.1234")
@@ -1344,6 +1370,7 @@ class TestRaffleDrawCommand:
     async def test_defers_before_running_raffle_and_uses_followup(self) -> None:
         events: list[str] = []
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
             get_pending_raffle_result=MagicMock(return_value=None),
             refresh_guild_log=AsyncMock(side_effect=lambda: events.append("refresh")),
@@ -1402,6 +1429,7 @@ class TestRaffleDrawCommand:
             free_tickets=1,
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
             get_pending_raffle_result=MagicMock(return_value=pending),
             refresh_guild_log=AsyncMock(),
@@ -1425,6 +1453,7 @@ class TestRaffleDrawCommand:
         self,
     ) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
             get_pending_raffle_result=MagicMock(return_value=None),
             refresh_guild_log=AsyncMock(),
@@ -1498,6 +1527,7 @@ class TestRaffleDrawCommand:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             authorize_raffle_command=AsyncMock(return_value=True),
             get_pending_raffle_result=MagicMock(return_value=None),
             refresh_guild_log=AsyncMock(
@@ -1720,7 +1750,10 @@ class TestRaffleAuditCommand:
         # The bot namespace omits authorize_raffle_command on purpose: the
         # audit command must be usable by every member, so gating would fail
         # this test with an AttributeError.
-        bot = SimpleNamespace(get_raffle_audit=MagicMock(return_value=two_draw_audit()))
+        bot = SimpleNamespace(
+            _config=default_config(),
+            get_raffle_audit=MagicMock(return_value=two_draw_audit()),
+        )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=1234),
             response=SimpleNamespace(send_message=AsyncMock()),
@@ -1767,7 +1800,10 @@ class TestRaffleAuditCommand:
 
     async def test_attaches_pagination_view_for_many_entrants(self) -> None:
         audit = many_entrant_audit(RAFFLE_AUDIT_RANGES_PAGE_SIZE + 5)
-        bot = SimpleNamespace(get_raffle_audit=MagicMock(return_value=audit))
+        bot = SimpleNamespace(
+            _config=default_config(),
+            get_raffle_audit=MagicMock(return_value=audit),
+        )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=1234),
             response=SimpleNamespace(send_message=AsyncMock()),
@@ -1802,6 +1838,7 @@ class TestRaffleAuditCommand:
 
     async def test_reports_unknown_run_and_lists_valid_ids(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_audit=MagicMock(return_value=None),
             get_raffle_run_summaries=MagicMock(
                 return_value=[
@@ -1833,6 +1870,7 @@ class TestRaffleAuditCommand:
 class TestRaffleRunAutocomplete:
     async def test_filters_run_ids_by_typed_prefix(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_run_summaries=MagicMock(
                 return_value=[
                     RaffleRunSummary(12, "2026-06-28 12:00:00"),
@@ -1858,6 +1896,7 @@ class TestRaffleRunAutocomplete:
 
     async def test_lists_newest_runs_first_without_typed_text(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_run_summaries=MagicMock(
                 return_value=[
                     RaffleRunSummary(run_id, "2026-06-07 12:00:00")
@@ -1882,6 +1921,7 @@ class TestRaffleRunAutocomplete:
     ) -> None:
         secret = "run-autocomplete-secret"
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_run_summaries=MagicMock(
                 side_effect=SQLAlchemyError(
                     f"query failed with access_token={secret}"

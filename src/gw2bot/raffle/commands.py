@@ -37,13 +37,6 @@ from gw2bot.raffle.views import (
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
-from gw2bot.raffle.roles import (
-    GUILD_ROSTER_ROLE_ID as GUILD_ROSTER_ROLE_ID,
-    RAFFLE_ADDTICKET_ROLE_ID as RAFFLE_ADDTICKET_ROLE_ID,
-    RAFFLE_DRAW_ROLE_ID as RAFFLE_DRAW_ROLE_ID,
-    RAFFLE_OFFICER_ROLE_ID as RAFFLE_OFFICER_ROLE_ID,
-)
-
 LOGGER = logging.getLogger(__name__)
 
 
@@ -61,7 +54,10 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(interaction.user, GUILD_ROSTER_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.guild_roster_role_id,
+        ):
             LOGGER.debug(
                 "Skipped raffle guild member autocomplete; authorized=false"
             )
@@ -90,7 +86,10 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(interaction.user, RAFFLE_DRAW_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.raffle_draw_role_id,
+        ):
             LOGGER.debug(
                 "Skipped purchased ticket holder autocomplete; authorized=false"
             )
@@ -255,7 +254,7 @@ class RaffleCommands(app_commands.Group):
         )
         if not await self._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_DRAW_ROLE_ID,
+            self._bot._config.raffle_draw_role_id,
         ):
             return
 
@@ -356,9 +355,9 @@ class RaffleCommands(app_commands.Group):
             amount is not None,
         )
         required_role_id = (
-            RAFFLE_OFFICER_ROLE_ID
+            self._bot._config.raffle_officer_role_id
             if amount is not None
-            else RAFFLE_ADDTICKET_ROLE_ID
+            else self._bot._config.raffle_addticket_role_id
         )
         if not await self._bot.authorize_raffle_command(
             interaction,
@@ -501,7 +500,7 @@ class RaffleCommands(app_commands.Group):
         )
         if not await self._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_ADDTICKET_ROLE_ID,
+            self._bot._config.raffle_addticket_role_id,
         ):
             return
         if not requested_usernames:
@@ -523,7 +522,7 @@ class RaffleCommands(app_commands.Group):
         LOGGER.debug("Bulk attendance raffle ticket command invoked")
         if not await self._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_ADDTICKET_ROLE_ID,
+            self._bot._config.raffle_addticket_role_id,
         ):
             return
         await interaction.response.send_modal(RaffleBulkAddTicketsModal(self))
@@ -549,7 +548,7 @@ class RaffleCommands(app_commands.Group):
         )
         if not await self._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_DRAW_ROLE_ID,
+            self._bot._config.raffle_draw_role_id,
         ):
             return
 

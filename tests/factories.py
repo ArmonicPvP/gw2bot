@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import discord
 
+from gw2bot.config import Config
 from gw2bot.raffle import RaffleTotal
 
 """Shared builders for fake GW2 guild-log events used across test modules."""
@@ -97,6 +98,18 @@ def guild_rank_change(
         "changed_by": changed_by,
     }
 
+def default_config(**overrides: Any) -> Config:
+    """Config carrying the shipped defaults for every Discord role and channel.
+
+    The role, channel and forum-tag ids commands gate on are settings now, read
+    off the bot's config rather than imported as constants, so every fake bot
+    driving one of those commands needs a config to read them from.
+    """
+    overrides.setdefault("discord_token", "discord-token")
+    overrides.setdefault("discord_command_guild_id", 5678)
+    return Config(**overrides)
+
+
 def configured_bot(**attributes: Any) -> SimpleNamespace:
     """Fake bot whose GW2 configuration guards let a command run.
 
@@ -104,6 +117,7 @@ def configured_bot(**attributes: Any) -> SimpleNamespace:
     GW2_GUILD_ID are set before doing any work, so every fake bot driving one
     of those commands has to answer.
     """
+    attributes.setdefault("_config", default_config())
     return SimpleNamespace(
         gw2_api_enabled=True,
         reject_without_gw2_api=AsyncMock(return_value=False),
@@ -113,6 +127,7 @@ def configured_bot(**attributes: Any) -> SimpleNamespace:
 
 def unconfigured_bot(**attributes: Any) -> SimpleNamespace:
     """Fake bot that reports GW2_API_KEY and GW2_GUILD_ID as unset."""
+    attributes.setdefault("_config", default_config())
     return SimpleNamespace(
         gw2_api_enabled=False,
         reject_without_gw2_api=AsyncMock(return_value=True),

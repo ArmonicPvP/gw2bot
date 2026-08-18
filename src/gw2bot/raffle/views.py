@@ -26,7 +26,6 @@ from gw2bot.raffle.formatting import (
     raffle_ticket_table_embed,
     raffle_tier_summary_embed,
 )
-from gw2bot.raffle.roles import RAFFLE_ADDTICKET_ROLE_ID
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -554,7 +553,7 @@ class RaffleBulkAddTicketsModal(discord.ui.Modal):
         )
         if not await self._commands._bot.authorize_raffle_command(
             interaction,
-            RAFFLE_ADDTICKET_ROLE_ID,
+            self._commands._bot._config.raffle_addticket_role_id,
         ):
             return
 

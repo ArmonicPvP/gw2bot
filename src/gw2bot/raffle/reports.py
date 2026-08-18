@@ -21,8 +21,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-RAFFLE_CONTRIBUTION_CHANNEL_ID = 856343628984746014
-
 
 def raffle_contribution_report_end(now: datetime) -> datetime:
     now_utc = now.astimezone(UTC)
@@ -135,11 +133,12 @@ async def send_raffle_contribution_embed(
 
 async def get_raffle_contribution_channel(bot: Gw2Bot) -> Any:
     if bot._raffle_contribution_channel is None:
+        channel_id = bot._config.raffle_contribution_channel_id
         LOGGER.debug(
             "Fetching raffle contribution channel %s",
-            RAFFLE_CONTRIBUTION_CHANNEL_ID,
+            channel_id,
         )
-        channel = await bot.fetch_channel(RAFFLE_CONTRIBUTION_CHANNEL_ID)
+        channel = await bot.fetch_channel(channel_id)
         if (
             getattr(getattr(channel, "guild", None), "id", None)
             != bot._config.discord_command_guild_id

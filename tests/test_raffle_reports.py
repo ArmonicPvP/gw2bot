@@ -14,8 +14,10 @@ from gw2bot.raffle.formatting import (
     raffle_contribution_report_embed,
     raffle_deposit_embed,
 )
+from gw2bot.config import (
+    DEFAULT_RAFFLE_CONTRIBUTION_CHANNEL_ID as RAFFLE_CONTRIBUTION_CHANNEL_ID,
+)
 from gw2bot.raffle.reports import (
-    RAFFLE_CONTRIBUTION_CHANNEL_ID,
     raffle_contribution_report_end,
     seconds_until_raffle_contribution_report,
 )
@@ -24,7 +26,7 @@ from gw2bot.raffle.views import (
     RaffleContributionReportView,
 )
 
-from factories import raffle_total
+from factories import default_config, raffle_total
 
 
 class TestRaffleContributionNotification:
@@ -67,6 +69,7 @@ class TestRaffleContributionNotification:
     async def test_empty_window_does_not_send_message(self) -> None:
         report_end = datetime(2026, 6, 7, 6, tzinfo=UTC)
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_contributions=MagicMock(return_value=[]),
             _send_raffle_contribution_embed=AsyncMock(),
         )
@@ -85,6 +88,7 @@ class TestRaffleContributionNotification:
     async def test_free_ticket_only_window_sends_embed(self) -> None:
         report_end = datetime(2026, 6, 7, 6, tzinfo=UTC)
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_contributions=MagicMock(
                 return_value=[RaffleContribution("Free Only.1234", 0, 1)]
             ),
@@ -111,6 +115,7 @@ class TestRaffleContributionNotification:
             for index in range(11)
         ]
         bot = SimpleNamespace(
+            _config=default_config(),
             get_raffle_contributions=MagicMock(return_value=contributions),
             _send_raffle_contribution_embed=AsyncMock(),
         )
@@ -233,6 +238,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_notifications.return_value = [deposit]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_raffle_contribution_embed=AsyncMock(return_value=True),
         )
@@ -252,6 +258,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.add_officer_purchase.return_value = total
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _send_pending_raffle_notifications=AsyncMock(),
             _send_pending_deposit_audit_notifications=AsyncMock(),
@@ -275,6 +282,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_deposit_audit_notifications.return_value = [deposit]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=True),
         )
@@ -289,6 +297,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_deposit_audit_notifications.return_value = [deposit]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=False),
         )
@@ -302,6 +311,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_join_notifications.return_value = [join]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=True),
         )
@@ -316,6 +326,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_join_notifications.return_value = [join]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=False),
         )
@@ -331,6 +342,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_invite_notifications.return_value = [invite]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=True),
         )
@@ -345,6 +357,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_invite_notifications.return_value = [invite]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=False),
         )
@@ -360,6 +373,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_rank_change_notifications.return_value = [rank_change]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=True),
         )
@@ -374,6 +388,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_rank_change_notifications.return_value = [rank_change]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_notification=AsyncMock(return_value=False),
         )
@@ -387,6 +402,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_milestones.return_value = [milestone]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_raffle_contribution_message=AsyncMock(return_value=True),
         )
@@ -403,6 +419,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_milestones.return_value = [milestone]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_raffle_contribution_message=AsyncMock(return_value=False),
         )
@@ -424,6 +441,7 @@ class TestRaffleContributionNotification:
         store = MagicMock()
         store.get_pending_notifications.return_value = [deposit]
         bot = SimpleNamespace(
+            _config=default_config(),
             _raffle_store=store,
             _try_send_raffle_contribution_embed=AsyncMock(return_value=False),
         )
@@ -438,6 +456,7 @@ class TestRaffleContributionNotification:
     ) -> None:
         secret = "raffle-channel-secret"
         bot = SimpleNamespace(
+            _config=default_config(),
             _send_raffle_contribution_message=AsyncMock(
                 side_effect=discord.ClientException(secret)
             ),
@@ -459,6 +478,7 @@ class TestRaffleContributionNotification:
     ) -> None:
         secret = "raffle-channel-embed-secret"
         bot = SimpleNamespace(
+            _config=default_config(),
             _send_raffle_contribution_embed=AsyncMock(
                 side_effect=discord.ClientException(secret)
             ),
@@ -493,7 +513,7 @@ class TestRaffleContributionNotification:
         )
         bot = SimpleNamespace(
             _raffle_contribution_channel=None,
-            _config=SimpleNamespace(discord_command_guild_id=5678),
+            _config=default_config(),
             fetch_channel=AsyncMock(return_value=channel),
         )
 
@@ -522,6 +542,7 @@ class TestRaffleContributionNotification:
             send=AsyncMock(),
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             _get_raffle_contribution_channel=AsyncMock(return_value=channel),
         )
         embed = discord.Embed(title="Report")
@@ -548,6 +569,7 @@ class TestRaffleContributionNotification:
         boundary = datetime(2026, 6, 7, 6, tzinfo=UTC)
         report_end.return_value = boundary
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(return_value=True),
@@ -582,6 +604,7 @@ class TestRaffleContributionNotification:
         boundary = datetime(2026, 6, 7, 6, tzinfo=UTC)
         report_end.return_value = boundary
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(return_value=False),
@@ -616,6 +639,7 @@ class TestRaffleContributionNotification:
         boundary = datetime(2026, 6, 7, 6, tzinfo=UTC)
         report_end.return_value = boundary
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(side_effect=TimeoutError("secret-timeout")),
@@ -659,6 +683,7 @@ class TestRaffleContributionNotification:
         report_end.return_value = boundary
         error = TimeoutError("Discord unavailable")
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
             refresh_guild_log=AsyncMock(),

@@ -17,7 +17,7 @@ from gw2bot.events.posting import (
     cancel_occurrence,
     post_occurrence,
 )
-from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
+from gw2bot.config import DEFAULT_EVENT_CREATE_ROLE_ID as EVENT_CREATE_ROLE_ID
 from gw2bot.events.formatting import (
     format_event_datetime,
     next_occurrence_start,
@@ -89,7 +89,7 @@ from gw2bot.events.views import (
     start_signup_flow,
 )
 
-from factories import forbidden_error, not_found_error
+from factories import default_config, forbidden_error, not_found_error
 from test_event_posting import FakeBot, FakeChannel, FakeThread, FakeUser
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
@@ -98,7 +98,11 @@ FUTURE_START_TEXT = "01.30.2107 20:00"
 def make_bot() -> Any:
     return cast(
         Any,
-        SimpleNamespace(event_timezone=ZoneInfo("UTC"), event_store=None),
+        SimpleNamespace(
+            event_timezone=ZoneInfo("UTC"),
+            event_store=None,
+            _config=default_config(),
+        ),
     )
 
 

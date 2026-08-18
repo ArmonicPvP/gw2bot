@@ -9,7 +9,6 @@ import discord
 from discord import app_commands
 
 from gw2bot.discord_utils import user_has_role
-from gw2bot.raffle.roles import RAFFLE_OFFICER_ROLE_ID
 from gw2bot.trials.reports import format_track_audit
 
 if TYPE_CHECKING:
@@ -37,12 +36,15 @@ async def handle_check_command(
         "Trial member check command invoked by Discord user %s",
         getattr(getattr(interaction, "user", None), "id", "unknown"),
     )
-    if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+    if not user_has_role(
+        interaction.user,
+        bot._config.raffle_officer_role_id,
+    ):
         LOGGER.warning(
             "Rejected Trial member check command from Discord user %s; "
             "required role %s",
             getattr(getattr(interaction, "user", None), "id", "unknown"),
-            RAFFLE_OFFICER_ROLE_ID,
+            bot._config.raffle_officer_role_id,
         )
         await interaction.response.send_message(
             "You do not have the required role for this command.",
@@ -93,7 +95,10 @@ async def track_member_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+    if not user_has_role(
+        interaction.user,
+        bot._config.raffle_officer_role_id,
+    ):
         LOGGER.debug("Skipped track guild member autocomplete; authorized=false")
         return []
     if not bot.gw2_api_enabled:
@@ -122,12 +127,15 @@ async def handle_track_command(
         "Trial member track command invoked by Discord user %s",
         getattr(getattr(interaction, "user", None), "id", "unknown"),
     )
-    if not user_has_role(interaction.user, RAFFLE_OFFICER_ROLE_ID):
+    if not user_has_role(
+        interaction.user,
+        bot._config.raffle_officer_role_id,
+    ):
         LOGGER.warning(
             "Rejected Trial member track command from Discord user %s; "
             "required role %s",
             getattr(getattr(interaction, "user", None), "id", "unknown"),
-            RAFFLE_OFFICER_ROLE_ID,
+            bot._config.raffle_officer_role_id,
         )
         await interaction.response.send_message(
             "You do not have the required role for this command.",

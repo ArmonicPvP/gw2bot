@@ -20,7 +20,8 @@ from gw2bot.events.store import EventStore
 from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
 from gw2bot.web import server as server_module
-from gw2bot.web.server import FOOD_PAGE_ROLE_ID, WebServer
+from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
+from gw2bot.web.server import WebServer
 
 from unittest.mock import AsyncMock, MagicMock
 
