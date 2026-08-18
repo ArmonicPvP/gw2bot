@@ -40,6 +40,7 @@ from gw2bot.events.posting import (
     departed_roster_members,
     disable_auto_signup,
     merge_roster_updates,
+    notify_roster_update,
     occurrence_status,
     post_occurrence,
     prune_departed_signups,
@@ -50,6 +51,7 @@ from gw2bot.events.posting import (
     repost_occurrence,
     seat_signup,
 )
+from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
 
 from factories import forbidden_error, not_found_error
@@ -1159,6 +1161,39 @@ class TestCompleteSignup:
         overflow = await complete_signup(bot, event, occurrence, 51, None, ())
 
         assert overflow.waitlisted
+
+    async def test_general_seats_everyone_without_a_cap(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.GENERAL,
+        )
+        # Past the 50 seats WvW and Open World stop at: General has no cap, so
+        # every one of these is seated rather than waitlisted.
+        for user_id in range(1, 61):
+            signup = await complete_signup(
+                bot,
+                event,
+                occurrence,
+                user_id,
+                None,
+                (),
+            )
+            assert not signup.waitlisted
+            assert signup.assigned_role is None
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert len(signups) == 60
+        assert not any(signup.waitlisted for signup in signups)
+        # An uncapped roster never fills, so the status stays OPEN.
+        assert not is_roster_full(event.capacity, signups)
+        assert occurrence_status(event, occurrence, signups) is (
+            EventStatus.OPEN
+        )
 
     async def test_instanced_event_requires_a_role(
         self,
@@ -2549,6 +2584,116 @@ class TestFittingRolesReshuffle:
         assert not is_roster_full(RAID_CAPACITY, signups)
 
 
+class TestNotifyRosterUpdate:
+    @staticmethod
+    def promotion(discord_user_id: int) -> EventSignup:
+        return EventSignup(
+            occurrence_id=1,
+            discord_user_id=discord_user_id,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            signed_up_at=BEFORE_START,
+            waitlisted=False,
+        )
+
+    async def test_large_update_is_split_into_sendable_messages(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.GENERAL,
+        )
+        assert event.capacity.total is None
+        channel.thread.send.reset_mock()
+        # Switching a capped event to General promotes its whole waitlist in
+        # one update, which does not fit in a single Discord message.
+        update = RosterUpdate(
+            promoted=tuple(
+                self.promotion(10**17 + user_id) for user_id in range(120)
+            ),
+        )
+
+        await notify_roster_update(bot, occurrence, update)
+
+        contents = [
+            call.args[0] for call in channel.thread.send.await_args_list
+        ]
+        assert len(contents) > 1
+        assert all(len(content) <= 2_000 for content in contents)
+        joined = "\n".join(contents)
+        assert all(
+            f"<@{10**17 + user_id}>" in joined for user_id in range(120)
+        )
+
+    async def test_one_failed_part_still_sends_the_rest(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        _, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.GENERAL,
+        )
+        channel.thread.send.reset_mock()
+        attempts = 0
+
+        async def fail_the_first(content: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise forbidden_error(50001)
+
+        channel.thread.send.side_effect = fail_the_first
+        update = RosterUpdate(
+            promoted=tuple(
+                self.promotion(10**17 + user_id) for user_id in range(120)
+            ),
+        )
+        parts = len(roster_update_messages(update))
+        assert parts > 1
+
+        # The first message is rejected; the rest are still attempted, so the
+        # remaining members keep their notification.
+        await notify_roster_update(bot, occurrence, update)
+
+        assert channel.thread.send.await_count == parts
+
+    async def test_split_notification_logs_carry_no_message_body(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.GENERAL,
+        )
+        channel.thread.send = AsyncMock(side_effect=forbidden_error(50001))
+        update = RosterUpdate(
+            promoted=tuple(
+                self.promotion(10**17 + user_id) for user_id in range(120)
+            ),
+        )
+
+        with caplog.at_level("DEBUG"):
+            await notify_roster_update(bot, occurrence, update)
+
+        # The failure path reports counts and the exception type only; the
+        # rendered announcement never reaches the log.
+        for content in roster_update_messages(update):
+            assert content not in caplog.text
+        assert "Forbidden" in caplog.text
+
+
 class TestMergeRosterUpdates:
     def test_chains_role_changes_and_drops_identity_chains(self) -> None:
         first = RosterUpdate(
@@ -3391,6 +3536,51 @@ class TestRebalanceOccurrenceRoster:
         assert not is_roster_full(fractal.capacity, signups)
         # A further DPS no longer fits, so the overfill is closed.
         assert EventRole.DPS not in fitting_roles(fractal.capacity, signups)
+
+    def test_moving_to_general_seats_the_whole_waitlist(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.FRACTAL)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        for user_id in range(1, 5):
+            self.seat(
+                store,
+                occurrence.occurrence_id,
+                user_id,
+                EventRole.DPS,
+                EventRole.DPS,
+            )
+        for user_id in range(5, 9):
+            self.seat(
+                store,
+                occurrence.occurrence_id,
+                user_id,
+                EventRole.DPS,
+                None,
+                waitlisted=True,
+            )
+        general = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.GENERAL,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        rebalance_occurrence_roster(bot, general, occurrence)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        # No cap left to hold anyone back, and no roles left to assign.
+        assert not any(signup.waitlisted for signup in signups)
+        assert all(signup.assigned_role is None for signup in signups)
+        assert not is_roster_full(general.capacity, signups)
 
     def test_shrinking_capacity_waitlists_the_overflow_in_signup_order(
         self,

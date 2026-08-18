@@ -45,7 +45,9 @@ class CalendarEntry:
     dps: int
     quickness: int
     alacrity: int
-    capacity_total: int
+    # None for an uncapped category (General): the page shows a plain headcount
+    # rather than a "seated of total" ratio.
+    capacity_total: int | None
     has_roles: bool
 
 

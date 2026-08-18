@@ -7,6 +7,7 @@ import pytest
 from gw2bot.events.formatting import (
     DRAFT_PENDING_TEXT,
     EMBED_TOTAL_LIMIT,
+    ROSTER_UPDATE_HEADER,
     WAITLIST_EMOJI,
     compute_status,
     confirm_embed,
@@ -21,9 +22,10 @@ from gw2bot.events.formatting import (
     parse_event_datetime,
     parse_event_duration,
     parse_repeat_days,
-    roster_update_message,
+    roster_update_messages,
     signup_edit_limit_message,
 )
+from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
     CATEGORY_EMOJI,
@@ -100,6 +102,14 @@ class TestEventCategories:
         assert capacity == CATEGORY_CAPACITIES[EventCategory.WVW]
         assert not capacity.has_roles
         assert capacity.total == 50
+
+    def test_general_is_role_less_and_uncapped(self) -> None:
+        capacity = CATEGORY_CAPACITIES[EventCategory.GENERAL]
+
+        # Same shape as WvW - one participants list, no roles or boons - but
+        # without the headcount, so nobody is ever turned away.
+        assert not capacity.has_roles
+        assert capacity.total is None
 
 
 class TestParseEventDatetime:
@@ -339,10 +349,10 @@ class TestRosterUpdateMessage:
             ),
         )
 
-        message = roster_update_message(update)
+        messages = roster_update_messages(update)
 
-        assert message is not None
-        lines = message.splitlines()
+        assert len(messages) == 1
+        lines = messages[0].splitlines()
         assert lines[0] == "🔀 **Roster update**"
         assert "<@11>" in lines[1]
         assert EventRole.QUICKNESS_DPS.value in lines[1]
@@ -356,14 +366,43 @@ class TestRosterUpdateMessage:
     def test_role_less_promotion_omits_the_seat(self) -> None:
         update = RosterUpdate(promoted=(make_signup(12),))
 
-        message = roster_update_message(update)
+        messages = roster_update_messages(update)
 
-        assert message is not None
-        assert "<@12> moved up from the waitlist" in message
-        assert " as " not in message
+        assert len(messages) == 1
+        assert "<@12> moved up from the waitlist" in messages[0]
+        assert " as " not in messages[0]
 
     def test_empty_update_produces_no_message(self) -> None:
-        assert roster_update_message(RosterUpdate()) is None
+        assert roster_update_messages(RosterUpdate()) == []
+
+    def test_large_promotion_batch_splits_across_messages(self) -> None:
+        # Switching a capped event to the uncapped General category promotes
+        # the whole waitlist at once, which outgrows a single Discord message.
+        update = RosterUpdate(
+            promoted=tuple(
+                make_signup(10**17 + user_id) for user_id in range(120)
+            ),
+        )
+
+        messages = roster_update_messages(update)
+
+        assert len(messages) > 1
+        assert all(
+            len(message) <= DISCORD_MESSAGE_LIMIT for message in messages
+        )
+        # Every promotion is announced exactly once, and each part reads as a
+        # roster update on its own.
+        assert all(
+            message.startswith(ROSTER_UPDATE_HEADER) for message in messages
+        )
+        lines = [
+            line
+            for message in messages
+            for line in message.splitlines()
+            if line != ROSTER_UPDATE_HEADER
+        ]
+        assert len(lines) == 120
+        assert len(set(lines)) == 120
 
 
 class TestSignupEditLimitMessage:
@@ -529,6 +568,24 @@ class TestEventEmbed:
         assert not any(name.startswith("Boons") for name in names)
         values = {field.name: field.value for field in embed.fields}
         assert values["👥 Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+
+    def test_general_embed_lists_participants_without_a_cap(self) -> None:
+        event = make_event(EventCategory.GENERAL)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert embed.title == (
+            f"{CATEGORY_EMOJI[EventCategory.GENERAL]} Kitty Cleanup"
+        )
+        names = [field.name or "" for field in embed.fields]
+        # No denominator: an uncapped roster has no total to count towards.
+        assert "👥 Participants (3)" in names
+        assert not any("Healer" in name for name in names)
+        assert not any(name.startswith("Boons") for name in names)
+        assert not any(WAITLIST_EMOJI in name for name in names)
+        values = {field.name: field.value for field in embed.fields}
+        assert values["👥 Participants (3)"] == "└ <@1>\n└ <@2>\n└ <@3>"
 
     def test_wvw_participant_list_chunks_below_field_value_limit(self) -> None:
         event = make_event(EventCategory.WVW)
