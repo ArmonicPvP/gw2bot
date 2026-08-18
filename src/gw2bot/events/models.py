@@ -14,6 +14,7 @@ EMOJI_STRIKE = "<:strike:1525431254340866171>"
 EMOJI_WVW = "<:wvw:1525431137982353428>"
 EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
 EMOJI_OPEN_WORLD = "🌍"
+EMOJI_GENERAL = "📋"
 
 
 class EventCategory(StrEnum):
@@ -22,6 +23,7 @@ class EventCategory(StrEnum):
     FRACTAL = "Fractal"
     WVW = "World vs. World"
     OPEN_WORLD = "Open World"
+    GENERAL = "General"
 
 
 CATEGORY_EMOJI: dict[EventCategory, str] = {
@@ -30,6 +32,7 @@ CATEGORY_EMOJI: dict[EventCategory, str] = {
     EventCategory.FRACTAL: EMOJI_FRACTAL,
     EventCategory.WVW: EMOJI_WVW,
     EventCategory.OPEN_WORLD: EMOJI_OPEN_WORLD,
+    EventCategory.GENERAL: EMOJI_GENERAL,
 }
 
 
@@ -120,7 +123,10 @@ class AutoSignupChoice(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CategoryCapacity:
-    total: int
+    # None means the roster never fills: a General event takes everyone, so
+    # there is no seat count to compare a headcount against and nobody is ever
+    # sent to the waitlist. Role-based categories always carry a number.
+    total: int | None
     healers: int | None
     dps: int | None
     quickness: int | None
@@ -168,6 +174,9 @@ CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
     # Open world squads are the same shape as WvW: a plain 50-seat headcount
     # with no role or boon requirements.
     EventCategory.OPEN_WORLD: CategoryCapacity(50, None, None, None, None),
+    # General events are the WvW shape without the headcount: one participants
+    # list, no roles, no boons, and no cap, so every signup is seated.
+    EventCategory.GENERAL: CategoryCapacity(None, None, None, None, None),
 }
 
 
@@ -424,7 +433,7 @@ def roster_feasible(
     number of role combinations.
     """
     if not capacity.has_roles:
-        return len(acceptable) <= capacity.total
+        return capacity.total is None or len(acceptable) <= capacity.total
     healer_cap = capacity.healers or 0
     dps_cap = capacity.dps or 0
     quickness_cap = capacity.quickness or 0
@@ -577,7 +586,9 @@ def is_roster_full(
     # reading as open rather than done.
     counts = count_roster(signups)
     if not capacity.has_roles:
-        return counts.active >= capacity.total
+        # An uncapped roster is never full, so its status stays OPEN until the
+        # occurrence starts.
+        return capacity.total is not None and counts.active >= capacity.total
     return (
         counts.healers >= (capacity.healers or 0)
         and counts.dps >= (capacity.dps or 0)
@@ -595,9 +606,10 @@ def rebalance_signups(
     A signup's assigned_role and waitlisted flag only mean anything relative to
     the capacity it was seated against, so changing an event's category
     invalidates every stored assignment. The worst case is a role-less category
-    (WvW, Open World), whose signups carry no assigned_role at all: a role-based
-    capacity reads that roster as zero healers and zero DPS and keeps admitting
-    on top of it, so the roster overfills and the embed shows seats nobody holds.
+    (WvW, Open World, General), whose signups carry no assigned_role at all: a
+    role-based capacity reads that roster as zero healers and zero DPS and keeps
+    admitting on top of it, so the roster overfills and the embed shows seats
+    nobody holds.
 
     Signups are re-seated in sign-up order, so seats stay first come, first
     served. Each is offered its own role and flex roles, widened with a plain
@@ -610,7 +622,8 @@ def rebalance_signups(
     during normal signups.
 
     Moving *to* a role-less category clears the assignments instead: seats there
-    are plain headcount.
+    are plain headcount, and an uncapped one (General) also seats every
+    waitlisted member, because there is no cap left to hold them back.
     """
     if not capacity.has_roles:
         reseated: list[EventSignup] = []
@@ -620,7 +633,8 @@ def rebalance_signups(
                     signup,
                     assigned_role=None,
                     waitlisted=(
-                        count_roster(reseated).active >= capacity.total
+                        capacity.total is not None
+                        and count_roster(reseated).active >= capacity.total
                     ),
                 )
             )

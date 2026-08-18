@@ -1091,7 +1091,8 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
       return;
     }
     tooltip.appendChild(el("div", "row",
-      "Participants: " + entry.active_count + "/" + entry.capacity_total));
+      "Participants: " + entry.active_count +
+      (entry.capacity_total === null ? "" : "/" + entry.capacity_total)));
     if (entry.has_roles) {
       tooltip.appendChild(el("div", "row",
         "Healers " + entry.healers + " \\u00b7 DPS " + entry.dps +

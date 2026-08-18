@@ -147,6 +147,31 @@ class TestMaterializedEntries:
         assert entry.healers == 0
         assert entry.dps == 0
 
+    def test_general_entry_reports_an_absent_capacity(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.GENERAL)
+        store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert len(entries) == 1
+        entry = entries[0]
+        assert not entry.has_roles
+        # None rather than a number: the page drops the denominator instead of
+        # printing a cap the event does not have.
+        assert entry.capacity_total is None
+
     def test_past_occurrence_is_reported_over(
         self,
         store: EventStore,

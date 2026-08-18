@@ -101,6 +101,14 @@ class TestEventCategories:
         assert not capacity.has_roles
         assert capacity.total == 50
 
+    def test_general_is_role_less_and_uncapped(self) -> None:
+        capacity = CATEGORY_CAPACITIES[EventCategory.GENERAL]
+
+        # Same shape as WvW - one participants list, no roles or boons - but
+        # without the headcount, so nobody is ever turned away.
+        assert not capacity.has_roles
+        assert capacity.total is None
+
 
 class TestParseEventDatetime:
     def test_interprets_input_in_the_configured_timezone(self) -> None:
@@ -529,6 +537,24 @@ class TestEventEmbed:
         assert not any(name.startswith("Boons") for name in names)
         values = {field.name: field.value for field in embed.fields}
         assert values["👥 Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+
+    def test_general_embed_lists_participants_without_a_cap(self) -> None:
+        event = make_event(EventCategory.GENERAL)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert embed.title == (
+            f"{CATEGORY_EMOJI[EventCategory.GENERAL]} Kitty Cleanup"
+        )
+        names = [field.name or "" for field in embed.fields]
+        # No denominator: an uncapped roster has no total to count towards.
+        assert "👥 Participants (3)" in names
+        assert not any("Healer" in name for name in names)
+        assert not any(name.startswith("Boons") for name in names)
+        assert not any(WAITLIST_EMOJI in name for name in names)
+        values = {field.name: field.value for field in embed.fields}
+        assert values["👥 Participants (3)"] == "└ <@1>\n└ <@2>\n└ <@3>"
 
     def test_wvw_participant_list_chunks_below_field_value_limit(self) -> None:
         event = make_event(EventCategory.WVW)

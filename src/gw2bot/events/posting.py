@@ -1662,10 +1662,13 @@ def _resettle_roster(
         assignments: list[RosterAssignment] = []
         promoted: list[EventSignup] = []
         active = sum(1 for signup in signups if not signup.waitlisted)
+        # An uncapped category (General) has no seat to run out of, so every
+        # waitlisted member is promoted.
+        capacity_total = event.capacity.total
         for signup in signups:
             if not signup.waitlisted:
                 continue
-            if active >= event.capacity.total:
+            if capacity_total is not None and active >= capacity_total:
                 break
             assignments.append(
                 RosterAssignment(

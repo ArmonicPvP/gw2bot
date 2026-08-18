@@ -1160,6 +1160,39 @@ class TestCompleteSignup:
 
         assert overflow.waitlisted
 
+    async def test_general_seats_everyone_without_a_cap(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.GENERAL,
+        )
+        # Past the 50 seats WvW and Open World stop at: General has no cap, so
+        # every one of these is seated rather than waitlisted.
+        for user_id in range(1, 61):
+            signup = await complete_signup(
+                bot,
+                event,
+                occurrence,
+                user_id,
+                None,
+                (),
+            )
+            assert not signup.waitlisted
+            assert signup.assigned_role is None
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert len(signups) == 60
+        assert not any(signup.waitlisted for signup in signups)
+        # An uncapped roster never fills, so the status stays OPEN.
+        assert not is_roster_full(event.capacity, signups)
+        assert occurrence_status(event, occurrence, signups) is (
+            EventStatus.OPEN
+        )
+
     async def test_instanced_event_requires_a_role(
         self,
         bot: Any,
@@ -3391,6 +3424,51 @@ class TestRebalanceOccurrenceRoster:
         assert not is_roster_full(fractal.capacity, signups)
         # A further DPS no longer fits, so the overfill is closed.
         assert EventRole.DPS not in fitting_roles(fractal.capacity, signups)
+
+    def test_moving_to_general_seats_the_whole_waitlist(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.FRACTAL)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        for user_id in range(1, 5):
+            self.seat(
+                store,
+                occurrence.occurrence_id,
+                user_id,
+                EventRole.DPS,
+                EventRole.DPS,
+            )
+        for user_id in range(5, 9):
+            self.seat(
+                store,
+                occurrence.occurrence_id,
+                user_id,
+                EventRole.DPS,
+                None,
+                waitlisted=True,
+            )
+        general = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.GENERAL,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        rebalance_occurrence_roster(bot, general, occurrence)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        # No cap left to hold anyone back, and no roles left to assign.
+        assert not any(signup.waitlisted for signup in signups)
+        assert all(signup.assigned_role is None for signup in signups)
+        assert not is_roster_full(general.capacity, signups)
 
     def test_shrinking_capacity_waitlists_the_overflow_in_signup_order(
         self,

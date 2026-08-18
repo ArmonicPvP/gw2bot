@@ -19,6 +19,7 @@ from gw2bot.events.models import (
     SIGNUP_EDIT_REFILL_SECONDS,
     STATUS_COLORS,
     STATUS_EMOJI,
+    CategoryCapacity,
     Event,
     EventCategory,
     EventRole,
@@ -418,6 +419,14 @@ def _embed_title(category: EventCategory | None, title: str) -> str:
     return f"{prefix}{title}"
 
 
+def _participants_name(count: int, capacity: CategoryCapacity) -> str:
+    # An uncapped category (General) has no denominator to show, so the header
+    # is a plain headcount rather than "n/None".
+    if capacity.total is None:
+        return f"👥 Participants ({count})"
+    return f"👥 Participants ({count}/{capacity.total})"
+
+
 def event_embed(
     event: Event,
     signups: list[EventSignup],
@@ -455,7 +464,7 @@ def event_embed(
     if capacity.has_roles:
         counts = count_roster(signups)
         embed.add_field(
-            name=f"👥 Participants ({counts.active}/{capacity.total})",
+            name=_participants_name(counts.active, capacity),
             value="​",
             inline=False,
         )
@@ -518,7 +527,7 @@ def event_embed(
     else:
         _add_chunked_field(
             embed,
-            f"👥 Participants ({len(active)}/{capacity.total})",
+            _participants_name(len(active), capacity),
             [_member_line(signup) for signup in active],
         )
         if waitlisted:

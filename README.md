@@ -190,11 +190,15 @@ The category fixes the squad, and the bot enforces it:
 | Fractal | 5 | 1 | 4 | 1 | 1 |
 | World vs. World | 50 | — | — | — | — |
 | Open World | 50 | — | — | — | — |
+| General | No limit | — | — | — | — |
 
 Raid, Strike, and Fractal events are role-based: members pick one of Just DPS,
 Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and the healer,
-DPS, quickness, and alacrity caps are all honoured at once. World vs. World and
-Open World events are a plain headcount with no roles to pick.
+DPS, quickness, and alacrity caps are all honoured at once. World vs. World,
+Open World, and General events are a plain headcount with no roles to pick.
+General has no squad size at all: everyone who signs up is seated, so it never
+fills and never waitlists anyone, and its embed shows the participant count on
+its own rather than as a share of a total.
 
 ### Signing Up
 
@@ -207,8 +211,9 @@ or as a waitlist-only pick, before it is chosen. A member is seated in their
 main role when it still fits; otherwise a flex role is used, and the bot fills
 the scarcer seats first, so a flexer lands on an open heal or boon seat before a
 plain DPS one. When no acceptable seat is free the member joins the waitlist,
-marked ⌛️ in the embed. A World vs. World or Open World event has no roles to
-pick, so one click seats the member or waitlists them.
+marked ⌛️ in the embed. A World vs. World, Open World, or General event has no
+roles to pick, so one click seats the member or waitlists them — and on a
+General event it always seats them.
 
 Seats are re-shuffled on every roster change: signing out promotes waitlisted
 members and can move seated members between their acceptable roles to make room,
