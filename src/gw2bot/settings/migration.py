@@ -127,10 +127,16 @@ def _importable(
 
 
 def legacy_variables_present(env: Mapping[str, str]) -> tuple[str, ...]:
-    """Legacy variables still set in the environment, in definition order."""
+    """Legacy variables worth warning about, in definition order.
+
+    A variable the container itself uses is imported like any other but left
+    out here: the warning tells the operator to delete what it names, and TZ
+    also sets the container's clock and log timestamps.
+    """
     return tuple(
         definition.legacy_variable
         for definition in LEGACY_SETTINGS
         if definition.legacy_variable is not None
+        and definition.warn_when_present
         and env.get(definition.legacy_variable, "").strip()
     )

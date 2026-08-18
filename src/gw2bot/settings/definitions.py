@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -67,6 +68,11 @@ class SettingDefinition:
     description: str
     parse: Callable[[str], object]
     legacy_variable: str | None = None
+    # Whether a leftover legacy_variable earns the "remove this from the
+    # environment" warning. False for a variable the container itself uses:
+    # the value is still imported once, but telling an operator to delete it
+    # would break something the bot does not own.
+    warn_when_present: bool = True
     group: str | None = None
     encrypted: bool = False
     default: object = None
@@ -117,6 +123,26 @@ def _parse_discord_id(name: str) -> Callable[[str], object]:
         return positive(cleaned)
 
     return parse
+
+
+def _parse_guild_id(value: str) -> object:
+    """A Guild Wars 2 guild id, which is always a GUID.
+
+    Worth checking rather than accepting any text: the raffle ledger records
+    the first guild id it is given and refuses a different one afterwards, so
+    a typo claims the database for a guild that does not exist and the correct
+    id is refused from then on.
+    """
+    guild_id = value.strip()
+    try:
+        uuid.UUID(guild_id)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "gw2_guild_id must be the guild's id from "
+            "/v2/account.guild_leader, which looks like "
+            "116E0C0E-0035-44A9-BB22-4AE3E23127E5"
+        ) from exc
+    return guild_id
 
 
 def _parse_text(name: str) -> Callable[[str], object]:
@@ -190,9 +216,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         description=(
             "Guild id listed in /v2/account.guild_leader. The API key must "
             "lead this guild. The raffle database records the first guild id "
-            "it is given and refuses a different one afterwards."
+            "it is given and refuses a different one afterwards, so it is "
+            "checked against the API before it is stored."
         ),
-        parse=_parse_text("gw2_guild_id"),
+        parse=_parse_guild_id,
     ),
     SettingDefinition(
         name="feast_notification_user_id",
@@ -242,11 +269,16 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         name="timezone",
         field="event_timezone",
         legacy_variable="TZ",
+        # TZ is read once on upgrade and then never again, but it is also the
+        # variable the container uses for its own clock and log timestamps, so
+        # it must not be named in the "remove these" warning.
+        warn_when_present=False,
         default="UTC",
         description=(
             "IANA timezone name used to read the times typed into /event new, "
             "to name event threads, and to define which day a weekly repeat "
-            "falls on. For example America/New_York."
+            "falls on. For example America/New_York. Taken from TZ once on "
+            "upgrade; leave TZ set, because the container uses it too."
         ),
         parse=_parse_timezone,
     ),

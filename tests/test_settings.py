@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import stat
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import discord
 import pytest
 from cryptography.fernet import Fernet
@@ -22,7 +24,11 @@ from factories import (
 from gw2bot.config import BootstrapConfig, ConfigurationError
 from gw2bot.logging_setup import RedactingFormatter, SecretRegistry
 from gw2bot.raffle import RaffleStore
-from gw2bot.settings.commands import SettingsCommands, chunk_lines
+from gw2bot.settings.commands import (
+    SettingsCommands,
+    _autocomplete_for,
+    chunk_lines,
+)
 from gw2bot.settings.composition import compose_config
 from gw2bot.settings.crypto import (
     ENCRYPTION_KEY_VARIABLE,
@@ -53,6 +59,10 @@ BOOTSTRAP = BootstrapConfig(
 )
 
 OFFICER_ROLE_ID = default_config().raffle_officer_role_id
+# Guild Wars 2 guild ids are GUIDs, and /settings now checks the shape,
+# so the tests use ids the parser accepts rather than readable labels.
+FIRST_GUILD = "116e0c0e-0035-44a9-bb22-4ae3e23127e5"
+SECOND_GUILD = "22c7b3a1-9f4e-4d18-8a05-6b1c0f2d7e93"
 # Discord's own rules for a slash command name.
 COMMAND_NAME_PATTERN = re.compile(r"^[-_a-z0-9]{1,32}$")
 
@@ -397,6 +407,19 @@ class TestLegacyEnvironmentImport:
         assert set(imported) == {"GW2_API_KEY", "TZ"}
         assert store.get_raw(definition_for("gw2_api_key")) == "gw2-secret"
         assert store.get_raw(definition_for("timezone")) == "America/New_York"
+
+    def test_tz_is_imported_even_though_it_is_never_warned_about(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        # The two behaviours are separate on purpose: an upgrade still picks
+        # up the operator's timezone, but the warning must not tell them to
+        # delete the variable their container uses for its own clock.
+        imported = import_legacy_environment(store, {"TZ": "America/New_York"})
+
+        assert imported == ("TZ",)
+        assert store.get_raw(definition_for("timezone")) == "America/New_York"
+        assert legacy_variables_present({"TZ": "America/New_York"}) == ()
 
     def test_runs_only_once(self, store: SettingsStore) -> None:
         environment = {"GW2_API_KEY": "gw2-secret"}
@@ -836,6 +859,12 @@ def _fake_bot(tmp_path: Path | None = None) -> Any:
     return SimpleNamespace(
         _config=default_config(),
         settings_store=store,
+        # No API client by default: the guild id check skips its API arm
+        # rather than reaching for a network nothing has configured.
+        _api=None,
+        # An unclaimed ledger, which is the state a fresh install is in and
+        # the one the guild id check has to get right.
+        raffle_store=SimpleNamespace(bound_guild=MagicMock(return_value=None)),
         apply_settings_change=AsyncMock(return_value=[]),
         fetch_channel=AsyncMock(side_effect=AssertionError("unexpected fetch")),
     )
@@ -1137,10 +1166,10 @@ class TestReviewFindings:
         # Finding out only while applying would leave the new id persisted and
         # the bot unable to start next time, with no command there to say why.
         commands, bot = _commands(tmp_path)
-        bot.raffle_store = SimpleNamespace(bound_guild=lambda: "first-guild")
+        bot.raffle_store = SimpleNamespace(bound_guild=lambda: FIRST_GUILD)
         interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
 
-        await _run(commands, "gw2_guild_id", interaction, "second-guild")
+        await _run(commands, "gw2_guild_id", interaction, SECOND_GUILD)
         stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
         bot.settings_store.close()
 
@@ -1153,14 +1182,14 @@ class TestReviewFindings:
         tmp_path: Path,
     ) -> None:
         commands, bot = _commands(tmp_path)
-        bot.raffle_store = SimpleNamespace(bound_guild=lambda: "first-guild")
+        bot.raffle_store = SimpleNamespace(bound_guild=lambda: FIRST_GUILD)
         interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
 
-        await _run(commands, "gw2_guild_id", interaction, "first-guild")
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
         stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
         bot.settings_store.close()
 
-        assert stored == "first-guild"
+        assert stored == FIRST_GUILD
 
     async def test_a_value_that_cannot_be_applied_is_rolled_back(
         self,
@@ -1234,12 +1263,12 @@ class TestGuildIdImportGuard:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        store = self._bound_store(tmp_path, "first-guild")
+        store = self._bound_store(tmp_path, FIRST_GUILD)
 
         with caplog.at_level(logging.WARNING, logger="gw2bot"):
             imported = import_legacy_environment(
                 store,
-                {"GW2_GUILD_ID": "second-guild", "GW2_API_KEY": "gw2-secret"},
+                {"GW2_GUILD_ID": SECOND_GUILD, "GW2_API_KEY": "gw2-secret"},
             )
         guild_id = store.get_raw(definition_for("gw2_guild_id"))
         api_key = store.get_raw(definition_for("gw2_api_key"))
@@ -1255,23 +1284,23 @@ class TestGuildIdImportGuard:
         self,
         tmp_path: Path,
     ) -> None:
-        store = self._bound_store(tmp_path, "first-guild")
+        store = self._bound_store(tmp_path, FIRST_GUILD)
 
-        imported = import_legacy_environment(store, {"GW2_GUILD_ID": "first-guild"})
+        imported = import_legacy_environment(store, {"GW2_GUILD_ID": FIRST_GUILD})
         guild_id = store.get_raw(definition_for("gw2_guild_id"))
         store.close()
 
         assert imported == ("GW2_GUILD_ID",)
-        assert guild_id == "first-guild"
+        assert guild_id == FIRST_GUILD
 
     def test_imports_a_guild_id_when_the_ledger_is_unclaimed(
         self,
         store: SettingsStore,
     ) -> None:
-        assert import_legacy_environment(store, {"GW2_GUILD_ID": "any-guild"}) == (
+        assert import_legacy_environment(store, {"GW2_GUILD_ID": FIRST_GUILD}) == (
             "GW2_GUILD_ID",
         )
-        assert store.get_raw(definition_for("gw2_guild_id")) == "any-guild"
+        assert store.get_raw(definition_for("gw2_guild_id")) == FIRST_GUILD
 
 
 class TestDatabaseFailuresDuringAChange:
@@ -1397,10 +1426,281 @@ class TestLedgerReadFailure:
         )
         interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
 
-        await _run(commands, "gw2_guild_id", interaction, "some-guild")
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
         stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
         bot.settings_store.close()
 
         assert not stored
         assert "could not be read" in settings_reply(interaction)
         bot.apply_settings_change.assert_not_awaited()
+
+
+class TestSettingsAutocomplete:
+    """The wrapper promises never to raise; these are the ways it could.
+
+    An autocomplete that raises shows the officer a Discord error instead of
+    suggestions, on a command whose whole point is that nobody has to paste a
+    snowflake by hand.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            aiohttp.ClientError("connection reset"),
+            asyncio.TimeoutError(),
+            discord.DiscordException("forbidden"),
+        ],
+        ids=["transport", "timeout", "discord"],
+    )
+    async def test_a_failure_reaching_discord_yields_no_choices(
+        self,
+        tmp_path: Path,
+        error: Exception,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        # The forum-tag branch is the only one that leaves the process, and
+        # fetch_channel raises transport errors that are not DiscordException.
+        bot.fetch_channel = AsyncMock(side_effect=error)
+        autocomplete = _autocomplete_for(
+            commands,
+            definition_for("trial_accepted_tag", CHANNELS_GROUP),
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        choices = await autocomplete(cast(discord.Interaction, interaction), "")
+        bot.settings_store.close()
+
+        assert choices == []
+
+    async def test_an_unauthorized_caller_is_offered_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        autocomplete = _autocomplete_for(commands, definition_for("timezone"))
+        interaction = settings_interaction()
+
+        choices = await autocomplete(cast(discord.Interaction, interaction), "")
+        bot.settings_store.close()
+
+        assert choices == []
+
+    async def test_roles_are_offered_by_name(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        guild = SimpleNamespace(
+            id=5678,
+            owner_id=999,
+            roles=(
+                SimpleNamespace(id=11, name="Officers", is_default=lambda: False),
+                SimpleNamespace(id=12, name="Members", is_default=lambda: False),
+                SimpleNamespace(id=13, name="@everyone", is_default=lambda: True),
+            ),
+            channels=(),
+            get_role=lambda role_id: None,
+            get_channel=lambda channel_id: None,
+        )
+        autocomplete = _autocomplete_for(
+            commands,
+            definition_for("raffle_officer", ROLES_GROUP),
+        )
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=guild,
+        )
+
+        choices = await autocomplete(
+            cast(discord.Interaction, interaction),
+            "offic",
+        )
+        bot.settings_store.close()
+
+        # @everyone is filtered out: it is not a role anybody means to name,
+        # and offering it would suggest a gate that lets the server through.
+        assert [(choice.name, choice.value) for choice in choices] == [
+            ("Officers", "11")
+        ]
+
+
+class TestUnreadableStoredValues:
+    """A row the parser rejects must not read as a value somebody chose.
+
+    compose_config drops it and falls back to the default, logging to the
+    console. Without a signal on screen, /settings reports the default as set
+    and the officer has no way to tell why their change did nothing.
+    """
+
+    async def test_the_single_setting_reply_says_it_could_not_be_read(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        # Written straight to the store: the command would have refused it,
+        # but a hand-edited database or a parser tightened in a later release
+        # both land here.
+        bot.settings_store.set_raw(definition_for("timezone"), "Not/A/Zone")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, None)
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert "could not be read" in reply
+        assert "set it again" in reply
+        # The running value is still shown, because that is what the bot is
+        # actually using.
+        assert "`UTC`" in reply
+
+    async def test_the_list_marks_it_unreadable(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        bot.settings_store.set_raw(definition_for("timezone"), "Not/A/Zone")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "list", interaction, None)
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert "(unreadable)" in reply
+        assert "`timezone` — `UTC` (default" in reply
+
+    async def test_a_readable_row_still_reads_as_set(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        bot._config = default_config(event_timezone="Europe/Berlin")
+
+        listing = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        await _run(commands, "list", listing, None)
+        bot.settings_store.close()
+
+        reply = settings_reply(listing)
+        assert "`timezone` — `Europe/Berlin` (set)" in reply
+        assert "unreadable" not in reply
+
+
+class TestGuildIdVerification:
+    """A wrong guild id has to be caught before it claims the ledger.
+
+    RaffleStore records the first guild id it is given and refuses a different
+    one from then on, with no unbind. So the checks here are not politeness -
+    they are the only chance to stop a typo costing the guild its ledger.
+    """
+
+    async def test_a_value_that_is_not_a_guid_is_refused(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, "my-guild")
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert not stored
+        assert "116E0C0E" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()
+
+    async def test_a_guild_the_key_does_not_lead_is_refused(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot._api = SimpleNamespace(
+            get_account=AsyncMock(return_value={"guild_leader": [SECOND_GUILD]})
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert not stored
+        assert "does not lead a guild with that id" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()
+
+    async def test_a_guild_the_key_leads_is_accepted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot._api = SimpleNamespace(
+            get_account=AsyncMock(
+                return_value={"guild_leader": [SECOND_GUILD, FIRST_GUILD]}
+            )
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+        bot.apply_settings_change.assert_awaited_once()
+
+    async def test_without_an_api_key_the_shape_alone_decides(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Setting the guild id before the key is an ordinary order to do it
+        # in, and refusing until a key exists would make the pair impossible
+        # to configure from a clean install.
+        commands, bot = _commands(tmp_path)
+        assert bot._api is None
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+
+    @pytest.mark.parametrize(
+        "error",
+        [aiohttp.ClientError("connection reset"), asyncio.TimeoutError()],
+        ids=["transport", "timeout"],
+    )
+    async def test_an_api_outage_does_not_block_the_change(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        error: Exception,
+    ) -> None:
+        # The shape check has already run, and refusing here would mean an
+        # API outage stopped an officer from correcting a setting.
+        commands, bot = _commands(tmp_path)
+        bot._api = SimpleNamespace(get_account=AsyncMock(side_effect=error))
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+        assert "storing it unchecked" in caplog.text
+
+    async def test_the_ledger_binding_is_checked_before_the_api(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # A ledger that already belongs elsewhere is refused whatever the API
+        # says, and the API is not asked - the answer cannot change it.
+        commands, bot = _commands(tmp_path)
+        bot.raffle_store = SimpleNamespace(
+            bound_guild=MagicMock(return_value=SECOND_GUILD)
+        )
+        bot._api = SimpleNamespace(
+            get_account=AsyncMock(return_value={"guild_leader": [FIRST_GUILD]})
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert not stored
+        assert "already belongs to a different guild" in settings_reply(interaction)
+        bot._api.get_account.assert_not_awaited()

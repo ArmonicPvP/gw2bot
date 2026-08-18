@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
@@ -42,6 +44,11 @@ MESSAGE_LIMIT = 1900
 # Anything that is only whitespace clears the setting, which is how the
 # request describes it: "a space or nothing means unset".
 UNSET_INPUT = ""
+
+# Shown instead of "(set)" when a row exists but its text no longer parses.
+# compose_config has already fallen back to the default, so the value on
+# screen is real - it is the claim that somebody chose it that would be false.
+UNREADABLE_NOTE = "default — the stored value could not be read; set it again"
 
 # _apply's "no previous value was captured, so do not roll back" marker. None
 # is a real previous value - it means the setting was unset - so it cannot
@@ -444,11 +451,12 @@ class SettingsCommands(app_commands.Group):
             if group is not None:
                 lines.append(f"\n__/settings {group}__")
             for definition in definitions:
-                source = (
-                    "set"
-                    if self._bot.settings_store.is_set(definition)
-                    else "default"
-                )
+                if not self._bot.settings_store.is_set(definition):
+                    source = "default"
+                elif self._stored_value_parses(definition):
+                    source = "set"
+                else:
+                    source = "unreadable"
                 lines.append(
                     f"`{definition.name}` — {self._display_value(definition)} "
                     f"({source})"
@@ -471,7 +479,32 @@ class SettingsCommands(app_commands.Group):
         current = getattr(self._bot._config, definition.field, None)
         if current is None:
             return UNSET_DISPLAY
+        if is_set and not self._stored_value_parses(definition):
+            return f"`{current}` ({UNREADABLE_NOTE})"
         return f"`{current}`" if is_set else f"`{current}` (default)"
+
+    def _stored_value_parses(self, definition: SettingDefinition) -> bool:
+        """Whether the stored text is the value the bot is actually running.
+
+        compose_config drops a stored value its parser rejects and falls back
+        to the default, logging it to the console. Without this the row would
+        still read as set here and the reply would show the default as though
+        somebody had chosen it - which is the one question /settings list
+        exists to answer.
+        """
+        raw = self._bot.settings_store.get_raw(definition)
+        if raw is None:
+            # Either nothing is stored, or it is an encrypted row this key
+            # cannot read; the caller answered for both before reaching here.
+            return True
+        try:
+            definition.parse(raw)
+        except Exception:
+            # Deliberately as broad as compose_config's own catch: a parser
+            # may raise anything, and the two have to agree on what counts as
+            # unusable or the display would contradict the running config.
+            return False
+        return True
 
     def _fallback_note(self, definition: SettingDefinition) -> str:
         # No secret's value is printed here either. None of them has a
@@ -502,7 +535,7 @@ class SettingsCommands(app_commands.Group):
         so an id that cannot be resolved is refused instead.
         """
         if definition.field == "gw2_guild_id" and isinstance(parsed, str):
-            return self._validate_guild_id(parsed)
+            return await self._validate_guild_id(parsed)
         if definition.validates is None or not isinstance(parsed, int):
             return None
         guild = interaction.guild
@@ -520,13 +553,15 @@ class SettingsCommands(app_commands.Group):
             return await self._validate_forum_tag(parsed)
         return await self._validate_channel(guild, definition, parsed)
 
-    def _validate_guild_id(self, guild_id: str) -> str | None:
-        """Refuse a guild id the raffle ledger has already ruled out.
+    async def _validate_guild_id(self, guild_id: str) -> str | None:
+        """Refuse a guild id the ledger or the API has already ruled out.
 
         The ledger records the guild it belongs to and rejects a different
         one. Finding that out only while applying the change would leave the
         new id persisted and the bot unable to start next time, so the check
-        happens before anything is written.
+        happens before anything is written - and because that record is
+        written once and never cleared, a wrong id has to be caught here or
+        not at all.
         """
         try:
             bound = self._bot.raffle_store.bound_guild()
@@ -540,13 +575,57 @@ class SettingsCommands(app_commands.Group):
                 "checked against it. Nothing was changed; try again in a "
                 "moment."
             )
-        if bound is None or bound == guild_id:
+        if bound is not None and bound != guild_id:
+            return (
+                "The raffle ledger already belongs to a different guild, so "
+                "its tickets and history could not be read as this one's. "
+                "Point RAFFLE_DB_PATH at a different database to run a "
+                "second guild's ledger."
+            )
+        return await self._reject_guild_the_key_does_not_lead(guild_id)
+
+    async def _reject_guild_the_key_does_not_lead(
+        self,
+        guild_id: str,
+    ) -> str | None:
+        """Check the id against /v2/account.guild_leader while a key exists.
+
+        docs/gw2-api.md already names this as the check to make before polling
+        a guild, and here it is the one thing standing between a well-formed
+        but wrong id and a ledger permanently claimed by it. Without a key
+        there is nothing to ask, so the id's shape is all that guards it.
+        """
+        api = self._bot._api
+        if api is None:
+            LOGGER.debug(
+                "Skipped the guild id API check; no Guild Wars 2 API client"
+            )
             return None
+        try:
+            account = await api.get_account()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # An outage must not stop an officer correcting a setting, and the
+            # shape check has already run, so this reports and allows.
+            LOGGER.warning(
+                "Could not check gw2_guild_id against the Guild Wars 2 API; "
+                "storing it unchecked. error_type=%s",
+                type(exc).__name__,
+            )
+            return None
+        led = account.get("guild_leader") or ()
+        if guild_id in led:
+            LOGGER.debug("Guild id confirmed against guild_leader")
+            return None
+        LOGGER.debug(
+            "Refused a guild id the API key does not lead; led_count=%s",
+            len(led),
+        )
         return (
-            "The raffle ledger already belongs to a different guild, so its "
-            "tickets and history could not be read as this one's. Point "
-            "RAFFLE_DB_PATH at a different database to run a second guild's "
-            "ledger."
+            "The configured API key does not lead a guild with that id, so "
+            "every Guild Wars 2 request for it would fail. Check the id in "
+            "/v2/account.guild_leader. Nothing was changed - the raffle "
+            "ledger records the first guild id it is given and refuses a "
+            "different one afterwards, so a wrong one is worth catching here."
         )
 
     async def _validate_channel(
@@ -642,10 +721,19 @@ def _autocomplete_for(
             return []
         try:
             choices = await _suggestions(commands, definition, interaction)
-        except discord.DiscordException:
+        except (
+            discord.DiscordException,
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+        ) as exc:
+            # The forum-tag branch fetches a channel, so a transport failure
+            # arrives as an aiohttp or timeout error rather than a Discord
+            # one, and letting either escape breaks the promise above.
             LOGGER.debug(
-                "Settings autocomplete could not reach Discord; setting=%s",
+                "Settings autocomplete could not reach Discord; setting=%s "
+                "error_type=%s",
                 setting_key(definition),
+                type(exc).__name__,
             )
             return []
         text = current.strip().casefold()

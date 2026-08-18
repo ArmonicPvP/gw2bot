@@ -74,7 +74,7 @@ override it.
 | --- | --- | --- |
 | `/settings discord_notification_channel_id` | unset | Discord text channel that receives all automated notifications. Must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
 | `/settings gw2_api_key` | unset | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `gw2_guild_id`. **Encrypted.** |
-| `/settings gw2_guild_id` | unset | Guild ID listed in `/v2/account.guild_leader`. Set it together with `gw2_api_key`. |
+| `/settings gw2_guild_id` | unset | Guild ID listed in `/v2/account.guild_leader`. Set it together with `gw2_api_key`. Must be a GUID, and once a key is set it is checked against `/v2/account.guild_leader` before being stored — the raffle ledger records the first guild ID it is given and refuses a different one afterwards. |
 | `/settings feast_notification_user_id` | unset | Discord user who also receives feast stock alerts by private message. |
 | `/settings gw2_poll_interval_seconds` | `300` | Guild Storage polling interval in seconds. At least `30`. |
 | `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
@@ -159,6 +159,11 @@ From then on the database is authoritative and a leftover variable is ignored.
 The bot says so on every startup — a console warning, and one message in the
 notification channel naming each stale variable and the `/settings` subcommand
 that replaced it. Remove them from `.env` and the notices stop.
+
+`TZ` is the exception. Its value is imported like the rest, but it is never
+named in either notice and you should **leave it set**: the container reads it
+for its own clock and log timestamps, so removing it changes more than this
+bot. Change the bot's timezone with `/settings timezone`.
 
 Because the import runs only once, a value you later clear with `/settings`
 stays cleared even if the old variable is still in the environment.

@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
-from factories import config_from_env
+from factories import GW2_GUILD_ID, config_from_env
 from gw2bot.config import (
     BOOTSTRAP_VARIABLES,
     Config,
@@ -108,13 +108,13 @@ class TestComposedConfiguration:
             environment(
                 DISCORD_NOTIFICATION_CHANNEL_ID="9012",
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
             )
         )
 
         assert config.discord_command_guild_id == 5678
         assert config.discord_notification_channel_id == 9012
-        assert config.gw2_guild_id == "guild-id"
+        assert config.gw2_guild_id == GW2_GUILD_ID
         assert config.discord_feast_notification_user_id is None
         assert config.poll_interval_seconds == 300
         assert config.guild_log_poll_interval_seconds == 60
@@ -162,7 +162,7 @@ class TestComposedConfiguration:
             environment(
                 DISCORD_NOTIFICATION_CHANNEL_ID="9012",
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
             )
         )
 
@@ -332,7 +332,7 @@ class TestMigrationIsANoOp:
                 "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
                 "DISCORD_FEAST_NOTIFICATION_USER_ID": "3456",
                 "GW2_API_KEY": "gw2-key",
-                "GW2_GUILD_ID": "guild-id",
+                "GW2_GUILD_ID": GW2_GUILD_ID,
                 "GW2_POLL_INTERVAL_SECONDS": "600",
                 "GW2_GUILD_LOG_POLL_INTERVAL_SECONDS": "120",
                 "GW2_GUILD_MEMBER_CACHE_SECONDS": "1800",
@@ -356,7 +356,7 @@ class TestMigrationIsANoOp:
             discord_notification_channel_id=9012,
             discord_feast_notification_user_id=3456,
             gw2_api_key="gw2-key",
-            gw2_guild_id="guild-id",
+            gw2_guild_id=GW2_GUILD_ID,
             poll_interval_seconds=600,
             guild_log_poll_interval_seconds=120,
             guild_member_cache_seconds=1800,

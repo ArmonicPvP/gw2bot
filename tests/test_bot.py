@@ -10,7 +10,13 @@ import discord
 import pytest
 from cryptography.fernet import Fernet
 
-from factories import config_from_env, default_config, forbidden_error
+from factories import (
+    GW2_GUILD_ID,
+    OTHER_GW2_GUILD_ID,
+    config_from_env,
+    default_config,
+    forbidden_error,
+)
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.logging_setup import SecretRegistry
@@ -53,7 +59,7 @@ class TestCommand:
         environment = self._environment(
             tmp_path,
             GW2_API_KEY="gw2-secret",
-            GW2_GUILD_ID="guild-id",
+            GW2_GUILD_ID=GW2_GUILD_ID,
             DISCORD_OAUTH_CLIENT_SECRET="oauth-secret",
             WEB_SESSION_SECRET="s" * 32,
         )
@@ -74,7 +80,7 @@ class TestCommand:
         }
         config = bot_class.call_args.args[0]
         assert config.gw2_api_key == "gw2-secret"
-        assert config.gw2_guild_id == "guild-id"
+        assert config.gw2_guild_id == GW2_GUILD_ID
         assert bot_class.call_args.kwargs["secrets"] is secrets
         bot_class.return_value.run.assert_called_once_with(
             "discord-secret",
@@ -138,7 +144,7 @@ class TestCommand:
         environment = self._environment(
             tmp_path,
             GW2_API_KEY="gw2-secret",
-            GW2_GUILD_ID="guild-id",
+            GW2_GUILD_ID=GW2_GUILD_ID,
             TZ="America/New_York",
         )
 
@@ -208,7 +214,7 @@ class TestCommandSync:
                 "DISCORD_COMMAND_GUILD_ID": "5678",
                 "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
                 "GW2_API_KEY": "gw2-key",
-                "GW2_GUILD_ID": "guild-id",
+                "GW2_GUILD_ID": GW2_GUILD_ID,
             }
         )
         self.tree = MagicMock()
@@ -248,7 +254,7 @@ class TestBotIntent:
                     "DISCORD_COMMAND_GUILD_ID": "5678",
                     "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
                     "GW2_API_KEY": "gw2-key",
-                    "GW2_GUILD_ID": "guild-id",
+                    "GW2_GUILD_ID": GW2_GUILD_ID,
                     "RAFFLE_DB_PATH": str(Path(directory) / "raffle.db"),
                 }
             )
@@ -279,7 +285,7 @@ class TestBotIntent:
                     "DISCORD_COMMAND_GUILD_ID": "5678",
                     "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
                     "GW2_API_KEY": "gw2-key",
-                    "GW2_GUILD_ID": "guild-id",
+                    "GW2_GUILD_ID": GW2_GUILD_ID,
                     "RAFFLE_DB_PATH": str(Path(directory) / "raffle.db"),
                 }
             )
@@ -312,7 +318,7 @@ class TestBotWebServer:
             "DISCORD_COMMAND_GUILD_ID": "5678",
             "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
             "GW2_API_KEY": "gw2-key",
-            "GW2_GUILD_ID": "guild-id",
+            "GW2_GUILD_ID": GW2_GUILD_ID,
             "RAFFLE_DB_PATH": str(tmp_path / "raffle.db"),
         }
         if web_enabled:
@@ -500,7 +506,7 @@ class TestOptionalConfiguration:
             self._config(
                 tmp_path,
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
             )
         )
 
@@ -521,7 +527,7 @@ class TestOptionalConfiguration:
                 tmp_path,
                 DISCORD_NOTIFICATION_CHANNEL_ID="9012",
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
             )
         )
 
@@ -573,7 +579,7 @@ class TestOptionalConfiguration:
                 tmp_path,
                 DISCORD_NOTIFICATION_CHANNEL_ID="9012",
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
                 WEB_ENABLED="true",
                 WEB_BASE_URL="http://localhost:8080",
             )
@@ -611,7 +617,7 @@ class TestOptionalConfiguration:
                 tmp_path,
                 DISCORD_NOTIFICATION_CHANNEL_ID="9012",
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
             )
         )
 
@@ -634,7 +640,7 @@ class TestOptionalConfiguration:
                 tmp_path,
                 DISCORD_NOTIFICATION_CHANNEL_ID="9012",
                 GW2_API_KEY="gw2-key",
-                GW2_GUILD_ID="guild-id",
+                GW2_GUILD_ID=GW2_GUILD_ID,
             )
         )
 
@@ -874,7 +880,7 @@ class TestSettingsHotApply:
         assert bot._api is None
 
         bot.settings_store.set_raw(definition_for("gw2_api_key"), "gw2-key")
-        bot.settings_store.set_raw(definition_for("gw2_guild_id"), "guild-id")
+        bot.settings_store.set_raw(definition_for("gw2_guild_id"), GW2_GUILD_ID)
         with self._quiet_bot_patches():
             restarted = await bot.apply_settings_change(
                 {"gw2_api_key", "gw2_guild_id"}
@@ -895,9 +901,9 @@ class TestSettingsHotApply:
     ) -> None:
         member_cache.return_value.close = AsyncMock()
         bot = await self._started(
-            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID=GW2_GUILD_ID),
             gw2_api_key="gw2-key",
-            gw2_guild_id="guild-id",
+            gw2_guild_id=GW2_GUILD_ID,
         )
         assert self._names(bot) == self.ALWAYS_RUNNING | self.GW2_POLLERS
 
@@ -921,9 +927,9 @@ class TestSettingsHotApply:
         # way a new one reaches them is a fresh task.
         member_cache.return_value.close = AsyncMock()
         bot = await self._started(
-            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID=GW2_GUILD_ID),
             gw2_api_key="gw2-key",
-            gw2_guild_id="guild-id",
+            gw2_guild_id=GW2_GUILD_ID,
         )
         before = {
             task.get_name(): task
@@ -957,9 +963,9 @@ class TestSettingsHotApply:
         # old sleep ran out - hours, for the intervals people actually set.
         member_cache.return_value.close = AsyncMock()
         bot = await self._started(
-            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID=GW2_GUILD_ID),
             gw2_api_key="gw2-key",
-            gw2_guild_id="guild-id",
+            gw2_guild_id=GW2_GUILD_ID,
         )
         before = {
             task.get_name(): task
@@ -993,9 +999,9 @@ class TestSettingsHotApply:
     ) -> None:
         member_cache.return_value.close = AsyncMock()
         bot = await self._started(
-            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID=GW2_GUILD_ID),
             gw2_api_key="gw2-key",
-            gw2_guild_id="guild-id",
+            gw2_guild_id=GW2_GUILD_ID,
         )
         before = {task.get_name(): task for task in bot._poll_tasks}
 
@@ -1202,12 +1208,15 @@ class TestSettingsHotApply:
     ) -> None:
         member_cache.return_value.close = AsyncMock()
         bot = await self._started(
-            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID=GW2_GUILD_ID),
             gw2_api_key="gw2-key",
-            gw2_guild_id="guild-id",
+            gw2_guild_id=GW2_GUILD_ID,
         )
 
-        bot.settings_store.set_raw(definition_for("gw2_guild_id"), "another-guild")
+        bot.settings_store.set_raw(
+            definition_for("gw2_guild_id"),
+            OTHER_GW2_GUILD_ID,
+        )
         with self._quiet_bot_patches():
             with pytest.raises(ValueError, match="belongs to a different guild"):
                 await bot.apply_settings_change({"gw2_guild_id"})
@@ -1318,11 +1327,30 @@ class TestLegacyEnvironmentWarnings:
                 {"GW2_API_KEY": "gw2-secret", "TZ": "UTC"},
             )
 
-        assert present == ("GW2_API_KEY", "TZ")
+        # TZ is imported like any other legacy variable but never named
+        # here: the warning tells the operator to delete what it lists, and
+        # the container uses TZ for its own clock and log timestamps.
+        assert present == ("GW2_API_KEY",)
         assert "no longer configure the bot" in caplog.text
-        assert "GW2_API_KEY, TZ" in caplog.text
+        assert "GW2_API_KEY" in caplog.text
+        assert "TZ" not in caplog.text
         # The variables are named; their values never are.
         assert "gw2-secret" not in caplog.text
+
+    async def test_tz_alone_earns_no_warning(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = SimpleNamespace()
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            present = Gw2Bot._log_legacy_variables(
+                cast(Gw2Bot, bot),
+                {"TZ": "America/New_York"},
+            )
+
+        assert present == ()
+        assert caplog.records == []
 
     async def test_nothing_is_warned_about_when_the_environment_is_clean(
         self,

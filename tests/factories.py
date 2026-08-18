@@ -16,6 +16,12 @@ from gw2bot.settings.store import SettingsStore
 
 """Shared builders for fake GW2 guild-log events used across test modules."""
 
+# Guild Wars 2 guild ids are GUIDs, and /settings checks the shape before
+# storing one, so anything that reaches the settings parser needs a real
+# one rather than a readable label.
+GW2_GUILD_ID = "116e0c0e-0035-44a9-bb22-4ae3e23127e5"
+OTHER_GW2_GUILD_ID = "22c7b3a1-9f4e-4d18-8a05-6b1c0f2d7e93"
+
 
 def gold_deposit(
     event_id: int,
