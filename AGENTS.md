@@ -190,7 +190,7 @@ it on the `Config` property, warn once at startup, and tell the caller which
 
 ### Settings That Hold Credentials
 
-- A `SettingDefinition` marked `secret=True` is encrypted in the row and never
+- A `SettingDefinition` marked `encrypted=True` is encrypted in the row and never
   rendered back: `/settings` reports the placeholder whether or not a value
   exists, and no command reveals it.
 - The encryption key comes from `SETTINGS_ENCRYPTION_KEY` or a `0600` file

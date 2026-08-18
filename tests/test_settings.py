@@ -266,14 +266,14 @@ class TestSettingDefinitions:
         for definition in SETTING_DEFINITIONS:
             assert hasattr(config, definition.field), definition.name
 
-    def test_only_credentials_are_marked_secret(self) -> None:
-        secrets = {
+    def test_only_credentials_are_marked_encrypted(self) -> None:
+        encrypted = {
             definition.name
             for definition in SETTING_DEFINITIONS
-            if definition.secret
+            if definition.encrypted
         }
 
-        assert secrets == {
+        assert encrypted == {
             "gw2_api_key",
             "discord_oauth_client_secret",
             "web_session_secret",
@@ -730,7 +730,7 @@ class TestDiscordIdValidation:
         bot.settings_store.close()
 
         assert not stored
-        assert "is a forum channel, not a text channel" in settings_reply(interaction)
+        assert "not a text channel" in settings_reply(interaction)
 
     async def test_refuses_a_text_channel_where_a_forum_is_wanted(
         self,
@@ -993,3 +993,121 @@ class TestSecretHandlingGuards:
         bot.settings_store.close()
 
         assert note == ""
+
+
+class TestReviewFindings:
+    """Cases for the four problems the PR review turned up."""
+
+    async def test_a_category_channel_is_refused_for_a_text_setting(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Ruling out forums is not enough: a category passes that test and
+        # then has no send(), so delivery would raise AttributeError outside
+        # every caller's discord.DiscordException handling.
+        commands, bot = _commands(tmp_path)
+        category = MagicMock(spec=discord.CategoryChannel)
+        category.id = 7
+        category.name = "Guild"
+        category.guild = SimpleNamespace(id=5678)
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=_guild(channels={7: category}),
+        )
+
+        await _run(
+            commands,
+            "discord_notification_channel_id",
+            interaction,
+            "7",
+        )
+        stored = bot.settings_store.is_set(
+            definition_for("discord_notification_channel_id")
+        )
+        bot.settings_store.close()
+
+        assert not stored
+        assert "not a text channel" in settings_reply(interaction)
+
+    async def test_a_guild_id_the_ledger_would_reject_is_refused(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Finding out only while applying would leave the new id persisted and
+        # the bot unable to start next time, with no command there to say why.
+        commands, bot = _commands(tmp_path)
+        bot.raffle_store = SimpleNamespace(bound_guild=lambda: "first-guild")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, "second-guild")
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert not stored
+        assert "already belongs to a different guild" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()
+
+    async def test_the_same_guild_id_the_ledger_holds_is_accepted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot.raffle_store = SimpleNamespace(bound_guild=lambda: "first-guild")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, "first-guild")
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == "first-guild"
+
+    async def test_a_value_that_cannot_be_applied_is_rolled_back(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Leaving it stored would apply it on the next restart, where nothing
+        # can report the problem.
+        commands, bot = _commands(tmp_path)
+        definition = definition_for("timezone")
+        bot.settings_store.set_raw(definition, "America/New_York")
+        bot.apply_settings_change = AsyncMock(
+            side_effect=[RuntimeError("poller would not restart"), []]
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        stored = bot.settings_store.get_raw(definition)
+        bot.settings_store.close()
+
+        assert stored == "America/New_York"
+        assert "previous value is back in place" in settings_reply(interaction)
+
+    async def test_a_rollback_restores_being_unset(self, tmp_path: Path) -> None:
+        # None is a real previous value - it means nobody had set it - so the
+        # restore has to clear the row rather than skip.
+        commands, bot = _commands(tmp_path)
+        definition = definition_for("timezone")
+        bot.apply_settings_change = AsyncMock(
+            side_effect=[RuntimeError("nope"), []]
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        still_set = bot.settings_store.is_set(definition)
+        bot.settings_store.close()
+
+        assert not still_set
+
+    async def test_a_successful_change_is_not_rolled_back(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        stored = bot.settings_store.get_raw(definition_for("timezone"))
+        bot.settings_store.close()
+
+        assert stored == "Europe/Berlin"
+        assert bot.apply_settings_change.await_count == 1

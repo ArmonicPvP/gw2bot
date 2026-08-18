@@ -1250,6 +1250,16 @@ class RaffleStore:
             )
         LOGGER.info("Applied one-time free-ticket cap; updated_users=%s", updated)
 
+    def bound_guild(self) -> str | None:
+        """The guild id this ledger already belongs to, if any.
+
+        Read-only, so /settings can refuse a guild id the ledger would reject
+        before anything is written rather than after.
+        """
+        with self._sessions() as session:
+            record = session.get(SettingRecord, "guild_id")
+            return record.value if record is not None else None
+
     def bind_guild(self, guild_id: str | None) -> None:
         """Claim the database for a guild id set after the store was opened.
 

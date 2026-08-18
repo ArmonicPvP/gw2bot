@@ -84,7 +84,7 @@ class SettingsStore:
 
     def set_raw(self, definition: SettingDefinition, value: str) -> None:
         key = setting_key(definition)
-        stored = self._cipher.encrypt(value) if definition.secret else value
+        stored = self._cipher.encrypt(value) if definition.encrypted else value
         with self._sessions.begin() as session:
             record = session.get(BotSettingRecord, key)
             if record is None:
@@ -92,16 +92,16 @@ class SettingsStore:
                     BotSettingRecord(
                         key=key,
                         value=stored,
-                        is_encrypted=definition.secret,
+                        is_encrypted=definition.encrypted,
                     )
                 )
             else:
                 record.value = stored
-                record.is_encrypted = definition.secret
+                record.is_encrypted = definition.encrypted
         LOGGER.debug(
             "Stored setting; setting=%s encrypted=%s characters=%s",
             key,
-            definition.secret,
+            definition.encrypted,
             len(value),
         )
 

@@ -52,6 +52,10 @@ class SettingDefinition:
     replaces - ``None`` for the Discord ids, which were source literals and so
     have nothing to import or warn about.
 
+    ``encrypted`` marks a value that holds a credential: it is encrypted in the
+    row and never rendered back to anybody. It is a flag describing the
+    setting, not the value itself.
+
     ``default`` and ``default_from`` are alternatives: a literal fallback, or
     the name of another setting to follow while this one is unset. Only the
     food page role uses the second, because it has always been whichever role
@@ -64,7 +68,7 @@ class SettingDefinition:
     parse: Callable[[str], object]
     legacy_variable: str | None = None
     group: str | None = None
-    secret: bool = False
+    encrypted: bool = False
     default: object = None
     default_from: str | None = None
     validates: str | None = None
@@ -170,7 +174,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         name="gw2_api_key",
         field="gw2_api_key",
         legacy_variable="GW2_API_KEY",
-        secret=True,
+        encrypted=True,
         description=(
             "Guild Wars 2 API key with the account and guilds permissions. "
             "Set it together with gw2_guild_id; without both, Guild Storage "
@@ -273,7 +277,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         name="discord_oauth_client_secret",
         field="discord_oauth_client_secret",
         legacy_variable="DISCORD_OAUTH_CLIENT_SECRET",
-        secret=True,
+        encrypted=True,
         description=(
             "OAuth2 client secret of the bot's Discord application, from the "
             "same OAuth2 tab as the client id."
@@ -284,7 +288,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         name="web_session_secret",
         field="web_session_secret",
         legacy_variable="WEB_SESSION_SECRET",
-        secret=True,
+        encrypted=True,
         description=(
             "Random secret of at least 32 characters that signs web calendar "
             "session cookies. Changing it signs every calendar user out. "

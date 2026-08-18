@@ -10,7 +10,7 @@ from gw2bot.logging_setup import (
     configure_logging as configure_logging,
 )
 from gw2bot.settings.composition import compose_from_store
-from gw2bot.settings.crypto import SettingsCipher
+from gw2bot.settings.crypto import ENCRYPTION_KEY_VARIABLE, SettingsCipher
 from gw2bot.settings.migration import import_legacy_environment
 from gw2bot.settings.store import SettingsStore
 
@@ -23,10 +23,16 @@ def main() -> None:
     except ConfigurationError as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
 
-    # The Discord token is the one credential that exists before the database
-    # does, so console redaction is armed with it first and the rest are added
-    # as soon as the settings can be read.
-    secrets = SecretRegistry((bootstrap.discord_token,))
+    # The two credentials that exist before the database does are armed first,
+    # and the rest are added as soon as the settings can be read. The
+    # encryption key is here because every credential variable has to reach the
+    # redacting formatter, not because anything is known to log it.
+    secrets = SecretRegistry(
+        (
+            bootstrap.discord_token,
+            os.environ.get(ENCRYPTION_KEY_VARIABLE, "").strip() or None,
+        )
+    )
     configure_logging(bootstrap.debug, secrets)
     LOGGER.debug("Debug logging enabled")
 

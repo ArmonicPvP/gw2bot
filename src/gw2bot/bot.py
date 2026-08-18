@@ -363,6 +363,17 @@ class Gw2Bot(discord.Client):
         if "gw2_guild_id" in changed:
             self._raffle_store.bind_guild(self._config.gw2_guild_id)
 
+        if changed & {"trial_forum_channel_id", "trial_accepted_tag_id"}:
+            # The index is a persistent cache of one forum's accepted posts,
+            # and refreshes are incremental against a watermark: a later run
+            # only re-reads recently active threads and never revisits the
+            # rest. Rows indexed from the old forum or the old tag would
+            # therefore survive and keep matching accounts in /check and the
+            # overdue report, so the cache is dropped and the next refresh
+            # rebuilds it cold.
+            self._raffle_store.clear_trial_forum_index()
+            restarted.append("the Trial application index")
+
         if "discord_notification_channel_id" in changed:
             self._notification_channel = None
             restarted.append("the notification channel")

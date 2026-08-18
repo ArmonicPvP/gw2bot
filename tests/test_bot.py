@@ -1,5 +1,6 @@
 import logging
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -7,12 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import pytest
+from cryptography.fernet import Fernet
 
 from factories import config_from_env, default_config, forbidden_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
-from gw2bot.settings.definitions import definition_for
 from gw2bot.main import main as run_main
+from gw2bot.raffle import TrialForumPost
+from gw2bot.settings.definitions import definition_for
 from gw2bot.events.views import (
     EventSettingsButton,
     EventSignOutButton,
@@ -99,6 +102,29 @@ class TestCommand:
         # An unset secret has nothing to redact, and registering a blank would
         # make the formatter replace every empty string it ever formats.
         assert set(secrets.current()) == {"gw2-secret", "discord-secret"}
+
+    @patch("gw2bot.main.Gw2Bot")
+    @patch("gw2bot.main.configure_logging")
+    def test_registers_the_settings_encryption_key(
+        self,
+        configure: MagicMock,
+        bot_class: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Every credential variable has to reach the redacting formatter, and
+        # this one is armed before the store is even opened.
+        key = Fernet.generate_key().decode("ascii")
+        environment = self._environment(
+            tmp_path,
+            SETTINGS_ENCRYPTION_KEY=key,
+        )
+
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
+        bot_class.call_args.kwargs["settings_store"].close()
+
+        _, secrets = configure.call_args.args
+        assert key in secrets.current()
 
     @patch("gw2bot.main.Gw2Bot")
     @patch("gw2bot.main.configure_logging")
@@ -912,6 +938,60 @@ class TestSettingsHotApply:
         assert bot._raffle_contribution_channel is None
         assert bot._feast_notification_user is None
         assert bot._config.discord_notification_channel_id == 9012
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_changing_the_trial_forum_drops_its_index(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The index is refreshed incrementally against a watermark, so rows
+        # from the old forum would never be revisited and would keep matching
+        # accounts in /check and the overdue report.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        bot.raffle_store.upsert_trial_forum_posts(
+            [TrialForumPost(1, 101, "member.1234", "2026-01-01T00:00:00+00:00")]
+        )
+        bot.raffle_store.set_trial_forum_watermark(
+            datetime(2026, 1, 1, tzinfo=UTC)
+        )
+        assert bot.raffle_store.get_trial_forum_index()
+
+        bot.settings_store.set_raw(
+            definition_for("trial_forum", "channels"),
+            "424242",
+        )
+        with self._quiet_bot_patches():
+            restarted = await bot.apply_settings_change(
+                {"trial_forum_channel_id"}
+            )
+
+        assert bot.raffle_store.get_trial_forum_index() == {}
+        assert bot.raffle_store.get_trial_forum_watermark() is None
+        assert "the Trial application index" in restarted
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_an_unrelated_change_keeps_the_trial_index(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        bot.raffle_store.upsert_trial_forum_posts(
+            [TrialForumPost(1, 101, "member.1234", "2026-01-01T00:00:00+00:00")]
+        )
+
+        bot.settings_store.set_raw(definition_for("timezone"), "Europe/Berlin")
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"event_timezone"})
+
+        assert bot.raffle_store.get_trial_forum_index()
 
         await self._close(bot)
 

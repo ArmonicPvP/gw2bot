@@ -42,6 +42,11 @@ MESSAGE_LIMIT = 1900
 # request describes it: "a space or nothing means unset".
 UNSET_INPUT = ""
 
+# _apply's "no previous value was captured, so do not roll back" marker. None
+# is a real previous value - it means the setting was unset - so it cannot
+# double as the sentinel.
+_KEEP: Any = object()
+
 
 class SettingsCommands(app_commands.Group):
     """The /settings command tree.
@@ -210,9 +215,9 @@ class SettingsCommands(app_commands.Group):
             f"\nCurrent value: {display}",
         )
         LOGGER.debug(
-            "Reported a setting; setting=%s secret=%s",
+            "Reported a setting; setting=%s encrypted=%s",
             setting_key(definition),
-            definition.secret,
+            definition.encrypted,
         )
 
     async def _unset(
@@ -221,6 +226,7 @@ class SettingsCommands(app_commands.Group):
         definition: SettingDefinition,
     ) -> None:
         key = setting_key(definition)
+        previous = self._bot.settings_store.get_raw(definition)
         try:
             removed = self._bot.settings_store.unset(definition)
         except SQLAlchemyError:
@@ -231,7 +237,7 @@ class SettingsCommands(app_commands.Group):
                 "changed.",
             )
             return
-        applied = await self._apply(interaction, definition)
+        applied = await self._apply(interaction, definition, previous)
         if applied is None:
             return
         fallback = self._fallback_note(definition)
@@ -270,6 +276,10 @@ class SettingsCommands(app_commands.Group):
             await send_interaction_notice(interaction, problem)
             return
         stored = str(parsed)
+        # Kept so a change that cannot be applied can be put back. Leaving a
+        # value the running bot rejected in the database would apply it on the
+        # next restart, where no command is there to report the problem.
+        previous = self._bot.settings_store.get_raw(definition)
         try:
             self._bot.settings_store.set_raw(definition, stored)
         except SQLAlchemyError:
@@ -280,19 +290,20 @@ class SettingsCommands(app_commands.Group):
                 "changed.",
             )
             return
-        applied = await self._apply(interaction, definition)
+        applied = await self._apply(interaction, definition, previous)
         if applied is None:
             return
-        shown = SECRET_PLACEHOLDER if definition.secret else f"`{stored}`"
+        shown = SECRET_PLACEHOLDER if definition.encrypted else f"`{stored}`"
         await send_interaction_notice(
             interaction,
             f"**{definition.command_path}** is now {shown}."
             + _restart_note(applied),
         )
         LOGGER.debug(
-            "Stored a setting from Discord; setting=%s secret=%s characters=%s",
+            "Stored a setting from Discord; setting=%s encrypted=%s "
+            "characters=%s",
             key,
-            definition.secret,
+            definition.encrypted,
             len(stored),
         )
 
@@ -300,11 +311,18 @@ class SettingsCommands(app_commands.Group):
         self,
         interaction: discord.Interaction,
         definition: SettingDefinition,
+        previous: str | None = _KEEP,
     ) -> list[str] | None:
         """Reload the configuration, reporting what had to be restarted.
 
         Returns None once the caller has been told the change could not be
         applied, so every caller only has to stop.
+
+        When ``previous`` is supplied and applying fails, the stored value is
+        put back and the configuration recomposed from it. A value the running
+        bot has already rejected must not survive in the database, because the
+        next startup would apply it with no command there to report why the
+        bot will not come up.
         """
         try:
             return await self._bot.apply_settings_change({definition.field})
@@ -314,12 +332,52 @@ class SettingsCommands(app_commands.Group):
                 setting_key(definition),
                 type(exc).__name__,
             )
+            restored = (
+                False
+                if previous is _KEEP
+                else await self._roll_back(definition, previous)
+            )
             await send_interaction_notice(
                 interaction,
-                "The value was saved, but applying it failed: "
-                f"{exc}\nRestart the bot to pick it up.",
+                f"That change could not be applied: {exc}"
+                + (
+                    "\nThe previous value is back in place."
+                    if restored
+                    else "\nRestart the bot to pick it up."
+                ),
             )
             return None
+
+    async def _roll_back(
+        self,
+        definition: SettingDefinition,
+        previous: str | None,
+    ) -> bool:
+        """Put a rejected value back, reporting whether it worked.
+
+        The change is applied a second time after the restore so the running
+        bot matches what the database now holds, rather than staying on the
+        half-applied state the failure left behind.
+        """
+        key = setting_key(definition)
+        try:
+            if previous is None:
+                self._bot.settings_store.unset(definition)
+            else:
+                self._bot.settings_store.set_raw(definition, previous)
+            await self._bot.apply_settings_change({definition.field})
+        except Exception as exc:
+            # Nothing further can be done from here; the operator needs to
+            # know the database still holds a value the bot would not take.
+            LOGGER.error(
+                "Could not roll a rejected setting back; setting=%s "
+                "error_type=%s",
+                key,
+                type(exc).__name__,
+            )
+            return False
+        LOGGER.debug("Rolled a rejected setting back; setting=%s", key)
+        return True
 
     async def _handle_list(self, interaction: discord.Interaction) -> None:
         LOGGER.debug(
@@ -378,7 +436,7 @@ class SettingsCommands(app_commands.Group):
         a credential back out of the bot.
         """
         is_set = self._bot.settings_store.is_set(definition)
-        if definition.secret:
+        if definition.encrypted:
             return SECRET_PLACEHOLDER if is_set else UNSET_DISPLAY
         current = getattr(self._bot._config, definition.field, None)
         if current is None:
@@ -389,7 +447,7 @@ class SettingsCommands(app_commands.Group):
         # No secret's value is printed here either. None of them has a
         # fallback today, so this guards the day one gains a default rather
         # than the code as it stands.
-        if definition.secret:
+        if definition.encrypted:
             return ""
         current = getattr(self._bot._config, definition.field, None)
         if current is None:
@@ -413,6 +471,8 @@ class SettingsCommands(app_commands.Group):
         silently - the command keeps working and simply never matches anyone -
         so an id that cannot be resolved is refused instead.
         """
+        if definition.field == "gw2_guild_id" and isinstance(parsed, str):
+            return self._validate_guild_id(parsed)
         if definition.validates is None or not isinstance(parsed, int):
             return None
         guild = interaction.guild
@@ -429,6 +489,24 @@ class SettingsCommands(app_commands.Group):
         if definition.validates == ValidationTarget.FORUM_TAG:
             return await self._validate_forum_tag(parsed)
         return await self._validate_channel(guild, definition, parsed)
+
+    def _validate_guild_id(self, guild_id: str) -> str | None:
+        """Refuse a guild id the raffle ledger has already ruled out.
+
+        The ledger records the guild it belongs to and rejects a different
+        one. Finding that out only while applying the change would leave the
+        new id persisted and the bot unable to start next time, so the check
+        happens before anything is written.
+        """
+        bound = self._bot.raffle_store.bound_guild()
+        if bound is None or bound == guild_id:
+            return None
+        return (
+            "The raffle ledger already belongs to a different guild, so its "
+            "tickets and history could not be read as this one's. Point "
+            "RAFFLE_DB_PATH at a different database to run a second guild's "
+            "ledger."
+        )
 
     async def _validate_channel(
         self,
@@ -447,12 +525,19 @@ class SettingsCommands(app_commands.Group):
                 )
             if getattr(getattr(channel, "guild", None), "id", None) != guild.id:
                 return "That channel is not in this server."
-        wants_forum = definition.validates == ValidationTarget.FORUM_CHANNEL
-        is_forum = isinstance(channel, discord.ForumChannel)
-        if wants_forum and not is_forum:
-            return f"`{channel_id}` is not a forum channel."
-        if not wants_forum and is_forum:
-            return f"`{channel_id}` is a forum channel, not a text channel."
+        # Check for the type the setting actually needs rather than merely
+        # ruling the other one out: a category or a voice channel would pass a
+        # "not a forum" test and then fail at delivery, where channel.send
+        # does not exist and the AttributeError falls outside every caller's
+        # discord.DiscordException handling.
+        if definition.validates == ValidationTarget.FORUM_CHANNEL:
+            if not isinstance(channel, discord.ForumChannel):
+                return f"`{channel_id}` is not a forum channel."
+            return None
+        if not isinstance(channel, discord.TextChannel):
+            return (
+                f"`{channel_id}` is not a text channel the bot can post in."
+            )
         return None
 
     async def _validate_forum_tag(self, tag_id: int) -> str | None:
