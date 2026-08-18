@@ -1,14 +1,18 @@
 from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
+from cryptography.fernet import Fernet
 
 from gw2bot.config import Config, bootstrap_from_env
 from gw2bot.raffle import RaffleTotal
 from gw2bot.settings.composition import compose_config
+from gw2bot.settings.crypto import SettingsCipher
 from gw2bot.settings.definitions import LEGACY_SETTINGS, setting_key
+from gw2bot.settings.store import SettingsStore
 
 """Shared builders for fake GW2 guild-log events used across test modules."""
 
@@ -187,3 +191,60 @@ def raffle_total(
         gold_raffle_tickets=purchased,
         manual_raffle_tickets=free,
     )
+
+
+def settings_store(tmp_path: Path) -> SettingsStore:
+    """Settings store on a throwaway database, with a throwaway key."""
+    return SettingsStore(
+        str(tmp_path / "gw2bot.db"),
+        SettingsCipher(Fernet.generate_key()),
+    )
+
+
+def settings_interaction(
+    *,
+    role_ids: tuple[int, ...] = (),
+    owner: bool = False,
+    administrator: bool = False,
+    guild: Any = None,
+    user_id: int = 1234,
+) -> Any:
+    """Interaction for a /settings command, with the gate's three arms.
+
+    The officer role, the server owner and Administrator each let a caller
+    through on their own, so a test has to be able to build a caller holding
+    exactly one of them.
+    """
+    if guild is None:
+        guild = SimpleNamespace(
+            id=5678,
+            owner_id=user_id if owner else 999,
+            roles=(),
+            channels=(),
+            get_role=lambda role_id: None,
+            get_channel=lambda channel_id: None,
+        )
+    elif owner:
+        guild.owner_id = user_id
+    user = SimpleNamespace(
+        id=user_id,
+        roles=[SimpleNamespace(id=role_id) for role_id in role_ids],
+        guild_permissions=SimpleNamespace(administrator=administrator),
+    )
+    return SimpleNamespace(
+        user=user,
+        guild=guild,
+        response=SimpleNamespace(
+            is_done=MagicMock(return_value=False),
+            send_message=AsyncMock(),
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+
+def settings_reply(interaction: Any) -> str:
+    """The single ephemeral message a /settings command replied with."""
+    interaction.response.send_message.assert_awaited_once()
+    call = interaction.response.send_message.await_args
+    assert call.kwargs["ephemeral"] is True
+    return call.args[0]

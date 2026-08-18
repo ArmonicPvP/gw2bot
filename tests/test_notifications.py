@@ -9,7 +9,11 @@ import pytest
 
 from factories import forbidden_error
 from gw2bot.bot import Gw2Bot
-from gw2bot.notifications import format_automated_message_diagnostics
+from gw2bot.notifications import (
+    format_automated_message_diagnostics,
+    format_legacy_configuration_warning,
+    send_legacy_configuration_warning,
+)
 from gw2bot.raffle import RaffleContribution, RaffleTotal
 from gw2bot.raffle.formatting import format_raffle_milestone_preview
 
@@ -449,3 +453,42 @@ class TestDiscordNotificationDelivery:
             await Gw2Bot._get_notification_channel(cast(Gw2Bot, bot))
 
         bot.fetch_channel.assert_not_awaited()
+
+
+class TestLegacyConfigurationWarning:
+    def test_names_each_variable_and_the_command_that_replaces_it(self) -> None:
+        message = format_legacy_configuration_warning(
+            ("GW2_API_KEY", "TZ", "DISCORD_FEAST_NOTIFICATION_USER_ID")
+        )
+
+        assert "`GW2_API_KEY` → `/settings gw2_api_key`" in message
+        assert "`TZ` → `/settings timezone`" in message
+        # The two variables Discord's 32-character command name limit forced
+        # to be renamed are the ones an operator is most likely to guess wrong.
+        assert (
+            "`DISCORD_FEAST_NOTIFICATION_USER_ID` → "
+            "`/settings feast_notification_user_id`"
+        ) in message
+
+    def test_never_carries_a_value(self) -> None:
+        # It goes to a channel members can read and search, and several of the
+        # variables it names held credentials.
+        message = format_legacy_configuration_warning(("GW2_API_KEY",))
+
+        assert "GW2_API_KEY" in message
+        assert "=" not in message.split("GW2_API_KEY")[1].split("\n")[0]
+
+    async def test_delivery_goes_through_the_notification_channel_guard(
+        self,
+    ) -> None:
+        bot = SimpleNamespace(_try_send_notification=AsyncMock(return_value=False))
+
+        delivered = await send_legacy_configuration_warning(
+            cast(Gw2Bot, bot),
+            ("GW2_API_KEY",),
+        )
+
+        # An unconfigured channel is skipped and logged at debug by the guard;
+        # this must not be the one delivery that reports it as a failure.
+        assert not delivered
+        bot._try_send_notification.assert_awaited_once()

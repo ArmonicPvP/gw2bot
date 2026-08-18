@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from factories import config_from_env, forbidden_error
+from factories import config_from_env, default_config, forbidden_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.settings.definitions import definition_for
@@ -714,3 +714,309 @@ class TestStartupStatus:
             "Storage polling every 300 seconds; guild log polling every 60 "
             "seconds; raffle contribution reporting every 6 hours UTC."
         )
+
+
+class TestSettingsHotApply:
+    """A settings change has to reach the parts that captured a value.
+
+    Most of the bot reads bot._config when it needs something, so swapping the
+    frozen Config covers them. These are the ones it does not cover: caches,
+    long-lived clients, and the poll tasks whose very existence depends on
+    whether a feature is configured.
+    """
+
+    ALWAYS_RUNNING = {"gw2-raffle-contribution-poller", "gw2-event-scheduler"}
+    GW2_POLLERS = {"gw2-guild-storage-poller", "gw2-guild-log-poller"}
+
+    def _config(self, tmp_path: Path, **values: str) -> Config:
+        return config_from_env(
+            {
+                "DISCORD_TOKEN": "discord-token",
+                "DISCORD_COMMAND_GUILD_ID": "5678",
+                "RAFFLE_DB_PATH": str(tmp_path / "raffle.db"),
+                **values,
+            }
+        )
+
+    def _quiet_bot_patches(self):
+        return patch.multiple(
+            Gw2Bot,
+            _sync_commands=AsyncMock(),
+            _poll_guild_storage=AsyncMock(),
+            _poll_guild_log=AsyncMock(),
+            _poll_overdue_trials=AsyncMock(),
+            _poll_raffle_contributions=AsyncMock(),
+            _poll_guild_member_count_topic=AsyncMock(),
+            _poll_event_updates=AsyncMock(),
+        )
+
+    async def _started(self, config: Config, **stored: str) -> Gw2Bot:
+        """Start a bot whose store already holds the values it was built with.
+
+        apply_settings_change recomposes from the store, which is what startup
+        does too, so a value only present in the Config would vanish the first
+        time anything changed.
+        """
+        bot = Gw2Bot(config)
+        for name, value in stored.items():
+            bot.settings_store.set_raw(definition_for(name), value)
+        with self._quiet_bot_patches():
+            await bot.setup_hook()
+        return bot
+
+    async def _close(self, bot: Gw2Bot) -> None:
+        with patch.object(discord.Client, "close", AsyncMock()):
+            await bot.close()
+
+    @staticmethod
+    def _names(bot: Gw2Bot) -> set[str]:
+        return {task.get_name() for task in bot._poll_tasks}
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_setting_the_credentials_starts_the_gw2_pollers(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Enabling a feature used to mean editing .env and restarting the
+        # container; the whole point is that it no longer does.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        assert self._names(bot) == self.ALWAYS_RUNNING
+        assert bot._api is None
+
+        bot.settings_store.set_raw(definition_for("gw2_api_key"), "gw2-key")
+        bot.settings_store.set_raw(definition_for("gw2_guild_id"), "guild-id")
+        with self._quiet_bot_patches():
+            restarted = await bot.apply_settings_change(
+                {"gw2_api_key", "gw2_guild_id"}
+            )
+
+        assert self._names(bot) == self.ALWAYS_RUNNING | self.GW2_POLLERS
+        assert bot._api is not None
+        assert bot._config.gw2_api_key == "gw2-key"
+        assert "the Guild Wars 2 API client" in restarted
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_clearing_the_credentials_stops_the_gw2_pollers(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            gw2_api_key="gw2-key",
+            gw2_guild_id="guild-id",
+        )
+        assert self._names(bot) == self.ALWAYS_RUNNING | self.GW2_POLLERS
+
+        bot.settings_store.unset(definition_for("gw2_api_key"))
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"gw2_api_key"})
+
+        assert self._names(bot) == self.ALWAYS_RUNNING
+        assert bot._api is None
+        assert bot._guild_members is None
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_a_new_api_key_replaces_the_running_pollers(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Both pollers read the guild id once before their loop, so the only
+        # way a new one reaches them is a fresh task.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            gw2_api_key="gw2-key",
+            gw2_guild_id="guild-id",
+        )
+        before = {
+            task.get_name(): task
+            for task in bot._poll_tasks
+            if task.get_name() in self.GW2_POLLERS
+        }
+
+        bot.settings_store.set_raw(definition_for("gw2_api_key"), "new-key")
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"gw2_api_key"})
+
+        after = {
+            task.get_name(): task
+            for task in bot._poll_tasks
+            if task.get_name() in self.GW2_POLLERS
+        }
+        assert set(after) == self.GW2_POLLERS
+        for name, task in before.items():
+            assert after[name] is not task
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_an_unrelated_change_leaves_the_pollers_alone(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            gw2_api_key="gw2-key",
+            gw2_guild_id="guild-id",
+        )
+        before = {task.get_name(): task for task in bot._poll_tasks}
+
+        bot.settings_store.set_raw(definition_for("timezone"), "America/New_York")
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"event_timezone"})
+
+        assert {task.get_name(): task for task in bot._poll_tasks} == before
+        assert str(bot.event_timezone) == "America/New_York"
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_changing_a_channel_drops_its_cached_handle(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Both handles are cached for the life of the process, so without this
+        # the bot would keep posting to the channel it was pointed at before.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        bot._notification_channel = object()
+        bot._raffle_contribution_channel = object()
+        bot._feast_notification_user = object()
+
+        bot.settings_store.set_raw(
+            definition_for("discord_notification_channel_id"),
+            "9012",
+        )
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change(
+                {
+                    "discord_notification_channel_id",
+                    "raffle_contribution_channel_id",
+                    "discord_feast_notification_user_id",
+                }
+            )
+
+        assert bot._notification_channel is None
+        assert bot._raffle_contribution_channel is None
+        assert bot._feast_notification_user is None
+        assert bot._config.discord_notification_channel_id == 9012
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_a_secret_set_at_runtime_is_registered_for_redaction(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        assert "gw2-secret" not in bot.secrets.current()
+
+        bot.settings_store.set_raw(definition_for("gw2_api_key"), "gw2-secret")
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"gw2_api_key"})
+
+        # Registered before anything can log it, and the registry is the same
+        # object the console formatter was built with.
+        assert "gw2-secret" in bot.secrets.current()
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_a_new_guild_id_rebinds_the_raffle_database(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(
+            self._config(tmp_path, GW2_API_KEY="gw2-key", GW2_GUILD_ID="guild-id"),
+            gw2_api_key="gw2-key",
+            gw2_guild_id="guild-id",
+        )
+
+        bot.settings_store.set_raw(definition_for("gw2_guild_id"), "another-guild")
+        with self._quiet_bot_patches():
+            with pytest.raises(ValueError, match="belongs to a different guild"):
+                await bot.apply_settings_change({"gw2_guild_id"})
+
+        await self._close(bot)
+
+
+class TestLegacyEnvironmentWarnings:
+    async def test_the_console_warning_names_every_stale_variable(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = SimpleNamespace()
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            present = Gw2Bot._log_legacy_variables(
+                cast(Gw2Bot, bot),
+                {"GW2_API_KEY": "gw2-secret", "TZ": "UTC"},
+            )
+
+        assert present == ("GW2_API_KEY", "TZ")
+        assert "no longer configure the bot" in caplog.text
+        assert "GW2_API_KEY, TZ" in caplog.text
+        # The variables are named; their values never are.
+        assert "gw2-secret" not in caplog.text
+
+    async def test_nothing_is_warned_about_when_the_environment_is_clean(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bot = SimpleNamespace()
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            present = Gw2Bot._log_legacy_variables(
+                cast(Gw2Bot, bot),
+                {"DISCORD_TOKEN": "token", "RAFFLE_DB_PATH": "/app/data/x.db"},
+            )
+
+        assert present == ()
+        assert caplog.records == []
+
+    async def test_the_channel_notice_is_posted_once_per_startup(self) -> None:
+        bot = SimpleNamespace(
+            _legacy_variables_announced=False,
+            _config=default_config(discord_notification_channel_id=9012),
+            _try_send_notification=AsyncMock(return_value=True),
+        )
+
+        with patch.dict("os.environ", {"GW2_API_KEY": "gw2-secret"}, clear=True):
+            await Gw2Bot._announce_legacy_variables(cast(Gw2Bot, bot))
+            await Gw2Bot._announce_legacy_variables(cast(Gw2Bot, bot))
+
+        # It is a migration notice, not a recurring alert; repeating it would
+        # bury the messages the channel exists for.
+        bot._try_send_notification.assert_awaited_once()
+        message = bot._try_send_notification.await_args.args[0]
+        assert "GW2_API_KEY" in message
+        assert "/settings gw2_api_key" in message
+        assert "gw2-secret" not in message
+
+    async def test_a_clean_environment_posts_nothing(self) -> None:
+        bot = SimpleNamespace(
+            _legacy_variables_announced=False,
+            _config=default_config(discord_notification_channel_id=9012),
+            _try_send_notification=AsyncMock(return_value=True),
+        )
+
+        with patch.dict("os.environ", {"DISCORD_TOKEN": "token"}, clear=True):
+            await Gw2Bot._announce_legacy_variables(cast(Gw2Bot, bot))
+
+        bot._try_send_notification.assert_not_awaited()

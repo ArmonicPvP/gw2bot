@@ -395,9 +395,10 @@ async def send_legacy_configuration_warning(
         "Delivering the legacy configuration warning; variables=%s",
         len(variables),
     )
-    return await try_send_notification(
-        bot,
-        format_legacy_configuration_warning(variables),
+    # Through the bot, like every other delivery here, so an unconfigured
+    # channel is skipped and logged at debug rather than retried.
+    return await bot._try_send_notification(
+        format_legacy_configuration_warning(variables)
     )
 
 
