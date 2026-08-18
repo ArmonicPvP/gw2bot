@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from factories import (
     default_config,
+    forbidden_error,
     settings_interaction,
     settings_reply,
     settings_store,
@@ -1274,4 +1275,98 @@ class TestDatabaseFailuresDuringAChange:
         bot.settings_store.close()
 
         assert "could not be written" in settings_reply(interaction)
+        bot.apply_settings_change.assert_not_awaited()
+
+
+class TestInteractionDeferral:
+    """A change can outrun Discord's three-second response window.
+
+    Validating a channel reaches Discord, and applying one rebuilds the API
+    client and can restart the calendar. Past the window the token expires and
+    the confirmation is lost with the value already stored, which is the worst
+    of both: changed, and reported as failed.
+    """
+
+    async def test_storing_defers_before_the_slow_work(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        bot.settings_store.close()
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        # The confirmation therefore arrives as a followup.
+        interaction.followup.send.assert_awaited_once()
+        assert "Europe/Berlin" in settings_reply(interaction)
+
+    async def test_unsetting_defers_too(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, " ")
+        bot.settings_store.close()
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+
+    async def test_reading_answers_directly(self, tmp_path: Path) -> None:
+        # A read is a SQLite lookup; deferring would only cost the caller the
+        # immediate answer.
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "timezone", interaction, None)
+        bot.settings_store.close()
+
+        interaction.response.defer.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once()
+
+    async def test_a_refused_defer_does_not_stop_the_change(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The value is still worth storing, and the notice reports what
+        # happened; losing the reply must not lose the change.
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        interaction.response.defer = AsyncMock(side_effect=forbidden_error(50013))
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        stored = bot.settings_store.get_raw(definition_for("timezone"))
+        bot.settings_store.close()
+
+        assert stored == "Europe/Berlin"
+
+    async def test_an_unauthorized_caller_is_refused_without_deferring(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction()
+
+        await _run(commands, "timezone", interaction, "Europe/Berlin")
+        bot.settings_store.close()
+
+        interaction.response.defer.assert_not_awaited()
+        assert "do not have the required role" in settings_reply(interaction)
+
+
+class TestLedgerReadFailure:
+    async def test_a_failed_ledger_read_is_reported(self, tmp_path: Path) -> None:
+        # The binding check runs before the guarded write, so it needs its own
+        # guard or the command ends with an unhandled error.
+        commands, bot = _commands(tmp_path)
+        bot.raffle_store = SimpleNamespace(
+            bound_guild=MagicMock(side_effect=SQLAlchemyError("read failed"))
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, "some-guild")
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert not stored
+        assert "could not be read" in settings_reply(interaction)
         bot.apply_settings_change.assert_not_awaited()

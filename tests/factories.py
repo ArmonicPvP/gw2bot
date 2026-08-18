@@ -231,20 +231,46 @@ def settings_interaction(
         roles=[SimpleNamespace(id=role_id) for role_id in role_ids],
         guild_permissions=SimpleNamespace(administrator=administrator),
     )
+    response = _FakeInteractionResponse()
     return SimpleNamespace(
         user=user,
         guild=guild,
-        response=SimpleNamespace(
-            is_done=MagicMock(return_value=False),
-            send_message=AsyncMock(),
-        ),
+        response=response,
         followup=SimpleNamespace(send=AsyncMock()),
     )
 
 
+class _FakeInteractionResponse:
+    """Discord's response half, with the one behaviour the flow depends on.
+
+    Deferring makes ``is_done()`` true, which is what sends every later notice
+    through the followup instead. A double that always answered false would
+    hide the difference the commands actually rely on.
+    """
+
+    def __init__(self) -> None:
+        self._done = False
+        self.send_message = AsyncMock(side_effect=self._finish)
+        self.defer = AsyncMock(side_effect=self._finish)
+
+    async def _finish(self, *args: Any, **kwargs: Any) -> None:
+        self._done = True
+
+    def is_done(self) -> bool:
+        return self._done
+
+
 def settings_reply(interaction: Any) -> str:
-    """The single ephemeral message a /settings command replied with."""
-    interaction.response.send_message.assert_awaited_once()
-    call = interaction.response.send_message.await_args
+    """The single ephemeral message a /settings command replied with.
+
+    A command that defers first answers through the followup, so this looks
+    wherever the reply actually went rather than assuming.
+    """
+    if interaction.followup.send.await_count:
+        interaction.followup.send.assert_awaited_once()
+        call = interaction.followup.send.await_args
+    else:
+        interaction.response.send_message.assert_awaited_once()
+        call = interaction.response.send_message.await_args
     assert call.kwargs["ephemeral"] is True
     return call.args[0]

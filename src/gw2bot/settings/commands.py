@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.config import ConfigurationError
 from gw2bot.discord_utils import (
     forum_tags_for_ids,
+    log_discord_failure,
     safe_int,
     send_interaction_notice,
     user_has_role,
@@ -183,12 +184,37 @@ class SettingsCommands(app_commands.Group):
         if not await self.authorize(interaction):
             return
         if value is None:
+            # A read answers from SQLite alone and comfortably beats Discord's
+            # three-second window, so it replies directly.
             await self._report(interaction, definition)
             return
+        # Changing one can validate against Discord, rebuild the API client
+        # and restart the calendar first. Past three seconds the interaction
+        # token expires and the confirmation is lost - with the value already
+        # stored - leaving the officer unsure whether it took.
+        await self._defer(interaction)
         if value.strip() == UNSET_INPUT:
             await self._unset(interaction, definition)
             return
         await self._store(interaction, definition, value)
+
+    async def _defer(self, interaction: discord.Interaction) -> None:
+        """Buy time for a change, privately.
+
+        send_interaction_notice already picks the followup once the response
+        is done, so deferring here is all the rest of the flow needs to know
+        about it. A refused defer is logged rather than raised: the change is
+        still worth attempting, and the notice will report what happened.
+        """
+        if interaction.response.is_done():
+            return
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.DiscordException as error:
+            log_discord_failure(
+                "Could not defer a settings command; the reply may not arrive",
+                error,
+            )
 
     async def _report(
         self,
@@ -502,7 +528,18 @@ class SettingsCommands(app_commands.Group):
         new id persisted and the bot unable to start next time, so the check
         happens before anything is written.
         """
-        bound = self._bot.raffle_store.bound_guild()
+        try:
+            bound = self._bot.raffle_store.bound_guild()
+        except SQLAlchemyError:
+            LOGGER.error(
+                "Could not read the raffle ledger's guild binding; setting="
+                "gw2_guild_id"
+            )
+            return (
+                "The raffle database could not be read, so this could not be "
+                "checked against it. Nothing was changed; try again in a "
+                "moment."
+            )
         if bound is None or bound == guild_id:
             return None
         return (
