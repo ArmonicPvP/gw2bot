@@ -1049,6 +1049,21 @@ class TestEncryptionKeyFile:
         assert "readable beyond its owner" in message
         assert ENCRYPTION_KEY_VARIABLE in message
 
+    def test_refuses_a_key_file_whose_mode_cannot_be_read(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # A mode that cannot be inspected cannot be trusted; assuming it is
+        # private is how the invariant quietly stops holding.
+        database = tmp_path / "gw2bot.db"
+        key_file_path(str(database)).write_bytes(Fernet.generate_key())
+
+        with patch.object(Path, "stat", side_effect=PermissionError("denied")):
+            with pytest.raises(ConfigurationError) as failure:
+                SettingsCipher.for_database(str(database), {})
+
+        assert "could not be read and checked" in str(failure.value)
+
     def test_a_corrupt_key_file_is_reported_rather_than_crashing(
         self,
         tmp_path: Path,

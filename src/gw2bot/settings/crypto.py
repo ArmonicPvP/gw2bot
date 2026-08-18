@@ -97,10 +97,22 @@ def key_file_path(database_path: str) -> Path:
 
 
 def _load_or_create_key(path: Path) -> bytes:
-    if path.exists():
+    # Every inspection of an existing key file is guarded together: exists(),
+    # stat() and the read all go to the same filesystem, and any of them
+    # failing means the file cannot be trusted to be both private and usable.
+    # Letting one through as a raw OSError would stop the bot with a traceback
+    # that names no remedy.
+    try:
+        exists = path.exists()
+    except OSError as exc:
+        raise _unreadable_key(path, exc) from exc
+    if exists:
         LOGGER.debug("Settings encryption key source=file")
         _require_private(path)
-        return path.read_bytes().strip()
+        try:
+            return path.read_bytes().strip()
+        except OSError as exc:
+            raise _unreadable_key(path, exc) from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     key = Fernet.generate_key()
     # Create the file already private rather than writing first and narrowing
@@ -120,6 +132,20 @@ def _load_or_create_key(path: Path) -> bytes:
     )
     LOGGER.debug("Settings encryption key source=generated")
     return key
+
+
+def _unreadable_key(path: Path, exc: OSError) -> ConfigurationError:
+    """One message for a key file that cannot be checked or read.
+
+    All of these mean the same thing to an operator: the bot cannot confirm
+    the key is private and usable, so it will not fall back to trusting it.
+    """
+    return ConfigurationError(
+        f"{path} could not be read and checked for owner-only permissions "
+        f"({type(exc).__name__}), so it cannot be trusted to keep the "
+        "encrypted settings private. Fix its ownership and permissions, or "
+        f"move the key off this filesystem by setting {ENCRYPTION_KEY_VARIABLE}."
+    )
 
 
 def _require_private(path: Path) -> None:
