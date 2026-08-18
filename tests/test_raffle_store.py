@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import (
     Boolean,
     Column,
@@ -16,6 +17,8 @@ from sqlalchemy import (
     select,
 )
 
+from gw2bot.settings.crypto import SettingsCipher
+from gw2bot.settings.store import SettingsStore
 from gw2bot.raffle import (
     RaffleDrawTier,
     RaffleRewardTier,
@@ -1253,6 +1256,94 @@ class TestRaffleStore:
             assert total.gold_raffle_tickets == 10
             assert total.manual_raffle_tickets == 0
             store.close()
+
+    def _legacy_totals_database(self, directory: str) -> str:
+        """A database from before gold and manual tickets were told apart."""
+        database_path = str(Path(directory) / "raffle.db")
+        engine = create_engine(f"sqlite:///{database_path}")
+        metadata = MetaData()
+        legacy_totals = Table(
+            "raffle_totals",
+            metadata,
+            Column("username", String, primary_key=True),
+            Column("coins_deposited", Integer, nullable=False),
+            Column("raffle_tickets", Integer, nullable=False),
+        )
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                legacy_totals.insert().values(
+                    username="Member.1234",
+                    coins_deposited=80_000,
+                    raffle_tickets=8,
+                )
+            )
+        engine.dispose()
+        return database_path
+
+    def test_migrates_legacy_totals_when_another_store_opened_first(
+        self,
+    ) -> None:
+        """The settings store opens the same database before RaffleStore does.
+
+        It runs the schema migration too, so a signal that only said "this
+        call added the column" was consumed before the store that owns the
+        data migration ever saw it, silently leaving every purchased ticket
+        recorded as zero gold tickets.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = self._legacy_totals_database(directory)
+
+            first = SettingsStore(
+                database_path,
+                SettingsCipher(Fernet.generate_key()),
+            )
+            first.close()
+
+            store = RaffleStore(database_path, "guild-id")
+            total = store.get_totals()[0]
+            store.close()
+
+            assert total.raffle_tickets == 8
+            assert total.gold_raffle_tickets == 8
+            assert total.manual_raffle_tickets == 0
+
+    def test_does_not_re_split_totals_an_earlier_release_migrated(self) -> None:
+        """Re-running the split would reclassify free tickets as purchased.
+
+        A database migrated by an earlier release carries no pending flag, so
+        reopening it - however many times, by whichever store - must leave the
+        gold and manual halves exactly as they are.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = self._legacy_totals_database(directory)
+            RaffleStore(database_path, "guild-id").close()
+
+            store = RaffleStore(database_path, "guild-id")
+            store.add_manual_ticket("Member.1234")
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            total = reopened.get_totals()[0]
+            reopened.close()
+
+            assert total.gold_raffle_tickets == 8
+            assert total.manual_raffle_tickets == 1
+            assert total.raffle_tickets == 9
+
+    def test_a_fresh_database_is_never_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.add_manual_ticket("Member.1234")
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            total = reopened.get_totals()[0]
+            reopened.close()
+
+            assert total.gold_raffle_tickets == 0
+            assert total.manual_raffle_tickets == 1
 
     def test_migrates_existing_deposits_preserving_pending_audit_notifications(
         self,

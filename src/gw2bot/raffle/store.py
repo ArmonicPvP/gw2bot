@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.database import (
+    PENDING_LEGACY_TOTALS_KEY,
     FeastAlertRecord,
     FeastStockLogRecord,
     GuildInviteRecord,
@@ -95,8 +96,7 @@ class RaffleStore:
         self._engine = create_database_engine(database_path)
         added_columns = initialize_database(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
-        if "gold_raffle_tickets" in added_columns:
-            self._migrate_legacy_totals()
+        self._migrate_legacy_totals_if_pending()
         try:
             self._bind_guild(guild_id)
             self._apply_manual_ticket_cap_once()
@@ -1241,9 +1241,23 @@ class RaffleStore:
                     )
                 )
 
-    def _migrate_legacy_totals(self) -> None:
+    def _migrate_legacy_totals_if_pending(self) -> None:
+        """Split legacy totals into gold and manual, once, if it is owed.
+
+        The flag is set by initialize_database when it adds the column, not by
+        whether this particular call added it: the settings store opens the
+        same database first and would otherwise consume that signal, leaving
+        purchased tickets recorded as zero gold tickets forever.
+
+        Reading a flag rather than "did I add the column" also keeps a
+        database migrated by an earlier release safe - re-running the split
+        would reclassify every free ticket as a purchased one.
+        """
         migrated = 0
         with self._sessions.begin() as session:
+            pending = session.get(SettingRecord, PENDING_LEGACY_TOTALS_KEY)
+            if pending is None:
+                return
             for total in session.scalars(select(RaffleTotalRecord)).all():
                 capped_tickets = min(
                     total.raffle_tickets,
@@ -1252,7 +1266,8 @@ class RaffleStore:
                 total.raffle_tickets = capped_tickets
                 total.gold_raffle_tickets = capped_tickets
                 migrated += 1
-        LOGGER.debug("Migrated %s legacy raffle totals", migrated)
+            session.delete(pending)
+        LOGGER.info("Migrated %s legacy raffle totals", migrated)
 
     def _apply_manual_ticket_cap_once(self) -> None:
         updated = 0
