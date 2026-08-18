@@ -33,6 +33,26 @@ class SettingRecord(Base):
     value: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class BotSettingRecord(Base):
+    """One value an officer set with /settings.
+
+    Kept apart from the `metadata` table above, which is the bot's own
+    bookkeeping - log cursors, index watermarks, the guild binding. Mixing
+    operator settings into it would make both harder to read, and only this
+    table holds anything that may be encrypted.
+    """
+
+    __tablename__ = "gw2_bot_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)
+    is_encrypted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
 class RaffleTotalRecord(Base):
     __tablename__ = "raffle_totals"
 

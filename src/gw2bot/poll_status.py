@@ -4,12 +4,12 @@ import logging
 
 import aiohttp
 
-from gw2bot.logging_setup import redact_log_text
+from gw2bot.logging_setup import Secrets, redact_log_text
 
 LOGGER = logging.getLogger(__name__)
 
 
-def format_poll_error(error: Exception, secrets: tuple[str, ...] = ()) -> str:
+def format_poll_error(error: Exception, secrets: Secrets = ()) -> str:
     if isinstance(error, aiohttp.ClientResponseError):
         status = f"HTTP {error.status}" if error.status else type(error).__name__
         detail = error.message.strip()
@@ -24,7 +24,9 @@ class PollStatusTracker:
     # Poll status is operational noise (timeouts, transient API errors), so it
     # stays in the console and is never posted to the logging channel.
 
-    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
+    def __init__(self, secrets: Secrets = ()) -> None:
+        # A registry is held by reference, so an API key set with /settings
+        # after startup is redacted from poll error text too.
         self._secrets = secrets
         self._last_errors: dict[str, str] = {}
 

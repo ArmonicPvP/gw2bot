@@ -17,7 +17,7 @@ class TestGuildLogRefresh:
             _raffle_store=store,
             _config=SimpleNamespace(
                 gw2_guild_id=None,
-                missing_gw2_api_variables=("GW2_API_KEY", "GW2_GUILD_ID"),
+                missing_gw2_api_settings=("gw2_api_key", "gw2_guild_id"),
             ),
         )
 

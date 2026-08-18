@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from collections.abc import Callable, Coroutine, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -12,7 +14,8 @@ from discord import app_commands
 
 from gw2bot import guild_log, guild_storage, member_count, notifications
 from gw2bot.config import (
-    NOTIFICATION_CHANNEL_VARIABLE,
+    NOTIFICATION_CHANNEL_SETTING,
+    BootstrapConfig,
     Config,
     missing_configuration_message,
 )
@@ -37,6 +40,7 @@ from gw2bot.raffle import (
     RaffleTotal,
 )
 from gw2bot.raffle import reports as raffle_reports
+from gw2bot.logging_setup import SecretRegistry
 from gw2bot.raffle.commands import RaffleCommands
 from gw2bot.raffle.views import (
     RaffleAuditRangesButton,
@@ -44,6 +48,12 @@ from gw2bot.raffle.views import (
     RaffleLeaderboardButton,
     RaffleTicketsListButton,
 )
+from gw2bot.settings.commands import SettingsCommands
+from gw2bot.settings.composition import compose_from_store
+from gw2bot.settings.crypto import SettingsCipher
+from gw2bot.settings.definitions import SettingDefinition, setting_key
+from gw2bot.settings.migration import legacy_variables_present
+from gw2bot.settings.store import SettingsStore
 from gw2bot.trials.commands import (
     create_check_command,
     create_track_command,
@@ -69,8 +79,33 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
+def _bootstrap_from(config: Config) -> BootstrapConfig:
+    """Recover the bootstrap half of a Config that was handed over whole.
+
+    Only used when a caller builds a bot from a Config alone - the tests, and
+    anything embedding the bot - so a settings change still has the values it
+    must recompose on top of.
+    """
+    return BootstrapConfig(
+        discord_token=config.discord_token,
+        discord_command_guild_id=config.discord_command_guild_id,
+        debug=config.debug,
+        raffle_db_path=config.raffle_db_path,
+        gw2_api_base_url=config.gw2_api_base_url,
+        web_enabled=config.web_enabled,
+        web_port=config.web_port,
+    )
+
+
 class Gw2Bot(discord.Client):
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        *,
+        bootstrap: BootstrapConfig | None = None,
+        settings_store: SettingsStore | None = None,
+        secrets: SecretRegistry | None = None,
+    ):
         intents = discord.Intents.none()
         # Discord.py needs the guild role cache to resolve interaction member roles.
         intents.guilds = True
@@ -78,15 +113,30 @@ class Gw2Bot(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents)
         self._config = config
+        # Kept so a settings change can be recomposed onto the same bootstrap
+        # values rather than re-read from an environment that no longer owns
+        # them.
+        self._bootstrap = bootstrap or _bootstrap_from(config)
+        self._settings_store = settings_store or SettingsStore(
+            config.raffle_db_path,
+            SettingsCipher.for_database(config.raffle_db_path),
+        )
+        self._secrets = secrets or SecretRegistry(
+            (
+                config.gw2_api_key,
+                config.discord_token,
+                config.discord_oauth_client_secret,
+                config.web_session_secret,
+            )
+        )
         self._session: aiohttp.ClientSession | None = None
         self._poll_tasks: list[asyncio.Task[None]] = []
         self._notification_channel: Any | None = None
         self._raffle_contribution_channel: Any | None = None
         self._feast_notification_user: Any | None = None
         self._feast_counts: dict[int, int] | None = None
-        self._poll_status = PollStatusTracker(
-            (config.gw2_api_key or "", config.discord_token)
-        )
+        self._legacy_variables_announced = False
+        self._poll_status = PollStatusTracker(self._secrets)
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._event_store = EventStore(config.raffle_db_path)
         self._event_timezone = ZoneInfo(config.event_timezone)
@@ -99,6 +149,7 @@ class Gw2Bot(discord.Client):
         self._ready_announced = False
         self.tree = app_commands.CommandTree(self)
         self.tree.add_command(RaffleCommands(self))
+        self.tree.add_command(SettingsCommands(self))
         self.tree.add_command(EventCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
@@ -125,94 +176,261 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Initializing HTTP session and GW2 API client")
         timeout = aiohttp.ClientTimeout(total=30)
         self._session = aiohttp.ClientSession(timeout=timeout)
-        gw2_api_enabled = self._config.gw2_api_enabled
-        notifications_enabled = self._config.notifications_enabled
         self._log_disabled_features()
+        self._log_legacy_variables()
+        self._rebuild_gw2_api_client()
+        await self._sync_commands()
+        self._reconcile_poll_tasks()
+        await self._reconcile_web_server()
+
+    def _rebuild_gw2_api_client(self) -> None:
+        """Point the API client and roster cache at the current credentials.
+
+        Both capture the key and guild id they were built with, so a change to
+        either has to replace them rather than let the old pair keep polling.
+        """
         api_key = self._config.gw2_api_key
         guild_id = self._config.gw2_guild_id
-        if api_key is not None and guild_id is not None:
-            self._api = Gw2ApiClient(
-                self._session,
-                self._config.gw2_api_base_url,
-                api_key,
-            )
-            self._guild_members = GuildMemberCache(
-                self._api,
-                guild_id,
-                self._config.guild_member_cache_seconds,
-            )
-            self._guild_members.start_background_refresh()
-        await self._sync_commands()
-        LOGGER.debug(
-            "Starting background poll tasks; gw2_api_enabled=%s "
-            "notifications_enabled=%s",
-            gw2_api_enabled,
-            notifications_enabled,
+        if self._session is None or api_key is None or guild_id is None:
+            self._api = None
+            self._guild_members = None
+            LOGGER.debug("Guild Wars 2 API client not built; credentials unset")
+            return
+        self._api = Gw2ApiClient(
+            self._session,
+            self._config.gw2_api_base_url,
+            api_key,
         )
-        self._poll_tasks = [
-            asyncio.create_task(
-                self._poll_raffle_contributions(),
-                name="gw2-raffle-contribution-poller",
-            ),
-            asyncio.create_task(
-                self._poll_event_updates(),
-                name="gw2-event-scheduler",
-            ),
-        ]
+        self._guild_members = GuildMemberCache(
+            self._api,
+            guild_id,
+            self._config.guild_member_cache_seconds,
+        )
+        self._guild_members.start_background_refresh()
+        LOGGER.debug("Guild Wars 2 API client and guild member cache rebuilt")
+
+    def _wanted_poll_tasks(self) -> dict[str, Callable[[], Coroutine[Any, Any, None]]]:
+        """The pollers this configuration should be running, by task name."""
+        gw2_api_enabled = self._config.gw2_api_enabled
+        notifications_enabled = self._config.notifications_enabled
+        wanted: dict[str, Callable[[], Coroutine[Any, Any, None]]] = {
+            "gw2-raffle-contribution-poller": self._poll_raffle_contributions,
+            "gw2-event-scheduler": self._poll_event_updates,
+        }
         if gw2_api_enabled:
             # These read the GW2 API on every pass, so without a key and a
             # guild id they have nothing to poll.
-            self._poll_tasks.extend(
-                (
-                    asyncio.create_task(
-                        self._poll_guild_storage(),
-                        name="gw2-guild-storage-poller",
-                    ),
-                    asyncio.create_task(
-                        self._poll_guild_log(),
-                        name="gw2-guild-log-poller",
-                    ),
-                )
-            )
+            wanted["gw2-guild-storage-poller"] = self._poll_guild_storage
+            wanted["gw2-guild-log-poller"] = self._poll_guild_log
         if gw2_api_enabled and notifications_enabled:
             # Both read the GW2 API and exist only to write to the
             # notification channel, so either half being unset stops them.
-            self._poll_tasks.extend(
-                (
-                    asyncio.create_task(
-                        self._poll_overdue_trials(),
-                        name="gw2-overdue-trial-poller",
-                    ),
-                    asyncio.create_task(
-                        self._poll_guild_member_count_topic(),
-                        name="gw2-guild-member-count-topic-poller",
-                    ),
-                )
+            wanted["gw2-overdue-trial-poller"] = self._poll_overdue_trials
+            wanted["gw2-guild-member-count-topic-poller"] = (
+                self._poll_guild_member_count_topic
             )
-        if self._config.web_enabled:
-            # Imported lazily so the web layer only loads when enabled.
-            from gw2bot.web.server import WebServer
+        return wanted
 
-            web_server = WebServer(self, self._config, self._session)
-            try:
-                await web_server.start()
-            except OSError as exc:
-                # The calendar is an optional read-only extra. A port conflict
-                # must not cost the guild its raffles, trials and events, so
-                # log loudly and carry on without it.
-                LOGGER.error(
-                    "Could not start the web calendar; the bot continues "
-                    "without it; port=%s error_type=%s",
-                    self._config.web_port,
-                    type(exc).__name__,
-                )
-            else:
-                self._web_server = web_server
-        else:
-            LOGGER.debug("Web calendar disabled")
+    def _reconcile_poll_tasks(self, restart: frozenset[str] = frozenset()) -> list[str]:
+        """Start the pollers this configuration wants and stop the rest.
+
+        Run at startup and again whenever /settings changes something a poller
+        depends on, so enabling a feature no longer waits for a restart.
+        Names in ``restart`` are cancelled even when they are still wanted,
+        which is how a poller that captured a credential picks up a new one.
+        """
+        wanted = self._wanted_poll_tasks()
+        running = {
+            task.get_name(): task
+            for task in self._poll_tasks
+            if not task.done()
+        }
+        changed: list[str] = []
+        for name, task in running.items():
+            if name in wanted and name not in restart:
+                continue
+            task.cancel()
+            changed.append(name)
+        surviving = [
+            task
+            for name, task in running.items()
+            if name in wanted and name not in restart
+        ]
+        for name, factory in wanted.items():
+            if name in running and name not in restart:
+                continue
+            surviving.append(asyncio.create_task(factory(), name=name))
+            if name not in changed:
+                changed.append(name)
+        self._poll_tasks = surviving
+        LOGGER.debug(
+            "Reconciled background poll tasks; running=%s changed=%s",
+            len(surviving),
+            sorted(changed),
+        )
+        return sorted(changed)
+
+    async def _reconcile_web_server(self, restart: bool = False) -> bool:
+        """Bring the calendar up, down, or back up on new settings.
+
+        Returns whether anything actually changed, so /settings can say the
+        calendar was restarted only when it was.
+        """
+        wanted = self._config.web_calendar_enabled
+        running = self._web_server is not None
+        if wanted and running and not restart:
+            return False
+        if running:
+            assert self._web_server is not None
+            await self._web_server.stop()
+            self._web_server = None
+            LOGGER.debug("Web calendar stopped")
+            if not wanted:
+                return True
+        if not wanted:
+            LOGGER.debug(
+                "Web calendar disabled; web_enabled=%s missing_settings=%s",
+                self._config.web_enabled,
+                ", ".join(self._config.missing_web_settings) or "none",
+            )
+            return running
+        if self._session is None:
+            return False
+        # Imported lazily so the web layer only loads when enabled.
+        from gw2bot.web.server import WebServer
+
+        web_server = WebServer(self, self._config, self._session)
+        try:
+            await web_server.start()
+        except OSError as exc:
+            # The calendar is an optional read-only extra. A port conflict
+            # must not cost the guild its raffles, trials and events, so
+            # log loudly and carry on without it.
+            LOGGER.error(
+                "Could not start the web calendar; the bot continues "
+                "without it; port=%s error_type=%s",
+                self._config.web_port,
+                type(exc).__name__,
+            )
+            return True
+        self._web_server = web_server
+        return True
+
+    @property
+    def settings_store(self) -> SettingsStore:
+        return self._settings_store
+
+    @property
+    def secrets(self) -> SecretRegistry:
+        return self._secrets
+
+    async def apply_settings_change(self, changed: set[str]) -> list[str]:
+        """Reload the configuration and reconcile whatever captured a value.
+
+        Most of the bot reads ``self._config`` when it needs something, so
+        swapping the frozen Config makes those reads live for free. Only the
+        things that cache or capture a value need touching, and only those
+        named here. The return value is what /settings reports back, so it
+        lists what was actually restarted rather than everything considered.
+        """
+        LOGGER.debug("Applying settings change; fields=%s", sorted(changed))
+        previous = self._config
+        self._config = compose_from_store(self._bootstrap, self._settings_store)
+        # A credential set while the bot is running has to be redacted by the
+        # handler that is already installed, so it is registered before
+        # anything can log it.
+        self._secrets.update(
+            (
+                self._config.gw2_api_key,
+                self._config.discord_oauth_client_secret,
+                self._config.web_session_secret,
+            )
+        )
+        restarted: list[str] = []
+        restart_tasks: set[str] = set()
+
+        if changed & {"gw2_api_key", "gw2_guild_id", "guild_member_cache_seconds"}:
+            if self._guild_members is not None:
+                await self._guild_members.close()
+            self._rebuild_gw2_api_client()
+            restarted.append("the Guild Wars 2 API client")
+            # Both pollers read the guild id once before their loop, so a new
+            # one only reaches them through a fresh task.
+            restart_tasks |= {
+                "gw2-guild-storage-poller",
+                "gw2-guild-log-poller",
+            }
+
+        if "gw2_guild_id" in changed:
+            self._raffle_store.bind_guild(self._config.gw2_guild_id)
+
+        if "discord_notification_channel_id" in changed:
+            self._notification_channel = None
+            restarted.append("the notification channel")
+
+        if "raffle_contribution_channel_id" in changed:
+            self._raffle_contribution_channel = None
+            restarted.append("the raffle contribution channel")
+
+        if "discord_feast_notification_user_id" in changed:
+            self._feast_notification_user = None
+
+        if "event_timezone" in changed:
+            self._event_timezone = ZoneInfo(self._config.event_timezone)
+            restarted.append("the event timezone")
+
+        changed_tasks = self._reconcile_poll_tasks(frozenset(restart_tasks))
+        if changed_tasks:
+            restarted.append(f"{len(changed_tasks)} background task(s)")
+
+        # The calendar captures its credentials and caches per-user role
+        # answers, so both a credential change and a role change need it
+        # rebuilt rather than merely reconfigured.
+        web_fields = {
+            "web_base_url",
+            "discord_oauth_client_id",
+            "discord_oauth_client_secret",
+            "web_session_secret",
+            "web_session_ttl_seconds",
+            "food_page_role_id",
+            "raffle_draw_role_id",
+        }
+        if await self._reconcile_web_server(bool(changed & web_fields)):
+            restarted.append("the web calendar")
+
+        if previous.debug != self._config.debug:
+            LOGGER.debug("Debug logging is a bootstrap variable and unchanged")
+        LOGGER.debug(
+            "Applied settings change; fields=%s restarted=%s",
+            sorted(changed),
+            restarted,
+        )
+        return restarted
+
+    def _log_legacy_variables(
+        self,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[str, ...]:
+        """Warn about environment variables the settings have taken over.
+
+        The bot cannot edit the operator's .env, so the only thing it can do
+        about a stale variable is say so on every startup until it is removed.
+        The values are never named, only the variables.
+        """
+        present = legacy_variables_present(os.environ if env is None else env)
+        if not present:
+            LOGGER.debug("No legacy configuration variables are set")
+            return ()
+        LOGGER.warning(
+            "These environment variables no longer configure the bot and are "
+            "ignored; set the values with /settings and remove the variables "
+            "from the environment: %s",
+            ", ".join(present),
+        )
+        return present
 
     def _log_disabled_features(self) -> None:
-        missing_gw2 = self._config.missing_gw2_api_variables
+        missing_gw2 = self._config.missing_gw2_api_settings
         if missing_gw2:
             LOGGER.warning(
                 "Guild Wars 2 features are disabled because %s %s not set: "
@@ -221,7 +439,7 @@ class Gw2Bot(discord.Client):
                 "raffle deposit tracking, the overdue Trial member report, the "
                 "guild member count channel description, and guild member "
                 "lookups in /raffle, /check and /track",
-                ", ".join(missing_gw2),
+                ", ".join(f"/settings {name}" for name in missing_gw2),
                 "is" if len(missing_gw2) == 1 else "are",
             )
         if not self._config.notifications_enabled:
@@ -231,7 +449,7 @@ class Gw2Bot(discord.Client):
                 "member message is delivered there, the guild member count "
                 "channel description is not updated, and the diag previews do "
                 "not run; the raffle contribution channel is unaffected",
-                NOTIFICATION_CHANNEL_VARIABLE,
+                f"/settings {NOTIFICATION_CHANNEL_SETTING}",
             )
 
     @property
@@ -244,11 +462,11 @@ class Gw2Bot(discord.Client):
         action: str,
     ) -> bool:
         """Tell a caller how to enable a command that needs the GW2 API."""
-        missing = self._config.missing_gw2_api_variables
+        missing = self._config.missing_gw2_api_settings
         if not missing:
             return False
         LOGGER.warning(
-            "Rejected %s from Discord user %s; unset environment variables: %s",
+            "Rejected %s from Discord user %s; unset settings: %s",
             action,
             getattr(getattr(interaction, "user", None), "id", "unknown"),
             ", ".join(missing),
@@ -277,6 +495,7 @@ class Gw2Bot(discord.Client):
             await self._session.close()
         self._raffle_store.close()
         self._event_store.close()
+        self._settings_store.close()
         await super().close()
 
     async def on_ready(self) -> None:
@@ -285,6 +504,32 @@ class Gw2Bot(discord.Client):
             return
         LOGGER.info("GW2 bot connected to Discord. %s", self._startup_status())
         self._ready_announced = True
+        await self._announce_legacy_variables()
+
+    async def _announce_legacy_variables(self) -> None:
+        """Tell the notification channel about variables /settings replaced.
+
+        Posted once per startup rather than on every poll: it is a migration
+        notice, and repeating it would bury the messages the channel exists
+        for. The console warning stands whether or not this is delivered.
+        """
+        if self._legacy_variables_announced:
+            return
+        self._legacy_variables_announced = True
+        present = legacy_variables_present(os.environ)
+        if not present:
+            LOGGER.debug("No legacy configuration warning to deliver")
+            return
+        delivered = await notifications.send_legacy_configuration_warning(
+            self,
+            present,
+        )
+        LOGGER.debug(
+            "Legacy configuration warning delivery finished; variables=%s "
+            "delivered=%s",
+            len(present),
+            delivered,
+        )
 
     def _startup_status(self) -> str:
         """Describe only the schedules that this configuration actually runs."""

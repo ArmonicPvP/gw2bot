@@ -1250,6 +1250,15 @@ class RaffleStore:
             )
         LOGGER.info("Applied one-time free-ticket cap; updated_users=%s", updated)
 
+    def bind_guild(self, guild_id: str | None) -> None:
+        """Claim the database for a guild id set after the store was opened.
+
+        /settings gw2_guild_id can be changed while the bot runs, and the
+        ledger records which guild it belongs to, so the same check that
+        guards startup has to guard that change too.
+        """
+        self._bind_guild(guild_id)
+
     def _bind_guild(self, guild_id: str | None) -> None:
         if guild_id is None:
             # Leave the database unbound so the first configured guild id
@@ -1260,8 +1269,9 @@ class RaffleStore:
             record = session.get(SettingRecord, "guild_id")
             if record is not None and record.value != guild_id:
                 raise ValueError(
-                    "Raffle database belongs to a different guild; "
-                    "use a different RAFFLE_DB_PATH"
+                    "This database belongs to a different guild. Point "
+                    "RAFFLE_DB_PATH at a different file to run a second "
+                    "guild's ledger."
                 )
             if record is None:
                 session.add(SettingRecord(key="guild_id", value=guild_id))

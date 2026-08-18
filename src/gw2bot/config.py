@@ -3,12 +3,30 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
-GW2_API_VARIABLES = ("GW2_API_KEY", "GW2_GUILD_ID")
-NOTIFICATION_CHANNEL_VARIABLE = "DISCORD_NOTIFICATION_CHANNEL_ID"
+# The settings a Guild Wars 2 lookup needs, and the one that decides whether
+# anything is delivered to the notification channel. Named here rather than
+# re-derived, so a message about a disabled feature always names the same
+# /settings subcommand the operator has to run.
+GW2_API_SETTINGS = ("gw2_api_key", "gw2_guild_id")
+NOTIFICATION_CHANNEL_SETTING = "discord_notification_channel_id"
+
+# Variables that stay in the environment because they decide how the container
+# itself starts: the credentials the bot needs before it can read a database,
+# where that database is, whether a listening socket is opened and on which
+# port, and where the encrypted API key is allowed to be sent.
+BOOTSTRAP_VARIABLES = (
+    "DISCORD_TOKEN",
+    "DISCORD_COMMAND_GUILD_ID",
+    "DEBUG",
+    "RAFFLE_DB_PATH",
+    "WEB_ENABLED",
+    "WEB_PORT",
+    "GW2_API_BASE_URL",
+    "SETTINGS_ENCRYPTION_KEY",
+)
 
 # Discord role, channel and forum-tag ids. These were literals scattered through
 # the feature modules until they became settings; they stay here as the values a
@@ -31,13 +49,13 @@ class ConfigurationError(ValueError):
     """Raised when required application configuration is invalid."""
 
 
-def missing_configuration_message(variables: Sequence[str]) -> str:
-    """Explain to a command's caller which variables switch the feature on."""
-    plural = "s" if len(variables) != 1 else ""
+def missing_configuration_message(settings: Sequence[str]) -> str:
+    """Explain to a command's caller which settings switch the feature on."""
+    commands = ", ".join(f"/settings {name}" for name in settings)
+    plural = "s" if len(settings) != 1 else ""
     return (
-        "This command is disabled. Set the "
-        f"{', '.join(variables)} environment variable{plural} for the bot "
-        "and restart it to enable this command."
+        "This command is disabled. Run the "
+        f"{commands} command{plural} to enable it."
     )
 
 
@@ -82,12 +100,12 @@ class Config:
     trial_in_review_tag_id: int = DEFAULT_TRIAL_IN_REVIEW_TAG_ID
 
     @property
-    def missing_gw2_api_variables(self) -> tuple[str, ...]:
-        """Names of the unset variables that Guild Wars 2 lookups need."""
+    def missing_gw2_api_settings(self) -> tuple[str, ...]:
+        """Names of the unset settings that Guild Wars 2 lookups need."""
         return tuple(
             name
             for name, value in zip(
-                GW2_API_VARIABLES,
+                GW2_API_SETTINGS,
                 (self.gw2_api_key, self.gw2_guild_id),
                 strict=True,
             )
@@ -97,136 +115,89 @@ class Config:
     @property
     def gw2_api_enabled(self) -> bool:
         """Whether the bot can call the Guild Wars 2 API for its guild."""
-        return not self.missing_gw2_api_variables
+        return not self.missing_gw2_api_settings
 
     @property
     def notifications_enabled(self) -> bool:
         """Whether a channel is configured for automated notifications."""
         return self.discord_notification_channel_id is not None
 
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
-        if env is None:
-            # Existing runtime variables win over local .env values.
-            load_dotenv(override=False)
-        values = os.environ if env is None else env
-        required = (
-            "DISCORD_TOKEN",
-            "DISCORD_COMMAND_GUILD_ID",
-        )
-        missing = [name for name in required if not values.get(name, "").strip()]
-        if missing:
-            raise ConfigurationError(
-                f"Missing required environment variables: {', '.join(missing)}"
+    @property
+    def missing_web_settings(self) -> tuple[str, ...]:
+        """Names of the unset settings the web calendar needs to serve."""
+        return tuple(
+            name
+            for name, value in (
+                ("web_base_url", self.web_base_url),
+                ("discord_oauth_client_id", self.discord_oauth_client_id),
+                (
+                    "discord_oauth_client_secret",
+                    self.discord_oauth_client_secret,
+                ),
+                ("web_session_secret", self.web_session_secret),
             )
+            if value is None
+        )
 
-        discord_command_guild_id = _positive_int(
+    @property
+    def web_calendar_enabled(self) -> bool:
+        """Whether the calendar is both switched on and fully configured.
+
+        WEB_ENABLED opens the listening socket, which is why it stays an
+        environment variable, but the four values it needs are settings now.
+        Switching it on before they are set warns and leaves the calendar off
+        rather than refusing to start, the same way an unset API key disables
+        Guild Wars 2 polling.
+        """
+        return self.web_enabled and not self.missing_web_settings
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapConfig:
+    """The values that have to be known before the database can be opened.
+
+    Everything else lives in the settings table and is composed on top of
+    this; see gw2bot.settings.composition.
+    """
+
+    discord_token: str
+    discord_command_guild_id: int
+    debug: bool = False
+    raffle_db_path: str = "data/gw2bot.db"
+    gw2_api_base_url: str = "https://api.guildwars2.com"
+    web_enabled: bool = False
+    web_port: int = 2222
+
+
+def bootstrap_from_env(env: Mapping[str, str] | None = None) -> BootstrapConfig:
+    if env is None:
+        # Existing runtime variables win over local .env values.
+        load_dotenv(override=False)
+    values = os.environ if env is None else env
+    required = ("DISCORD_TOKEN", "DISCORD_COMMAND_GUILD_ID")
+    missing = [name for name in required if not values.get(name, "").strip()]
+    if missing:
+        raise ConfigurationError(
+            f"Missing required environment variables: {', '.join(missing)}"
+        )
+    return BootstrapConfig(
+        discord_token=values["DISCORD_TOKEN"].strip(),
+        discord_command_guild_id=_positive_int(
             values["DISCORD_COMMAND_GUILD_ID"],
             "DISCORD_COMMAND_GUILD_ID",
-        )
-        discord_notification_channel_id = _optional_positive_int(
-            values.get("DISCORD_NOTIFICATION_CHANNEL_ID"),
-            "DISCORD_NOTIFICATION_CHANNEL_ID",
-        )
-        discord_feast_notification_user_id = _optional_positive_int(
-            values.get("DISCORD_FEAST_NOTIFICATION_USER_ID"),
-            "DISCORD_FEAST_NOTIFICATION_USER_ID",
-        )
-        poll_interval = _positive_int(
-            values.get("GW2_POLL_INTERVAL_SECONDS", "300"),
-            "GW2_POLL_INTERVAL_SECONDS",
-        )
-        if poll_interval < 30:
-            raise ConfigurationError("GW2_POLL_INTERVAL_SECONDS must be at least 30")
-        guild_log_poll_interval = _positive_int(
-            values.get("GW2_GUILD_LOG_POLL_INTERVAL_SECONDS", "60"),
-            "GW2_GUILD_LOG_POLL_INTERVAL_SECONDS",
-        )
-        if guild_log_poll_interval < 30:
-            raise ConfigurationError(
-                "GW2_GUILD_LOG_POLL_INTERVAL_SECONDS must be at least 30"
-            )
-        guild_member_cache = _positive_int(
-            values.get("GW2_GUILD_MEMBER_CACHE_SECONDS", "900"),
-            "GW2_GUILD_MEMBER_CACHE_SECONDS",
-        )
-        event_timezone = _optional_string(
-            values.get("TZ"),
-            "UTC",
-        )
-        try:
-            ZoneInfo(event_timezone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
-            raise ConfigurationError(
-                "TZ must be a valid IANA timezone name"
-            ) from exc
-        web_enabled = _boolean(values.get("WEB_ENABLED", "false"), "WEB_ENABLED")
-        web_port = _positive_int(values.get("WEB_PORT", "2222"), "WEB_PORT")
-        web_session_ttl_seconds = _positive_int(
-            values.get("WEB_SESSION_TTL_SECONDS", "604800"),
-            "WEB_SESSION_TTL_SECONDS",
-        )
-        web_base_url: str | None = None
-        discord_oauth_client_id: str | None = None
-        discord_oauth_client_secret: str | None = None
-        web_session_secret: str | None = None
-        if web_enabled:
-            web_required = (
-                "WEB_BASE_URL",
-                "DISCORD_OAUTH_CLIENT_ID",
-                "DISCORD_OAUTH_CLIENT_SECRET",
-                "WEB_SESSION_SECRET",
-            )
-            web_missing = [
-                name for name in web_required if not values.get(name, "").strip()
-            ]
-            if web_missing:
-                raise ConfigurationError(
-                    "WEB_ENABLED requires environment variables: "
-                    f"{', '.join(web_missing)}"
-                )
-            web_base_url = values["WEB_BASE_URL"].strip().rstrip("/")
-            if not web_base_url.startswith(("http://", "https://")):
-                raise ConfigurationError(
-                    "WEB_BASE_URL must start with http:// or https://"
-                )
-            discord_oauth_client_id = values["DISCORD_OAUTH_CLIENT_ID"].strip()
-            discord_oauth_client_secret = values[
-                "DISCORD_OAUTH_CLIENT_SECRET"
-            ].strip()
-            web_session_secret = values["WEB_SESSION_SECRET"].strip()
-            if len(web_session_secret) < 32:
-                raise ConfigurationError(
-                    "WEB_SESSION_SECRET must be at least 32 characters"
-                )
-        return cls(
-            discord_token=values["DISCORD_TOKEN"].strip(),
-            discord_command_guild_id=discord_command_guild_id,
-            discord_notification_channel_id=discord_notification_channel_id,
-            discord_feast_notification_user_id=discord_feast_notification_user_id,
-            gw2_api_key=_optional_stripped(values.get("GW2_API_KEY")),
-            gw2_guild_id=_optional_stripped(values.get("GW2_GUILD_ID")),
-            poll_interval_seconds=poll_interval,
-            guild_log_poll_interval_seconds=guild_log_poll_interval,
-            guild_member_cache_seconds=guild_member_cache,
-            raffle_db_path=_optional_string(
-                values.get("RAFFLE_DB_PATH"),
-                "data/gw2bot.db",
-            ),
-            gw2_api_base_url=_optional_string(
-                values.get("GW2_API_BASE_URL"),
-                "https://api.guildwars2.com",
-            ).rstrip("/"),
-            event_timezone=event_timezone,
-            debug=_boolean(values.get("DEBUG", "false"), "DEBUG"),
-            web_enabled=web_enabled,
-            web_port=web_port,
-            web_base_url=web_base_url,
-            discord_oauth_client_id=discord_oauth_client_id,
-            discord_oauth_client_secret=discord_oauth_client_secret,
-            web_session_secret=web_session_secret,
-            web_session_ttl_seconds=web_session_ttl_seconds,
-        )
+        ),
+        debug=_boolean(values.get("DEBUG", "false"), "DEBUG"),
+        raffle_db_path=_optional_string(
+            values.get("RAFFLE_DB_PATH"),
+            "data/gw2bot.db",
+        ),
+        gw2_api_base_url=_optional_string(
+            values.get("GW2_API_BASE_URL"),
+            "https://api.guildwars2.com",
+        ).rstrip("/"),
+        web_enabled=_boolean(values.get("WEB_ENABLED", "false"), "WEB_ENABLED"),
+        web_port=_positive_int(values.get("WEB_PORT", "2222"), "WEB_PORT"),
+    )
 
 
 def _positive_int(value: str, name: str) -> int:
@@ -237,18 +208,6 @@ def _positive_int(value: str, name: str) -> int:
     if result <= 0:
         raise ConfigurationError(f"{name} must be greater than zero")
     return result
-
-
-def _optional_positive_int(value: str | None, name: str) -> int | None:
-    if value is None or not value.strip():
-        return None
-    return _positive_int(value, name)
-
-
-def _optional_stripped(value: str | None) -> str | None:
-    if value is None or not value.strip():
-        return None
-    return value.strip()
 
 
 def _optional_string(value: str | None, default: str) -> str:

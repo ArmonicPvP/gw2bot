@@ -29,8 +29,8 @@ async def refresh_guild_log(bot: Gw2Bot) -> bool:
         # The startup warning already reported why the guild log itself is
         # not being read.
         LOGGER.debug(
-            "Skipped guild log refresh; unset environment variables: %s",
-            ", ".join(bot._config.missing_gw2_api_variables),
+            "Skipped guild log refresh; unset settings: %s",
+            ", ".join(bot._config.missing_gw2_api_settings),
         )
         return False
     cursor = bot._raffle_store.get_cursor()

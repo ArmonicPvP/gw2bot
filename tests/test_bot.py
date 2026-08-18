@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from factories import forbidden_error
+from factories import config_from_env, forbidden_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
+from gw2bot.settings.definitions import definition_for
 from gw2bot.main import main as run_main
 from gw2bot.events.views import (
     EventSettingsButton,
@@ -26,36 +27,51 @@ from gw2bot.raffle.views import (
 
 
 class TestCommand:
+    @staticmethod
+    def _environment(tmp_path: Path, **overrides: str) -> dict[str, str]:
+        values = {
+            "DISCORD_TOKEN": "discord-secret",
+            "DISCORD_COMMAND_GUILD_ID": "5678",
+            "RAFFLE_DB_PATH": str(tmp_path / "gw2bot.db"),
+            "DEBUG": "true",
+        }
+        values.update(overrides)
+        return values
+
     @patch("gw2bot.main.Gw2Bot")
     @patch("gw2bot.main.configure_logging")
-    @patch("gw2bot.main.Config.from_env")
     def test_registers_all_configured_credentials_with_console_redaction(
         self,
-        from_env: MagicMock,
         configure: MagicMock,
         bot_class: MagicMock,
+        tmp_path: Path,
     ) -> None:
-        config = SimpleNamespace(
-            debug=True,
-            gw2_api_key="gw2-secret",
-            discord_token="discord-secret",
-            discord_oauth_client_secret="oauth-secret",
-            web_session_secret="session-secret",
+        environment = self._environment(
+            tmp_path,
+            GW2_API_KEY="gw2-secret",
+            GW2_GUILD_ID="guild-id",
+            DISCORD_OAUTH_CLIENT_SECRET="oauth-secret",
+            WEB_SESSION_SECRET="s" * 32,
         )
-        from_env.return_value = config
 
-        run_main()
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
 
-        configure.assert_called_once_with(
-            True,
-            (
-                "gw2-secret",
-                "discord-secret",
-                "oauth-secret",
-                "session-secret",
-            ),
-        )
-        bot_class.assert_called_once_with(config)
+        debug, secrets = configure.call_args.args
+        assert debug
+        # The registry is shared with the handler, so a secret set later is
+        # redacted too; every credential this configuration carries has to be
+        # in it before anything can log one.
+        assert set(secrets.current()) == {
+            "gw2-secret",
+            "discord-secret",
+            "oauth-secret",
+            "s" * 32,
+        }
+        config = bot_class.call_args.args[0]
+        assert config.gw2_api_key == "gw2-secret"
+        assert config.gw2_guild_id == "guild-id"
+        assert bot_class.call_args.kwargs["secrets"] is secrets
         bot_class.return_value.run.assert_called_once_with(
             "discord-secret",
             log_handler=None,
@@ -63,33 +79,103 @@ class TestCommand:
 
     @patch("gw2bot.main.Gw2Bot")
     @patch("gw2bot.main.configure_logging")
-    @patch("gw2bot.main.Config.from_env")
-    def test_registers_blank_placeholders_for_unset_web_secrets(
+    def test_registers_no_placeholders_for_unset_web_secrets(
         self,
-        from_env: MagicMock,
         configure: MagicMock,
         bot_class: MagicMock,
+        tmp_path: Path,
     ) -> None:
-        config = SimpleNamespace(
-            debug=False,
-            gw2_api_key="gw2-secret",
-            discord_token="discord-secret",
-            discord_oauth_client_secret=None,
-            web_session_secret=None,
+        environment = self._environment(
+            tmp_path,
+            DEBUG="false",
+            GW2_API_KEY="gw2-secret",
         )
-        from_env.return_value = config
 
-        run_main()
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
 
-        configure.assert_called_once_with(
-            False,
-            ("gw2-secret", "discord-secret", "", ""),
+        debug, secrets = configure.call_args.args
+        assert not debug
+        # An unset secret has nothing to redact, and registering a blank would
+        # make the formatter replace every empty string it ever formats.
+        assert set(secrets.current()) == {"gw2-secret", "discord-secret"}
+
+    @patch("gw2bot.main.Gw2Bot")
+    @patch("gw2bot.main.configure_logging")
+    def test_imports_the_legacy_environment_once(
+        self,
+        configure: MagicMock,
+        bot_class: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        environment = self._environment(
+            tmp_path,
+            GW2_API_KEY="gw2-secret",
+            GW2_GUILD_ID="guild-id",
+            TZ="America/New_York",
         )
+
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
+        first = bot_class.call_args.args[0]
+        store = bot_class.call_args.kwargs["settings_store"]
+        store.close()
+
+        assert first.event_timezone == "America/New_York"
+        assert first.gw2_api_key == "gw2-secret"
+
+        # The database is authoritative from here on: a value cleared with
+        # /settings must not come back because the variable is still in the
+        # environment.
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
+        reopened = bot_class.call_args.kwargs["settings_store"]
+        definition = definition_for("gw2_api_key")
+        reopened.unset(definition)
+        reopened.close()
+
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
+        third = bot_class.call_args.args[0]
+        bot_class.call_args.kwargs["settings_store"].close()
+
+        assert third.gw2_api_key is None
+        assert third.event_timezone == "America/New_York"
+
+    @patch("gw2bot.main.Gw2Bot")
+    @patch("gw2bot.main.configure_logging")
+    def test_encrypts_the_secrets_it_imports(
+        self,
+        configure: MagicMock,
+        bot_class: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        database = tmp_path / "gw2bot.db"
+        environment = self._environment(
+            tmp_path,
+            GW2_API_KEY="gw2-secret",
+        )
+
+        with patch.dict("os.environ", environment, clear=True):
+            run_main()
+        bot_class.call_args.kwargs["settings_store"].close()
+
+        # The whole point of encrypting them: a copied database file is not a
+        # copied API key.
+        assert b"gw2-secret" not in database.read_bytes()
+
+    def test_reports_a_missing_bootstrap_variable_and_stops(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("gw2bot.config.load_dotenv"):
+                with pytest.raises(SystemExit) as exit_info:
+                    run_main()
+
+        assert "DISCORD_TOKEN" in str(exit_info.value)
 
 
 class TestCommandSync:
     def setup_method(self) -> None:
-        self.config = Config.from_env(
+        self.config = config_from_env(
             {
                 "DISCORD_TOKEN": "discord-token",
                 "DISCORD_COMMAND_GUILD_ID": "5678",
@@ -129,7 +215,7 @@ class TestBotIntent:
         raffle_store: MagicMock,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            config = Config.from_env(
+            config = config_from_env(
                 {
                     "DISCORD_TOKEN": "discord-token",
                     "DISCORD_COMMAND_GUILD_ID": "5678",
@@ -160,7 +246,7 @@ class TestBotIntent:
         # old message, keeping /raffle audit pages reachable after the
         # original interaction ages out or the bot restarts.
         with tempfile.TemporaryDirectory() as directory:
-            config = Config.from_env(
+            config = config_from_env(
                 {
                     "DISCORD_TOKEN": "discord-token",
                     "DISCORD_COMMAND_GUILD_ID": "5678",
@@ -212,7 +298,7 @@ class TestBotWebServer:
                     "WEB_SESSION_SECRET": "s" * 32,
                 }
             )
-        return Config.from_env(values)
+        return config_from_env(values)
 
     def _quiet_bot_patches(self):
         return patch.multiple(
@@ -325,7 +411,7 @@ class TestOptionalConfiguration:
     }
 
     def _config(self, tmp_path: Path, **values: str) -> Config:
-        return Config.from_env(
+        return config_from_env(
             {
                 "DISCORD_TOKEN": "discord-token",
                 "DISCORD_COMMAND_GUILD_ID": "5678",
@@ -434,16 +520,17 @@ class TestOptionalConfiguration:
             record.getMessage()
             for record in caplog.records
             if record.levelno == logging.WARNING
+            and record.name.startswith("gw2bot")
         ]
         assert len(warnings) == 2
         assert (
-            "Guild Wars 2 features are disabled because GW2_API_KEY, "
-            "GW2_GUILD_ID are not set" in warnings[0]
+            "Guild Wars 2 features are disabled because /settings "
+            "gw2_api_key, /settings gw2_guild_id are not set" in warnings[0]
         )
         assert "Guild Storage polling" in warnings[0]
         assert (
-            "Notification channel delivery is disabled because "
-            "DISCORD_NOTIFICATION_CHANNEL_ID is not set" in warnings[1]
+            "Notification channel delivery is disabled because /settings "
+            "discord_notification_channel_id is not set" in warnings[1]
         )
         # The raffle contribution channel keeps posting, so the warning must
         # not read as "the bot has gone silent".
@@ -471,10 +558,10 @@ class TestOptionalConfiguration:
         assert caplog.records == []
         assert bot.gw2_api_enabled
 
-    async def test_disabled_command_reply_names_the_unset_variables(self) -> None:
+    async def test_disabled_command_reply_names_the_unset_settings(self) -> None:
         bot = SimpleNamespace(
             _config=SimpleNamespace(
-                missing_gw2_api_variables=("GW2_API_KEY", "GW2_GUILD_ID"),
+                missing_gw2_api_settings=("gw2_api_key", "gw2_guild_id"),
             )
         )
         interaction = SimpleNamespace(
@@ -493,9 +580,8 @@ class TestOptionalConfiguration:
 
         assert rejected
         interaction.response.send_message.assert_awaited_once_with(
-            "This command is disabled. Set the GW2_API_KEY, GW2_GUILD_ID "
-            "environment variables for the bot and restart it to enable "
-            "this command.",
+            "This command is disabled. Run the /settings gw2_api_key, "
+            "/settings gw2_guild_id commands to enable it.",
             ephemeral=True,
         )
 
@@ -504,7 +590,7 @@ class TestOptionalConfiguration:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         bot = SimpleNamespace(
-            _config=SimpleNamespace(missing_gw2_api_variables=("GW2_API_KEY",)),
+            _config=SimpleNamespace(missing_gw2_api_settings=("gw2_api_key",)),
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=1234),
@@ -529,7 +615,7 @@ class TestOptionalConfiguration:
 
     async def test_configured_commands_are_not_rejected(self) -> None:
         bot = SimpleNamespace(
-            _config=SimpleNamespace(missing_gw2_api_variables=()),
+            _config=SimpleNamespace(missing_gw2_api_settings=()),
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=1234),
@@ -580,6 +666,7 @@ class TestStartupStatus:
             ),
             _startup_status=lambda: Gw2Bot._startup_status(cast(Gw2Bot, bot)),
             _try_send_notification=AsyncMock(),
+            _announce_legacy_variables=AsyncMock(),
         )
 
         with caplog.at_level(logging.INFO, logger="gw2bot"):

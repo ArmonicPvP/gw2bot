@@ -1,11 +1,14 @@
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 import discord
 
-from gw2bot.config import Config
+from gw2bot.config import Config, bootstrap_from_env
 from gw2bot.raffle import RaffleTotal
+from gw2bot.settings.composition import compose_config
+from gw2bot.settings.definitions import LEGACY_SETTINGS, setting_key
 
 """Shared builders for fake GW2 guild-log events used across test modules."""
 
@@ -97,6 +100,26 @@ def guild_rank_change(
         "new_rank": new_rank,
         "changed_by": changed_by,
     }
+
+def config_from_env(values: Mapping[str, str]) -> Config:
+    """Compose the Config a given environment would produce after migration.
+
+    Walks the same path startup does - bootstrap the environment-only values,
+    then compose the settings on top - with the legacy variables standing in
+    for the settings rows the one-time import would have written. It is how a
+    test says "this is the environment an operator had" without building a
+    database for it.
+    """
+    bootstrap = bootstrap_from_env(values)
+    raw_values: dict[str, str] = {}
+    for definition in LEGACY_SETTINGS:
+        variable = definition.legacy_variable
+        assert variable is not None
+        value = values.get(variable, "").strip()
+        if value:
+            raw_values[setting_key(definition)] = value
+    return compose_config(bootstrap, raw_values)
+
 
 def default_config(**overrides: Any) -> Config:
     """Config carrying the shipped defaults for every Discord role and channel.

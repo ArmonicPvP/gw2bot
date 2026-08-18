@@ -425,8 +425,9 @@ class TestDiscordNotificationDelivery:
         bot._send_notification.assert_not_awaited()
         assert secret not in caplog.text
         assert (
-            "Skipped Discord notification; DISCORD_NOTIFICATION_CHANNEL_ID is "
-            f"not set; characters={len(secret)}"
+            "Skipped Discord notification; /settings "
+            "discord_notification_channel_id is not set; "
+            f"characters={len(secret)}"
             in caplog.text
         )
 
@@ -443,7 +444,7 @@ class TestDiscordNotificationDelivery:
 
         with pytest.raises(
             discord.ClientException,
-            match="DISCORD_NOTIFICATION_CHANNEL_ID is not set",
+            match="/settings discord_notification_channel_id is not set",
         ):
             await Gw2Bot._get_notification_channel(cast(Gw2Bot, bot))
 
