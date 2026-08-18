@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+import discord
 import pytest
 
 from gw2bot.events.formatting import (
@@ -32,6 +33,7 @@ from gw2bot.events.models import (
     EMOJI_ALACRITY,
     EMOJI_DPS,
     EMOJI_QUICKNESS,
+    CategoryCapacity,
     Event,
     EventCategory,
     EventRole,
@@ -86,6 +88,23 @@ def make_signup(
         signed_up_at=datetime(2027, 1, 1, tzinfo=UTC),
         waitlisted=waitlisted,
     )
+
+
+def _roster_fields(embed: discord.Embed) -> list[tuple[str, str, bool]]:
+    """The (name, value, inline) of every field below the event's header.
+
+    Date & Time, Duration and Leader always lead the embed, so everything after
+    them is the roster.
+    """
+    return [
+        (field.name or "", field.value or "", bool(field.inline))
+        for field in embed.fields[3:]
+    ]
+
+
+def _participant_columns(embed: discord.Embed) -> tuple[str, str]:
+    (_, left, _), (_, right, _) = _roster_fields(embed)[:2]
+    return left, right
 
 
 class TestEventCategories:
@@ -550,8 +569,11 @@ class TestEventEmbed:
         assert "👥 Participants (3/50)" in names
         assert not any("Healer" in name for name in names)
         assert not any(name.startswith("Boons") for name in names)
-        values = {field.name: field.value for field in embed.fields}
-        assert values["👥 Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+        # A fifty-seat squad is listed in two columns, the left one taking the
+        # extra name on an odd count.
+        left, right = _participant_columns(embed)
+        assert left == "└ <@1>\n└ <@2>"
+        assert right == "└ <@3>"
 
     def test_open_world_embed_matches_the_role_less_wvw_layout(self) -> None:
         event = make_event(EventCategory.OPEN_WORLD)
@@ -566,8 +588,9 @@ class TestEventEmbed:
         assert "👥 Participants (3/50)" in names
         assert not any("Healer" in name for name in names)
         assert not any(name.startswith("Boons") for name in names)
-        values = {field.name: field.value for field in embed.fields}
-        assert values["👥 Participants (3/50)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+        left, right = _participant_columns(embed)
+        assert left == "└ <@1>\n└ <@2>"
+        assert right == "└ <@3>"
 
     def test_general_embed_lists_participants_without_a_cap(self) -> None:
         event = make_event(EventCategory.GENERAL)
@@ -584,10 +607,55 @@ class TestEventEmbed:
         assert not any("Healer" in name for name in names)
         assert not any(name.startswith("Boons") for name in names)
         assert not any(WAITLIST_EMOJI in name for name in names)
-        values = {field.name: field.value for field in embed.fields}
-        assert values["👥 Participants (3)"] == "└ <@1>\n└ <@2>\n└ <@3>"
+        # An uncapped roster grows without bound, so it uses the two-column
+        # layout too.
+        left, right = _participant_columns(embed)
+        assert left == "└ <@1>\n└ <@2>"
+        assert right == "└ <@3>"
 
-    def test_wvw_participant_list_chunks_below_field_value_limit(self) -> None:
+    def test_small_role_less_squad_keeps_one_participant_column(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setitem(
+            CATEGORY_CAPACITIES,
+            EventCategory.WVW,
+            CategoryCapacity(10, None, None, None, None),
+        )
+        event = make_event(EventCategory.WVW)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert _roster_fields(embed) == [
+            ("👥 Participants (3/10)", "└ <@1>\n└ <@2>\n└ <@3>", False),
+        ]
+
+    def test_participant_columns_sit_side_by_side(self) -> None:
+        event = make_event(EventCategory.GENERAL)
+        signups = [make_signup(user_id) for user_id in range(1, 7)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        # Two inline fields and nothing else on the row: Discord renders them
+        # side by side as the two columns. The second column carries no header
+        # of its own, so both columns start on the same line.
+        assert _roster_fields(embed) == [
+            ("👥 Participants (6)", "└ <@1>\n└ <@2>\n└ <@3>", True),
+            ("​", "└ <@4>\n└ <@5>\n└ <@6>", True),
+        ]
+
+    def test_empty_participant_list_keeps_the_placeholder(self) -> None:
+        event = make_event(EventCategory.GENERAL)
+
+        embed = event_embed(event, [], EventStatus.OPEN)
+
+        assert _roster_fields(embed) == [
+            ("👥 Participants (0)", "—", True),
+            ("​", "​", True),
+        ]
+
+    def test_full_wvw_roster_fits_two_columns(self) -> None:
         event = make_event(EventCategory.WVW)
         signups = [
             make_signup(10**17 + user_id) for user_id in range(50)
@@ -595,26 +663,43 @@ class TestEventEmbed:
 
         embed = event_embed(event, signups, EventStatus.OPEN)
 
-        participant_fields = [
-            field
-            for field in embed.fields
-            if field.name and "Participants" in field.name
+        roster = _roster_fields(embed)
+        # Split in half, a full fifty-seat squad still fits one column each,
+        # so the roster is two fields rather than a run of continuations.
+        assert len(roster) == 2
+        assert all(len(value) <= 1024 for _, value, _ in roster)
+        assert "".join(value for _, value, _ in roster).count("<@") == 50
+
+    def test_long_participant_columns_chunk_row_by_row(self) -> None:
+        event = make_event(EventCategory.GENERAL)
+        signups = [make_signup(10**17 + user_id) for user_id in range(100)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        roster = _roster_fields(embed)
+        assert all(len(value) <= 1024 for _, value, _ in roster)
+        # Each column overflows one field, so the roster continues on a second
+        # row of two columns. The full-width spacer between the rows is what
+        # stops Discord from pulling the continuation up beside the first row.
+        names = [name for name, _, _ in roster]
+        assert names[0] == "👥 Participants (100)"
+        assert names[1:] == ["​", "​", "​", "​"]
+        assert [inline for _, _, inline in roster] == [
+            True,
+            True,
+            False,
+            True,
+            True,
         ]
-        assert participant_fields
-        assert all(
-            field.value is not None and len(field.value) <= 1024
-            for field in embed.fields
-        )
-        # The 50 participants overflow one 1024-character field, so the
-        # list continues in unnamed follow-up fields.
-        assert len(participant_fields) == 1
-        continuation = "".join(
-            field.value or ""
-            for field in embed.fields
-            if field.name is not None
-            and ("Participants" in field.name or field.name == "​")
-        )
-        assert continuation.count("<@") == 50
+        assert roster[2][1] == "​"
+        left = f"{roster[0][1]}\n{roster[3][1]}"
+        right = f"{roster[1][1]}\n{roster[4][1]}"
+        assert left.count("<@") == 50
+        assert right.count("<@") == 50
+        # The columns are read down the left and then down the right, so the
+        # first half of the roster is the left column.
+        assert left.startswith(f"└ <@{10**17}>")
+        assert right.startswith(f"└ <@{10**17 + 50}>")
 
     def test_embed_color_follows_status(self) -> None:
         event = make_event()

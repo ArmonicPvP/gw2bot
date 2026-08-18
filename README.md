@@ -200,6 +200,11 @@ General has no squad size at all: everyone who signs up is seated, so it never
 fills and never waitlists anyone, and its embed shows the participant count on
 its own rather than as a share of a total.
 
+A role-less squad bigger than ten seats — World vs. World and Open World, and
+General with no cap at all — lists its participants in two side-by-side
+columns, read down the left column and then down the right one, so a long
+roster does not stretch the event post down the channel.
+
 ### Signing Up
 
 A posted event carries three buttons: **Sign up**, **Sign out**, and a ⚙️
