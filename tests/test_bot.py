@@ -1042,6 +1042,54 @@ class TestSettingsHotApply:
         await self._close(bot)
 
     @patch("gw2bot.bot.GuildMemberCache")
+    async def test_changing_the_channel_lets_topic_failures_be_reported_again(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+
+        class DiscordFailure(discord.DiscordException):
+            status = 403
+            code = 50013
+
+        # The old channel already refused a topic edit, so the failure is
+        # suppressed until its signature changes.
+        bot._notification_channel = SimpleNamespace(
+            topic="old",
+            edit=AsyncMock(side_effect=DiscordFailure()),
+        )
+        assert not await bot._try_update_logging_channel_topic("1/500")
+        suppressed = bot._last_topic_update_failure
+        assert suppressed is not None
+
+        bot.settings_store.set_raw(
+            definition_for("discord_notification_channel_id"),
+            "9012",
+        )
+        with self._quiet_bot_patches():
+            await bot.apply_settings_change({"discord_notification_channel_id"})
+
+        assert bot._last_topic_update_failure is None
+
+        # A new channel that fails the same way must be reported, not read as
+        # the failure the operator was already told about - the only log on
+        # record names the channel nobody is using any more.
+        bot._notification_channel = SimpleNamespace(
+            topic="old",
+            edit=AsyncMock(side_effect=DiscordFailure()),
+        )
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            assert not await bot._try_update_logging_channel_topic("1/500")
+
+        assert "channel_id=9012" in caplog.text
+        assert bot._last_topic_update_failure == suppressed
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
     async def test_changing_the_trial_forum_drops_its_index(
         self,
         member_cache: MagicMock,

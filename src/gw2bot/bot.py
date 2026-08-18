@@ -391,6 +391,11 @@ class Gw2Bot(discord.Client):
 
         if "discord_notification_channel_id" in changed:
             self._notification_channel = None
+            # The topic-update suppression is keyed on the failure signature,
+            # not on the channel, so a new destination that fails the same way
+            # as the old one would be silently swallowed - leaving only the
+            # earlier log, naming the channel nobody is using any more.
+            self._last_topic_update_failure = None
             restarted.append("the notification channel")
 
         if "raffle_contribution_channel_id" in changed:
