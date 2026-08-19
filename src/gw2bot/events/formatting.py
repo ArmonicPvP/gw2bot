@@ -45,6 +45,12 @@ DRAFT_PENDING_TEXT = "Not set yet"
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
 WAITLIST_EMOJI = "⌛️"
+# The largest role-less squad still listed in a single column of participants.
+# A ten-seat roster stays short enough to read down one column; a larger one
+# (World vs. World and Open World at fifty, or an uncapped General roster that
+# has no ceiling at all) is split across two columns so the embed does not run
+# on for screens.
+SINGLE_COLUMN_SQUAD_SIZE = 10
 _TRUNCATION_MARKER = "…"
 
 _WEEKDAY_NAMES = (
@@ -405,6 +411,39 @@ def _add_chunked_field(
         )
 
 
+def _split_columns(lines: list[str]) -> tuple[list[str], list[str]]:
+    # The left column takes the extra line on an odd count, so a reader follows
+    # the roster down the left column and then down the right one.
+    half = ceil(len(lines) / 2)
+    return lines[:half], lines[half:]
+
+
+def _add_two_column_field(
+    embed: discord.Embed,
+    name: str,
+    lines: list[str],
+) -> None:
+    left_lines, right_lines = _split_columns(lines)
+    left = _chunk_lines(left_lines)
+    right = _chunk_lines(right_lines) if right_lines else []
+    for index in range(max(len(left), len(right))):
+        if index:
+            # Discord packs up to three inline fields into one row, so without
+            # a full-width spacer a continuation pair would be pulled up beside
+            # the previous row's left column and break the two columns.
+            embed.add_field(name="​", value="​", inline=False)
+        embed.add_field(
+            name=name if index == 0 else "​",
+            value=left[index] if index < len(left) else "​",
+            inline=True,
+        )
+        embed.add_field(
+            name="​",
+            value=right[index] if index < len(right) else "​",
+            inline=True,
+        )
+
+
 def _member_line(signup: EventSignup) -> str:
     role = signup.assigned_role or signup.role
     emoji = f"{ROLE_EMOJI[role]} " if role is not None else ""
@@ -445,6 +484,15 @@ def _embed_title(category: EventCategory | None, title: str) -> str:
         keep = budget - len(_TRUNCATION_MARKER)
         title = title[:keep].rstrip() + _TRUNCATION_MARKER
     return f"{prefix}{title}"
+
+
+def _uses_two_participant_columns(capacity: CategoryCapacity) -> bool:
+    # An uncapped roster has no ceiling to keep it short, so it always gets the
+    # two-column layout; a capped one gets it once the squad outgrows what one
+    # column holds comfortably.
+    if capacity.total is None:
+        return True
+    return capacity.total > SINGLE_COLUMN_SQUAD_SIZE
 
 
 def _participants_name(count: int, capacity: CategoryCapacity) -> str:
@@ -553,11 +601,12 @@ def event_embed(
                 _role_group_lines(waitlisted),
             )
     else:
-        _add_chunked_field(
-            embed,
-            _participants_name(len(active), capacity),
-            [_member_line(signup) for signup in active],
-        )
+        participant_lines = [_member_line(signup) for signup in active]
+        participants_name = _participants_name(len(active), capacity)
+        if _uses_two_participant_columns(capacity):
+            _add_two_column_field(embed, participants_name, participant_lines)
+        else:
+            _add_chunked_field(embed, participants_name, participant_lines)
         if waitlisted:
             _add_chunked_field(
                 embed,
