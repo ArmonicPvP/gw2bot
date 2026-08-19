@@ -1843,3 +1843,70 @@ class TestGuildIdSpelling:
 
         assert stored == FIRST_GUILD
         assert "different guild" not in settings_reply(interaction)
+
+
+class TestValidationTransportFailures:
+    """A validator that raises leaves the officer with nothing.
+
+    _handle defers before validating, so an escaping exception surfaces as a
+    Discord error on an interaction that is already waiting, with no notice
+    and nothing in the log to trace it to.
+    """
+
+    @pytest.mark.parametrize(
+        "error",
+        [aiohttp.ClientError("connection reset"), asyncio.TimeoutError()],
+        ids=["transport", "timeout"],
+    )
+    async def test_a_channel_that_cannot_be_fetched_is_reported(
+        self,
+        tmp_path: Path,
+        error: Exception,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot.fetch_channel = AsyncMock(side_effect=error)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(
+            commands,
+            "raffle_contribution",
+            interaction,
+            "424242",
+            CHANNELS_GROUP,
+        )
+        stored = bot.settings_store.is_set(
+            definition_for("raffle_contribution", CHANNELS_GROUP)
+        )
+        bot.settings_store.close()
+
+        assert not stored
+        assert "No channel with the id" in settings_reply(interaction)
+
+    @pytest.mark.parametrize(
+        "error",
+        [aiohttp.ClientError("connection reset"), asyncio.TimeoutError()],
+        ids=["transport", "timeout"],
+    )
+    async def test_a_forum_that_cannot_be_fetched_is_reported(
+        self,
+        tmp_path: Path,
+        error: Exception,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot.fetch_channel = AsyncMock(side_effect=error)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(
+            commands,
+            "trial_accepted_tag",
+            interaction,
+            "424242",
+            CHANNELS_GROUP,
+        )
+        stored = bot.settings_store.is_set(
+            definition_for("trial_accepted_tag", CHANNELS_GROUP)
+        )
+        bot.settings_store.close()
+
+        assert not stored
+        assert "could not be read" in settings_reply(interaction)

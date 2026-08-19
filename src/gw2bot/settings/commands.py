@@ -46,6 +46,16 @@ MESSAGE_LIMIT = 1900
 # request describes it: "a space or nothing means unset".
 UNSET_INPUT = ""
 
+# Everything fetch_channel can fail with. A transport error is not a
+# DiscordException, and one escaping a validator reaches the caller as a
+# Discord error on an already-deferred interaction - no notice, nothing
+# logged. The autocomplete wrapper needs the same set.
+_FETCH_FAILURES = (
+    discord.DiscordException,
+    aiohttp.ClientError,
+    asyncio.TimeoutError,
+)
+
 # Shown instead of "(set)" when a row exists but its text no longer parses.
 # compose_config has already fallen back to the default, so the value on
 # screen is real - it is the claim that somebody chose it that would be false.
@@ -682,7 +692,13 @@ class SettingsCommands(app_commands.Group):
         if channel is None:
             try:
                 channel = await self._bot.fetch_channel(channel_id)
-            except discord.DiscordException:
+            except _FETCH_FAILURES as exc:
+                LOGGER.debug(
+                    "Could not read a channel to validate it; setting=%s "
+                    "error_type=%s",
+                    setting_key(definition),
+                    type(exc).__name__,
+                )
                 return (
                     f"No channel with the id `{channel_id}` could be read. "
                     "Check the id and that the bot can see the channel."
@@ -708,7 +724,12 @@ class SettingsCommands(app_commands.Group):
         forum_id = self._bot._config.trial_forum_channel_id
         try:
             forum = await self._bot.fetch_channel(forum_id)
-        except discord.DiscordException:
+        except _FETCH_FAILURES as exc:
+            LOGGER.debug(
+                "Could not read the Trial forum to validate a tag; "
+                "error_type=%s",
+                type(exc).__name__,
+            )
             return (
                 "The Trial application forum could not be read, so the tag "
                 f"could not be checked. Set `/settings {CHANNELS_GROUP} "
@@ -765,11 +786,7 @@ def _autocomplete_for(
             return []
         try:
             choices = await _suggestions(commands, definition, interaction)
-        except (
-            discord.DiscordException,
-            aiohttp.ClientError,
-            asyncio.TimeoutError,
-        ) as exc:
+        except _FETCH_FAILURES as exc:
             # The forum-tag branch fetches a channel, so a transport failure
             # arrives as an aiohttp or timeout error rather than a Discord
             # one, and letting either escape breaks the promise above.
