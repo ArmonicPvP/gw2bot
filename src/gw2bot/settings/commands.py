@@ -28,6 +28,7 @@ from gw2bot.settings.definitions import (
     ValidationTarget,
     definitions_in_group,
     setting_key,
+    setting_text,
 )
 
 if TYPE_CHECKING:
@@ -322,7 +323,7 @@ class SettingsCommands(app_commands.Group):
             )
             await send_interaction_notice(interaction, problem)
             return
-        stored = str(parsed)
+        stored = setting_text(definition, parsed)
         try:
             # The snapshot is kept so a change that cannot be applied can be
             # put back; leaving a value the running bot rejected would apply
@@ -489,11 +490,14 @@ class SettingsCommands(app_commands.Group):
         if definition.encrypted:
             return SECRET_PLACEHOLDER if is_set else UNSET_DISPLAY
         current = getattr(self._bot._config, definition.field, None)
-        if current is None:
+        if current is None or current == ():
+            # An empty collection is a value the same way None is: nothing is
+            # configured, and rendering it as `()` would say otherwise.
             return UNSET_DISPLAY
+        shown = setting_text(definition, current)
         if is_set and not self._stored_value_parses(definition):
-            return f"`{current}` ({UNREADABLE_NOTE})"
-        return f"`{current}`" if is_set else f"`{current}` (default)"
+            return f"`{shown}` ({UNREADABLE_NOTE})"
+        return f"`{shown}`" if is_set else f"`{shown}` (default)"
 
     def _stored_value_parses(self, definition: SettingDefinition) -> bool:
         """Whether the stored text is the value the bot is actually running.
@@ -525,8 +529,9 @@ class SettingsCommands(app_commands.Group):
         if definition.encrypted:
             return ""
         current = getattr(self._bot._config, definition.field, None)
-        if current is None:
+        if current is None or current == ():
             return ""
+        current = setting_text(definition, current)
         if definition.default_from is not None:
             return (
                 f"It follows `/settings {definition.group} "

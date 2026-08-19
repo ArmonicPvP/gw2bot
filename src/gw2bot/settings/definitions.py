@@ -78,6 +78,10 @@ class SettingDefinition:
     default: object = None
     default_from: str | None = None
     validates: str | None = None
+    # How a parsed value is written back to the row. Defaults to str(), which
+    # round-trips every scalar setting; a setting whose value is a collection
+    # has to say how, or str(tuple) would be stored and never parse again.
+    serialize: Callable[[object], str] | None = None
 
     @property
     def command_path(self) -> str:
@@ -143,6 +147,38 @@ def _parse_guild_id(value: str) -> object:
     # Stored in one spelling so the value on screen, the value compared
     # against the API and the value that claims the ledger are the same text.
     return canonical
+
+
+def _parse_account_list(value: str) -> object:
+    """A comma-separated list of Guild Wars 2 account names.
+
+    Kept in the order it was given so /settings reads back the way it was
+    typed, de-duplicated case-insensitively because the guild log and the
+    roster disagree on capitalisation and one account listed twice would look
+    like two exclusions.
+    """
+    seen: set[str] = set()
+    accounts: list[str] = []
+    for entry in value.split(","):
+        account = entry.strip()
+        if not account:
+            continue
+        key = account.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        accounts.append(account)
+    if not accounts:
+        raise ConfigurationError(
+            "List one or more account names separated by commas, for example "
+            "Someone.1234, Another.5678. Pass a space to clear the list."
+        )
+    return tuple(accounts)
+
+
+def _format_account_list(value: object) -> str:
+    assert isinstance(value, tuple)
+    return ", ".join(str(account) for account in value)
 
 
 def _parse_text(name: str) -> Callable[[str], object]:
@@ -220,6 +256,19 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
             "checked against the API before it is stored."
         ),
         parse=_parse_guild_id,
+    ),
+    SettingDefinition(
+        name="raffle_excluded_accounts",
+        field="raffle_excluded_accounts",
+        default=(),
+        description=(
+            "Guild Wars 2 account names barred from the raffle, separated by "
+            "commas. They earn no tickets from gold they deposit, and "
+            "/raffle addticket refuses them. Gold they deposit is still "
+            "recorded as a contribution."
+        ),
+        parse=_parse_account_list,
+        serialize=_format_account_list,
     ),
     SettingDefinition(
         name="feast_notification_user_id",
@@ -549,3 +598,15 @@ def definitions_in_group(group: str | None) -> tuple[SettingDefinition, ...]:
         for definition in SETTING_DEFINITIONS
         if definition.group == group
     )
+
+
+def setting_text(definition: SettingDefinition, value: object) -> str:
+    """The text to store for a parsed value.
+
+    str() is right for every scalar, and wrong for a collection: storing
+    str(tuple) would write a value its own parser rejects, so the setting
+    would read as unreadable the moment anybody looked at it.
+    """
+    if definition.serialize is not None:
+        return definition.serialize(value)
+    return str(value)

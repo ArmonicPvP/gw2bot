@@ -21,7 +21,11 @@ from factories import (
     settings_reply,
     settings_store,
 )
-from gw2bot.config import BootstrapConfig, ConfigurationError
+from gw2bot.config import (
+    BootstrapConfig,
+    ConfigurationError,
+    bootstrap_from_env,
+)
 from gw2bot.logging_setup import RedactingFormatter, SecretRegistry
 from gw2bot.raffle import RaffleStore
 from gw2bot.settings.commands import (
@@ -1910,3 +1914,118 @@ class TestValidationTransportFailures:
 
         assert not stored
         assert "could not be read" in settings_reply(interaction)
+
+
+class TestRaffleExclusionSetting:
+    """The first setting whose value is a list rather than a scalar."""
+
+    async def test_a_comma_separated_list_round_trips(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The stored text has to be something the parser accepts again, or
+        # the value would read as unreadable the moment anybody looked.
+        commands, bot = _commands(tmp_path)
+        definition = definition_for("raffle_excluded_accounts")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(
+            commands,
+            "raffle_excluded_accounts",
+            interaction,
+            "Banned.1234, Another.5678",
+        )
+        stored = bot.settings_store.get_raw(definition)
+        bot.settings_store.close()
+
+        assert stored == "Banned.1234, Another.5678"
+        assert definition.parse(stored) == ("Banned.1234", "Another.5678")
+
+    async def test_the_reply_shows_the_names_not_a_python_tuple(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(
+            commands,
+            "raffle_excluded_accounts",
+            interaction,
+            "Banned.1234, Another.5678",
+        )
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert "`Banned.1234, Another.5678`" in reply
+        assert "(" not in reply.split("is now")[1]
+
+    def test_duplicates_are_dropped_case_insensitively(self) -> None:
+        definition = definition_for("raffle_excluded_accounts")
+
+        parsed = definition.parse("Banned.1234, banned.1234, Other.5678")
+
+        # One account listed twice would read as two exclusions.
+        assert parsed == ("Banned.1234", "Other.5678")
+
+    def test_surrounding_whitespace_and_empty_entries_are_ignored(self) -> None:
+        definition = definition_for("raffle_excluded_accounts")
+
+        assert definition.parse(" A.1 ,, B.2 , ") == ("A.1", "B.2")
+
+    def test_a_list_of_only_separators_is_refused(self) -> None:
+        definition = definition_for("raffle_excluded_accounts")
+
+        with pytest.raises(ConfigurationError, match="one or more account"):
+            definition.parse(",,,")
+
+    async def test_an_unset_list_reads_as_not_set(self, tmp_path: Path) -> None:
+        # The default is an empty tuple, and rendering that as `()` would
+        # claim a value nobody set.
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "raffle_excluded_accounts", interaction, None)
+        bot.settings_store.close()
+
+        assert UNSET_DISPLAY in settings_reply(interaction)
+
+    async def test_clearing_it_empties_the_list(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        definition = definition_for("raffle_excluded_accounts")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        await _run(
+            commands,
+            "raffle_excluded_accounts",
+            interaction,
+            "Banned.1234",
+        )
+
+        clearing = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        await _run(commands, "raffle_excluded_accounts", clearing, " ")
+        still_set = bot.settings_store.is_set(definition)
+        bot.settings_store.close()
+
+        assert not still_set
+
+    def test_it_composes_onto_the_config_as_a_tuple(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        definition = definition_for("raffle_excluded_accounts")
+        store.set_raw(definition, "Banned.1234, Another.5678")
+
+        config = compose_config(
+            bootstrap_from_env(
+                {
+                    "DISCORD_TOKEN": "discord-token",
+                    "DISCORD_COMMAND_GUILD_ID": "5678",
+                }
+            ),
+            store.raw_values(),
+        )
+
+        assert config.raffle_excluded_accounts == (
+            "Banned.1234",
+            "Another.5678",
+        )

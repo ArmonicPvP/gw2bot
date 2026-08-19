@@ -2385,3 +2385,63 @@ class TestRaffleAuditFormatting:
             "Raffle run 1 was not found. "
             "No raffle draws have been recorded yet."
         )
+
+
+class TestExcludedAccountsInAddTicket:
+    """The refusal has to reach the officer, naming what to change."""
+
+    def _interaction(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+    def _command(self, bot: Any) -> tuple[Any, Any]:
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        return group, next(
+            command for command in group.commands if command.name == "addticket"
+        )
+
+    async def test_a_refused_purchase_is_reported_to_the_officer(self) -> None:
+        refusal = ValueError(
+            "Banned.1234 is excluded from the raffle. Remove them from "
+            "/settings raffle_excluded_accounts first."
+        )
+        bot = configured_bot(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value="Banned.1234"),
+            add_officer_raffle_purchase=AsyncMock(side_effect=refusal),
+            add_manual_raffle_ticket=MagicMock(),
+        )
+        interaction = self._interaction()
+        group, command = self._command(bot)
+
+        await command.callback(group, interaction, "banned.1234", 4)  # type: ignore[arg-type]
+
+        message = interaction.followup.send.await_args.args[0]
+        assert "excluded from the raffle" in message
+        assert "raffle_excluded_accounts" in message
+        assert interaction.followup.send.await_args.kwargs["ephemeral"]
+
+    async def test_a_refused_manual_ticket_is_reported_to_the_officer(
+        self,
+    ) -> None:
+        refusal = ValueError(
+            "Banned.1234 is excluded from the raffle. Remove them from "
+            "/settings raffle_excluded_accounts first."
+        )
+        bot = configured_bot(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value="Banned.1234"),
+            add_manual_raffle_ticket=MagicMock(side_effect=refusal),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = self._interaction()
+        group, command = self._command(bot)
+
+        await command.callback(group, interaction, "banned.1234")  # type: ignore[arg-type]
+
+        message = interaction.followup.send.await_args.args[0]
+        assert "excluded from the raffle" in message
+        assert "raffle_excluded_accounts" in message

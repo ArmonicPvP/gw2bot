@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -261,6 +261,7 @@ class RaffleStore:
         self,
         events: list[dict[str, Any]],
         officer_usernames: set[str] | None = None,
+        excluded_usernames: Sequence[str] | None = None,
     ) -> None:
         processed = 0
         deposits = 0
@@ -272,6 +273,8 @@ class RaffleStore:
         officer_keys = {
             username.casefold() for username in officer_usernames or set()
         }
+        excluded_keys = self._exclusion_keys(excluded_usernames)
+        excluded_deposits = 0
         with self._sessions.begin() as session:
             cursor_record = session.get(SettingRecord, "guild_log_cursor")
             if cursor_record is None:
@@ -300,7 +303,17 @@ class RaffleStore:
                         )
                         officer_deposits_skipped += 1
                     else:
-                        self._process_deposit(session, deposit)
+                        # An excluded account still deposited the gold, and
+                        # the guild still has it, so the contribution is
+                        # recorded - it simply earns nothing.
+                        awards = deposit.username.casefold() not in excluded_keys
+                        if not awards:
+                            excluded_deposits += 1
+                        self._process_deposit(
+                            session,
+                            deposit,
+                            awards_tickets=awards,
+                        )
                         deposits += 1
 
                 join = parse_guild_join(event)
@@ -372,12 +385,13 @@ class RaffleStore:
             cursor_record.value = str(cursor)
         LOGGER.debug(
             "Processed guild log events; fetched=%s new=%s deposits=%s "
-            "officer_deposits_skipped=%s joins=%s leaves=%s invites=%s "
-            "rank_changes=%s cursor=%s",
+            "officer_deposits_skipped=%s excluded_deposits=%s joins=%s "
+            "leaves=%s invites=%s rank_changes=%s cursor=%s",
             len(events),
             processed,
             deposits,
             officer_deposits_skipped,
+            excluded_deposits,
             joins,
             leaves,
             invites,
@@ -540,7 +554,14 @@ class RaffleStore:
         self,
         username: str,
         event_time: datetime | None = None,
+        excluded_usernames: Sequence[str] | None = None,
     ) -> RaffleTotal:
+        if username.casefold() in self._exclusion_keys(excluded_usernames):
+            LOGGER.debug("Refused a manual raffle ticket; account is excluded")
+            raise ValueError(
+                f"{username} is excluded from the raffle. Remove them from "
+                "/settings raffle_excluded_accounts first."
+            )
         with self._sessions.begin() as session:
             total = session.get(RaffleTotalRecord, username)
             manual_tickets = total.manual_raffle_tickets if total else 0
@@ -580,9 +601,16 @@ class RaffleStore:
         username: str,
         amount: int,
         event_time: datetime | None = None,
+        excluded_usernames: Sequence[str] | None = None,
     ) -> RaffleTotal:
         if amount <= 0:
             raise ValueError("Ticket purchase amount must be greater than zero")
+        if username.casefold() in self._exclusion_keys(excluded_usernames):
+            LOGGER.debug("Refused an officer raffle purchase; account is excluded")
+            raise ValueError(
+                f"{username} is excluded from the raffle. Remove them from "
+                "/settings raffle_excluded_accounts first."
+            )
         with self._sessions.begin() as session:
             total = session.get(RaffleTotalRecord, username)
             purchased = total.gold_raffle_tickets if total is not None else 0
@@ -1188,6 +1216,7 @@ class RaffleStore:
         self,
         session: Session,
         deposit: RaffleDeposit,
+        awards_tickets: bool = True,
     ) -> None:
         if session.get(RaffleDepositRecord, deposit.event_id) is not None:
             LOGGER.debug("Skipping duplicate raffle deposit event %s", deposit.event_id)
@@ -1195,9 +1224,13 @@ class RaffleStore:
 
         total = session.get(RaffleTotalRecord, deposit.username)
         gold_tickets = total.gold_raffle_tickets if total else 0
-        tickets_awarded = min(
-            deposit.raffle_tickets,
-            MAX_GOLD_RAFFLE_TICKETS - gold_tickets,
+        tickets_awarded = (
+            min(
+                deposit.raffle_tickets,
+                MAX_GOLD_RAFFLE_TICKETS - gold_tickets,
+            )
+            if awards_tickets
+            else 0
         )
         session.add(
             RaffleDepositRecord(
@@ -1293,6 +1326,16 @@ class RaffleStore:
                 )
             )
         LOGGER.info("Applied one-time free-ticket cap; updated_users=%s", updated)
+
+    @staticmethod
+    def _exclusion_keys(excluded: Sequence[str] | None) -> set[str]:
+        """Excluded accounts, folded for comparison.
+
+        The guild log, the roster and whatever an officer typed into
+        /settings disagree on capitalisation, so matching the raw text would
+        let an excluded account back in under a different spelling.
+        """
+        return {account.casefold() for account in excluded or ()}
 
     def bound_guild(self) -> str | None:
         """The guild id this ledger already belongs to, if any.

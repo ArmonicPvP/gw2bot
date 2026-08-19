@@ -124,6 +124,9 @@ class Config:
     # Discord ids. The food page has no default of its own: it has always been
     # whichever role draws the raffle, and composing the settings is what keeps
     # it following that role until someone sets it apart.
+    # In-game account names barred from the raffle. Matched case-insensitively,
+    # because the guild log and the roster do not agree on capitalisation.
+    raffle_excluded_accounts: tuple[str, ...] = ()
     raffle_draw_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     raffle_addticket_role_id: int = DEFAULT_RAFFLE_ADDTICKET_ROLE_ID
     raffle_officer_role_id: int = DEFAULT_RAFFLE_OFFICER_ROLE_ID

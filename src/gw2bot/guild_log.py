@@ -65,7 +65,11 @@ async def refresh_guild_log(bot: Gw2Bot) -> bool:
             OFFICER_RANK,
             force_refresh=True,
         )
-    bot._raffle_store.process_events(events, officer_usernames)
+    bot._raffle_store.process_events(
+        events,
+        officer_usernames,
+        excluded_usernames=bot._config.raffle_excluded_accounts,
+    )
     LOGGER.debug("Processed %s fetched guild log events", len(events))
     return True
 

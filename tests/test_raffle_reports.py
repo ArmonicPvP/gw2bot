@@ -272,7 +272,11 @@ class TestRaffleContributionNotification:
         )
 
         assert result == total
-        store.add_officer_purchase.assert_called_once_with("Member.1234", 3)
+        store.add_officer_purchase.assert_called_once_with(
+            "Member.1234",
+            3,
+            excluded_usernames=(),
+        )
         bot._send_pending_raffle_notifications.assert_awaited_once()
         bot._send_pending_deposit_audit_notifications.assert_awaited_once()
         bot._send_pending_raffle_milestones.assert_awaited_once()

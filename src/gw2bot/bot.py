@@ -747,14 +747,21 @@ class Gw2Bot(discord.Client):
         self,
         username: str,
     ) -> RaffleTotal:
-        return self._raffle_store.add_manual_ticket(username)
+        return self._raffle_store.add_manual_ticket(
+            username,
+            excluded_usernames=self._config.raffle_excluded_accounts,
+        )
 
     async def add_officer_raffle_purchase(
         self,
         username: str,
         amount: int,
     ) -> RaffleTotal:
-        total = self._raffle_store.add_officer_purchase(username, amount)
+        total = self._raffle_store.add_officer_purchase(
+            username,
+            amount,
+            excluded_usernames=self._config.raffle_excluded_accounts,
+        )
         LOGGER.debug(
             "Delivering officer raffle purchase notifications; amount=%s",
             amount,

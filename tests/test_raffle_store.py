@@ -1759,3 +1759,107 @@ class TestGuildBindingSpelling:
 
             with pytest.raises(ValueError, match="different guild"):
                 RaffleStore(database, "another-legacy-guild")
+
+
+class TestRaffleExclusions:
+    """An excluded account earns nothing, by any route.
+
+    The gold is still the guild's, so a deposit is still recorded as a
+    contribution - it simply awards no tickets. Matching is case-insensitive
+    because the guild log, the roster and whatever an officer typed into
+    /settings do not agree on capitalisation.
+    """
+
+    GUILD = "116e0c0e-0035-44a9-bb22-4ae3e23127e5"
+
+    def _store(self, directory: str) -> RaffleStore:
+        store = RaffleStore(str(Path(directory) / "raffle.db"), self.GUILD)
+        store.initialize_cursor(0)
+        return store
+
+    def test_an_excluded_deposit_is_recorded_but_earns_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [gold_deposit(101, "Banned.1234", coins=100_000)],
+                excluded_usernames=("Banned.1234",),
+            )
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Banned.1234"].raffle_tickets == 0
+            assert totals["Banned.1234"].gold_raffle_tickets == 0
+            # The contribution itself is not erased - they did give the gold.
+            assert totals["Banned.1234"].coins_deposited == 100_000
+            store.close()
+
+    def test_an_excluded_account_is_matched_whatever_its_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [gold_deposit(101, "Banned.1234", coins=100_000)],
+                excluded_usernames=("banned.1234",),
+            )
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Banned.1234"].raffle_tickets == 0
+            store.close()
+
+    def test_everybody_else_still_earns_from_the_same_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [
+                    gold_deposit(101, "Banned.1234", coins=100_000),
+                    gold_deposit(102, "Allowed.5678", coins=100_000),
+                ],
+                excluded_usernames=("Banned.1234",),
+            )
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Banned.1234"].raffle_tickets == 0
+            assert totals["Allowed.5678"].raffle_tickets > 0
+            store.close()
+
+    def test_an_officer_purchase_for_an_excluded_account_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            with pytest.raises(ValueError, match="excluded from the raffle"):
+                store.add_officer_purchase(
+                    "Banned.1234",
+                    3,
+                    excluded_usernames=("BANNED.1234",),
+                )
+
+            assert store.get_totals() == []
+            store.close()
+
+    def test_a_manual_ticket_for_an_excluded_account_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            with pytest.raises(ValueError, match="excluded from the raffle"):
+                store.add_manual_ticket(
+                    "Banned.1234",
+                    excluded_usernames=("Banned.1234",),
+                )
+
+            assert store.get_totals() == []
+            store.close()
+
+    def test_an_empty_exclusion_list_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [gold_deposit(101, "Allowed.5678", coins=100_000)],
+                excluded_usernames=(),
+            )
+            store.add_manual_ticket("Allowed.5678", excluded_usernames=())
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Allowed.5678"].raffle_tickets > 1
+            store.close()
