@@ -75,7 +75,7 @@ override it.
 | `/settings discord_notification_channel_id` | unset | Discord text channel that receives all automated notifications. Must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
 | `/settings gw2_api_key` | unset | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `gw2_guild_id`. **Encrypted.** |
 | `/settings gw2_guild_id` | unset | Guild ID listed in `/v2/account.guild_leader`. Must be a GUID, and is stored in lower case whatever form you paste. **Set `gw2_api_key` first:** with a key configured the ID is checked against `/v2/account.guild_leader` before being stored, and with no key it is stored unchecked and the reply says so. This matters because the raffle ledger records the first guild ID it is given and refuses a different one afterwards, and that cannot be undone from Discord. |
-| `/settings raffle_excluded_accounts` | unset | Guild Wars 2 account names barred from the raffle, separated by commas (for example `Someone.1234, Another.5678`). Matched case-insensitively. See [Excluding Someone From The Raffle](#excluding-someone-from-the-raffle). |
+| `/settings raffle_excluded_accounts` | unset | Guild Wars 2 account names barred from the raffle, separated by commas (for example `Someone.1234, Another.5678`). Matched case-insensitively, and capped at 1500 characters so `/settings` can always show the list back to you. See [Excluding Someone From The Raffle](#excluding-someone-from-the-raffle). |
 | `/settings feast_notification_user_id` | unset | Discord user who also receives feast stock alerts by private message. |
 | `/settings gw2_poll_interval_seconds` | `300` | Guild Storage polling interval in seconds. At least `30`. |
 | `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
@@ -154,6 +154,11 @@ The three settings marked **Encrypted** hold credentials and are encrypted in
 the database. `/settings` never shows one back: once set, it reports
 `This secret cannot be viewed once set`, and an unset one reports `Not set`.
 There is no command that reveals the value — set it again to change it.
+
+If the key is lost or replaced, the encrypted rows survive but cannot be read.
+The bot keeps running with those features switched off, and `/settings`
+reports each affected setting as set but undecryptable rather than as working
+— set it again to recover.
 
 The key comes from `SETTINGS_ENCRYPTION_KEY` if you set it, and otherwise from
 `settings.key`, generated beside the database on first run with `0600`

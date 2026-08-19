@@ -2029,3 +2029,124 @@ class TestRaffleExclusionSetting:
             "Banned.1234",
             "Another.5678",
         )
+
+
+class TestUndecryptableSecrets:
+    """A credential the key cannot read is not a credential in force.
+
+    SettingsStore.is_set deliberately does not decrypt, so /settings can say
+    a value is there and unreadable. It has to actually say it: the feature
+    that needs the credential is already switched off, and the usual "cannot
+    be viewed once set" would read as working.
+    """
+
+    def _unreadable(self, tmp_path: Path) -> tuple[Any, Any]:
+        commands, bot = _commands(tmp_path)
+        definition = definition_for("gw2_api_key")
+        bot.settings_store.set_raw(definition, "gw2-secret")
+        # The key changes, exactly as it would if settings.key were lost and
+        # regenerated. The row survives; nothing can read it.
+        bot.settings_store._cipher = SettingsCipher(Fernet.generate_key())
+        return commands, bot
+
+    async def test_the_reply_says_it_could_not_be_decrypted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = self._unreadable(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_api_key", interaction, None)
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert "could not be decrypted" in reply
+        assert "set it again" in reply
+        # Still no value, and not the placeholder that reads as healthy.
+        assert "gw2-secret" not in reply
+        assert SECRET_PLACEHOLDER not in reply
+
+    async def test_the_list_marks_it_unreadable(self, tmp_path: Path) -> None:
+        commands, bot = self._unreadable(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "list", interaction, None)
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert "(unreadable)" in reply
+        assert "gw2-secret" not in reply
+
+    async def test_a_readable_secret_still_shows_the_placeholder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        bot.settings_store.set_raw(definition_for("gw2_api_key"), "gw2-secret")
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_api_key", interaction, None)
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert SECRET_PLACEHOLDER in reply
+        assert "could not be decrypted" not in reply
+        assert "gw2-secret" not in reply
+
+
+class TestExclusionListLength:
+    """A list too long to show back would be stored and then unusable."""
+
+    def test_a_list_that_would_not_fit_a_message_is_refused(self) -> None:
+        definition = definition_for("raffle_excluded_accounts")
+        oversized = ", ".join(f"Account{index}.1234" for index in range(200))
+
+        with pytest.raises(ConfigurationError, match="characters and the limit"):
+            definition.parse(oversized)
+
+    def test_a_list_within_the_limit_is_accepted(self) -> None:
+        definition = definition_for("raffle_excluded_accounts")
+        accounts = [f"Account{index}.1234" for index in range(50)]
+
+        parsed = definition.parse(", ".join(accounts))
+
+        assert parsed == tuple(accounts)
+
+    async def test_an_oversized_list_is_not_stored(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        oversized = ", ".join(f"Account{index}.1234" for index in range(200))
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "raffle_excluded_accounts", interaction, oversized)
+        stored = bot.settings_store.is_set(
+            definition_for("raffle_excluded_accounts")
+        )
+        bot.settings_store.close()
+
+        assert not stored
+        assert "Remove some accounts" in settings_reply(interaction)
+
+    async def test_the_longest_accepted_list_still_fits_one_message(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The point of the cap: whatever it lets through has to render inside
+        # Discord's limit, both in the confirmation and in /settings list.
+        commands, bot = _commands(tmp_path)
+        accounts = [f"Account{index}.1234" for index in range(93)]
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(
+            commands,
+            "raffle_excluded_accounts",
+            interaction,
+            ", ".join(accounts),
+        )
+        bot._config = default_config(raffle_excluded_accounts=tuple(accounts))
+        listing = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        await _run(commands, "list", listing, None)
+        bot.settings_store.close()
+
+        assert len(settings_reply(interaction)) < 2000
+        for message in listing.followup.send.await_args_list:
+            assert len(message.args[0]) < 2000

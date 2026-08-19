@@ -31,6 +31,12 @@ GROUP_OPTION_LIMIT = 25
 ROLES_GROUP = "roles"
 CHANNELS_GROUP = "channels"
 
+# How long a rendered account list may be. Discord caps a message at 2000
+# characters, /settings list puts each setting on one line, and chunk_lines
+# splits between lines and not inside one - so a list longer than this would
+# be stored and then break both the confirmation and every later inspection.
+MAX_ACCOUNT_LIST_CHARACTERS = 1500
+
 SECRET_PLACEHOLDER = "This secret cannot be viewed once set"
 UNSET_DISPLAY = "Not set"
 
@@ -149,6 +155,11 @@ def _parse_guild_id(value: str) -> object:
     return canonical
 
 
+def _format_account_list(value: object) -> str:
+    assert isinstance(value, tuple)
+    return ", ".join(str(account) for account in value)
+
+
 def _parse_account_list(value: str) -> object:
     """A comma-separated list of Guild Wars 2 account names.
 
@@ -173,12 +184,20 @@ def _parse_account_list(value: str) -> object:
             "List one or more account names separated by commas, for example "
             "Someone.1234, Another.5678. Pass a space to clear the list."
         )
+    rendered = _format_account_list(tuple(accounts))
+    if len(rendered) > MAX_ACCOUNT_LIST_CHARACTERS:
+        # Storing it would work and everything that reads it back would then
+        # fail: the confirmation and /settings list both render the whole
+        # list into one Discord message, and a single over-long line cannot
+        # be split. The setting would be stuck - unconfirmable and
+        # uninspectable - so it is refused before it is written.
+        raise ConfigurationError(
+            f"That list is {len(rendered)} characters and the limit is "
+            f"{MAX_ACCOUNT_LIST_CHARACTERS}, because /settings has to be able "
+            "to show it back to you in one Discord message. Remove some "
+            "accounts."
+        )
     return tuple(accounts)
-
-
-def _format_account_list(value: object) -> str:
-    assert isinstance(value, tuple)
-    return ", ".join(str(account) for account in value)
 
 
 def _parse_text(name: str) -> Callable[[str], object]:

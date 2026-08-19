@@ -62,6 +62,14 @@ _FETCH_FAILURES = (
 # screen is real - it is the claim that somebody chose it that would be false.
 UNREADABLE_NOTE = "default — the stored value could not be read; set it again"
 
+# Shown for an encrypted row the current key cannot decrypt. The feature that
+# needs the credential is already switched off, so reporting only the usual
+# "cannot be viewed once set" would tell an operator the opposite of the truth.
+UNDECRYPTABLE_NOTE = (
+    "Set, but it could not be decrypted with the current key, so the bot is "
+    "running without it — set it again"
+)
+
 # _apply's "no previous value was captured, so do not roll back" marker. None
 # is a real previous value - it means the setting was unset - so it cannot
 # double as the sentinel.
@@ -466,10 +474,10 @@ class SettingsCommands(app_commands.Group):
             for definition in definitions:
                 if not self._bot.settings_store.is_set(definition):
                     source = "default"
-                elif self._stored_value_parses(definition):
-                    source = "set"
-                else:
+                elif self._is_unreadable(definition):
                     source = "unreadable"
+                else:
+                    source = "set"
                 lines.append(
                     f"`{definition.name}` — {self._display_value(definition)} "
                     f"({source})"
@@ -488,39 +496,47 @@ class SettingsCommands(app_commands.Group):
         """
         is_set = self._bot.settings_store.is_set(definition)
         if definition.encrypted:
-            return SECRET_PLACEHOLDER if is_set else UNSET_DISPLAY
+            if not is_set:
+                return UNSET_DISPLAY
+            if self._is_unreadable(definition):
+                # The row is there and this key cannot read it, so the bot is
+                # running without the credential. Saying only "cannot be
+                # viewed once set" would read as working. Naming the failure
+                # leaks nothing: the value is what stays unsaid.
+                return UNDECRYPTABLE_NOTE
+            return SECRET_PLACEHOLDER
         current = getattr(self._bot._config, definition.field, None)
         if current is None or current == ():
             # An empty collection is a value the same way None is: nothing is
             # configured, and rendering it as `()` would say otherwise.
             return UNSET_DISPLAY
         shown = setting_text(definition, current)
-        if is_set and not self._stored_value_parses(definition):
+        if is_set and self._is_unreadable(definition):
             return f"`{shown}` ({UNREADABLE_NOTE})"
         return f"`{shown}`" if is_set else f"`{shown}` (default)"
 
-    def _stored_value_parses(self, definition: SettingDefinition) -> bool:
-        """Whether the stored text is the value the bot is actually running.
+    def _is_unreadable(self, definition: SettingDefinition) -> bool:
+        """Whether a stored row is not the value the bot is running.
 
-        compose_config drops a stored value its parser rejects and falls back
-        to the default, logging it to the console. Without this the row would
-        still read as set here and the reply would show the default as though
-        somebody had chosen it - which is the one question /settings list
-        exists to answer.
+        Two ways that happens, and /settings has to report both or it says a
+        setting is in force when it is not: compose_config drops a value its
+        parser rejects and falls back to the default, and an encrypted row
+        this key cannot decrypt is read as unset. Callers check is_set first;
+        this answers for rows that exist.
         """
         raw = self._bot.settings_store.get_raw(definition)
         if raw is None:
-            # Either nothing is stored, or it is an encrypted row this key
-            # cannot read; the caller answered for both before reaching here.
-            return True
+            # A row exists - the caller checked - so this is an encrypted
+            # value the current key cannot decrypt.
+            return definition.encrypted
         try:
             definition.parse(raw)
         except Exception:
             # Deliberately as broad as compose_config's own catch: a parser
             # may raise anything, and the two have to agree on what counts as
             # unusable or the display would contradict the running config.
-            return False
-        return True
+            return True
+        return False
 
     def _fallback_note(self, definition: SettingDefinition) -> str:
         # No secret's value is printed here either. None of them has a
