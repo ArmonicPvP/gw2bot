@@ -123,7 +123,9 @@ class Config:
     web_session_ttl_seconds: int = 604800
     # Discord ids. The food page has no default of its own: it has always been
     # whichever role draws the raffle, and composing the settings is what keeps
-    # it following that role until someone sets it apart.
+    # it following that role until someone sets it apart. The roster page
+    # starts from that same role as a plain default rather than a follower,
+    # because it is a page with its own audience.
     # In-game account names barred from the raffle. Matched case-insensitively,
     # because the guild log and the roster do not agree on capitalisation.
     raffle_excluded_accounts: tuple[str, ...] = ()
@@ -135,6 +137,7 @@ class Config:
     trial_role_id: int = DEFAULT_TRIAL_ROLE_ID
     sunborne_role_id: int = DEFAULT_SUNBORNE_ROLE_ID
     food_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
+    roster_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     raffle_contribution_channel_id: int = DEFAULT_RAFFLE_CONTRIBUTION_CHANNEL_ID
     trial_forum_channel_id: int = DEFAULT_TRIAL_FORUM_CHANNEL_ID
     trial_accepted_tag_id: int = DEFAULT_TRIAL_ACCEPTED_TAG_ID

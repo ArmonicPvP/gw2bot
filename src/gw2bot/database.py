@@ -226,6 +226,28 @@ class FeastStockLogRecord(Base):
     recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class GuildMemberCountLogRecord(Base):
+    """One observed guild member count, written only when it changes.
+
+    The roster page draws its line from the join and leave events already
+    stored, but those only say how the count moved; this says where it
+    actually stood. The newest row is the anchor every derived count is
+    measured from, so a stretch of missed events shifts the history rather
+    than the present.
+    """
+
+    __tablename__ = "guild_member_count_log"
+
+    log_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    pending_invite_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class RaffleRunRecord(Base):
     __tablename__ = "raffle_runs"
 

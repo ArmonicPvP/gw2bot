@@ -15,6 +15,22 @@ from gw2bot.member_count import (
 )
 
 
+class RecordingCountStore:
+    """Stands in for the raffle store's member count log."""
+
+    def __init__(self) -> None:
+        self.recorded: list[tuple[int, int]] = []
+
+    def record_member_count(
+        self,
+        member_count: int,
+        pending_invite_count: int,
+        recorded_at: float,
+    ) -> bool:
+        self.recorded.append((member_count, pending_invite_count))
+        return True
+
+
 class GuildMemberCountTopicBot(SimpleNamespace):
     async def _try_update_logging_channel_topic(self, topic: str) -> bool:
         return await Gw2Bot._try_update_logging_channel_topic(
@@ -56,8 +72,10 @@ class TestGuildMemberCountTopic:
                 ]
             )
         )
+        store = RecordingCountStore()
         bot = GuildMemberCountTopicBot(
             _api=api,
+            _raffle_store=store,
             _config=SimpleNamespace(
                 gw2_guild_id="guild-id",
                 discord_notification_channel_id=9012,
@@ -102,8 +120,10 @@ class TestGuildMemberCountTopic:
                 ]
             )
         )
+        store = RecordingCountStore()
         bot = GuildMemberCountTopicBot(
             _api=api,
+            _raffle_store=store,
             _config=SimpleNamespace(
                 gw2_guild_id="guild-id",
                 discord_notification_channel_id=9012,
@@ -123,6 +143,48 @@ class TestGuildMemberCountTopic:
         assert bot._last_guild_member_count == 3
         assert bot._last_pending_guild_invite_count == 1
         channel.edit.assert_not_awaited()
+
+    async def test_records_the_observed_member_count_before_editing(
+        self,
+    ) -> None:
+        # The roster page reads its history from this log, so the count is
+        # recorded whatever Discord does with the channel description.
+        channel = SimpleNamespace(
+            id=9012,
+            guild=SimpleNamespace(id=5678),
+            topic="old",
+            edit=AsyncMock(side_effect=discord.DiscordException()),
+        )
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {"name": "One.1234", "rank": "Member"},
+                    {"name": "Two.5678", "rank": "Officer"},
+                    {"name": "Pending.9012", "rank": "invited"},
+                ]
+            )
+        )
+        store = RecordingCountStore()
+        bot = GuildMemberCountTopicBot(
+            _api=api,
+            _raffle_store=store,
+            _config=SimpleNamespace(
+                gw2_guild_id="guild-id",
+                discord_notification_channel_id=9012,
+                discord_command_guild_id=5678,
+            ),
+            _notification_channel=channel,
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
+            _last_topic_update_failure=None,
+        )
+
+        updated = await Gw2Bot._update_guild_member_count_topic(
+            cast(Gw2Bot, bot)
+        )
+
+        assert not updated
+        assert store.recorded == [(2, 1)]
 
     async def test_channel_update_failure_logging_omits_raw_exception_body(
         self,
@@ -151,8 +213,10 @@ class TestGuildMemberCountTopic:
                 ]
             )
         )
+        store = RecordingCountStore()
         bot = GuildMemberCountTopicBot(
             _api=api,
+            _raffle_store=store,
             _config=SimpleNamespace(
                 gw2_guild_id="guild-id",
                 discord_notification_channel_id=9012,

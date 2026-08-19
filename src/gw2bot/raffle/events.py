@@ -91,12 +91,25 @@ def parse_guild_rank_change(event: dict[str, Any]) -> GuildRankChange | None:
     )
 
 
-def event_in_window(event_time: str, start: datetime, end: datetime) -> bool:
+def parse_event_time(event_time: str) -> datetime | None:
+    """Read a stored guild-log timestamp, or None when it cannot be read.
+
+    The GW2 API writes ``Z`` where fromisoformat wants an offset, and rows
+    written by the bot itself carry a plain offset, so both spellings have to
+    parse. A value that parses without a zone is read as UTC, which is what
+    every producer of these strings means.
+    """
     try:
         parsed = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
     except ValueError:
-        return False
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    parsed_utc = parsed.astimezone(UTC)
+    return parsed.astimezone(UTC)
+
+
+def event_in_window(event_time: str, start: datetime, end: datetime) -> bool:
+    parsed_utc = parse_event_time(event_time)
+    if parsed_utc is None:
+        return False
     return start <= parsed_utc < end

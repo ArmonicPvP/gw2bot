@@ -21,6 +21,7 @@ from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
 from gw2bot.web import server as server_module
 from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
+from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
 from gw2bot.web.server import WebServer
 
 from unittest.mock import AsyncMock, MagicMock
@@ -947,6 +948,198 @@ class TestFoodApi:
 
         response = await client.get(
             "/api/food",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+        assert await response.json() == {"error": "unavailable"}
+
+
+class TestRosterPageGate:
+    async def test_unauthenticated_page_shows_sign_in(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/roster")
+
+        assert response.status == 401
+        assert "Sign in with Discord" in await response.text()
+
+    async def test_member_without_role_gets_officers_only(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/roster",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert "guild roster history" in await response.text()
+
+    async def test_officer_reaches_roster_page(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+
+        response = await client.get(
+            "/roster",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 200
+        assert "Guild Roster" in await response.text()
+
+    async def test_unreachable_discord_returns_503(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/roster",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+
+
+class TestRosterApi:
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    async def test_member_without_role_is_forbidden(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/api/roster",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert await response.json() == {"error": "forbidden"}
+
+    async def test_rejects_unknown_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/roster",
+            params={"range": "90d"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_returns_the_line_and_the_changes(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.import_membership_events(
+            [
+                ImportedMembershipEvent(1, now - 3000, JOIN, "One.1234"),
+                ImportedMembershipEvent(2, now - 2000, LEAVE, "Two.5678"),
+                ImportedMembershipEvent(
+                    3,
+                    now - 1000,
+                    KICK,
+                    "Three.9012",
+                    "Officer.3456",
+                ),
+            ]
+        )
+        raffle_store.record_member_count(400, 2, now - 500)
+
+        response = await client.get(
+            "/api/roster",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "24h"
+        assert payload["member_count"] == 400
+        assert (payload["joins"], payload["leaves"], payload["kicks"]) == (
+            1,
+            1,
+            1,
+        )
+        # Newest first, each carrying the count it left the guild at.
+        assert [
+            (change["kind"], change["name"], change["count"])
+            for change in payload["events"]
+        ] == [
+            (KICK, "Three.9012", 400),
+            (LEAVE, "Two.5678", 401),
+            (JOIN, "One.1234", 402),
+        ]
+        assert payload["events"][0]["actor"] == "Officer.3456"
+        # The line spans the whole window: an opening vertex, one per change,
+        # and a closing one at the moment of the request that carries the
+        # count forward to the right-hand edge.
+        assert [point["count"] for point in payload["points"]] == [
+            401,
+            402,
+            401,
+            400,
+            400,
+        ]
+
+    async def test_reports_no_line_before_a_count_is_observed(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        raffle_store.import_membership_events(
+            [ImportedMembershipEvent(1, time.time() - 100, JOIN, "One.1234")]
+        )
+
+        response = await client.get(
+            "/api/roster",
+            headers=self._officer_headers(guild),
+        )
+
+        payload = await response.json()
+        assert payload["points"] == []
+        assert payload["member_count"] is None
+        assert payload["events"][0]["count"] is None
+
+    async def test_defaults_to_the_24h_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/roster",
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        assert (await response.json())["range"] == "24h"
+
+    async def test_unreachable_discord_returns_503_json(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/api/roster",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 

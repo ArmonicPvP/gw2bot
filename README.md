@@ -139,6 +139,7 @@ that nothing answers to is how a guild silently loses a feature.
 | `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
 | `/settings roles sunborne` | `1317140660188352584` | Marks a Discord member as a full member in the same reports. |
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
+| `/settings roles roster_page` | `1317124663847157880` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
 | `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
 | `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
 | `/settings channels trial_accepted_tag` | `1317349209619562587` | Tag marking an accepted application; only tagged posts are indexed. |
@@ -958,6 +959,60 @@ is posted once per destination, including across restarts. Startup status and
 guild-log polling failures and recovery are written only to the application
 console logs.
 
+### Guild Roster History
+
+Every join, leave and kick the poller records is kept, and the one-minute
+member count poll writes a row whenever the count itself changes — only when it
+changes, so a quiet week costs a handful of rows rather than ten thousand
+identical ones. Together they are what the
+[Guild Roster page](#guild-roster-history-page) draws.
+
+The count is what the history is measured from. A change on its own says which
+way the roster moved, not where it stood, so the page walks back from the
+newest recorded count through the changes between. Measuring from the newest
+observation rather than the oldest keeps the right-hand edge of the graph — the
+part you would check against the channel description — true even if an older
+stretch of changes was never recorded.
+
+Both need `/settings gw2_api_key` and `/settings gw2_guild_id`, and the count
+poll additionally needs `/settings discord_notification_channel_id`, because it
+is the same poll that writes the channel description.
+
+#### Importing The History From The Log Channel
+
+The bot only started keeping join and leave rows when the guild log poller
+gained them, but it has been *announcing* every one of them in the notification
+channel for far longer. `/roster import` reads those announcements back:
+
+```text
+/roster import
+```
+
+It walks the whole channel newest first and takes only the messages the bot
+itself wrote, and only the three membership notifications among them — joins,
+departures and kicks. Invitations and rank changes are passed over, because
+neither moves the member count; so is everything else in the channel, including
+the `diag` previews, which describe a fictional account and nothing that
+happened. Discord's own timestamp on each message is when the change happened,
+which is within one poll of the truth.
+
+The command is limited to `/settings roles raffle_officer` and answers
+privately with what it read and imported. Three things make it safe to run more
+than once:
+
+- each imported change is keyed by the Discord message it came from, so a
+  second run finds its own rows and adds nothing;
+- changes at or after the first one the guild log poller recorded are skipped,
+  so an event the poller already stored is never counted twice;
+- a run Discord cuts short keeps what it read and says so, and running it again
+  resumes rather than restarts.
+
+An import writes no messages back to the channel: the message being read *was*
+the notification, so imported changes are recorded as already delivered.
+
+Reading years of history takes minutes, not seconds. Run it once after
+upgrading; there is nothing to schedule.
+
 ## Automated Message Diagnostics
 
 When a non-bot user sends exactly `diag`, ignoring case and surrounding spaces,
@@ -1062,6 +1117,33 @@ gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
 officers-only page. Membership and the role are re-checked on the same schedule
 as calendar access, so a member who loses the role loses the page within
 minutes. The page is not linked from the calendar; browse to `/food` directly.
+
+### Guild Roster History Page
+
+The same site serves a **Guild Roster** page at `/roster`, built from the
+membership history described under
+[Guild Roster History](#guild-roster-history). It charts the guild's member
+count over the last 24 hours, 7 days, or 30 days as a step — membership holds
+until somebody joins or leaves, then jumps — with one dot per change, green for
+a join, amber for a departure and red for a kick. Hovering a dot, or tapping it
+on a phone, names the account and shows the count it left the roster at. Below
+the chart every change in the window is listed newest first, with who did the
+kicking where the guild log named them.
+
+The y axis covers the counts the window actually reached rather than the whole
+500-member ceiling, so a handful of departures is visible rather than a flat
+line near the top.
+
+Access is gated by `/settings roles roster_page`, which starts as the role that
+draws the raffle, because the page names who was kicked and by whom. Point it
+at a wider role to open the history to the whole guild. Membership and the role
+are re-checked on the same schedule as calendar access. The page is not linked
+from the calendar; browse to `/roster` directly.
+
+Until the member count poll has written its first row there is no count to
+measure against, so the page says so and lists the changes without a line. That
+resolves itself within a minute of the bot starting with the Guild Wars 2
+settings in place.
 
 ## Run With Docker
 
