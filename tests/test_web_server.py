@@ -12,7 +12,7 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from factories import forbidden_error, not_found_error
+from factories import config_from_env, forbidden_error, not_found_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.events.models import EventCategory, RepeatFrequency
@@ -20,7 +20,8 @@ from gw2bot.events.store import EventStore
 from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
 from gw2bot.web import server as server_module
-from gw2bot.web.server import FOOD_PAGE_ROLE_ID, WebServer
+from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
+from gw2bot.web.server import WebServer
 
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,7 +37,7 @@ def member(display_name: str = "Kitty", *, officer: bool = False) -> object:
 
 
 def make_config() -> Config:
-    return Config.from_env(
+    return config_from_env(
         {
             "DISCORD_TOKEN": "discord-token",
             "DISCORD_COMMAND_GUILD_ID": str(GUILD_ID),

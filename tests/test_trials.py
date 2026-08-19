@@ -11,24 +11,32 @@ import discord
 import pytest
 from discord import app_commands
 
-from factories import configured_bot, not_found_error, unconfigured_bot
+from factories import (
+    configured_bot,
+    default_config,
+    not_found_error,
+    unconfigured_bot,
+)
 from gw2bot.guild_members import TrialMemberReportEntry
 from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleStore, TrialForumPost
-from gw2bot.raffle.roles import RAFFLE_OFFICER_ROLE_ID
-from gw2bot.trials.forum import (
-    TRIAL_ACCEPTED_TAG_ID,
-    TRIAL_FORUM_CHANNEL_ID,
-    TRIAL_IN_REVIEW_TAG_ID,
+from gw2bot.config import (
+    DEFAULT_RAFFLE_OFFICER_ROLE_ID as RAFFLE_OFFICER_ROLE_ID,
+    DEFAULT_SUNBORNE_ROLE_ID as SUNBORNE_ROLE_ID,
+    DEFAULT_TRIAL_ACCEPTED_TAG_ID as TRIAL_ACCEPTED_TAG_ID,
+    DEFAULT_TRIAL_FORUM_CHANNEL_ID as TRIAL_FORUM_CHANNEL_ID,
+    DEFAULT_TRIAL_IN_REVIEW_TAG_ID as TRIAL_IN_REVIEW_TAG_ID,
+    DEFAULT_TRIAL_ROLE_ID as TRIAL_ROLE_ID,
 )
-from gw2bot.trials.reports import (
-    SUNBORNE_ROLE_ID,
-    TRIAL_ROLE_ID,
-    format_track_audit,
-)
+from gw2bot.trials.forum import refresh_trial_forum_index
+from gw2bot.trials.reports import format_track_audit
 
 
 class TrialForumTaggingBot(SimpleNamespace):
+    def __init__(self, **attributes: Any) -> None:
+        attributes.setdefault("_config", default_config())
+        super().__init__(**attributes)
+
     async def _resolve_trial_forum_tags(
         self,
         thread: discord.Thread,
@@ -53,7 +61,10 @@ class TestTrialForumFailureLogging:
             def __str__(self) -> str:
                 return "raw-response-body-secret"
 
-        bot = SimpleNamespace(fetch_channel=AsyncMock(side_effect=DiscordFailure()))
+        bot = SimpleNamespace(
+            _config=default_config(),
+            fetch_channel=AsyncMock(side_effect=DiscordFailure()),
+        )
         with caplog.at_level(logging.ERROR, logger="gw2bot"):
             entries = await Gw2Bot._resolve_trial_member_discord_statuses(
                 cast(Gw2Bot, bot), ["User.1234"]
@@ -77,7 +88,7 @@ class TestTrialForumTagging:
             _applied_tags=[existing_tag.id],
             edit=AsyncMock(),
         )
-        bot = TrialForumTaggingBot()
+        bot = TrialForumTaggingBot(_config=default_config())
 
         await Gw2Bot._apply_trial_forum_in_review_tag(
             cast(Gw2Bot, bot),
@@ -102,7 +113,10 @@ class TestTrialForumTagging:
             _applied_tags=[],
             edit=AsyncMock(),
         )
-        bot = TrialForumTaggingBot(fetch_channel=AsyncMock(return_value=forum))
+        bot = TrialForumTaggingBot(
+            _config=default_config(),
+            fetch_channel=AsyncMock(return_value=forum),
+        )
 
         await Gw2Bot._apply_trial_forum_in_review_tag(
             cast(Gw2Bot, bot),
@@ -124,7 +138,7 @@ class TestTrialForumTagging:
             _applied_tags=[],
             edit=AsyncMock(),
         )
-        bot = SimpleNamespace()
+        bot = SimpleNamespace(_config=default_config())
 
         await Gw2Bot._apply_trial_forum_in_review_tag(
             cast(Gw2Bot, bot),
@@ -143,7 +157,7 @@ class TestTrialForumTagging:
             _applied_tags=[TRIAL_IN_REVIEW_TAG_ID],
             edit=AsyncMock(),
         )
-        bot = SimpleNamespace()
+        bot = SimpleNamespace(_config=default_config())
 
         await Gw2Bot._apply_trial_forum_in_review_tag(
             cast(Gw2Bot, bot),
@@ -165,7 +179,10 @@ class TestTrialForumTagging:
             _applied_tags=[],
             edit=AsyncMock(),
         )
-        bot = TrialForumTaggingBot(fetch_channel=AsyncMock(return_value=forum))
+        bot = TrialForumTaggingBot(
+            _config=default_config(),
+            fetch_channel=AsyncMock(return_value=forum),
+        )
 
         with caplog.at_level(logging.ERROR, logger="gw2bot"):
             await Gw2Bot._apply_trial_forum_in_review_tag(
@@ -199,7 +216,7 @@ class TestTrialForumTagging:
             _applied_tags=[],
             edit=AsyncMock(side_effect=DiscordFailure()),
         )
-        bot = TrialForumTaggingBot()
+        bot = TrialForumTaggingBot(_config=default_config())
 
         with caplog.at_level(logging.ERROR, logger="gw2bot"):
             await Gw2Bot._apply_trial_forum_in_review_tag(
@@ -253,7 +270,7 @@ class TestTrialMemberReportMessages:
         )
         bot = SimpleNamespace(
             _api=api,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=default_config(gw2_guild_id="guild-id"),
             get_tracked_trial_member_times=MagicMock(return_value={}),
             untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
@@ -300,7 +317,7 @@ class TestTrialMemberReportMessages:
         )
         bot = SimpleNamespace(
             _api=api,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=default_config(gw2_guild_id="guild-id"),
             get_tracked_trial_member_times=MagicMock(return_value={}),
             untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver(
@@ -317,7 +334,7 @@ class TestTrialMemberReportMessages:
     async def test_builds_no_messages_when_no_trials(self) -> None:
         bot = SimpleNamespace(
             _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=[])),
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=default_config(gw2_guild_id="guild-id"),
             get_tracked_trial_member_times=MagicMock(return_value={}),
             untrack_trial_member=MagicMock(),
             _resolve_trial_member_discord_statuses=_trial_status_resolver({}),
@@ -351,7 +368,7 @@ class TestTrialMemberReportMessages:
         untrack = MagicMock()
         bot = SimpleNamespace(
             _api=api,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=default_config(gw2_guild_id="guild-id"),
             get_tracked_trial_member_times=MagicMock(
                 return_value={
                     # Tracked more than 7 days ago -> past the warning mark.
@@ -399,7 +416,7 @@ class TestTrialMemberReportMessages:
         untrack = MagicMock()
         bot = SimpleNamespace(
             _api=api,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=default_config(gw2_guild_id="guild-id"),
             get_tracked_trial_member_times=MagicMock(
                 return_value={
                     "Promoted Warned.1234": now - timedelta(days=8),
@@ -453,7 +470,7 @@ class TestTrialMemberReportMessages:
         untrack = MagicMock()
         bot = SimpleNamespace(
             _api=api,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=default_config(gw2_guild_id="guild-id"),
             get_tracked_trial_member_times=MagicMock(
                 # Tracked only 2 days ago -> still inside the 7-day grace window.
                 return_value={"Tracked.5678": now - timedelta(days=2)}
@@ -483,6 +500,7 @@ class TestTrialMemberReportMessages:
 class TestTrialMemberNotification:
     async def test_posts_each_built_message_to_notification_channel(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             _build_trial_report_messages=AsyncMock(
                 return_value=["before mark", "past mark"]
             ),
@@ -521,7 +539,10 @@ class TestTrialMemberNotification:
 
 class TestCheckCommand:
     async def test_command_is_named_check_and_delegates_to_handler(self) -> None:
-        bot = SimpleNamespace(_handle_check_command=AsyncMock())
+        bot = SimpleNamespace(
+            _config=default_config(),
+            _handle_check_command=AsyncMock(),
+        )
         interaction = SimpleNamespace()
 
         command = Gw2Bot._create_check_command(cast(Gw2Bot, bot))
@@ -532,7 +553,10 @@ class TestCheckCommand:
         bot._handle_check_command.assert_awaited_once_with(interaction)
 
     async def test_rejects_users_without_officer_role(self) -> None:
-        bot = SimpleNamespace(_build_trial_report_messages=AsyncMock())
+        bot = SimpleNamespace(
+            _config=default_config(),
+            _build_trial_report_messages=AsyncMock(),
+        )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=1, roles=[]),
             response=SimpleNamespace(send_message=AsyncMock()),
@@ -639,6 +663,7 @@ class TestTrackCommand:
             return []
 
         bot = SimpleNamespace(
+            _config=default_config(),
             _handle_track_command=AsyncMock(),
             _track_member_autocomplete=_autocomplete,
         )
@@ -656,6 +681,7 @@ class TestTrackCommand:
 
     async def test_rejects_users_without_officer_role(self) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             resolve_guild_member=AsyncMock(),
             toggle_trial_member_tracking=MagicMock(),
         )
@@ -834,7 +860,10 @@ class TestTrackCommand:
         assert "Could not verify guild membership" in message
 
     async def test_autocomplete_requires_officer_role(self) -> None:
-        bot = SimpleNamespace(search_guild_members=AsyncMock())
+        bot = SimpleNamespace(
+            _config=default_config(),
+            search_guild_members=AsyncMock(),
+        )
         interaction = SimpleNamespace(user=SimpleNamespace(id=1, roles=[]))
 
         choices = await Gw2Bot._track_member_autocomplete(
@@ -915,6 +944,7 @@ class TestTrialMemberStatusResolution:
             archived_threads=None,
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             fetch_channel=AsyncMock(return_value=forum),
             _refresh_trial_forum_index=AsyncMock(),
             _raffle_store=SimpleNamespace(
@@ -951,6 +981,7 @@ class TestTrialMemberStatusResolution:
             archived_threads=None,
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             fetch_channel=AsyncMock(return_value=forum),
             _refresh_trial_forum_index=AsyncMock(),
             _raffle_store=SimpleNamespace(
@@ -978,6 +1009,7 @@ class TestTrialMemberStatusResolution:
             archived_threads=None,
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             fetch_channel=AsyncMock(return_value=forum),
             _refresh_trial_forum_index=AsyncMock(),
             _raffle_store=SimpleNamespace(
@@ -1010,6 +1042,7 @@ class TestTrialMemberStatusResolution:
             archived_threads=None,
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             fetch_channel=AsyncMock(return_value=forum),
             _refresh_trial_forum_index=AsyncMock(),
             _raffle_store=SimpleNamespace(
@@ -1039,6 +1072,7 @@ class TestTrialMemberStatusResolution:
             archived_threads=None,
         )
         bot = SimpleNamespace(
+            _config=default_config(),
             fetch_channel=AsyncMock(return_value=forum),
             _refresh_trial_forum_index=AsyncMock(),
             _raffle_store=SimpleNamespace(
@@ -1111,7 +1145,10 @@ class TestTrialMemberStatusResolution:
 
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
-            bot = SimpleNamespace(_raffle_store=store)
+            bot = SimpleNamespace(
+                _config=default_config(),
+                _raffle_store=store,
+            )
 
             await Gw2Bot._refresh_trial_forum_index(
                 cast(Gw2Bot, bot),
@@ -1126,6 +1163,49 @@ class TestTrialMemberStatusResolution:
             assert index[2].owner_id == 202
             assert store.get_trial_forum_watermark() is not None
             rejected.history.assert_not_called()
+            store.close()
+
+    async def test_a_moved_forum_rebuilds_the_index_at_the_next_refresh(
+        self,
+    ) -> None:
+        """The index self-heals when a settings change did not get to clear it.
+
+        apply_settings_change drops the cache, but the process can stop
+        between the settings row being written and that running. Without the
+        recorded source the next startup would refresh incrementally against
+        the new forum and keep every row from the old one forever.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.upsert_trial_forum_posts(
+                [TrialForumPost(1, 101, "stale.1234 application", "t")]
+            )
+            store.set_trial_forum_watermark(datetime(2026, 6, 10, tzinfo=UTC))
+            store.set_trial_forum_index_source("999:888")
+
+            forum = SimpleNamespace(
+                id=TRIAL_FORUM_CHANNEL_ID,
+                guild=SimpleNamespace(
+                    id=5678,
+                    active_threads=AsyncMock(return_value=[]),
+                ),
+                threads=[],
+                archived_threads=lambda **_: _empty_threads(),
+            )
+            bot = SimpleNamespace(
+                _config=default_config(),
+                _raffle_store=store,
+            )
+
+            await refresh_trial_forum_index(
+                cast(Gw2Bot, bot),
+                cast(discord.ForumChannel, forum),
+            )
+
+            assert store.get_trial_forum_index() == {}
+            assert store.get_trial_forum_index_source() == (
+                f"{TRIAL_FORUM_CHANNEL_ID}:{TRIAL_ACCEPTED_TAG_ID}"
+            )
             store.close()
 
     async def test_incremental_refresh_skips_unmodified_and_purges_unaccepted(
@@ -1148,6 +1228,12 @@ class TestTrialMemberStatusResolution:
             )
             watermark = datetime(2026, 6, 10, tzinfo=UTC)
             store.set_trial_forum_watermark(watermark)
+            # An earlier run against this same forum and tag would have
+            # recorded them; without that the refresh correctly treats the
+            # index as built from somewhere else and rebuilds it cold.
+            store.set_trial_forum_index_source(
+                f"{TRIAL_FORUM_CHANNEL_ID}:{TRIAL_ACCEPTED_TAG_ID}"
+            )
 
             unchanged_history = MagicMock()
             unchanged = SimpleNamespace(
@@ -1198,7 +1284,10 @@ class TestTrialMemberStatusResolution:
                 guild=guild,
                 archived_threads=archived_threads,
             )
-            bot = SimpleNamespace(_raffle_store=store)
+            bot = SimpleNamespace(
+                _config=default_config(),
+                _raffle_store=store,
+            )
 
             await Gw2Bot._refresh_trial_forum_index(
                 cast(Gw2Bot, bot),
@@ -1220,6 +1309,7 @@ class TestTrialMemberStatusResolution:
         seconds_until_report: MagicMock,
     ) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, True]),
             _check_overdue_trials=AsyncMock(return_value=True),
@@ -1245,6 +1335,7 @@ class TestTrialMemberStatusResolution:
         seconds_until_report: MagicMock,
     ) -> None:
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, True]),
             _check_overdue_trials=AsyncMock(return_value=False),
@@ -1270,6 +1361,7 @@ class TestTrialMemberStatusResolution:
     ) -> None:
         error = aiohttp.ClientError("Guild members unavailable")
         bot = SimpleNamespace(
+            _config=default_config(),
             wait_until_ready=AsyncMock(),
             is_closed=MagicMock(side_effect=[False, False, False, True]),
             _check_overdue_trials=AsyncMock(side_effect=error),
@@ -1286,3 +1378,10 @@ class TestTrialMemberStatusResolution:
         bot._check_overdue_trials.assert_awaited_once()
         bot._poll_status.record_error.assert_called_once_with("Trial Members", error)
         bot._poll_status.record_success.assert_not_called()
+
+
+async def _empty_threads() -> Any:
+    # An async generator that yields nothing, standing in for a forum whose
+    # archived threads the rebuild finds empty.
+    return
+    yield  # pragma: no cover

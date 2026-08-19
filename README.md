@@ -9,6 +9,11 @@ client supports the account, token, and guild endpoints documented in
 
 ## Configuration
 
+Almost everything the bot uses is a **setting**, changed from Discord with
+`/settings` and stored in the bot's database. The environment keeps only what
+has to be known before the bot can read that database or decide how the
+container starts.
+
 For local development, copy `.env.example` to `.env`.
 
 ### Required Environment Variables
@@ -22,31 +27,181 @@ These two are the only variables the bot refuses to start without.
 
 ### Optional Environment Variables
 
-| Variable                              | Default                      | Description                                                                                                                                                              |
-| ------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `DISCORD_NOTIFICATION_CHANNEL_ID`     | unset                        | Positive integer ID of the Discord text channel that receives all automated notifications. The channel must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
-| `GW2_API_KEY`                         | unset                        | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `GW2_GUILD_ID`.                                                                       |
-| `GW2_GUILD_ID`                        | unset                        | Guild ID listed in `/v2/account.guild_leader`. Set it together with `GW2_API_KEY`.                                                                                       |
-| `DEBUG`                               | `false`                      | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs.                                                                                       |
-| `DISCORD_FEAST_NOTIFICATION_USER_ID`  | unset                        | Discord user ID that also receives feast stock alerts by private message.                                                                                                |
-| `GW2_POLL_INTERVAL_SECONDS`           | `300`                        | Guild Storage polling interval in seconds. Must be a positive integer of at least `30`.                                                                                  |
-| `GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` | `60`                         | Guild log polling interval in seconds. Must be a positive integer of at least `30`.                                                                                      |
-| `GW2_GUILD_MEMBER_CACHE_SECONDS`      | `900`                        | Guild member cache lifetime in seconds. Must be a positive integer.                                                                                                      |
-| `RAFFLE_DB_PATH`                      | `data/gw2bot.db`             | SQLite database path. The Docker image overrides this default with `/app/data/gw2bot.db`.                                                                                |
-| `GW2_API_BASE_URL`                    | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed.                                                                                               |
-| `TZ`                                  | `UTC`                        | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times and to format event thread names.                                         |
-| `WEB_ENABLED`                         | `false`                      | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). Requires the four variables below.                                                          |
-| `WEB_PORT`                            | `2222`                       | Port the web calendar listens on.                                                                                                                                        |
-| `WEB_BASE_URL`                        | unset                        | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed.                                                           |
-| `DISCORD_OAUTH_CLIENT_ID`             | unset                        | OAuth2 client ID of the bot's Discord application.                                                                                                                       |
-| `DISCORD_OAUTH_CLIENT_SECRET`         | unset                        | OAuth2 client secret of the bot's Discord application.                                                                                                                   |
-| `WEB_SESSION_SECRET`                  | unset                        | Random secret of at least 32 characters that signs web session cookies.                                                                                                  |
-| `WEB_SESSION_TTL_SECONDS`             | `604800`                     | How long a web sign-in stays valid. Guild membership is re-checked periodically regardless, so a departed member loses access without waiting for the session to expire. |
+These stay in the environment because each one decides how the container
+itself runs — where it writes, whether it opens a listening socket, and where
+it is allowed to send the API key. Everything else is a `/settings` subcommand.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs. |
+| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. Settings live here too. The Docker image overrides this default with `/app/data/gw2bot.db`. |
+| `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). It opens the listening port; the calendar's four credentials are settings. |
+| `WEB_PORT` | `2222` | Port the web calendar listens on. |
+| `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. It decides where the API key is sent, which is why it is not settable from Discord. |
+| `SETTINGS_ENCRYPTION_KEY` | unset | Fernet key used to encrypt the settings that hold credentials. Leave it unset and the bot generates `settings.key` next to the database on first run. See [Encrypted Settings](#encrypted-settings). |
 
 The application loads `.env` automatically. Existing environment variables take
 precedence over `.env`, so an Unraid container can inject the same variables at
 runtime without using or mounting a `.env` file. The `.env` file is excluded
 from Git and the Docker build context.
+
+## Settings
+
+`/settings` is how the bot is configured. Running a subcommand with no value
+prints what the setting does and what it is currently set to; passing a value
+validates and stores it; passing a space clears it.
+
+Changes take effect immediately. Setting the Guild Wars 2 credentials starts
+the pollers that need them, changing the notification channel redirects the
+next message, and changing a calendar credential restarts the calendar — none
+of it waits for a container restart. The reply says what had to be restarted.
+
+Every reply is private to the person who ran the command.
+
+### Who May Change Settings
+
+Anyone holding the raffle officer role — `/settings roles raffle_officer`, see
+below — plus the server owner and anyone with the `Administrator` permission.
+
+The owner and administrator arms are deliberate: the officer role is itself a
+setting, so if it were the only way in, one wrong value would lock everybody
+out of the command that could fix it, with no environment variable left to
+override it.
+
+### Settings That Replaced Environment Variables
+
+| Subcommand | Default | Description |
+| --- | --- | --- |
+| `/settings discord_notification_channel_id` | unset | Discord text channel that receives all automated notifications. Must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
+| `/settings gw2_api_key` | unset | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `gw2_guild_id`. **Encrypted.** |
+| `/settings gw2_guild_id` | unset | Guild ID listed in `/v2/account.guild_leader`. Must be a GUID, and is stored in lower case whatever form you paste. **Set `gw2_api_key` first:** with a valid key the ID is checked against `/v2/account.guild_leader` before being stored. If the API rejects the key the change is refused, and if the API is unreachable or erroring the ID is stored with the reply saying it went unchecked. This matters because the raffle ledger records the first guild ID it is given and refuses a different one afterwards, and that cannot be undone from Discord. |
+| `/settings raffle_excluded_accounts` | unset | Guild Wars 2 account names barred from the raffle, separated by commas (for example `Someone.1234, Another.5678`). Matched case-insensitively, and capped at 1500 characters so `/settings` can always show the list back to you. See [Excluding Someone From The Raffle](#excluding-someone-from-the-raffle). |
+| `/settings feast_notification_user_id` | unset | Discord user who also receives feast stock alerts by private message. |
+| `/settings gw2_poll_interval_seconds` | `300` | Guild Storage polling interval in seconds. At least `30`. |
+| `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
+| `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime in seconds. |
+| `/settings timezone` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times, to name event threads, and to define weekly repeat days. |
+| `/settings web_base_url` | unset | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed. |
+| `/settings discord_oauth_client_id` | unset | OAuth2 client ID of the bot's Discord application. |
+| `/settings discord_oauth_client_secret` | unset | OAuth2 client secret of the bot's Discord application. **Encrypted.** |
+| `/settings web_session_secret` | unset | Random secret of at least 32 characters that signs web session cookies. Changing it signs every calendar user out. **Encrypted.** |
+| `/settings web_session_ttl_seconds` | `604800` | How long a web sign-in stays valid. Guild membership is re-checked periodically regardless, so a departed member loses access without waiting for the session to expire. |
+
+Three subcommands are named differently from the variable they replaced,
+because Discord caps a command name at 32 characters:
+`DISCORD_FEAST_NOTIFICATION_USER_ID` became `feast_notification_user_id`,
+`GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` became `guild_log_poll_interval_seconds`,
+and `TZ` became `timezone`.
+
+### Excluding Someone From The Raffle
+
+`/settings raffle_excluded_accounts` lists the in-game account names that earn
+no raffle tickets. It is a comma-separated list, matched case-insensitively,
+because the guild log and the in-game roster do not always agree on
+capitalisation.
+
+An excluded account is blocked on every route into the raffle:
+
+- Gold they deposit into Guild Storage earns them **no tickets**. The deposit
+  is still recorded and still shows in the contribution reports — the guild has
+  the gold, so the ledger says so; it simply buys nothing.
+- `/raffle addticket <account> <amount>` is refused, so an officer cannot
+  record a gold purchase for them.
+- `/raffle addticket <account>` is refused too, so they cannot be given a free
+  ticket either.
+
+Both refusals name this setting, so whoever hits one knows what to change.
+Clearing the setting lets them earn tickets again from the next deposit
+onwards; it does not retroactively award tickets for gold deposited while they
+were excluded, and it does not remove tickets they already had.
+
+The names are not checked against the guild roster, so somebody who has already
+left can be listed — which is deliberate, since that is a case where you may
+want the exclusion to outlast their membership.
+
+### Role, Channel And Forum Settings
+
+These were fixed IDs in the source until they became settings. They keep those
+values as defaults, so nothing changes until you change one, and clearing one
+restores its default rather than switching the feature off.
+
+Each subcommand suggests the server's roles, matching channels, or the Trial
+forum's tags as you type, and refuses an ID that does not resolve — storing one
+that nothing answers to is how a guild silently loses a feature.
+
+| Subcommand | Default | Gates |
+| --- | --- | --- |
+| `/settings roles raffle_draw` | `1317124663847157880` | `/raffle draw` and `/raffle removetickets`. |
+| `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, and `/settings`. |
+| `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
+| `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. |
+| `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
+| `/settings roles sunborne` | `1317140660188352584` | Marks a Discord member as a full member in the same reports. |
+| `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
+| `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
+| `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
+| `/settings channels trial_accepted_tag` | `1317349209619562587` | Tag marking an accepted application; only tagged posts are indexed. |
+| `/settings channels trial_in_review_tag` | `1317349421821726790` | Tag the bot applies to a new application post. |
+
+`raffle_addticket` and `event_create` are the same role today but are separate
+settings, because they grant unrelated powers. Changing one no longer changes
+the other.
+
+### Encrypted Settings
+
+The three settings marked **Encrypted** hold credentials and are encrypted in
+the database. `/settings` never shows one back: once set, it reports
+`This secret cannot be viewed once set`, and an unset one reports `Not set`.
+There is no command that reveals the value — set it again to change it.
+
+If the key is lost or replaced, the encrypted rows survive but cannot be read.
+The bot keeps running with those features switched off, and `/settings`
+reports each affected setting as set but undecryptable rather than as working
+— set it again to recover.
+
+The key comes from `SETTINGS_ENCRYPTION_KEY` if you set it, and otherwise from
+`settings.key`, generated beside the database on first run with `0600`
+permissions. If a key file you restored or wrote yourself is readable by
+anyone else, the bot narrows it to `0600` and says so — and refuses to start
+if it cannot, rather than protecting your credentials with a key other local
+users can read.
+
+Back it up with the database: without the key the secrets cannot be read.
+
+- **Replacing the key** is recoverable. The bot reports each secret it can no
+  longer read, treats it as unset, and carries on; set those three values
+  again.
+- **A key file that is corrupt or truncated** — a half-finished restore, say —
+  stops the bot with a message naming the file. It is not overwritten, because
+  that would destroy the one thing that can read your stored secrets. Restore
+  it from a backup, or delete it to start with a new key and set the three
+  values again.
+
+Setting the key yourself is what keeps it off the data volume. Everything else
+about the feature works without it.
+
+### Migrating From Environment Variables
+
+The first time the bot starts after this upgrade it copies every legacy
+variable it finds into the settings, once, and then never reads them again.
+Nothing to do: an existing install comes up with exactly the values it had.
+
+From then on the database is authoritative and a leftover variable is ignored.
+The bot says so on every startup — a console warning, and one message in the
+notification channel naming each stale variable and the `/settings` subcommand
+that replaced it. Remove them from `.env` and the notices stop.
+
+`TZ` is the exception. Its value is imported like the rest, but it is never
+named in either notice and you should **leave it set**: the container reads it
+for its own clock and log timestamps, so removing it changes more than this
+bot. Change the bot's timezone with `/settings timezone`.
+
+Because the import runs only once, a value you later clear with `/settings`
+stays cleared even if the old variable is still in the environment.
+
+Run `/settings list` to see every setting, its value, and whether it came from
+`/settings` or is still the default.
 
 ### Running Without The Optional Credentials
 
@@ -56,8 +211,8 @@ already has, while every feature that needs a value you did not set is switched
 off instead of stopping the bot. Each disabled feature is named in a startup
 warning in the console.
 
-Without `GW2_API_KEY` **and** `GW2_GUILD_ID` — either one missing disables all
-of it, because every Guild Wars 2 request needs both:
+Without `/settings gw2_api_key` **and** `/settings gw2_guild_id` — either one
+missing disables all of it, because every Guild Wars 2 request needs both:
 
 - Guild Storage polling stops, so there are no feast stock alerts and no feast
   count history.
@@ -67,17 +222,18 @@ of it, because every Guild Wars 2 request needs both:
   description stop.
 - `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`,
   `/raffle removetickets`, `/raffle tickets <username>`, the GW2 account link
-  prompt, `/check` and `/track` answer privately with the variables to set,
+  prompt, `/check` and `/track` answer privately with the commands to run,
   and their account-name autocompletes offer no choices. `/raffle draw`,
   `/raffle audit`, `/raffle list`, `/raffle leaderboard`, and `/raffle
   tickets` for a member who has already linked their account keep working
   from the recorded ledger.
 
 The raffle database records which guild it belongs to the first time a guild id
-is configured, so a database created without `GW2_GUILD_ID` is claimed by the
-first guild id you set afterwards.
+is configured, so a database created without a guild id is claimed by the first
+one you set afterwards. Setting a *different* one later is refused, and
+`/settings` reports why.
 
-Without `DISCORD_NOTIFICATION_CHANNEL_ID`, nothing is posted to the
+Without `/settings discord_notification_channel_id`, nothing is posted to the
 notification channel:
 
 - Guild membership messages, raffle deposit audit lines, raffle command audit
@@ -88,23 +244,28 @@ notification channel:
 - Commands that post an audit line still do their work and report that the
   audit log could not be delivered.
 
-The bot is not silent, though: the raffle contribution channel is a separate,
-hard-coded destination that `DISCORD_NOTIFICATION_CHANNEL_ID` does not control.
-With `GW2_API_KEY` and `GW2_GUILD_ID` set, every guild-log poll still posts
-gold-deposit ticket purchase embeds and reward-tier milestone announcements
-there, and the six-hourly contribution report is posted there whether or not
-the GW2 credentials are set. Raffle draw announcements and the replies to every
-`/raffle`, `/check` and `/track` command go to the channel the command was run
-in and are likewise unaffected.
+The bot is not silent, though: the raffle contribution channel is a separate
+destination that the notification channel setting does not control. With the
+Guild Wars 2 credentials set, every guild-log poll still posts gold-deposit
+ticket purchase embeds and reward-tier milestone announcements there, and the
+six-hourly contribution report is posted there whether or not those credentials
+are set. Raffle draw announcements and the replies to every `/raffle`, `/check`
+and `/track` command go to the channel the command was run in and are likewise
+unaffected.
 
-Set the missing variables and restart the bot to enable the feature; nothing
-else has to be reconfigured.
+`WEB_ENABLED=true` without the calendar's four settings is not an error: the
+bot names the missing ones in a startup warning and leaves the calendar off,
+the same way an unset API key disables Guild Wars 2 polling.
+
+Run the missing `/settings` subcommand and the feature switches on; nothing
+else has to be reconfigured and the bot does not have to be restarted.
 
 When `DEBUG=true`, detailed `gw2bot` diagnostics are written to the console.
 Third-party library debug logging remains disabled, and credentials and full
 notification contents are not included in application debug messages. All
 console records, including third-party logs and exception tracebacks, pass
-through a final credential-redacting formatter.
+through a final credential-redacting formatter — including a credential set
+with `/settings` while the bot is running.
 
 The bot must have `View Channel` and `Send Messages` permissions in the
 configured notification channel. Users running raffle commands must have
@@ -114,7 +275,7 @@ If notification delivery reports Discord HTTP 403, use the logged Discord error
 code to correct the channel configuration:
 
 - Error code `50001` (`missing_access`): verify
-  `DISCORD_NOTIFICATION_CHANNEL_ID` identifies a channel in
+  `/settings discord_notification_channel_id` identifies a channel in
   `DISCORD_COMMAND_GUILD_ID`, the bot is installed in that server, and the bot
   can view the channel.
 - Error code `50013` (`missing_permissions`): grant the bot `View Channel` and
@@ -128,9 +289,10 @@ guild-log poll after permissions are corrected.
 Enable the privileged `Message Content Intent` for the bot in the Discord
 Developer Portal so it can respond to the notification-channel `diag` message.
 The bot also needs `View Channel` and `Read Message History` permissions for
-forum channel `1317206104727621693` so it can link Trial applications to
-Discord members. Grant `Manage Threads` in that forum channel so the bot can
-automatically tag new posts as `In Review`.
+the Trial application forum — `/settings channels trial_forum`, by default
+`1317206104727621693` — so it can link Trial applications to Discord members.
+Grant `Manage Threads` there as well so it can automatically tag new posts as
+`In Review`.
 
 ## Guild Events
 
@@ -161,8 +323,8 @@ of each event post as `eventID: N`, so it can be read off the message itself.
 1. **Details** — category, title, description, destination channel or forum
    post, and the roles to ping (see [Event Role Pings](#event-role-pings)).
 2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, and whether
-   the event repeats. Typed times are read in the server's `TZ` timezone and
-   must be in the future.
+   the event repeats. Typed times are read in the timezone set with
+   `/settings timezone` and must be in the future.
 3. **Repeat** — only when the event repeats: frequency, which days, and whether
    posting the next occurrence should delete the previous one.
 
@@ -541,9 +703,10 @@ Please confirm whether these users have completed the challenges and can be rank
 ````
 
 To match each reported account to its application, the bot maintains a
-persistent index of the `Accepted` posts in forum channel
-`1317206104727621693` (Accepted forum tag `1317349209619562587`), stored in the
-same SQLite database as the raffle data. On the first run the bot reads every
+persistent index of the `Accepted` posts in the Trial application forum
+(`/settings channels trial_forum`, tagged with
+`/settings channels trial_accepted_tag`), stored in the same SQLite database as
+the raffle data. On the first run the bot reads every
 Accepted post's title and message bodies once and stores their normalized text
 and post author. On later runs it only re-reads posts whose most recent activity
 is newer than the last successful run minus a one-hour grace window; unchanged
@@ -617,7 +780,7 @@ players with multiple free tickets are reduced to one free ticket. Purchased
 tickets are preserved. The correction is recorded and does not run again.
 
 Deposit notifications are posted to both the raffle contribution channel and
-`DISCORD_NOTIFICATION_CHANNEL_ID`, alongside join and leave logs. Delivery to
+the notification channel, alongside join and leave logs. Delivery to
 each channel is tracked independently and retried after failures. Every six
 hours at `00:00`, `06:00`, `12:00`, and `18:00` UTC, the bot also posts the
 players who purchased tickets or received free tickets during the preceding
@@ -784,7 +947,8 @@ message is posted once per event, including across restarts.
 
 Guild membership messages, raffle deposit audit messages, raffle command audit
 messages, stock alerts, and
-polling-status messages are posted in `DISCORD_NOTIFICATION_CHANNEL_ID`.
+polling-status messages are posted in the channel named by
+`/settings discord_notification_channel_id`.
 Every minute, the bot updates that channel's description to the current GW2
 guild member count as `x/500 (y pending)`, excluding `invited` records from
 `x` and reporting them in `y`.
@@ -797,7 +961,7 @@ console logs.
 ## Automated Message Diagnostics
 
 When a non-bot user sends exactly `diag`, ignoring case and surrounding spaces,
-in `DISCORD_NOTIFICATION_CHANNEL_ID`, the bot posts read-only previews of:
+in the notification channel, the bot posts read-only previews of:
 
 - the next six-hour raffle contribution report using contributions currently
   recorded in its active interval, including free tickets;
@@ -819,8 +983,10 @@ console-only and therefore are not previewed as Discord messages. Every
 diagnostic preview delivery is attempted independently, so one failed preview
 does not prevent later previews from being sent.
 
-Docker Compose stores the database in the persistent `bot-data` volume. To view
-the current totals:
+Docker Compose stores the database in the persistent `bot-data` volume, along
+with `settings.key` unless you set `SETTINGS_ENCRYPTION_KEY` yourself. Back
+both up together: the key is what makes the encrypted settings readable. To
+view the current totals:
 
 ```powershell
 docker compose exec bot python -m gw2bot.raffle_totals
@@ -850,7 +1016,7 @@ finished events stay visible dimmed on past days.
 Access requires signing in with Discord. The site only requests the `identify`
 OAuth scope and then checks with the bot that the signed-in user is a member
 of `DISCORD_COMMAND_GUILD_ID`. Non-members receive a members-only page.
-Sessions last `WEB_SESSION_TTL_SECONDS` (seven days by default). Membership is
+Sessions last `/settings web_session_ttl_seconds` (seven days by default). Membership is
 re-checked at sign-in and then at most every five minutes for the life of the
 session, so a member who leaves or is banned loses access within minutes rather
 than keeping it until the cookie expires.
@@ -860,21 +1026,25 @@ To enable it:
 1. Open the bot's application in the
    [Discord developer portal](https://discord.com/developers/applications),
    go to OAuth2, and copy the Client ID and Client Secret.
-2. Add `<WEB_BASE_URL>/oauth/callback` (for example
+2. Add `<web_base_url>/oauth/callback` (for example
    `https://calendar.example.com/oauth/callback`) to the application's
    OAuth2 redirect URIs.
-3. Set `WEB_ENABLED=true`, `WEB_BASE_URL`, `DISCORD_OAUTH_CLIENT_ID`,
-   `DISCORD_OAUTH_CLIENT_SECRET`, and `WEB_SESSION_SECRET` in `.env`
-   (see `.env.example` for details and how to generate the session secret).
+3. Set `WEB_ENABLED=true` in `.env`, then run `/settings web_base_url`,
+   `/settings discord_oauth_client_id`,
+   `/settings discord_oauth_client_secret` and `/settings web_session_secret`.
+   Generate the session secret with
+   `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The
+   calendar starts as soon as the fourth one is set.
 4. Publish the port by uncommenting the `ports` block in `compose.yaml`. It
    follows `WEB_PORT`, so there is nothing to change there if you move the port.
 
 Serve the calendar behind a reverse proxy that terminates TLS. Discord only
 accepts `https` redirect URIs (localhost excepted), and session cookies are
-marked `Secure` only when `WEB_BASE_URL` uses `https`.
+marked `Secure` only when `/settings web_base_url` uses `https`.
 
 Times are shown in each viewer's local timezone. Weekly repeat days are
-defined in the server's `TZ` timezone, so viewers far from that timezone may
+defined in the timezone set with `/settings timezone`, so viewers far from it
+may
 correctly see a repeating event land on an adjacent local weekday.
 
 ### Feast Usage Dashboard
@@ -957,5 +1127,8 @@ events, `src/gw2bot/web/` for the calendar and feast usage site, and
 `src/gw2bot/database.py` owns the SQLite schema and its migrations,
 `src/gw2bot/bot.py` wires the pollers and commands together, and
 `src/gw2bot/main.py` is the entrypoint that loads configuration and installs
-the redacting log formatter. Secrets are read only from environment variables
-and are excluded from both Git and the Docker build context.
+the redacting log formatter. `src/gw2bot/settings/` owns `/settings`: the
+definitions every subcommand is generated from, the store behind them, the
+encryption for the credential-bearing ones, and the one-time import from the
+environment. Secrets are read only from `/settings` and the bootstrap
+variables, and `.env` is excluded from both Git and the Docker build context.

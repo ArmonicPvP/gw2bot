@@ -21,6 +21,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 LOGGER = logging.getLogger(__name__)
 
+# Set when the raffle totals table gains gold_raffle_tickets, and cleared by
+# RaffleStore once it has split the legacy totals. It has to outlive the call
+# that added the column, because the settings store may open the database
+# first and consume the in-memory signal.
+PENDING_LEGACY_TOTALS_KEY = "pending_legacy_totals_split"
+
 
 class Base(DeclarativeBase):
     pass
@@ -31,6 +37,26 @@ class SettingRecord(Base):
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
     value: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class BotSettingRecord(Base):
+    """One value an officer set with /settings.
+
+    Kept apart from the `metadata` table above, which is the bot's own
+    bookkeeping - log cursors, index watermarks, the guild binding. Mixing
+    operator settings into it would make both harder to read, and only this
+    table holds anything that may be encrypted.
+    """
+
+    __tablename__ = "gw2_bot_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String, nullable=False)
+    is_encrypted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
 
 
 class RaffleTotalRecord(Base):
@@ -431,6 +457,17 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add(column_name)
+        if "gold_raffle_tickets" in added_columns:
+            # Splitting the legacy raffle_tickets total into gold and manual
+            # halves is RaffleStore's job, but only this call knows the column
+            # was just added - and any store that opens the database first
+            # consumes that signal. Record it so whichever store does the
+            # migration still finds out, and so a database migrated by an
+            # earlier release is never re-split.
+            connection.exec_driver_sql(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (PENDING_LEGACY_TOTALS_KEY, "1"),
+            )
 
         deposit_columns = {
             column["name"]

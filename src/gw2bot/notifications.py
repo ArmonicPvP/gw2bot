@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import discord
 
-from gw2bot.config import NOTIFICATION_CHANNEL_VARIABLE
+from gw2bot.config import NOTIFICATION_CHANNEL_SETTING
 from gw2bot.discord_utils import discord_failure_reason, log_discord_failure
 from gw2bot.feast_stock import FeastAlert
 from gw2bot.guild_members import (
@@ -38,6 +39,7 @@ from gw2bot.raffle.models import (
     RaffleWinner,
 )
 from gw2bot.raffle.reports import raffle_contribution_report_end
+from gw2bot.settings.definitions import definition_for_variable
 from gw2bot.raffle.views import RaffleContributionReportView
 
 if TYPE_CHECKING:
@@ -357,13 +359,57 @@ async def send_automated_message_diagnostics(
     )
 
 
+def format_legacy_configuration_warning(variables: Sequence[str]) -> str:
+    """Name the variables /settings replaced, and how to migrate each one.
+
+    Only the variable names appear. Several of them held credentials, and this
+    message goes to a channel people can read and search.
+    """
+    lines = [
+        "**These environment variables no longer configure the bot.**",
+        "They are ignored. Set each value with the command beside it, then "
+        "remove the variable from the environment so this notice stops.",
+        "",
+    ]
+    for variable in variables:
+        definition = definition_for_variable(variable)
+        command = (
+            definition.command_path
+            if definition is not None
+            else "/settings list"
+        )
+        lines.append(f"- `{variable}` → `{command}`")
+    lines.append("")
+    lines.append(
+        "Run `/settings list` to see every setting and where its value came "
+        "from. Values that hold a secret can never be read back once set."
+    )
+    return "\n".join(lines)
+
+
+async def send_legacy_configuration_warning(
+    bot: Gw2Bot,
+    variables: Sequence[str],
+) -> bool:
+    LOGGER.debug(
+        "Delivering the legacy configuration warning; variables=%s",
+        len(variables),
+    )
+    # Through the bot, like every other delivery here, so an unconfigured
+    # channel is skipped and logged at debug rather than retried.
+    return await bot._try_send_notification(
+        format_legacy_configuration_warning(variables)
+    )
+
+
 async def try_send_notification(bot: Gw2Bot, message: str) -> bool:
     if not bot._config.notifications_enabled:
         # The startup warning already named the variable; each skipped
         # delivery only needs to be traceable, not repeated at warning level.
         LOGGER.debug(
-            "Skipped Discord notification; %s is not set; characters=%s",
-            NOTIFICATION_CHANNEL_VARIABLE,
+            "Skipped Discord notification; /settings %s is not set; "
+            "characters=%s",
+            NOTIFICATION_CHANNEL_SETTING,
             len(message),
         )
         return False
@@ -394,7 +440,7 @@ async def get_notification_channel(bot: Gw2Bot) -> Any:
             # Raised as a Discord error so every caller's existing failure
             # handling reports it instead of crashing a poll task.
             raise discord.ClientException(
-                f"{NOTIFICATION_CHANNEL_VARIABLE} is not set"
+                f"/settings {NOTIFICATION_CHANNEL_SETTING} is not set"
             )
         LOGGER.debug("Fetching Discord notification channel %s", channel_id)
         channel = await bot.fetch_channel(channel_id)
@@ -403,8 +449,8 @@ async def get_notification_channel(bot: Gw2Bot) -> Any:
             != bot._config.discord_command_guild_id
         ):
             raise discord.ClientException(
-                "DISCORD_NOTIFICATION_CHANNEL_ID must belong to "
-                "DISCORD_COMMAND_GUILD_ID"
+                f"/settings {NOTIFICATION_CHANNEL_SETTING} must name a "
+                "channel in DISCORD_COMMAND_GUILD_ID"
             )
         bot._notification_channel = channel
         LOGGER.debug("Cached Discord notification channel")

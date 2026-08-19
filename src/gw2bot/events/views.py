@@ -61,7 +61,6 @@ from gw2bot.events.models import (
     is_pingable_role_name,
     is_roster_full,
 )
-from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -1144,11 +1143,14 @@ class EventConfirmView(_PreviewConfirmView):
         # The preview can sit open for minutes; the creator role may have
         # been revoked since /event new, so recheck before the irreversible
         # save/post path.
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event post from Discord user %s; required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to create events.",
@@ -1313,12 +1315,15 @@ class EventEditConfirmView(_PreviewConfirmView):
             return
         # The preview can sit open for minutes; recheck the role before the
         # save path, mirroring post_event.
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event edit save from Discord user %s; required "
                 "role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to edit events.",
@@ -1449,12 +1454,12 @@ async def _opened_roster_target(
             ephemeral=True,
         )
         return None
-    if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+    if not user_has_role(interaction.user, bot._config.event_create_role_id):
         LOGGER.warning(
             "Rejected event roster %s from Discord user %s; required role %s",
             action,
             interaction.user.id,
-            EVENT_CREATE_ROLE_ID,
+            bot._config.event_create_role_id,
         )
         await interaction.response.send_message(
             "You do not have the required role to edit events.",
@@ -1518,12 +1523,12 @@ async def _picked_roster_target(
     for rather than re-resolving the draft's, so a series that seeds its
     successor mid-session cannot redirect the change onto the next run.
     """
-    if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+    if not user_has_role(interaction.user, bot._config.event_create_role_id):
         LOGGER.warning(
             "Rejected event roster %s from Discord user %s; required role %s",
             action,
             interaction.user.id,
-            EVENT_CREATE_ROLE_ID,
+            bot._config.event_create_role_id,
         )
         await interaction.response.send_message(
             "You do not have the required role to edit events.",
@@ -2959,12 +2964,15 @@ class ChannelMoveConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[ChannelMoveConfirmView],
     ) -> None:
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event channel move from Discord user %s; required "
                 "role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to edit events.",
@@ -3388,11 +3396,14 @@ class EventDeleteConfirmView(discord.ui.View):
 
         # The confirmation can sit open for minutes; recheck the role before the
         # irreversible delete, mirroring the edit/post paths.
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event delete from Discord user %s; required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to delete events.",
@@ -3588,11 +3599,14 @@ class EventCancelConfirmView(discord.ui.View):
 
         # The confirmation can sit open for minutes; recheck the role before
         # the irreversible cancel, mirroring the delete/edit/post paths.
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event cancel from Discord user %s; required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to cancel events.",
@@ -4172,7 +4186,7 @@ class LeaderPickView(discord.ui.View):
         interaction: discord.Interaction,
         user: discord.Member | discord.User,
     ) -> None:
-        if not user_has_role(user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(user, self._bot._config.event_create_role_id):
             LOGGER.debug(
                 "Rejected event leader change; user_id=%s candidate_id=%s "
                 "authorized=false",

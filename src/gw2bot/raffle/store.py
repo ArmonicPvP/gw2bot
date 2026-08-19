@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from gw2bot.config import same_guild_id
 from gw2bot.database import (
+    PENDING_LEGACY_TOTALS_KEY,
     FeastAlertRecord,
     FeastStockLogRecord,
     GuildInviteRecord,
@@ -75,6 +77,10 @@ MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
 OFFICER_PURCHASE_EVENT_ID_KEY = "officer_purchase_event_id"
 OFFICER_PURCHASE_EVENT_ID_START = -(2**63)
 TRIAL_FORUM_INDEX_WATERMARK_KEY = "trial_forum_index_watermark"
+# Which forum and tag the stored index was built from. Kept so a refresh can
+# tell that the settings moved underneath it and rebuild, even when the change
+# happened in a process that stopped before it could clear the cache.
+TRIAL_FORUM_INDEX_SOURCE_KEY = "trial_forum_index_source"
 
 
 class RaffleStore:
@@ -91,8 +97,7 @@ class RaffleStore:
         self._engine = create_database_engine(database_path)
         added_columns = initialize_database(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
-        if "gold_raffle_tickets" in added_columns:
-            self._migrate_legacy_totals()
+        self._migrate_legacy_totals_if_pending()
         try:
             self._bind_guild(guild_id)
             self._apply_manual_ticket_cap_once()
@@ -256,6 +261,7 @@ class RaffleStore:
         self,
         events: list[dict[str, Any]],
         officer_usernames: set[str] | None = None,
+        excluded_usernames: Sequence[str] | None = None,
     ) -> None:
         processed = 0
         deposits = 0
@@ -267,6 +273,8 @@ class RaffleStore:
         officer_keys = {
             username.casefold() for username in officer_usernames or set()
         }
+        excluded_keys = self._exclusion_keys(excluded_usernames)
+        excluded_deposits = 0
         with self._sessions.begin() as session:
             cursor_record = session.get(SettingRecord, "guild_log_cursor")
             if cursor_record is None:
@@ -295,7 +303,17 @@ class RaffleStore:
                         )
                         officer_deposits_skipped += 1
                     else:
-                        self._process_deposit(session, deposit)
+                        # An excluded account still deposited the gold, and
+                        # the guild still has it, so the contribution is
+                        # recorded - it simply earns nothing.
+                        awards = deposit.username.casefold() not in excluded_keys
+                        if not awards:
+                            excluded_deposits += 1
+                        self._process_deposit(
+                            session,
+                            deposit,
+                            awards_tickets=awards,
+                        )
                         deposits += 1
 
                 join = parse_guild_join(event)
@@ -367,12 +385,13 @@ class RaffleStore:
             cursor_record.value = str(cursor)
         LOGGER.debug(
             "Processed guild log events; fetched=%s new=%s deposits=%s "
-            "officer_deposits_skipped=%s joins=%s leaves=%s invites=%s "
-            "rank_changes=%s cursor=%s",
+            "officer_deposits_skipped=%s excluded_deposits=%s joins=%s "
+            "leaves=%s invites=%s rank_changes=%s cursor=%s",
             len(events),
             processed,
             deposits,
             officer_deposits_skipped,
+            excluded_deposits,
             joins,
             leaves,
             invites,
@@ -535,7 +554,14 @@ class RaffleStore:
         self,
         username: str,
         event_time: datetime | None = None,
+        excluded_usernames: Sequence[str] | None = None,
     ) -> RaffleTotal:
+        if username.casefold() in self._exclusion_keys(excluded_usernames):
+            LOGGER.debug("Refused a manual raffle ticket; account is excluded")
+            raise ValueError(
+                f"{username} is excluded from the raffle. Remove them from "
+                "/settings raffle_excluded_accounts first."
+            )
         with self._sessions.begin() as session:
             total = session.get(RaffleTotalRecord, username)
             manual_tickets = total.manual_raffle_tickets if total else 0
@@ -575,9 +601,16 @@ class RaffleStore:
         username: str,
         amount: int,
         event_time: datetime | None = None,
+        excluded_usernames: Sequence[str] | None = None,
     ) -> RaffleTotal:
         if amount <= 0:
             raise ValueError("Ticket purchase amount must be greater than zero")
+        if username.casefold() in self._exclusion_keys(excluded_usernames):
+            LOGGER.debug("Refused an officer raffle purchase; account is excluded")
+            raise ValueError(
+                f"{username} is excluded from the raffle. Remove them from "
+                "/settings raffle_excluded_accounts first."
+            )
         with self._sessions.begin() as session:
             total = session.get(RaffleTotalRecord, username)
             purchased = total.gold_raffle_tickets if total is not None else 0
@@ -1143,10 +1176,34 @@ class RaffleStore:
     def clear_trial_forum_index(self) -> None:
         with self._sessions.begin() as session:
             session.execute(delete(TrialForumPostRecord))
-            watermark = session.get(SettingRecord, TRIAL_FORUM_INDEX_WATERMARK_KEY)
-            if watermark is not None:
-                session.delete(watermark)
+            for key in (
+                TRIAL_FORUM_INDEX_WATERMARK_KEY,
+                TRIAL_FORUM_INDEX_SOURCE_KEY,
+            ):
+                record = session.get(SettingRecord, key)
+                if record is not None:
+                    session.delete(record)
         LOGGER.debug("Cleared Trial forum index")
+
+    def get_trial_forum_index_source(self) -> str | None:
+        """The forum and tag the stored index was built from, if recorded."""
+        with self._sessions() as session:
+            record = session.get(SettingRecord, TRIAL_FORUM_INDEX_SOURCE_KEY)
+            return record.value if record is not None else None
+
+    def set_trial_forum_index_source(self, source: str) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(SettingRecord, TRIAL_FORUM_INDEX_SOURCE_KEY)
+            if record is None:
+                session.add(
+                    SettingRecord(
+                        key=TRIAL_FORUM_INDEX_SOURCE_KEY,
+                        value=source,
+                    )
+                )
+            else:
+                record.value = source
+        LOGGER.debug("Recorded Trial forum index source")
 
     def mark_milestone_notification_sent(self, threshold: int) -> None:
         with self._sessions.begin() as session:
@@ -1159,6 +1216,7 @@ class RaffleStore:
         self,
         session: Session,
         deposit: RaffleDeposit,
+        awards_tickets: bool = True,
     ) -> None:
         if session.get(RaffleDepositRecord, deposit.event_id) is not None:
             LOGGER.debug("Skipping duplicate raffle deposit event %s", deposit.event_id)
@@ -1166,9 +1224,13 @@ class RaffleStore:
 
         total = session.get(RaffleTotalRecord, deposit.username)
         gold_tickets = total.gold_raffle_tickets if total else 0
-        tickets_awarded = min(
-            deposit.raffle_tickets,
-            MAX_GOLD_RAFFLE_TICKETS - gold_tickets,
+        tickets_awarded = (
+            min(
+                deposit.raffle_tickets,
+                MAX_GOLD_RAFFLE_TICKETS - gold_tickets,
+            )
+            if awards_tickets
+            else 0
         )
         session.add(
             RaffleDepositRecord(
@@ -1213,9 +1275,23 @@ class RaffleStore:
                     )
                 )
 
-    def _migrate_legacy_totals(self) -> None:
+    def _migrate_legacy_totals_if_pending(self) -> None:
+        """Split legacy totals into gold and manual, once, if it is owed.
+
+        The flag is set by initialize_database when it adds the column, not by
+        whether this particular call added it: the settings store opens the
+        same database first and would otherwise consume that signal, leaving
+        purchased tickets recorded as zero gold tickets forever.
+
+        Reading a flag rather than "did I add the column" also keeps a
+        database migrated by an earlier release safe - re-running the split
+        would reclassify every free ticket as a purchased one.
+        """
         migrated = 0
         with self._sessions.begin() as session:
+            pending = session.get(SettingRecord, PENDING_LEGACY_TOTALS_KEY)
+            if pending is None:
+                return
             for total in session.scalars(select(RaffleTotalRecord)).all():
                 capped_tickets = min(
                     total.raffle_tickets,
@@ -1224,7 +1300,8 @@ class RaffleStore:
                 total.raffle_tickets = capped_tickets
                 total.gold_raffle_tickets = capped_tickets
                 migrated += 1
-        LOGGER.debug("Migrated %s legacy raffle totals", migrated)
+            session.delete(pending)
+        LOGGER.info("Migrated %s legacy raffle totals", migrated)
 
     def _apply_manual_ticket_cap_once(self) -> None:
         updated = 0
@@ -1250,6 +1327,35 @@ class RaffleStore:
             )
         LOGGER.info("Applied one-time free-ticket cap; updated_users=%s", updated)
 
+    @staticmethod
+    def _exclusion_keys(excluded: Sequence[str] | None) -> set[str]:
+        """Excluded accounts, folded for comparison.
+
+        The guild log, the roster and whatever an officer typed into
+        /settings disagree on capitalisation, so matching the raw text would
+        let an excluded account back in under a different spelling.
+        """
+        return {account.casefold() for account in excluded or ()}
+
+    def bound_guild(self) -> str | None:
+        """The guild id this ledger already belongs to, if any.
+
+        Read-only, so /settings can refuse a guild id the ledger would reject
+        before anything is written rather than after.
+        """
+        with self._sessions() as session:
+            record = session.get(SettingRecord, "guild_id")
+            return record.value if record is not None else None
+
+    def bind_guild(self, guild_id: str | None) -> None:
+        """Claim the database for a guild id set after the store was opened.
+
+        /settings gw2_guild_id can be changed while the bot runs, and the
+        ledger records which guild it belongs to, so the same check that
+        guards startup has to guard that change too.
+        """
+        self._bind_guild(guild_id)
+
     def _bind_guild(self, guild_id: str | None) -> None:
         if guild_id is None:
             # Leave the database unbound so the first configured guild id
@@ -1258,10 +1364,16 @@ class RaffleStore:
             return
         with self._sessions.begin() as session:
             record = session.get(SettingRecord, "guild_id")
-            if record is not None and record.value != guild_id:
+            if record is not None and not same_guild_id(record.value, guild_id):
+                # Compared as guilds rather than as text: the row holds
+                # whatever spelling claimed it, which for an install upgraded
+                # from GW2_GUILD_ID is whatever the operator typed. This runs
+                # in __init__ and raises, so calling one guild two names would
+                # stop the bot from starting.
                 raise ValueError(
-                    "Raffle database belongs to a different guild; "
-                    "use a different RAFFLE_DB_PATH"
+                    "This database belongs to a different guild. Point "
+                    "RAFFLE_DB_PATH at a different file to run a second "
+                    "guild's ledger."
                 )
             if record is None:
                 session.add(SettingRecord(key="guild_id", value=guild_id))

@@ -12,6 +12,7 @@ __pycache__
 .ruff_cache
 .mypy_cache
 data
+settings.key
 tests
 README.md
 LICENSE

@@ -17,7 +17,7 @@ class TestGuildLogRefresh:
             _raffle_store=store,
             _config=SimpleNamespace(
                 gw2_guild_id=None,
-                missing_gw2_api_variables=("GW2_API_KEY", "GW2_GUILD_ID"),
+                missing_gw2_api_settings=("gw2_api_key", "gw2_guild_id"),
             ),
         )
 
@@ -49,7 +49,10 @@ class TestGuildLogRefresh:
             _api=api,
             _raffle_store=store,
             _guild_members=guild_members,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=SimpleNamespace(
+                gw2_guild_id="guild-id",
+                raffle_excluded_accounts=(),
+            ),
         )
 
         refreshed = await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
@@ -60,7 +63,11 @@ class TestGuildLogRefresh:
             "Officer",
             force_refresh=True,
         )
-        store.process_events.assert_called_once_with(events, {"Officer.1234"})
+        store.process_events.assert_called_once_with(
+            events,
+            {"Officer.1234"},
+            excluded_usernames=(),
+        )
         store.initialize_cursor.assert_not_called()
 
     async def test_does_not_refresh_member_ranks_without_new_deposits(self) -> None:
@@ -73,13 +80,20 @@ class TestGuildLogRefresh:
             _api=api,
             _raffle_store=store,
             _guild_members=guild_members,
-            _config=SimpleNamespace(gw2_guild_id="guild-id"),
+            _config=SimpleNamespace(
+                gw2_guild_id="guild-id",
+                raffle_excluded_accounts=(),
+            ),
         )
 
         await Gw2Bot.refresh_guild_log(cast(Gw2Bot, bot))
 
         guild_members.usernames_with_rank.assert_not_awaited()
-        store.process_events.assert_called_once_with(events, set())
+        store.process_events.assert_called_once_with(
+            events,
+            set(),
+            excluded_usernames=(),
+        )
 
     @patch("gw2bot.guild_log.asyncio.sleep", new_callable=AsyncMock)
     async def test_guild_log_poller_sends_deposits_to_main_and_audit_channels(

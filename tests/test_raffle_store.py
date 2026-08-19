@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import (
     Boolean,
     Column,
@@ -16,6 +17,8 @@ from sqlalchemy import (
     select,
 )
 
+from gw2bot.settings.crypto import SettingsCipher
+from gw2bot.settings.store import SettingsStore
 from gw2bot.raffle import (
     RaffleDrawTier,
     RaffleRewardTier,
@@ -1254,6 +1257,94 @@ class TestRaffleStore:
             assert total.manual_raffle_tickets == 0
             store.close()
 
+    def _legacy_totals_database(self, directory: str) -> str:
+        """A database from before gold and manual tickets were told apart."""
+        database_path = str(Path(directory) / "raffle.db")
+        engine = create_engine(f"sqlite:///{database_path}")
+        metadata = MetaData()
+        legacy_totals = Table(
+            "raffle_totals",
+            metadata,
+            Column("username", String, primary_key=True),
+            Column("coins_deposited", Integer, nullable=False),
+            Column("raffle_tickets", Integer, nullable=False),
+        )
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                legacy_totals.insert().values(
+                    username="Member.1234",
+                    coins_deposited=80_000,
+                    raffle_tickets=8,
+                )
+            )
+        engine.dispose()
+        return database_path
+
+    def test_migrates_legacy_totals_when_another_store_opened_first(
+        self,
+    ) -> None:
+        """The settings store opens the same database before RaffleStore does.
+
+        It runs the schema migration too, so a signal that only said "this
+        call added the column" was consumed before the store that owns the
+        data migration ever saw it, silently leaving every purchased ticket
+        recorded as zero gold tickets.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = self._legacy_totals_database(directory)
+
+            first = SettingsStore(
+                database_path,
+                SettingsCipher(Fernet.generate_key()),
+            )
+            first.close()
+
+            store = RaffleStore(database_path, "guild-id")
+            total = store.get_totals()[0]
+            store.close()
+
+            assert total.raffle_tickets == 8
+            assert total.gold_raffle_tickets == 8
+            assert total.manual_raffle_tickets == 0
+
+    def test_does_not_re_split_totals_an_earlier_release_migrated(self) -> None:
+        """Re-running the split would reclassify free tickets as purchased.
+
+        A database migrated by an earlier release carries no pending flag, so
+        reopening it - however many times, by whichever store - must leave the
+        gold and manual halves exactly as they are.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = self._legacy_totals_database(directory)
+            RaffleStore(database_path, "guild-id").close()
+
+            store = RaffleStore(database_path, "guild-id")
+            store.add_manual_ticket("Member.1234")
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            total = reopened.get_totals()[0]
+            reopened.close()
+
+            assert total.gold_raffle_tickets == 8
+            assert total.manual_raffle_tickets == 1
+            assert total.raffle_tickets == 9
+
+    def test_a_fresh_database_is_never_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.add_manual_ticket("Member.1234")
+            store.close()
+
+            reopened = RaffleStore(database_path, "guild-id")
+            total = reopened.get_totals()[0]
+            reopened.close()
+
+            assert total.gold_raffle_tickets == 0
+            assert total.manual_raffle_tickets == 1
+
     def test_migrates_existing_deposits_preserving_pending_audit_notifications(
         self,
     ) -> None:
@@ -1621,4 +1712,154 @@ class TestRaffleStore:
                 sample.recorded_at for sample in series[1102].samples
             ] == [300.0, 400.0, 500.0]
             assert series[1102].prior_count is None
+            store.close()
+
+
+class TestGuildBindingSpelling:
+    """The ledger binding is compared, and it outlives how it was written.
+
+    _bind_guild runs inside RaffleStore.__init__ and raises, so a comparison
+    that calls the same guild by two names does not degrade a feature - it
+    stops the bot from starting.
+    """
+
+    UPPER = "116E0C0E-0035-44A9-BB22-4AE3E23127E5"
+    CANONICAL = "116e0c0e-0035-44a9-bb22-4ae3e23127e5"
+
+    def test_a_ledger_bound_in_upper_case_still_opens(self) -> None:
+        # The upgrade path: an install whose old GW2_GUILD_ID was uppercase
+        # has an uppercase row, and the setting now composes to the canonical
+        # lowercase form. These are the same guild and must stay so.
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "raffle.db")
+            RaffleStore(database, self.UPPER).close()
+
+            reopened = RaffleStore(database, self.CANONICAL)
+
+            assert reopened.bound_guild() == self.UPPER
+            reopened.close()
+
+    def test_a_genuinely_different_guild_is_still_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "raffle.db")
+            RaffleStore(database, self.CANONICAL).close()
+
+            with pytest.raises(ValueError, match="different guild"):
+                RaffleStore(database, "22c7b3a1-9f4e-4d18-8a05-6b1c0f2d7e93")
+
+    def test_a_ledger_bound_to_a_non_uuid_keeps_its_behaviour(self) -> None:
+        # Nothing writes these any more, but a database an earlier release
+        # bound must not start failing because the comparison changed.
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "raffle.db")
+            RaffleStore(database, "legacy-guild").close()
+
+            reopened = RaffleStore(database, "legacy-guild")
+            reopened.close()
+
+            with pytest.raises(ValueError, match="different guild"):
+                RaffleStore(database, "another-legacy-guild")
+
+
+class TestRaffleExclusions:
+    """An excluded account earns nothing, by any route.
+
+    The gold is still the guild's, so a deposit is still recorded as a
+    contribution - it simply awards no tickets. Matching is case-insensitive
+    because the guild log, the roster and whatever an officer typed into
+    /settings do not agree on capitalisation.
+    """
+
+    GUILD = "116e0c0e-0035-44a9-bb22-4ae3e23127e5"
+
+    def _store(self, directory: str) -> RaffleStore:
+        store = RaffleStore(str(Path(directory) / "raffle.db"), self.GUILD)
+        store.initialize_cursor(0)
+        return store
+
+    def test_an_excluded_deposit_is_recorded_but_earns_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [gold_deposit(101, "Banned.1234", coins=100_000)],
+                excluded_usernames=("Banned.1234",),
+            )
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Banned.1234"].raffle_tickets == 0
+            assert totals["Banned.1234"].gold_raffle_tickets == 0
+            # The contribution itself is not erased - they did give the gold.
+            assert totals["Banned.1234"].coins_deposited == 100_000
+            store.close()
+
+    def test_an_excluded_account_is_matched_whatever_its_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [gold_deposit(101, "Banned.1234", coins=100_000)],
+                excluded_usernames=("banned.1234",),
+            )
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Banned.1234"].raffle_tickets == 0
+            store.close()
+
+    def test_everybody_else_still_earns_from_the_same_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [
+                    gold_deposit(101, "Banned.1234", coins=100_000),
+                    gold_deposit(102, "Allowed.5678", coins=100_000),
+                ],
+                excluded_usernames=("Banned.1234",),
+            )
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Banned.1234"].raffle_tickets == 0
+            assert totals["Allowed.5678"].raffle_tickets > 0
+            store.close()
+
+    def test_an_officer_purchase_for_an_excluded_account_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            with pytest.raises(ValueError, match="excluded from the raffle"):
+                store.add_officer_purchase(
+                    "Banned.1234",
+                    3,
+                    excluded_usernames=("BANNED.1234",),
+                )
+
+            assert store.get_totals() == []
+            store.close()
+
+    def test_a_manual_ticket_for_an_excluded_account_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            with pytest.raises(ValueError, match="excluded from the raffle"):
+                store.add_manual_ticket(
+                    "Banned.1234",
+                    excluded_usernames=("Banned.1234",),
+                )
+
+            assert store.get_totals() == []
+            store.close()
+
+    def test_an_empty_exclusion_list_changes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+
+            store.process_events(
+                [gold_deposit(101, "Allowed.5678", coins=100_000)],
+                excluded_usernames=(),
+            )
+            store.add_manual_ticket("Allowed.5678", excluded_usernames=())
+
+            totals = {total.username: total for total in store.get_totals()}
+            assert totals["Allowed.5678"].raffle_tickets > 1
             store.close()

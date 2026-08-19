@@ -19,7 +19,6 @@ from gw2bot.feast_stock import (
     FeastStockSeries,
     feast_removals,
 )
-from gw2bot.raffle.roles import RAFFLE_DRAW_ROLE_ID
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
 from gw2bot.web.page import (
@@ -55,10 +54,8 @@ MEMBERSHIP_FAILURE_BACKOFF_SECONDS = 60
 
 UNKNOWN_NAME = "Unknown"
 
-# The feast usage dashboard is gated behind the same role that gates the
-# /raffle removetickets command. Change this single constant to move the page
-# to a different role.
-FOOD_PAGE_ROLE_ID = RAFFLE_DRAW_ROLE_ID
+# The feast usage dashboard is gated behind the role /settings roles food_page
+# names, which follows /raffle removetickets' role until it is set apart.
 
 # Every response this server sends is scoped to one signed-in member, so none
 # of it may be kept by the reverse proxy the README asks operators to run, by a
@@ -112,7 +109,7 @@ class WebServer:
         self._names: dict[int, tuple[str, float]] = {}
         # user id -> (is_member, monotonic time the answer stops being trusted)
         self._members: dict[int, tuple[bool, float]] = {}
-        # user id -> (holds FOOD_PAGE_ROLE_ID, monotonic expiry). Cached with
+        # user id -> (holds the food page role, monotonic expiry). Cached with
         # the same TTL and outage backoff as _members.
         self._role_members: dict[int, tuple[bool, float]] = {}
         self.app = web.Application(
@@ -495,7 +492,10 @@ class WebServer:
 
     async def _check_role(self, user_id: int) -> bool | None:
         """Return role membership, or None when Discord cannot be checked."""
-        has_role = await self._member_holds_role(user_id, FOOD_PAGE_ROLE_ID)
+        has_role = await self._member_holds_role(
+            user_id,
+            self._config.food_page_role_id,
+        )
         if has_role is not None:
             self._role_members[user_id] = (
                 has_role,

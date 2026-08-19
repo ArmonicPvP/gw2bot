@@ -19,9 +19,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-TRIAL_FORUM_CHANNEL_ID = 1317206104727621693
-TRIAL_ACCEPTED_TAG_ID = 1317349209619562587
-TRIAL_IN_REVIEW_TAG_ID = 1317349421821726790
 TRIAL_FORUM_INDEX_GRACE = timedelta(hours=1)
 
 
@@ -36,7 +33,7 @@ async def apply_trial_forum_in_review_tag(
         thread_id,
         parent_id,
     )
-    if parent_id != TRIAL_FORUM_CHANNEL_ID:
+    if parent_id != bot._config.trial_forum_channel_id:
         LOGGER.debug(
             "Ignoring created thread outside Trial application forum; "
             "thread_id=%s",
@@ -44,26 +41,27 @@ async def apply_trial_forum_in_review_tag(
         )
         return
 
+    in_review_tag_id = bot._config.trial_in_review_tag_id
     applied_tag_ids = thread_applied_tag_ids(thread)
-    if TRIAL_IN_REVIEW_TAG_ID in applied_tag_ids:
+    if in_review_tag_id in applied_tag_ids:
         LOGGER.debug(
             "Trial application forum thread %s already has In Review tag",
             thread_id,
         )
         return
 
-    tag_ids_to_resolve = {*applied_tag_ids, TRIAL_IN_REVIEW_TAG_ID}
+    tag_ids_to_resolve = {*applied_tag_ids, in_review_tag_id}
     resolved_tags = await bot._resolve_trial_forum_tags(
         thread,
         tag_ids_to_resolve,
     )
-    in_review_tag = resolved_tags.get(TRIAL_IN_REVIEW_TAG_ID)
+    in_review_tag = resolved_tags.get(in_review_tag_id)
     if in_review_tag is None:
         LOGGER.error(
             "Could not apply In Review tag to Trial application forum "
             "thread %s; tag_id=%s not found",
             thread_id,
-            TRIAL_IN_REVIEW_TAG_ID,
+            in_review_tag_id,
         )
         return
 
@@ -136,7 +134,9 @@ async def resolve_trial_forum_tags(
         len(missing_tag_ids),
     )
     try:
-        forum = await bot.fetch_channel(TRIAL_FORUM_CHANNEL_ID)
+        forum = await bot.fetch_channel(
+            bot._config.trial_forum_channel_id
+        )
     except discord.DiscordException as error:
         log_discord_failure(
             "Could not fetch Trial application forum while resolving %s tag IDs",
@@ -160,6 +160,20 @@ async def refresh_trial_forum_index(
     bot: Gw2Bot,
     forum: discord.ForumChannel,
 ) -> None:
+    accepted_tag_id = bot._config.trial_accepted_tag_id
+    # The index is a cache of one forum's posts under one tag. If either has
+    # moved since it was built, every row in it describes somewhere else, and
+    # an incremental refresh would never revisit them. The recorded source is
+    # what makes that survive a restart between the settings write and the
+    # cache being dropped.
+    source = f"{bot._config.trial_forum_channel_id}:{accepted_tag_id}"
+    if bot._raffle_store.get_trial_forum_index_source() != source:
+        LOGGER.info(
+            "Trial application forum or tag changed since the index was "
+            "built; rebuilding it from scratch"
+        )
+        bot._raffle_store.clear_trial_forum_index()
+    bot._raffle_store.set_trial_forum_index_source(source)
     cached = bot._raffle_store.get_trial_forum_index()
     watermark = bot._raffle_store.get_trial_forum_watermark()
     run_start = datetime.now(UTC)
@@ -195,7 +209,7 @@ async def refresh_trial_forum_index(
             return
         if getattr(thread, "parent_id", None) != getattr(forum, "id", None):
             return
-        if TRIAL_ACCEPTED_TAG_ID not in thread_applied_tag_ids(thread):
+        if accepted_tag_id not in thread_applied_tag_ids(thread):
             if thread_id in cached:
                 deletions.add(thread_id)
             return

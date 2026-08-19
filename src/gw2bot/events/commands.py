@@ -21,7 +21,6 @@ from gw2bot.events.reminders import (
     reminder_participants,
     send_reminder,
 )
-from gw2bot.events.roles import EVENT_CREATE_ROLE_ID
 from gw2bot.events.views import (
     EventCancelConfirmView,
     EventDeleteConfirmView,
@@ -71,12 +70,15 @@ class EventCommands(app_commands.Group):
             "Event creation command invoked by Discord user %s",
             interaction.user.id,
         )
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event creation command from Discord user %s; "
                 "required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to create events.",
@@ -103,7 +105,10 @@ class EventCommands(app_commands.Group):
         # Shared by /event edit and /event delete. Autocomplete must never error
         # out; unauthorized users simply see no suggestions (each command still
         # enforces the role).
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             return []
         query = current.strip().casefold()
         choices: list[app_commands.Choice[int]] = []
@@ -144,12 +149,15 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event edit command from Discord user %s; "
                 "required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to edit events.",
@@ -307,12 +315,15 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event remind command from Discord user %s; "
                 "required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to remind event members.",
@@ -411,12 +422,15 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event cancel command from Discord user %s; "
                 "required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to cancel events.",
@@ -520,12 +534,15 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(interaction.user, EVENT_CREATE_ROLE_ID):
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
             LOGGER.warning(
                 "Rejected event delete command from Discord user %s; "
                 "required role %s",
                 interaction.user.id,
-                EVENT_CREATE_ROLE_ID,
+                self._bot._config.event_create_role_id,
             )
             await interaction.response.send_message(
                 "You do not have the required role to delete events.",
