@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -61,6 +62,20 @@ _FETCH_FAILURES = (
 # compose_config has already fallen back to the default, so the value on
 # screen is real - it is the claim that somebody chose it that would be false.
 UNREADABLE_NOTE = "default — the stored value could not be read; set it again"
+
+@dataclass(frozen=True, slots=True)
+class _Validation:
+    """What a pre-store check decided.
+
+    A refusal stops the write. A note is appended to the confirmation of a
+    write that went ahead but could not be fully checked - the two are not
+    alternatives, and returning only a refusal string meant a value stored
+    without verification looked identical to one that passed.
+    """
+
+    refusal: str | None = None
+    note: str = ""
+
 
 # Shown for an encrypted row the current key cannot decrypt. The feature that
 # needs the credential is already switched off, so reporting only the usual
@@ -324,12 +339,12 @@ class SettingsCommands(app_commands.Group):
             )
             await send_interaction_notice(interaction, f"{exc}")
             return
-        problem = await self._validate(interaction, definition, parsed)
-        if problem is not None:
+        checked = await self._validate(interaction, definition, parsed)
+        if checked.refusal is not None:
             LOGGER.debug(
                 "Rejected a setting value; setting=%s reason=discord", key
             )
-            await send_interaction_notice(interaction, problem)
+            await send_interaction_notice(interaction, checked.refusal)
             return
         stored = setting_text(definition, parsed)
         try:
@@ -355,7 +370,7 @@ class SettingsCommands(app_commands.Group):
             interaction,
             f"**{definition.command_path}** is now {shown}."
             + _restart_note(applied)
-            + self._unverified_guild_note(definition),
+            + checked.note,
         )
         LOGGER.debug(
             "Stored a setting from Discord; setting=%s encrypted=%s "
@@ -560,7 +575,7 @@ class SettingsCommands(app_commands.Group):
         interaction: discord.Interaction,
         definition: SettingDefinition,
         parsed: object,
-    ) -> str | None:
+    ) -> _Validation:
         """Check a Discord id resolves before it is stored.
 
         Storing an id nothing answers to is how a guild loses a feature
@@ -570,23 +585,25 @@ class SettingsCommands(app_commands.Group):
         if definition.field == "gw2_guild_id" and isinstance(parsed, str):
             return await self._validate_guild_id(parsed)
         if definition.validates is None or not isinstance(parsed, int):
-            return None
+            return _Validation()
         guild = interaction.guild
         if guild is None:
-            return "This command has to be run in the server."
+            return _Validation("This command has to be run in the server.")
         if definition.validates == ValidationTarget.ROLE:
             if guild.get_role(parsed) is None:
-                return (
+                return _Validation(
                     f"No role in this server has the id `{parsed}`. Turn on "
                     "Developer Mode and copy the role id, or pick one from "
                     "the suggestions."
                 )
-            return None
+            return _Validation()
         if definition.validates == ValidationTarget.FORUM_TAG:
-            return await self._validate_forum_tag(parsed)
-        return await self._validate_channel(guild, definition, parsed)
+            return _Validation(await self._validate_forum_tag(parsed))
+        return _Validation(
+            await self._validate_channel(guild, definition, parsed)
+        )
 
-    async def _validate_guild_id(self, guild_id: str) -> str | None:
+    async def _validate_guild_id(self, guild_id: str) -> _Validation:
         """Refuse a guild id the ledger or the API has already ruled out.
 
         The ledger records the guild it belongs to and rejects a different
@@ -603,13 +620,13 @@ class SettingsCommands(app_commands.Group):
                 "Could not read the raffle ledger's guild binding; setting="
                 "gw2_guild_id"
             )
-            return (
+            return _Validation(
                 "The raffle database could not be read, so this could not be "
                 "checked against it. Nothing was changed; try again in a "
                 "moment."
             )
         if bound is not None and not same_guild_id(bound, guild_id):
-            return (
+            return _Validation(
                 "The raffle ledger already belongs to a different guild, so "
                 "its tickets and history could not be read as this one's. "
                 "Point RAFFLE_DB_PATH at a different database to run a "
@@ -620,41 +637,78 @@ class SettingsCommands(app_commands.Group):
     async def _reject_guild_the_key_does_not_lead(
         self,
         guild_id: str,
-    ) -> str | None:
+    ) -> _Validation:
         """Check the id against /v2/account.guild_leader while a key exists.
 
         docs/gw2-api.md already names this as the check to make before polling
         a guild, and here it is the one thing standing between a well-formed
-        but wrong id and a ledger permanently claimed by it. Without a key
-        there is nothing to ask, so the id's shape is all that guards it -
-        and _store says so in the reply rather than letting it pass silently.
+        but wrong id and a ledger permanently claimed by it.
+
+        Three outcomes, because the ledger binding cannot be undone from
+        Discord and so "could not check" must never read as "checked":
+        confirmed, refused, or stored with the reason it went unverified.
         """
         api = self._guild_api_client()
         if api is None:
             LOGGER.debug("Skipped the guild id API check; no API key is set")
-            return None
+            return _Validation(
+                note=_unverified_note("no `/settings gw2_api_key` is set")
+            )
         try:
             account = await api.get_account()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            # An outage must not stop an officer correcting a setting, and the
-            # shape check has already run, so this reports and allows.
+        except aiohttp.ClientResponseError as exc:
+            if _is_rejected_key(exc.status):
+                # The key is bad or lacks the guilds permission. That is the
+                # operator's own configuration rather than an outage, and
+                # storing the id would claim the ledger on the strength of a
+                # check that never happened.
+                LOGGER.warning(
+                    "The Guild Wars 2 API rejected the key while checking "
+                    "gw2_guild_id; status=%s",
+                    exc.status,
+                )
+                return _Validation(
+                    "The Guild Wars 2 API rejected the configured key "
+                    f"(HTTP {exc.status}), so the guild id could not be "
+                    "checked. Set a valid `/settings gw2_api_key` with the "
+                    "account and guilds permissions first. Nothing was "
+                    "changed, because the raffle ledger records the first "
+                    "guild id it is given and refuses a different one "
+                    "afterwards."
+                )
             LOGGER.warning(
-                "Could not check gw2_guild_id against the Guild Wars 2 API; "
+                "The Guild Wars 2 API could not answer while checking "
+                "gw2_guild_id; storing it unchecked. status=%s",
+                exc.status,
+            )
+            return _Validation(
+                note=_unverified_note(
+                    f"the Guild Wars 2 API answered HTTP {exc.status}"
+                )
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # A genuine outage must not stop an officer correcting a setting,
+            # and the shape check has already run - but the reply has to say
+            # the check did not happen.
+            LOGGER.warning(
+                "Could not reach the Guild Wars 2 API to check gw2_guild_id; "
                 "storing it unchecked. error_type=%s",
                 type(exc).__name__,
             )
-            return None
+            return _Validation(
+                note=_unverified_note("the Guild Wars 2 API could not be reached")
+            )
         led = account.get("guild_leader") or ()
         # The API answers in upper case; the stored value is canonical lower
         # case. Comparing the raw text would refuse a correct id.
         if any(same_guild_id(candidate, guild_id) for candidate in led):
             LOGGER.debug("Guild id confirmed against guild_leader")
-            return None
+            return _Validation()
         LOGGER.debug(
             "Refused a guild id the API key does not lead; led_count=%s",
             len(led),
         )
-        return (
+        return _Validation(
             "The configured API key does not lead a guild with that id, so "
             "every Guild Wars 2 request for it would fail. Check the id in "
             "/v2/account.guild_leader. Nothing was changed - the raffle "
@@ -683,24 +737,6 @@ class SettingsCommands(app_commands.Group):
             session,
             config.gw2_api_base_url,
             config.gw2_api_key,
-        )
-
-    def _unverified_guild_note(self, definition: SettingDefinition) -> str:
-        """Say when a guild id was stored without being checked.
-
-        The ledger is claimed by it and cannot be re-pointed from Discord, so
-        an officer who mistyped has to hear about it now rather than when the
-        first poll fails.
-        """
-        if definition.field != "gw2_guild_id":
-            return ""
-        if self._guild_api_client() is not None:
-            return ""
-        return (
-            "\nIt could not be checked against the Guild Wars 2 API, because "
-            "no `/settings gw2_api_key` is set. The raffle ledger now belongs "
-            "to this guild id and cannot be pointed at another one from "
-            "Discord, so check it is right."
         )
 
     async def _validate_channel(
@@ -782,6 +818,32 @@ def _truncate(text: str, limit: int = DESCRIPTION_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _unverified_note(reason: str) -> str:
+    """The caveat on a guild id that was stored without being checked.
+
+    The ledger is claimed by it and cannot be re-pointed from Discord, so an
+    officer who mistyped has to hear about it now rather than when the first
+    poll fails. The reason is named because the three causes need different
+    things done about them.
+    """
+    return (
+        f"\nIt could not be checked against /v2/account.guild_leader because "
+        f"{reason}. The raffle ledger now belongs to this guild id and cannot "
+        "be pointed at another one from Discord, so check it is right."
+    )
+
+
+def _is_rejected_key(status: int) -> bool:
+    """Whether an HTTP status means the key, not the service, is the problem.
+
+    ClientResponseError subclasses ClientError, so without this a 401 from an
+    invalid key would be handled as an outage and the guild id would bind the
+    ledger on a check that never ran. 429 is excluded: rate limiting says
+    nothing about the key and clears on its own.
+    """
+    return 400 <= status < 500 and status != 429
 
 
 def _restart_note(restarted: list[str]) -> str:

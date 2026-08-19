@@ -2150,3 +2150,103 @@ class TestExclusionListLength:
         assert len(settings_reply(interaction)) < 2000
         for message in listing.followup.send.await_args_list:
             assert len(message.args[0]) < 2000
+
+
+def _response_error(status: int) -> aiohttp.ClientResponseError:
+    return aiohttp.ClientResponseError(
+        cast(Any, None),
+        (),
+        status=status,
+        message=f"HTTP {status}",
+    )
+
+
+class TestGuildIdApiFailures:
+    """ClientResponseError is a ClientError, and the two mean opposite things.
+
+    A rejected key is the operator's own misconfiguration and must stop the
+    write, because the ledger binding cannot be undone from Discord. A service
+    that is down is an outage and must not block a correction - but the reply
+    has to say the check never happened either way.
+    """
+
+    def _bot_with(self, tmp_path: Path, error: Exception) -> tuple[Any, Any]:
+        commands, bot = _commands(tmp_path)
+        bot._api = SimpleNamespace(get_account=AsyncMock(side_effect=error))
+        return commands, bot
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404], ids=str)
+    async def test_a_rejected_key_refuses_the_change(
+        self,
+        tmp_path: Path,
+        status: int,
+    ) -> None:
+        commands, bot = self._bot_with(tmp_path, _response_error(status))
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.is_set(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        # Nothing stored means the ledger is not claimed on a check that
+        # never ran - the whole point, since it cannot be unclaimed.
+        assert not stored
+        reply = settings_reply(interaction)
+        assert "rejected the configured key" in reply
+        assert f"HTTP {status}" in reply
+        bot.apply_settings_change.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 429], ids=str)
+    async def test_a_service_failure_stores_it_with_the_caveat(
+        self,
+        tmp_path: Path,
+        status: int,
+    ) -> None:
+        commands, bot = self._bot_with(tmp_path, _response_error(status))
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        # An outage, including rate limiting, must not stop a correction.
+        assert stored == FIRST_GUILD
+        reply = settings_reply(interaction)
+        assert "could not be checked" in reply
+        assert f"HTTP {status}" in reply
+
+    @pytest.mark.parametrize(
+        "error",
+        [aiohttp.ClientError("connection reset"), asyncio.TimeoutError()],
+        ids=["transport", "timeout"],
+    )
+    async def test_an_unreachable_api_stores_it_with_the_caveat(
+        self,
+        tmp_path: Path,
+        error: Exception,
+    ) -> None:
+        commands, bot = self._bot_with(tmp_path, error)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        stored = bot.settings_store.get_raw(definition_for("gw2_guild_id"))
+        bot.settings_store.close()
+
+        assert stored == FIRST_GUILD
+        reply = settings_reply(interaction)
+        assert "could not be reached" in reply
+        assert "cannot be pointed at another one" in reply
+
+    async def test_a_verified_id_carries_no_caveat(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        bot._api = SimpleNamespace(
+            get_account=AsyncMock(return_value={"guild_leader": [FIRST_GUILD]})
+        )
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "gw2_guild_id", interaction, FIRST_GUILD)
+        bot.settings_store.close()
+
+        reply = settings_reply(interaction)
+        assert "could not be checked" not in reply
+        assert "cannot be pointed at another one" not in reply
