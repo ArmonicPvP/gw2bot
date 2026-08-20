@@ -19,6 +19,7 @@ from gw2bot.feast_stock import (
     FeastStockSeries,
     feast_removals,
 )
+from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
 from gw2bot.web.page import (
@@ -27,6 +28,8 @@ from gw2bot.web.page import (
     LOGIN_FAILED_PAGE,
     MEMBERS_ONLY_PAGE,
     OFFICER_ONLY_PAGE,
+    ROSTER_OFFICER_ONLY_PAGE,
+    ROSTER_PAGE,
     SERVICE_UNAVAILABLE_PAGE,
     SIGN_IN_PAGE,
     SIGNED_OUT_PAGE,
@@ -55,7 +58,9 @@ MEMBERSHIP_FAILURE_BACKOFF_SECONDS = 60
 UNKNOWN_NAME = "Unknown"
 
 # The feast usage dashboard is gated behind the role /settings roles food_page
-# names, which follows /raffle removetickets' role until it is set apart.
+# names, which follows /raffle removetickets' role until it is set apart, and
+# the roster history behind /settings roles roster_page, which starts from the
+# same role.
 
 # Every response this server sends is scoped to one signed-in member, so none
 # of it may be kept by the reverse proxy the README asks operators to run, by a
@@ -109,9 +114,11 @@ class WebServer:
         self._names: dict[int, tuple[str, float]] = {}
         # user id -> (is_member, monotonic time the answer stops being trusted)
         self._members: dict[int, tuple[bool, float]] = {}
-        # user id -> (holds the food page role, monotonic expiry). Cached with
-        # the same TTL and outage backoff as _members.
-        self._role_members: dict[int, tuple[bool, float]] = {}
+        # (role id, user id) -> (holds the role, monotonic expiry). Cached
+        # with the same TTL and outage backoff as _members. Keyed by the role
+        # as well as the user because two pages are gated by two settings, and
+        # an operator may point them at different roles.
+        self._role_members: dict[tuple[int, int], tuple[bool, float]] = {}
         self.app = web.Application(
             middlewares=[self._log_middleware, self._auth_middleware]
         )
@@ -129,6 +136,8 @@ class WebServer:
                 web.get("/api/events", self._events),
                 web.get("/food", self._food),
                 web.get("/api/food", self._food_data),
+                web.get("/roster", self._roster),
+                web.get("/api/roster", self._roster_data),
             ]
         )
 
@@ -469,12 +478,13 @@ class WebServer:
             return None
         return True
 
-    async def _cached_role(self, user_id: int) -> bool | None:
-        """Whether a signed-in user holds the gated role, cached for a TTL."""
-        cached = self._role_members.get(user_id)
+    async def _cached_role(self, user_id: int, role_id: int) -> bool | None:
+        """Whether a signed-in user holds a gated role, cached for a TTL."""
+        key = (role_id, user_id)
+        cached = self._role_members.get(key)
         if cached is not None and time.monotonic() < cached[1]:
             return cached[0]
-        has_role = await self._check_role(user_id)
+        has_role = await self._check_role(user_id, role_id)
         if has_role is None:
             if cached is None:
                 return None
@@ -483,21 +493,18 @@ class WebServer:
             # short backoff so the outage costs one lookup per window instead
             # of one per request (the bot runs without the members intent, so
             # every cache miss is a rate-limited fetch_member call).
-            self._role_members[user_id] = (
+            self._role_members[key] = (
                 cached[0],
                 time.monotonic() + MEMBERSHIP_FAILURE_BACKOFF_SECONDS,
             )
             return cached[0]
         return has_role
 
-    async def _check_role(self, user_id: int) -> bool | None:
+    async def _check_role(self, user_id: int, role_id: int) -> bool | None:
         """Return role membership, or None when Discord cannot be checked."""
-        has_role = await self._member_holds_role(
-            user_id,
-            self._config.food_page_role_id,
-        )
+        has_role = await self._member_holds_role(user_id, role_id)
         if has_role is not None:
-            self._role_members[user_id] = (
+            self._role_members[(role_id, user_id)] = (
                 has_role,
                 time.monotonic() + MEMBERSHIP_CACHE_TTL_SECONDS,
             )
@@ -527,21 +534,27 @@ class WebServer:
                 return None
         return user_has_role(member, role_id)
 
-    async def _require_food_access(
+    async def _require_role_access(
         self,
         request: web.Request,
+        role_id: int,
+        denial_page: str,
+        feature: str,
     ) -> web.Response | None:
         """Return a denial response, or None when the caller may proceed.
 
         The auth middleware has already proven a valid session and current
-        guild membership; this only adds the officer-role check on top.
+        guild membership; this only adds the role check the gated pages need
+        on top. ``feature`` names the page in the log line, so a refusal can
+        be traced to the page that made it.
         """
         session = request[SESSION_KEY]
-        authorized = await self._cached_role(session.user_id)
+        authorized = await self._cached_role(session.user_id, role_id)
         if authorized is None:
             LOGGER.info(
-                "Feast usage authorization unavailable; Discord unreachable; "
-                "user_id=%s",
+                "Page authorization unavailable; Discord unreachable; "
+                "page=%s user_id=%s",
+                feature,
                 session.user_id,
             )
             if request.path.startswith("/api/"):
@@ -549,13 +562,36 @@ class WebServer:
             return self._html(SERVICE_UNAVAILABLE_PAGE, status=503)
         if not authorized:
             LOGGER.info(
-                "Rejected feast usage request; missing role; user_id=%s",
+                "Rejected page request; missing role; page=%s user_id=%s",
+                feature,
                 session.user_id,
             )
             if request.path.startswith("/api/"):
                 return self._json({"error": "forbidden"}, status=403)
-            return self._html(OFFICER_ONLY_PAGE, status=403)
+            return self._html(denial_page, status=403)
         return None
+
+    async def _require_food_access(
+        self,
+        request: web.Request,
+    ) -> web.Response | None:
+        return await self._require_role_access(
+            request,
+            self._config.food_page_role_id,
+            OFFICER_ONLY_PAGE,
+            "food",
+        )
+
+    async def _require_roster_access(
+        self,
+        request: web.Request,
+    ) -> web.Response | None:
+        return await self._require_role_access(
+            request,
+            self._config.roster_page_role_id,
+            ROSTER_OFFICER_ONLY_PAGE,
+            "roster",
+        )
 
     async def _logout(self, request: web.Request) -> web.StreamResponse:
         response = self._html(SIGNED_OUT_PAGE)
@@ -638,6 +674,88 @@ class WebServer:
             "name": feast.name,
             "points": points,
             "removals": removals,
+        }
+
+    async def _roster(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_roster_access(request)
+        if denied is not None:
+            return denied
+        return self._html(ROSTER_PAGE)
+
+    async def _roster_data(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_roster_access(request)
+        if denied is not None:
+            return denied
+        range_key = request.query.get("range", "24h")
+        window = ROSTER_RANGES.get(range_key)
+        if window is None:
+            LOGGER.debug("Rejected roster history request; reason=range")
+            return self._json({"error": "invalid range"}, status=400)
+
+        now = datetime.now(UTC).timestamp()
+        since = now - window
+        # Both reads are synchronous SQLite on the Discord client's event
+        # loop, so they go to a worker thread like the calendar's query. The
+        # store pools its connections per thread, so one thread is safe.
+        anchor = await asyncio.to_thread(
+            self._bot.raffle_store.get_last_member_count
+        )
+        # Events are read from the earlier of the window and the anchor: the
+        # count at any moment is measured by walking the events between it and
+        # the anchor, so an anchor older than the window still needs the
+        # events that stand between them.
+        lookback = since if anchor is None else min(since, anchor.recorded_at)
+        events = await asyncio.to_thread(
+            self._bot.raffle_store.get_membership_events,
+            lookback,
+        )
+        series = build_roster_series(events, anchor, since, now)
+        LOGGER.debug(
+            "Served roster history; range=%s events=%s joins=%s leaves=%s "
+            "kicks=%s points=%s counted=%s",
+            range_key,
+            len(series.events),
+            series.joins,
+            series.leaves,
+            series.kicks,
+            len(series.points),
+            anchor is not None,
+        )
+        return self._json(
+            {
+                "range": range_key,
+                "since": since,
+                "now": now,
+                # The count as it stands now, or None when none has ever
+                # been observed and the line is therefore empty.
+                "member_count": (
+                    series.points[-1].member_count if series.points else None
+                ),
+                "points": [
+                    {"t": point.at, "count": point.member_count}
+                    for point in series.points
+                ],
+                # Newest first: the table below the chart reads like the
+                # channel it was built from.
+                "events": [
+                    self._serialize_roster_event(event)
+                    for event in reversed(series.events)
+                ],
+                "joins": series.joins,
+                "leaves": series.leaves,
+                "kicks": series.kicks,
+            }
+        )
+
+    @staticmethod
+    def _serialize_roster_event(event: RosterEvent) -> dict[str, object]:
+        return {
+            "t": event.occurred_at,
+            "kind": event.kind,
+            "name": event.username,
+            "actor": event.actor,
+            "count": event.member_count,
+            "imported": event.imported,
         }
 
     async def _events(self, request: web.Request) -> web.StreamResponse:

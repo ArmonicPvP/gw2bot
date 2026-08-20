@@ -42,6 +42,7 @@ from gw2bot.raffle import (
 from gw2bot.raffle import reports as raffle_reports
 from gw2bot.logging_setup import SecretRegistry
 from gw2bot.raffle.commands import RaffleCommands
+from gw2bot.roster.commands import RosterCommands
 from gw2bot.raffle.views import (
     RaffleAuditRangesButton,
     RaffleContributionReportButton,
@@ -163,6 +164,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(RaffleCommands(self))
         self.tree.add_command(SettingsCommands(self))
         self.tree.add_command(EventCommands(self))
+        self.tree.add_command(RosterCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
@@ -435,6 +437,7 @@ class Gw2Bot(discord.Client):
             "web_session_secret",
             "web_session_ttl_seconds",
             "food_page_role_id",
+            "roster_page_role_id",
             "raffle_draw_role_id",
         }
         web_outcome = await self._reconcile_web_server(bool(changed & web_fields))
@@ -478,7 +481,8 @@ class Gw2Bot(discord.Client):
                 "Guild Storage polling, feast stock alerts, guild log polling, "
                 "guild join, leave, invite and rank-change notifications, "
                 "raffle deposit tracking, the overdue Trial member report, the "
-                "guild member count channel description, and guild member "
+                "guild member count channel description and the roster "
+                "history it records, and guild member "
                 "lookups in /raffle, /check and /track",
                 ", ".join(f"/settings {name}" for name in missing_gw2),
                 "is" if len(missing_gw2) == 1 else "are",
@@ -488,7 +492,8 @@ class Gw2Bot(discord.Client):
                 "Notification channel delivery is disabled because %s is not "
                 "set: no guild membership, raffle audit, feast stock or Trial "
                 "member message is delivered there, the guild member count "
-                "channel description is not updated, and the diag previews do "
+                "channel description is not updated and the roster history "
+                "records no counts, and the diag previews do "
                 "not run; the raffle contribution channel is unaffected",
                 f"/settings {NOTIFICATION_CHANNEL_SETTING}",
             )
@@ -499,8 +504,9 @@ class Gw2Bot(discord.Client):
             # in _reconcile_web_server covers the case nobody asked for.
             LOGGER.warning(
                 "The web calendar is disabled because %s %s not set, even "
-                "though WEB_ENABLED is true: the calendar and the feast usage "
-                "page are not served and nothing listens on port %s",
+                "though WEB_ENABLED is true: the calendar, the feast usage "
+                "page and the roster history are not served and nothing "
+                "listens on port %s",
                 ", ".join(f"/settings {name}" for name in missing_web),
                 "is" if len(missing_web) == 1 else "are",
                 self._config.web_port,

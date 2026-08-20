@@ -128,6 +128,13 @@ OFFICER_ONLY_PAGE = _simple_page(
     '<a class="button" href="/">Back to the calendar</a>',
 )
 
+ROSTER_OFFICER_ONLY_PAGE = _simple_page(
+    "Officers only",
+    "Officers only",
+    "The guild roster history is only available to raffle officers.",
+    '<a class="button" href="/">Back to the calendar</a>',
+)
+
 
 CALENDAR_PAGE = (
     """<!DOCTYPE html>
@@ -2093,6 +2100,969 @@ button:focus-visible {
           error && error.name, error && error.message);
         if (chartStatus.textContent === "Loading\\u2026") {
           chartStatus.textContent = "Could not load feast usage.";
+        }
+      });
+  }
+
+  document.querySelectorAll("[data-range]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      state.range = button.getAttribute("data-range");
+      syncRangeButtons();
+      refresh();
+    });
+  });
+  // Redraw when the breakpoint flips so the chart adopts the layout for the
+  // new width.
+  mobileQuery.addEventListener("change", function () {
+    if (state.data) { render(); }
+  });
+
+  fetch("/api/me")
+    .then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login";
+        throw new Error("unauthorized");
+      }
+      return response.json();
+    })
+    .then(function (payload) {
+      document.getElementById("whoami").textContent = payload.name || "";
+    })
+    .catch(function () {});
+
+  syncRangeButtons();
+  refresh();
+})();
+</script>
+</body>
+</html>
+"""
+)
+
+
+ROSTER_PAGE = (
+    """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Guild Roster</title>
+<style>"""
+    + _SHARED_STYLE
+    + """
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
+.ranges { display: flex; gap: 0.25rem; }
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+button:hover { background: var(--border); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.active { background: var(--accent); border-color: var(--accent); }
+.spacer { flex: 1; }
+#whoami { color: var(--muted); font-size: 0.85rem; }
+header a { font-size: 0.85rem; }
+header form { display: flex; }
+.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
+.signout-icon { display: none; }
+.signout-icon, .signout-icon * { pointer-events: none; }
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+}
+.card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+.card h2 .now {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.85rem;
+  margin-left: 0.4rem;
+}
+/* The legend names what each colour of dot means. Unlike the feast page there
+   are only three, and they are fixed, so the names are always shown. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem 1.25rem;
+  margin-top: 0.6rem;
+}
+.legend .item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.legend .swatch {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+/* The chart is a fixed-viewBox SVG that scales to its container width, so
+   every plotted coordinate is computed once against the viewBox and the
+   browser handles resizing without a re-render. */
+.chart-svg { width: 100%; height: auto; display: block; }
+.chart-svg .axis { stroke: var(--border); stroke-width: 1; }
+.chart-svg .grid { stroke: var(--border); stroke-width: 1; opacity: 0.35; }
+.chart-svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+.chart-svg .y-label { text-anchor: end; }
+.chart-svg .x-label { text-anchor: middle; }
+.chart-svg .x-label.first { text-anchor: start; }
+.chart-svg .x-label.last { text-anchor: end; }
+.chart-svg .count-line { fill: none; stroke-width: 2; }
+.chart-svg .event-dot { stroke: var(--panel); stroke-width: 1; }
+.chart-svg .overlay { fill: transparent; }
+/* A thin, translucent gray line the hover snaps to the nearest event. */
+.chart-svg .crosshair {
+  stroke: rgba(128, 128, 128, 0.45);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.chart-svg .hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
+/* #chart is the positioning context for the hover tooltip, which is an HTML
+   box overlaid on the SVG so its text wraps and inherits page styling. */
+#chart { position: relative; }
+.chart-tooltip {
+  position: absolute;
+  z-index: 2;
+  min-width: 9rem;
+  max-width: 16rem;
+  padding: 0.45rem 0.55rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
+.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
+.chart-tooltip .tip-row .swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.chart-tooltip .tip-row .val {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.chart-tooltip .tip-row.em { font-weight: 600; }
+.chart-tooltip .tip-note { color: var(--muted); margin-top: 0.25rem; }
+#chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
+.totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  margin-bottom: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.totals .num {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+table.changes { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+table.changes th, table.changes td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+table.changes th { color: var(--muted); font-weight: 600; }
+table.changes td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table.changes td.change { white-space: nowrap; }
+table.changes .dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+}
+.empty { color: var(--muted); padding: 0.6rem; }
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 640px) {
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    row-gap: 0.4rem;
+    column-gap: 0.4rem;
+    padding: 0.5rem 0.6rem;
+  }
+  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
+  header form { grid-column: 3; grid-row: 1; justify-self: end; }
+  .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  #whoami { display: none; }
+  .signout-icon { display: inline-block; }
+  .signout-label { display: none; }
+  .signout { padding: 0.35rem 0.5rem; }
+  main { padding: 0.6rem 0.5rem; }
+  .card { padding: 0.6rem; }
+  /* The account a change is about is the column worth the width on a phone;
+     who did the kicking is shown in the chart tooltip instead. */
+  table.changes .by { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="brand">Guild Roster</h1>
+  <nav class="ranges" aria-label="Time range">
+    <button type="button" data-range="24h">24h</button>
+    <button type="button" data-range="7d">7d</button>
+    <button type="button" data-range="30d">30d</button>
+  </nav>
+  <span class="spacer"></span>
+  <span id="whoami"></span>
+  <form method="post" action="/logout">
+    <button type="submit" class="signout" aria-label="Sign out">
+      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
+        fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>
+      <span class="signout-label">Log out</span>
+    </button>
+  </form>
+</header>
+<main>
+  <section class="card">
+    <h2>Guild members over time<span id="now-count" class="now"></span></h2>
+    <div id="chart"></div>
+    <div id="legend" class="legend" role="list" aria-label="Change kinds"></div>
+    <div id="chart-status" role="status" aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <h2>Membership changes</h2>
+    <div id="totals" class="totals"></div>
+    <div id="table"></div>
+    <div id="pager" class="pager"></div>
+  </section>
+</main>
+<script>
+"use strict";
+(function () {
+  // Okabe-Ito colourblind-safe palette: one hue per kind of change, and a
+  // fourth for the member count line itself.
+  var KINDS = {
+    join: { color: "#009E73", label: "Joined" },
+    leave: { color: "#E69F00", label: "Left" },
+    kick: { color: "#D55E00", label: "Kicked" }
+  };
+  var KIND_ORDER = ["join", "leave", "kick"];
+  var LINE_COLOR = "#56B4E9";
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var TABLE_PAGE_SIZE = 10;
+  // Smallest number of members the y axis ever spans, so a quiet week does not
+  // turn a single departure into a cliff.
+  var MIN_SPAN = 6;
+
+  var mobileQuery = window.matchMedia("(max-width: 640px)");
+  function isMobile() { return mobileQuery.matches; }
+
+  // The chart uses a wide viewBox on desktop and a taller one on mobile, where
+  // it scales to the narrow screen width; the extra height makes the graph
+  // read large on a phone. Coordinates are computed against whichever set is
+  // active, so M is refreshed at the start of every chart render.
+  function metrics() {
+    if (isMobile()) {
+      return {
+        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 40, ticks: 4
+      };
+    }
+    return {
+      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 40, ticks: 6
+    };
+  }
+  var M = metrics();
+  function plotW() { return M.w - M.left - M.right; }
+  function plotH() { return M.h - M.top - M.bottom; }
+
+  var state = { range: "24h", data: null, tablePage: 0, scale: null };
+
+  // A pinned touch selection listens on the whole page, so the chart it
+  // belongs to is torn down before another one is drawn.
+  var detachHover = null;
+
+  var legend = document.getElementById("legend");
+  var chart = document.getElementById("chart");
+  var chartStatus = document.getElementById("chart-status");
+  var nowCount = document.getElementById("now-count");
+  var totals = document.getElementById("totals");
+  var tableBox = document.getElementById("table");
+  var pager = document.getElementById("pager");
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) { node.className = className; }
+    if (text !== undefined) { node.textContent = text; }
+    return node;
+  }
+  function svg(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (key) {
+        node.setAttribute(key, attrs[key]);
+      });
+    }
+    return node;
+  }
+
+  function points() { return (state.data && state.data.points) || []; }
+  function events() { return (state.data && state.data.events) || []; }
+  function kindOf(kind) { return KINDS[kind] || KINDS.leave; }
+
+  // The axis covers the counts actually reached in the window, padded out to
+  // MIN_SPAN and rounded to whole members, so the line uses the full height
+  // instead of hugging the 500-member ceiling.
+  function computeScale() {
+    var values = points().map(function (point) { return point.count; });
+    if (!values.length) { return null; }
+    var low = Math.min.apply(null, values);
+    var high = Math.max.apply(null, values);
+    var pad = Math.max(1, Math.round((high - low) * 0.15));
+    low -= pad;
+    high += pad;
+    if (high - low < MIN_SPAN) {
+      var grow = Math.ceil((MIN_SPAN - (high - low)) / 2);
+      low -= grow;
+      high += grow;
+    }
+    if (low < 0) { low = 0; }
+    var step = Math.max(1, Math.ceil((high - low) / 4));
+    low = Math.floor(low / step) * step;
+    high = low + step * Math.ceil((high - low) / step);
+    return { low: low, high: high, step: step };
+  }
+
+  function scaleX(t) {
+    var since = state.data.since;
+    var now = state.data.now;
+    var span = now - since;
+    var frac = span > 0 ? (t - since) / span : 0;
+    if (frac < 0) { frac = 0; }
+    if (frac > 1) { frac = 1; }
+    return M.left + frac * plotW();
+  }
+  function scaleY(count) {
+    var scale = state.scale;
+    var span = scale.high - scale.low;
+    var value = count;
+    if (value < scale.low) { value = scale.low; }
+    if (value > scale.high) { value = scale.high; }
+    return M.top + (1 - (value - scale.low) / span) * plotH();
+  }
+
+  function formatTick(t) {
+    var date = new Date(t * 1000);
+    if (state.range === "24h") {
+      return date.toLocaleTimeString(
+        undefined, { hour: "numeric", minute: "2-digit" });
+    }
+    return date.toLocaleDateString(
+      undefined, { month: "numeric", day: "numeric" });
+  }
+  function formatMoment(t) {
+    return new Date(t * 1000).toLocaleString(
+      undefined,
+      {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+  }
+
+  function renderChart() {
+    M = metrics();
+    state.scale = computeScale();
+    if (detachHover) { detachHover(); detachHover = null; }
+    chart.replaceChildren();
+    if (!state.scale) {
+      chartStatus.textContent = state.data
+        ? "No guild member count has been recorded yet, so the roster line " +
+          "cannot be drawn. The changes below are still listed."
+        : "";
+      return;
+    }
+    var canvas = svg("svg", {
+      "class": "chart-svg",
+      viewBox: "0 0 " + M.w + " " + M.h,
+      role: "img",
+      "aria-label": "Guild member count over time, with one dot per change"
+    });
+
+    // Horizontal gridlines and y labels at every step of the computed scale.
+    for (var value = state.scale.low;
+         value <= state.scale.high;
+         value += state.scale.step) {
+      var y = scaleY(value);
+      canvas.appendChild(svg("line", {
+        "class": value === state.scale.low ? "axis" : "grid",
+        x1: M.left, y1: y, x2: M.left + plotW(), y2: y
+      }));
+      var yLabel = svg("text", {
+        "class": "y-label", x: M.left - 6, y: y + 4
+      });
+      yLabel.textContent = String(value);
+      canvas.appendChild(yLabel);
+    }
+
+    // Left axis, plus x labels spaced evenly across the whole window so the
+    // range spans the full width even when little happened.
+    canvas.appendChild(svg("line", {
+      "class": "axis",
+      x1: M.left, y1: M.top, x2: M.left, y2: M.top + plotH()
+    }));
+    for (var i = 0; i <= M.ticks; i += 1) {
+      var t = state.data.since +
+        (state.data.now - state.data.since) * (i / M.ticks);
+      var x = scaleX(t);
+      var xLabel = svg("text", {
+        "class": "x-label", x: x, y: M.top + plotH() + 18
+      });
+      // The outermost labels sit on the plot's own edges, so centring them
+      // would hang half of each one off the chart and the browser would clip
+      // it. They are tucked inwards instead - by class, because the
+      // stylesheet's text-anchor would win over a presentation attribute.
+      if (i === 0) { xLabel.classList.add("first"); }
+      if (i === M.ticks) { xLabel.classList.add("last"); }
+      xLabel.textContent = formatTick(t);
+      canvas.appendChild(xLabel);
+    }
+
+    // Membership is a step: the count holds until somebody joins or leaves,
+    // then jumps. Each pair of vertices is therefore drawn as a horizontal
+    // run followed by a vertical jump, never as a diagonal, which would claim
+    // members trickled in over the hours between two changes.
+    var coords = [];
+    points().forEach(function (point, index) {
+      var px = scaleX(point.t);
+      var py = scaleY(point.count);
+      if (index > 0) {
+        coords.push(px.toFixed(1) + "," +
+          scaleY(points()[index - 1].count).toFixed(1));
+      }
+      coords.push(px.toFixed(1) + "," + py.toFixed(1));
+    });
+    if (coords.length > 1) {
+      canvas.appendChild(svg("polyline", {
+        "class": "count-line", stroke: LINE_COLOR, points: coords.join(" ")
+      }));
+    }
+
+    // One dot per change, in its kind's colour. Every change is drawn; the
+    // series is never downsampled. Each dot is collected so the hover can
+    // snap to it.
+    var plotted = [];
+    events().forEach(function (event) {
+      if (event.count === null) { return; }
+      var px = scaleX(event.t);
+      var py = scaleY(event.count);
+      canvas.appendChild(svg("circle", {
+        "class": "event-dot",
+        cx: px.toFixed(1),
+        cy: py.toFixed(1),
+        r: 4,
+        fill: kindOf(event.kind).color
+      }));
+      plotted.push({ x: px, y: py, event: event });
+    });
+
+    detachHover = attachHover(canvas, plotted);
+    chart.appendChild(canvas);
+    chartStatus.textContent = plotted.length
+      ? ""
+      : "No members joined or left in this period.";
+  }
+
+  // Changes that share a moment form a single column, so the crosshair snaps
+  // to one x and the tooltip lists everything recorded there.
+  function groupColumns(plotted) {
+    var byTime = {};
+    var columns = [];
+    plotted.forEach(function (point) {
+      var key = String(point.event.t);
+      var column = byTime[key];
+      if (!column) {
+        column = { t: point.event.t, x: point.x, points: [] };
+        byTime[key] = column;
+        columns.push(column);
+      }
+      column.points.push(point);
+    });
+    return columns;
+  }
+
+  // Tells a hovering pointer from a finger or a pen. A touch has no hover
+  // state: the browser sends one pointermove at the tap point and then a
+  // pointerleave as the finger lifts. Touch selects by tapping instead and
+  // never reaches the move or leave handlers.
+  function isHoverPointer(event) {
+    return !event.pointerType || event.pointerType === "mouse";
+  }
+
+  // How far a finger may travel from where it landed and still count as a tap
+  // rather than the start of a scroll, in CSS pixels.
+  var TAP_SLOP = 12;
+
+  // Pointer and event types are narrowed to the names the spec defines before
+  // they are traced, so an exotic value cannot ride into the console.
+  function pointerKind(event) {
+    var kind = event && event.pointerType;
+    if (kind === "mouse" || kind === "pen" || kind === "touch") {
+      return kind;
+    }
+    return "other";
+  }
+  function eventKind(event) {
+    var name = event && event.type;
+    if (name === "pointerdown" || name === "wheel" ||
+        name === "keydown" || name === "blur") {
+      return name;
+    }
+    return "other";
+  }
+
+  // Sanitized tracing for the tap selection lifecycle, so a console trace can
+  // explain why a selection opened, moved or went away. Every call passes a
+  // fixed action name, one of the narrowed reason names above, and a count of
+  // drawn elements. Account names, timestamps and member counts are never
+  // passed, so no part of the payload or of the reader's gesture reaches the
+  // console. debug keeps it out of the default console view.
+  function traceSelection(action, reason, count) {
+    console.debug("roster chart selection:", action, reason, count);
+  }
+
+  function attachHover(canvas, plotted) {
+    var columns = groupColumns(plotted);
+    // The viewBox differs between the mobile and desktop layouts, so the hover
+    // is pinned to the metrics this canvas was drawn with rather than to
+    // whichever set is current when a pointer event arrives.
+    var m = M;
+    var innerW = m.w - m.left - m.right;
+    var innerH = m.h - m.top - m.bottom;
+    // Set while a tap holds a column open, together with the page listeners
+    // that dismiss it. A mouse hover never arms them.
+    var pinned = false;
+    var pinOrigin = null;
+
+    var crosshair = svg("line", {
+      "class": "crosshair",
+      y1: m.top,
+      y2: m.top + innerH
+    });
+    crosshair.style.visibility = "hidden";
+    var rings = svg("g");
+    var overlay = svg("rect", {
+      "class": "overlay",
+      x: m.left,
+      y: m.top,
+      width: innerW,
+      height: innerH
+    });
+    overlay.style.cursor = "crosshair";
+    canvas.appendChild(crosshair);
+    canvas.appendChild(rings);
+    canvas.appendChild(overlay);
+
+    var tooltip = el("div", "chart-tooltip");
+    tooltip.style.visibility = "hidden";
+    chart.appendChild(tooltip);
+
+    function nearestColumn(vbX) {
+      var best = null;
+      var bestDist = Infinity;
+      columns.forEach(function (column) {
+        var dist = Math.abs(column.x - vbX);
+        if (dist < bestDist) { bestDist = dist; best = column; }
+      });
+      return best;
+    }
+
+    function showTooltip(column, emphasized) {
+      tooltip.replaceChildren();
+      tooltip.appendChild(el("div", "tip-time", formatMoment(column.t)));
+      var imported = false;
+      column.points.forEach(function (point) {
+        var change = point.event;
+        var row = el("div",
+          "tip-row" + (point === emphasized ? " em" : ""));
+        var swatch = el("span", "swatch");
+        swatch.style.background = kindOf(change.kind).color;
+        row.appendChild(swatch);
+        row.appendChild(el("span", "name", describe(change)));
+        row.appendChild(el("span", "val", String(change.count)));
+        tooltip.appendChild(row);
+        if (change.imported) { imported = true; }
+      });
+      if (imported) {
+        tooltip.appendChild(el("div", "tip-note",
+          "Time taken from the log channel message."));
+      }
+      // Anchor to the point nearest the cursor and flip below the axis top
+      // when there is no room to sit above it.
+      var leftPct = Math.max(10, Math.min(90, emphasized.x / m.w * 100));
+      var topPct = emphasized.y / m.h * 100;
+      tooltip.style.left = leftPct + "%";
+      tooltip.style.top = topPct + "%";
+      tooltip.style.transform = topPct < 32
+        ? "translate(-50%, 14px)"
+        : "translate(-50%, calc(-100% - 14px))";
+      tooltip.style.visibility = "visible";
+    }
+
+    function showHover(column, vbY) {
+      crosshair.setAttribute("x1", column.x);
+      crosshair.setAttribute("x2", column.x);
+      crosshair.style.visibility = "visible";
+      rings.replaceChildren();
+      var emphasized = column.points[0];
+      var bestDy = Infinity;
+      column.points.forEach(function (point) {
+        rings.appendChild(svg("circle", {
+          "class": "hover-ring",
+          cx: point.x,
+          cy: point.y,
+          r: 7,
+          stroke: kindOf(point.event.kind).color
+        }));
+        var dy = Math.abs(point.y - vbY);
+        if (dy < bestDy) { bestDy = dy; emphasized = point; }
+      });
+      showTooltip(column, emphasized);
+    }
+
+    function hideHover() {
+      crosshair.style.visibility = "hidden";
+      rings.replaceChildren();
+      tooltip.style.visibility = "hidden";
+      unpin();
+    }
+
+    // Translates a pointer position into viewBox coordinates, or null while
+    // the canvas has no laid-out size to measure against.
+    function pointFromEvent(event) {
+      var rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) { return null; }
+      return {
+        x: (event.clientX - rect.left) / rect.width * m.w,
+        y: (event.clientY - rect.top) / rect.height * m.h
+      };
+    }
+
+    // Clears the selection and traces why it went away, but only when a tap
+    // was holding it open. A mouse hover follows the pointer continuously, so
+    // tracing every move that ends one would bury the trace it exists to give.
+    function release(reason) {
+      var wasPinned = pinned;
+      hideHover();
+      if (wasPinned) { traceSelection("release", reason, columns.length); }
+    }
+
+    // Anything other than another tap on the plot clears a pinned selection: a
+    // tap elsewhere on the page, a wheel, a key, or the window losing focus.
+    function dismiss(event) {
+      // A tap that moves the selection to another column reaches the overlay
+      // after this capture listener has already run, so it is left to the
+      // overlay's own handler. Only a tap earns that exemption: a wheel over
+      // the plot, or a mouse press on it, is aimed at the overlay too, but the
+      // handler there acts on neither, so waving those through would strand
+      // the selection on screen with nothing left to clear it.
+      if (isRetargetingTap(event)) {
+        traceSelection("keep", "retarget-on-plot", columns.length);
+        return;
+      }
+      release("page-" + eventKind(event));
+    }
+
+    // True only for the events the overlay's pointerdown handler will act on,
+    // which is what makes leaving them to it safe.
+    function isRetargetingTap(event) {
+      return !!event && event.type === "pointerdown" &&
+        event.target === overlay && !isHoverPointer(event);
+    }
+
+    function pin(event, kind) {
+      pinOrigin = { x: event.clientX, y: event.clientY };
+      if (pinned) { return; }
+      pinned = true;
+      document.addEventListener("pointerdown", dismiss, true);
+      document.addEventListener("wheel", dismiss, true);
+      document.addEventListener("keydown", dismiss, true);
+      window.addEventListener("blur", dismiss);
+      traceSelection("pin", kind, columns.length);
+    }
+
+    function unpin() {
+      if (!pinned) { return; }
+      pinned = false;
+      pinOrigin = null;
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("wheel", dismiss, true);
+      document.removeEventListener("keydown", dismiss, true);
+      window.removeEventListener("blur", dismiss);
+    }
+
+    // Resolves the column a pointer is over. When there is nothing to show,
+    // reason names why so the caller can trace the skip; the names are fixed
+    // strings, never anything read off the event or the payload.
+    function resolveColumn(event) {
+      if (!columns.length) { return { column: null, reason: "no-changes" }; }
+      var at = pointFromEvent(event);
+      if (!at) { return { column: null, reason: "unsized-canvas" }; }
+      var column = nearestColumn(at.x);
+      if (!column) { return { column: null, reason: "no-nearest" }; }
+      return { column: column, at: at, reason: "ok" };
+    }
+
+    overlay.addEventListener("pointermove", function (event) {
+      if (!isHoverPointer(event)) {
+        // A finger that travels past the tap slop is scrolling the page, not
+        // picking a point, so the selection it opened is dropped.
+        if (pinned && pinOrigin) {
+          var dx = event.clientX - pinOrigin.x;
+          var dy = event.clientY - pinOrigin.y;
+          if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { release("drag"); }
+        }
+        return;
+      }
+      var hovered = resolveColumn(event);
+      if (hovered.column) { showHover(hovered.column, hovered.at.y); }
+    });
+    overlay.addEventListener("pointerleave", function (event) {
+      // A finger's pointerleave arrives as it lifts off the glass; only a
+      // mouse leaving the plot means its hover is over.
+      if (isHoverPointer(event)) { release("pointer-leave"); }
+    });
+    // Touch and pen select by tapping: the nearest column opens and stays up
+    // until the next interaction, and a tap on another point moves it there.
+    overlay.addEventListener("pointerdown", function (event) {
+      if (isHoverPointer(event)) { return; }
+      var kind = pointerKind(event);
+      var tapped = resolveColumn(event);
+      if (!tapped.column) {
+        // Nothing to open, so the tap is reported and any selection already
+        // showing is cleared rather than left behind as a stale reading.
+        traceSelection("skip", tapped.reason, columns.length);
+        release("skipped-tap");
+        return;
+      }
+      // Tracing the move apart from the open is what shows a trace reader that
+      // a second tap replaced the first selection instead of adding to it.
+      var moved = pinned;
+      pin(event, kind);
+      showHover(tapped.column, tapped.at.y);
+      traceSelection(
+        moved ? "move" : "open", kind, tapped.column.points.length);
+    });
+    // The browser claims the gesture once it decides a touch is a scroll.
+    overlay.addEventListener("pointercancel", function (event) {
+      if (!isHoverPointer(event)) { release("pointer-cancel"); }
+    });
+
+    // Lets a re-render drop this canvas's page-level listeners with it.
+    return function () { release("redraw"); };
+  }
+
+  // What one change reads as in a tooltip row: the account, and for a kick the
+  // officer who did it.
+  function describe(change) {
+    if (change.kind === "kick" && change.actor) {
+      return change.name + " \\u2014 kicked by " + change.actor;
+    }
+    return change.name;
+  }
+
+  function renderLegend() {
+    legend.replaceChildren();
+    KIND_ORDER.forEach(function (kind) {
+      var item = el("span", "item");
+      item.setAttribute("role", "listitem");
+      var swatch = el("span", "swatch");
+      swatch.style.background = KINDS[kind].color;
+      item.appendChild(swatch);
+      item.appendChild(el("span", "legend-name", KINDS[kind].label));
+      legend.appendChild(item);
+    });
+  }
+
+  function renderTotals() {
+    totals.replaceChildren();
+    if (!state.data) { return; }
+    [
+      ["Joined", state.data.joins],
+      ["Left", state.data.leaves],
+      ["Kicked", state.data.kicks]
+    ].forEach(function (pair) {
+      var item = el("span", null);
+      item.appendChild(el("span", "num", String(pair[1] || 0)));
+      item.appendChild(document.createTextNode(" " + pair[0].toLowerCase()));
+      totals.appendChild(item);
+    });
+    nowCount.textContent = state.data.member_count === null ||
+      state.data.member_count === undefined
+      ? ""
+      : "\\u2014 " + state.data.member_count + " now";
+  }
+
+  function renderTable() {
+    tableBox.replaceChildren();
+    pager.replaceChildren();
+    var changes = events();
+    if (!changes.length) {
+      tableBox.appendChild(
+        el("div", "empty", "No members joined or left in this period."));
+      return;
+    }
+    var pageCount = Math.ceil(changes.length / TABLE_PAGE_SIZE);
+    if (state.tablePage > pageCount - 1) { state.tablePage = pageCount - 1; }
+    var start = state.tablePage * TABLE_PAGE_SIZE;
+    var pageRows = changes.slice(start, start + TABLE_PAGE_SIZE);
+
+    var table = el("table", "changes");
+    var head = el("tr");
+    head.appendChild(el("th", null, "Time"));
+    head.appendChild(el("th", null, "Account"));
+    head.appendChild(el("th", null, "Change"));
+    var byHead = el("th", "by", "By");
+    head.appendChild(byHead);
+    head.appendChild(el("th", "num", "Members"));
+    table.appendChild(head);
+    pageRows.forEach(function (change) {
+      var row = el("tr");
+      row.appendChild(el("td", null, formatMoment(change.t)));
+      row.appendChild(el("td", null, change.name));
+      var kindCell = el("td", "change");
+      var dot = el("span", "dot");
+      dot.style.background = kindOf(change.kind).color;
+      kindCell.appendChild(dot);
+      kindCell.appendChild(
+        document.createTextNode(kindOf(change.kind).label));
+      row.appendChild(kindCell);
+      row.appendChild(el("td", "by", change.actor || ""));
+      row.appendChild(el("td", "num",
+        change.count === null ? "" : String(change.count)));
+      table.appendChild(row);
+    });
+    tableBox.appendChild(table);
+
+    var prev = el("button", null, "Prev");
+    prev.type = "button";
+    prev.disabled = state.tablePage <= 0;
+    prev.addEventListener("click", function () {
+      if (state.tablePage > 0) { state.tablePage -= 1; renderTable(); }
+    });
+    var next = el("button", null, "Next");
+    next.type = "button";
+    next.disabled = state.tablePage >= pageCount - 1;
+    next.addEventListener("click", function () {
+      if (state.tablePage < pageCount - 1) {
+        state.tablePage += 1;
+        renderTable();
+      }
+    });
+    pager.appendChild(prev);
+    pager.appendChild(next);
+    pager.appendChild(el("span", null,
+      "Page " + (state.tablePage + 1) + " of " + pageCount +
+      " (" + changes.length + " changes)"));
+  }
+
+  function render() {
+    renderLegend();
+    renderTotals();
+    renderChart();
+    renderTable();
+  }
+
+  function syncRangeButtons() {
+    document.querySelectorAll("[data-range]").forEach(function (button) {
+      var active = button.getAttribute("data-range") === state.range;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  function refresh() {
+    chartStatus.textContent = "Loading\\u2026";
+    fetch("/api/roster?range=" + encodeURIComponent(state.range))
+      .then(function (response) {
+        if (response.status === 401) {
+          location.href = "/login";
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) { throw new Error("failed"); }
+        return response.json();
+      })
+      .then(function (payload) {
+        state.data = payload;
+        state.tablePage = 0;
+        render();
+      })
+      .catch(function (error) {
+        // render() runs inside this chain, so a drawing fault lands here and
+        // otherwise reads as a failed request with nothing in the console to
+        // trace. Only the error's type and message are logged; no request,
+        // response or payload is ever passed through.
+        console.error(
+          "roster history load failed:",
+          error && error.name, error && error.message);
+        if (chartStatus.textContent === "Loading\\u2026") {
+          chartStatus.textContent = "Could not load the roster history.";
         }
       });
   }

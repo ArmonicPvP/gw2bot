@@ -127,9 +127,10 @@ Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 | `guild_log.py`, `guild_storage.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
 | `notifications.py`, `poll_status.py` | Delivery to the notification channel, plus the `diag` previews. |
 | `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
+| `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import` from the log channel. |
 | `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
 | `events/` | Guild events: models, store, posting, scheduler, reminders, views, `/event` commands. |
-| `web/` | Optional aiohttp site: Discord OAuth, calendar, and feast usage pages. |
+| `web/` | Optional aiohttp site: Discord OAuth, calendar, feast usage and guild roster pages. |
 | `settings/` | `/settings`: the definitions every subcommand is generated from, the store behind them, encryption for the credential-bearing ones, composition onto `Config`, and the one-time import from the environment. |
 | `discord_utils.py` | Shared role checks, ephemeral interaction notices, and Discord failure logging helpers. |
 

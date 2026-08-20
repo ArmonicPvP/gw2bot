@@ -17,6 +17,7 @@ from gw2bot.database import (
     GuildInviteRecord,
     GuildJoinRecord,
     GuildLeaveRecord,
+    GuildMemberCountLogRecord,
     GuildRankChangeRecord,
     RaffleAccountLinkRecord,
     RaffleDepositRecord,
@@ -39,6 +40,7 @@ from gw2bot.feast_stock import (
 )
 from gw2bot.raffle.events import (
     event_in_window,
+    parse_event_time,
     parse_gold_deposit,
     parse_guild_invite,
     parse_guild_join,
@@ -69,6 +71,14 @@ from gw2bot.raffle.models import (
     RaffleTotal,
     RaffleWinner,
     TrialForumPost,
+)
+from gw2bot.roster.models import (
+    JOIN,
+    KICK,
+    LEAVE,
+    ImportedMembershipEvent,
+    MemberCountSample,
+    MembershipEvent,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -248,6 +258,250 @@ class RaffleStore:
             sum(len(item.samples) for item in series.values()),
         )
         return series
+
+    def record_member_count(
+        self,
+        member_count: int,
+        pending_invite_count: int,
+        recorded_at: float,
+    ) -> bool:
+        """Log an observed guild member count, reporting whether it moved.
+
+        Only a count that differs from the last logged one gets a row: the
+        roster poll runs every minute and the number moves a handful of times
+        a week, so a row per poll would store the same value a thousand times
+        over for each change worth seeing. A row therefore reads as "the count
+        was this, when last seen at this moment", and an unchanged observation
+        moves the newest row's moment forward rather than adding another.
+
+        That refresh is the point, not bookkeeping. The newest row is the
+        anchor every derived count is measured from, and the guild log returns
+        only about a hundred events per type, so an outage long enough to push
+        events out of it leaves changes the bot will never see. Leaving the
+        anchor where it was would then replay the changes that *were* captured
+        forward from a stale count and disagree with the channel description;
+        moving it to the latest observation puts the whole gap behind the
+        anchor, where the missing changes can no longer be double-counted.
+
+        The anchor's moment only ever moves forward, whether the count moved
+        or not. A clock stepped back between two polls - an NTP correction, a
+        host resumed from suspend - would otherwise backdate it, and every
+        change between that stamp and the previous observation would be
+        replayed forward on top of a count that already includes them. The
+        event times those changes carry come from the Guild Wars 2 API rather
+        than this host, so a local clock going backwards moves the anchor out
+        from under them; refusing to let it is what keeps the two comparable.
+
+        The pending-invite count recorded alongside is whatever stood at that
+        moment, not a series of its own - it moves without the member count
+        and so is not what decides that a row is written.
+        """
+        with self._sessions.begin() as session:
+            latest = session.scalars(
+                select(GuildMemberCountLogRecord)
+                .order_by(GuildMemberCountLogRecord.log_id.desc())
+                .limit(1)
+            ).first()
+            observed_at = (
+                recorded_at
+                if latest is None
+                else max(recorded_at, latest.recorded_at)
+            )
+            if latest is not None and latest.member_count == member_count:
+                refreshed = observed_at > latest.recorded_at
+                if refreshed:
+                    latest.recorded_at = observed_at
+                    latest.pending_invite_count = pending_invite_count
+                LOGGER.debug(
+                    "Guild member count unchanged; anchor_refreshed=%s "
+                    "members=%s",
+                    refreshed,
+                    member_count,
+                )
+                return False
+            session.add(
+                GuildMemberCountLogRecord(
+                    member_count=member_count,
+                    pending_invite_count=pending_invite_count,
+                    recorded_at=observed_at,
+                )
+            )
+        LOGGER.debug(
+            "Logged a changed guild member count; members=%s pending=%s",
+            member_count,
+            pending_invite_count,
+        )
+        return True
+
+    def get_last_member_count(self) -> MemberCountSample | None:
+        """The newest observed member count, or None before the first poll."""
+        with self._sessions() as session:
+            record = session.scalars(
+                select(GuildMemberCountLogRecord)
+                .order_by(GuildMemberCountLogRecord.log_id.desc())
+                .limit(1)
+            ).first()
+        if record is None:
+            LOGGER.debug("No guild member count has been logged yet")
+            return None
+        LOGGER.debug(
+            "Loaded the newest logged guild member count; members=%s",
+            record.member_count,
+        )
+        return MemberCountSample(
+            recorded_at=record.recorded_at,
+            member_count=record.member_count,
+            pending_invite_count=record.pending_invite_count,
+        )
+
+    def get_membership_events(self, since: float) -> list[MembershipEvent]:
+        """Every join, leave and kick recorded at or after ``since``.
+
+        Timestamps are stored as text - the guild log's own spelling for rows
+        the poller wrote, and an ISO timestamp for rows the Discord log import
+        wrote - so they are parsed here rather than compared in SQL, where the
+        two spellings would not sort against each other. A row whose time
+        cannot be read is dropped: placing it would mean guessing when it
+        happened, and every count after it would inherit that guess.
+        """
+        unreadable = 0
+        events: list[MembershipEvent] = []
+        with self._sessions() as session:
+            joins = session.scalars(select(GuildJoinRecord)).all()
+            leaves = session.scalars(select(GuildLeaveRecord)).all()
+        for join in joins:
+            occurred_at = _membership_time(join.event_time)
+            if occurred_at is None:
+                unreadable += 1
+                continue
+            if occurred_at < since:
+                continue
+            events.append(
+                MembershipEvent(
+                    occurred_at=occurred_at,
+                    kind=JOIN,
+                    username=join.username,
+                    imported=join.event_id < 0,
+                )
+            )
+        for leave in leaves:
+            occurred_at = _membership_time(leave.event_time)
+            if occurred_at is None:
+                unreadable += 1
+                continue
+            if occurred_at < since:
+                continue
+            events.append(
+                MembershipEvent(
+                    occurred_at=occurred_at,
+                    kind=KICK if leave.kicked_by is not None else LEAVE,
+                    username=leave.username,
+                    actor=leave.kicked_by,
+                    imported=leave.event_id < 0,
+                )
+            )
+        events.sort(key=lambda event: event.occurred_at)
+        LOGGER.debug(
+            "Loaded guild membership events; joins=%s leaves=%s in_window=%s "
+            "unreadable=%s",
+            len(joins),
+            len(leaves),
+            len(events),
+            unreadable,
+        )
+        return events
+
+    def get_earliest_polled_membership_time(self) -> float | None:
+        """When the guild log poller first recorded a membership change.
+
+        The Discord log import stops here: everything from this moment on is
+        already in the database from the guild log itself, and importing the
+        notification the poller posted about it would count the same departure
+        twice.
+        """
+        with self._sessions() as session:
+            join_times = session.scalars(
+                select(GuildJoinRecord.event_time).where(
+                    GuildJoinRecord.event_id > 0
+                )
+            ).all()
+            leave_times = session.scalars(
+                select(GuildLeaveRecord.event_time).where(
+                    GuildLeaveRecord.event_id > 0
+                )
+            ).all()
+        moments = [
+            moment
+            for moment in (
+                _membership_time(value)
+                for value in (*join_times, *leave_times)
+            )
+            if moment is not None
+        ]
+        earliest = min(moments, default=None)
+        LOGGER.debug(
+            "Read the earliest polled membership event; rows=%s readable=%s "
+            "found=%s",
+            len(join_times) + len(leave_times),
+            len(moments),
+            earliest is not None,
+        )
+        return earliest
+
+    def import_membership_events(
+        self,
+        events: Sequence[ImportedMembershipEvent],
+    ) -> int:
+        """Store membership changes read out of the Discord log channel.
+
+        Each row is keyed by the negated Discord message id, which no guild
+        log event can collide with - those ids are positive and small - so a
+        second run over the same channel finds its own rows and adds nothing.
+        Delivery is marked done because the message being read is the delivery.
+        """
+        if not events:
+            return 0
+        imported = 0
+        with self._sessions.begin() as session:
+            for event in events:
+                event_id = -event.message_id
+                event_time = datetime.fromtimestamp(
+                    event.occurred_at,
+                    UTC,
+                ).isoformat()
+                if event.kind == JOIN:
+                    if session.get(GuildJoinRecord, event_id) is not None:
+                        continue
+                    session.add(
+                        GuildJoinRecord(
+                            event_id=event_id,
+                            username=event.username,
+                            event_time=event_time,
+                            notification_sent=True,
+                        )
+                    )
+                elif event.kind in {LEAVE, KICK}:
+                    if session.get(GuildLeaveRecord, event_id) is not None:
+                        continue
+                    session.add(
+                        GuildLeaveRecord(
+                            event_id=event_id,
+                            username=event.username,
+                            kicked_by=event.actor,
+                            event_time=event_time,
+                            notification_sent=True,
+                        )
+                    )
+                else:
+                    continue
+                imported += 1
+        LOGGER.debug(
+            "Imported guild membership events from the log channel; "
+            "offered=%s imported=%s",
+            len(events),
+            imported,
+        )
+        return imported
 
     def initialize_cursor(self, event_id: int) -> None:
         with self._sessions.begin() as session:
@@ -1378,6 +1632,11 @@ class RaffleStore:
             if record is None:
                 session.add(SettingRecord(key="guild_id", value=guild_id))
         LOGGER.debug("Validated raffle database guild binding")
+
+
+def _membership_time(event_time: str) -> float | None:
+    parsed = parse_event_time(event_time)
+    return None if parsed is None else parsed.timestamp()
 
 
 def _to_raffle_deposit(record: RaffleDepositRecord) -> RaffleDeposit:

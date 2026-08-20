@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
 import discord
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import (
     TopicEditableChannel,
@@ -52,7 +54,11 @@ async def poll_guild_member_count_topic(bot: Gw2Bot) -> None:
         LOGGER.debug("Starting Guild Member Count poll")
         try:
             updated = await bot._update_guild_member_count_topic()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            SQLAlchemyError,
+        ) as exc:
             bot._poll_status.record_error("Guild Member Count", exc)
         else:
             if updated:
@@ -72,13 +78,22 @@ async def update_guild_member_count_topic(bot: Gw2Bot) -> bool:
     member_count, pending_invite_count = count_active_guild_members(members)
     bot._last_guild_member_count = member_count
     bot._last_pending_guild_invite_count = pending_invite_count
+    # Logged before the topic edit, and whatever that edit does: the roster
+    # page's history is a record of the guild, not of whether Discord let the
+    # bot rename a channel.
+    recorded = bot._raffle_store.record_member_count(
+        member_count,
+        pending_invite_count,
+        time.time(),
+    )
     topic = format_guild_member_count_topic(member_count, pending_invite_count)
     LOGGER.debug(
         "Fetched guild member count; records=%s members=%s "
-        "pending_invites=%s topic_characters=%s",
+        "pending_invites=%s recorded=%s topic_characters=%s",
         len(members),
         member_count,
         pending_invite_count,
+        recorded,
         len(topic),
     )
     return await bot._try_update_logging_channel_topic(topic)
