@@ -2574,6 +2574,10 @@ button:focus-visible {
     white-space: nowrap;
   }
   table.changes .change .dot { margin-right: 0; }
+  /* With nothing but the dot left in it, the column reads as a column of dots
+     rather than one dot per row hanging off a ragged left edge. The heading
+     goes with them so the two stay over each other. */
+  table.changes .change { text-align: center; }
 }
 </style>
 </head>
@@ -3221,7 +3225,7 @@ button:focus-visible {
     var head = el("tr");
     head.appendChild(el("th", null, "Time"));
     head.appendChild(el("th", null, "Account"));
-    head.appendChild(el("th", null, "Change"));
+    head.appendChild(el("th", "change", "Change"));
     var byHead = el("th", "by", "By");
     head.appendChild(byHead);
     head.appendChild(el("th", "num", "Members"));

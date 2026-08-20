@@ -566,6 +566,17 @@ class TestRosterTable:
             "table.changes .change-label {"
         )[1].split("}")[0]
 
+    def test_the_lone_dot_sits_under_its_heading(self) -> None:
+        # With only the dot left in the cell, the column is centred so it
+        # reads as a column of dots; the heading carries the same class so
+        # the two stay over each other.
+        assert 'el("th", "change", "Change")' in ROSTER_PAGE
+        mobile = ROSTER_PAGE[ROSTER_PAGE.index("@media (max-width: 640px)"):]
+        assert "table.changes .change { text-align: center; }" in mobile
+        assert "table.changes .change .dot { margin-right: 0; }" in mobile
+        desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
+        assert "text-align: center" not in desktop
+
     def test_the_desktop_layout_keeps_the_word(self) -> None:
         desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
         assert "change-label" not in desktop
