@@ -63,29 +63,31 @@ def build_roster_series(
     events: Sequence[MembershipEvent],
     anchor: MemberCountSample | None,
     since: float,
-    now: float,
+    until: float,
 ) -> RosterSeries:
     """Derive the member count line and the plotted events for one window.
 
     ``events`` must hold every known membership change from the earlier of
-    ``since`` and the anchor's own moment onwards; anything later than ``now``
-    is ignored. The count at any moment is measured from ``anchor``, the last
-    count the bot actually observed, by walking the events between the two.
-    Measuring from the newest observation rather than the oldest is what keeps
-    the right-hand edge of the graph - the part a reader checks against the
-    channel description - true even when an older stretch of events was missed.
+    ``since`` and the anchor's own moment onwards. The count at any moment is
+    measured from ``anchor``, the last count the bot actually observed, by
+    walking the events between the two. Measuring from the newest observation
+    rather than the oldest is what keeps the right-hand edge of the graph - the
+    part a reader checks against the channel description - true even when an
+    older stretch of events was missed.
+
+    Only ``since``..``until`` is plotted, but every event is walked, including
+    the ones after ``until``. A custom window that ends in the past sits behind
+    the anchor, so the changes between the two are exactly what has to be
+    unwound to recover the count that stood at the window's right-hand edge.
 
     Without an anchor nothing can be placed on a count axis, so the events come
     back with no count and the line is empty rather than invented.
     """
-    ordered = sorted(
-        (event for event in events if event.occurred_at <= now),
-        key=lambda event: event.occurred_at,
-    )
+    ordered = sorted(events, key=lambda event: event.occurred_at)
     in_window = [
         index
         for index, event in enumerate(ordered)
-        if since <= event.occurred_at <= now
+        if since <= event.occurred_at <= until
     ]
     if anchor is None:
         LOGGER.debug(
@@ -101,7 +103,8 @@ def build_roster_series(
             ),
         )
 
-    counts_after, baseline, count_now = _derive_counts(ordered, anchor)
+    counts_after, baseline = _derive_counts(ordered, anchor)
+    count_at_end = _count_through(ordered, counts_after, baseline, until)
     points = [
         RosterPoint(
             at=since,
@@ -115,7 +118,7 @@ def build_roster_series(
         )
         for index in in_window
     )
-    points.append(RosterPoint(at=now, member_count=count_now))
+    points.append(RosterPoint(at=until, member_count=count_at_end))
     series = RosterSeries(
         points=tuple(points),
         events=tuple(
@@ -124,12 +127,12 @@ def build_roster_series(
     )
     LOGGER.debug(
         "Built roster series; events=%s in_window=%s points=%s "
-        "anchor_age_seconds=%s current_count=%s",
+        "anchor_offset_seconds=%s end_count=%s",
         len(ordered),
         len(in_window),
         len(series.points),
-        int(now - anchor.recorded_at),
-        count_now,
+        int(until - anchor.recorded_at),
+        count_at_end,
     )
     return series
 
@@ -148,8 +151,8 @@ def _plot(event: MembershipEvent, member_count: int | None) -> RosterEvent:
 def _derive_counts(
     ordered: Sequence[MembershipEvent],
     anchor: MemberCountSample,
-) -> tuple[list[int], int, int]:
-    """Return the count after each event, before the oldest, and right now.
+) -> tuple[list[int], int]:
+    """Return the count after each event, and the one before the oldest.
 
     ``ordered`` is oldest first. Events at or before the anchor are walked
     backwards from it, subtracting each change to recover the count that stood
@@ -169,7 +172,7 @@ def _derive_counts(
             continue
         running += event.delta
         counts_after[index] = running
-    return counts_after, baseline, running
+    return counts_after, baseline
 
 
 def _count_before(
@@ -182,6 +185,26 @@ def _count_before(
     result = baseline
     for index, event in enumerate(ordered):
         if event.occurred_at >= moment:
+            break
+        result = counts_after[index]
+    return result
+
+
+def _count_through(
+    ordered: Sequence[MembershipEvent],
+    counts_after: Sequence[int],
+    baseline: int,
+    moment: float,
+) -> int:
+    """The member count as it stood once every change up to ``moment`` landed.
+
+    Unlike ``_count_before`` a change dated exactly ``moment`` counts, because
+    this places the line's closing vertex and that vertex sits on the same x as
+    the change's own dot.
+    """
+    result = baseline
+    for index, event in enumerate(ordered):
+        if event.occurred_at > moment:
             break
         result = counts_after[index]
     return result

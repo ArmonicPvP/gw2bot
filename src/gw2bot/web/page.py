@@ -1305,6 +1305,31 @@ button {
 button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
+/* The date picker is a second header row that stays out of the way until the
+   Custom button reveals it, so the preset windows remain one tap apart. */
+.custom {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex-basis: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.custom.open { display: flex; }
+.custom input[type="date"] {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  /* Asks the browser for the dark spelling of its own calendar popup, which
+     would otherwise open as a white sheet over a dark page. */
+  color-scheme: dark;
+}
+.custom .custom-error { color: var(--full); }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
 header a { font-size: 0.85rem; }
@@ -1351,6 +1376,10 @@ main {
 }
 .legend .swatch { width: 0.9rem; height: 0.9rem; border-radius: 3px; flex-shrink: 0; }
 .legend .legend-name { display: inline; }
+/* A feast switched off keeps its place in the legend, dimmed and with its
+   colour reduced to an outline, so what is missing from the chart is still
+   named and one more click puts it back. */
+.legend .item.off { opacity: 0.55; }
 /* The chart is a fixed-viewBox SVG that scales to its container width, so
    every plotted coordinate is computed once against the viewBox and the
    browser handles resizing without a re-render. */
@@ -1439,15 +1468,18 @@ button:focus-visible {
   #brand { grid-column: 2; grid-row: 1; justify-self: center; }
   header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
   #whoami { display: none; }
   .signout-icon { display: inline-block; }
   .signout-label { display: none; }
   .signout { padding: 0.35rem 0.5rem; }
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
-  /* Names are hidden until a swatch is tapped, leaving a compact colour key. */
+  /* Names are hidden, leaving a compact colour key. A feast switched off
+     names itself, so a tap still answers "which one is this?" - it answers by
+     taking the line away and labelling what went. */
   .legend .legend-name { display: none; }
-  .legend .item.show-name .legend-name { display: inline; }
+  .legend .item.off .legend-name { display: inline; }
 }
 </style>
 </head>
@@ -1458,6 +1490,7 @@ button:focus-visible {
     <button type="button" data-range="24h">24h</button>
     <button type="button" data-range="7d">7d</button>
     <button type="button" data-range="30d">30d</button>
+    <button type="button" data-range="custom">Custom</button>
   </nav>
   <span class="spacer"></span>
   <span id="whoami"></span>
@@ -1473,6 +1506,15 @@ button:focus-visible {
       <span class="signout-label">Log out</span>
     </button>
   </form>
+  <div id="custom-range" class="custom">
+    <label for="custom-start">From</label>
+    <input type="date" id="custom-start">
+    <label for="custom-end">To</label>
+    <input type="date" id="custom-end">
+    <button type="button" id="custom-apply">Apply</button>
+    <span id="custom-error" class="custom-error" role="status"
+      aria-live="polite"></span>
+  </div>
 </header>
 <main>
   <section class="card">
@@ -1518,7 +1560,12 @@ button:focus-visible {
   function plotW() { return M.w - M.left - M.right; }
   function plotH() { return M.h - M.top - M.bottom; }
 
-  var state = { range: "24h", data: null, activeFeast: 0, tablePage: 0 };
+  // hidden holds the feasts the reader has switched off in the legend, keyed
+  // by guild storage id so the choice outlives a range change and the redraw
+  // it brings.
+  var state = {
+    range: "24h", data: null, activeFeast: 0, tablePage: 0, hidden: {}
+  };
 
   // A pinned touch selection listens on the whole page, so the chart it
   // belongs to is torn down before another one is drawn.
@@ -1553,6 +1600,12 @@ button:focus-visible {
   function activeFeast() {
     return feasts()[state.activeFeast] || null;
   }
+  function isHidden(feast) {
+    return state.hidden[feast.id] === true;
+  }
+  function visibleFeasts() {
+    return feasts().filter(function (feast) { return !isHidden(feast); });
+  }
 
   function scaleX(t) {
     var since = state.data.since;
@@ -1570,9 +1623,17 @@ button:focus-visible {
     return M.top + (1 - value / Y_MAX) * plotH();
   }
 
+  // How wide the drawn window is, in seconds.
+  function windowSpan() {
+    return state.data ? state.data.now - state.data.since : 0;
+  }
+
   function formatTick(t) {
     var date = new Date(t * 1000);
-    if (state.range === "24h") {
+    // A window of about a day or less is read off the clock and a wider one
+    // off the calendar. The span decides rather than the range's name, so a
+    // custom pair of dates is labelled like the preset it resembles.
+    if (windowSpan() <= 48 * 60 * 60) {
       return date.toLocaleTimeString(
         undefined, { hour: "numeric", minute: "2-digit" });
     }
@@ -1637,6 +1698,10 @@ button:focus-visible {
     // marker is also collected so the hover can snap to it.
     var plotted = [];
     feasts().forEach(function (feast, index) {
+      // A feast switched off in the legend is left out of the drawing
+      // entirely, so it is absent from the hover and the tooltip too rather
+      // than invisible but still selectable.
+      if (isHidden(feast)) { return; }
       var color = COLORS[index % COLORS.length];
       var points = feast.points || [];
       if (points.length > 1) {
@@ -1673,10 +1738,19 @@ button:focus-visible {
     detachHover = attachHover(canvas, plotted);
     chart.appendChild(canvas);
 
-    var total = plotted.length;
-    chartStatus.textContent = total
-      ? ""
-      : "No feast counts were recorded in this period.";
+    chartStatus.textContent = chartStatusText(plotted.length);
+  }
+
+  // What the chart says about itself when it has drawn nothing: an empty
+  // window and a legend switched all the way off are different states, and
+  // only one of them is worth waiting for more data over.
+  function chartStatusText(plottedCount) {
+    if (plottedCount) { return ""; }
+    if (feasts().length && !visibleFeasts().length) {
+      return "Every feast is switched off. Click one in the legend to draw " +
+        "it again.";
+    }
+    return "No feast counts were recorded in this period.";
   }
 
   // Samples that share a timestamp (one storage poll can log several feasts at
@@ -1966,21 +2040,45 @@ button:focus-visible {
     return function () { release("redraw"); };
   }
 
+  // Sanitized tracing for the legend, so a console trace can explain why the
+  // chart is drawing fewer lines than the window holds. Only a fixed action
+  // name and a count of the feasts left on are passed; no feast name, count
+  // or timestamp reaches the console.
+  function traceLegend(action, count) {
+    console.debug("feast chart legend:", action, count);
+  }
+
   function renderLegend() {
     legend.replaceChildren();
     feasts().forEach(function (feast, index) {
-      // Each entry is a button so a tap can reveal which feast a colour is
-      // for; the name is always exposed to assistive tech through aria-label.
-      var item = el("button", "item");
+      // Each entry is a button that switches its feast off and back on. The
+      // name is always exposed to assistive tech through aria-label, and
+      // aria-pressed carries whether the feast is currently drawn.
+      var hidden = isHidden(feast);
+      var item = el("button", hidden ? "item off" : "item");
       item.type = "button";
       item.setAttribute("aria-label", feast.name);
+      item.setAttribute("aria-pressed", hidden ? "false" : "true");
       item.title = feast.name;
+      var color = COLORS[index % COLORS.length];
       var swatch = el("span", "swatch");
-      swatch.style.background = COLORS[index % COLORS.length];
+      if (hidden) {
+        swatch.style.background = "transparent";
+        swatch.style.boxShadow = "inset 0 0 0 2px " + color;
+      } else {
+        swatch.style.background = color;
+      }
       item.appendChild(swatch);
       item.appendChild(el("span", "legend-name", feast.name));
       item.addEventListener("click", function () {
-        item.classList.toggle("show-name");
+        if (hidden) {
+          delete state.hidden[feast.id];
+        } else {
+          state.hidden[feast.id] = true;
+        }
+        traceLegend(hidden ? "show" : "hide", visibleFeasts().length);
+        renderLegend();
+        renderChart();
       });
       legend.appendChild(item);
     });
@@ -2063,6 +2161,146 @@ button:focus-visible {
     renderTable();
   }
 
+  // The longest custom window the server will serve, mirrored here so a
+  // range too wide to draw is named as such instead of coming back as a
+  // failed load.
+  var MAX_CUSTOM_DAYS = 366;
+
+  // The window a pair of applied dates asks for, as whole epoch seconds, or
+  // null while the reader is still on one of the presets.
+  var customWindow = null;
+
+  var customPanel = document.getElementById("custom-range");
+  var customStart = document.getElementById("custom-start");
+  var customEnd = document.getElementById("custom-end");
+  var customError = document.getElementById("custom-error");
+
+  // A local calendar day in the spelling a date input reads and writes.
+  function dayValue(date) {
+    return date.getFullYear() + "-" +
+      String(date.getMonth() + 1).padStart(2, "0") + "-" +
+      String(date.getDate()).padStart(2, "0");
+  }
+
+  // Reads one date input as a local calendar day. The parts are re-read off
+  // the Date afterwards, so a day that does not exist - the 31st of a 30-day
+  // month, typed into the field - is refused rather than silently rolled into
+  // the month after it.
+  function parseDay(value) {
+    var parts = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value || "");
+    if (!parts) { return null; }
+    var year = Number(parts[1]);
+    var month = Number(parts[2]);
+    var day = Number(parts[3]);
+    var date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 ||
+        date.getDate() !== day) {
+      return null;
+    }
+    return date;
+  }
+
+  // The window the two fields describe, or the reason it cannot be drawn. A
+  // picked pair covers whole local days: it opens at midnight on the first and
+  // closes at the last second of the second, so picking one day twice is that
+  // whole day rather than an empty instant.
+  // Each refusal carries a fixed reason name beside the sentence the reader
+  // sees, because the sentence is prose meant for them and the name is what
+  // the console trace is allowed to say about their dates.
+  function pickedWindow() {
+    var from = parseDay(customStart.value);
+    var to = parseDay(customEnd.value);
+    if (!from || !to) {
+      return {
+        reason: "no-dates", error: "Pick a start and an end date."
+      };
+    }
+    var since = Math.floor(from.getTime() / 1000);
+    var until = Math.floor(new Date(
+      to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() / 1000) - 1;
+    if (until <= since) {
+      return {
+        reason: "backwards",
+        error: "The end date is before the start date."
+      };
+    }
+    if (until - since > MAX_CUSTOM_DAYS * 86400) {
+      return {
+        reason: "too-wide",
+        error: "Pick a range of " + MAX_CUSTOM_DAYS + " days or fewer."
+      };
+    }
+    if (since > Math.floor(Date.now() / 1000)) {
+      return {
+        reason: "future-start", error: "The start date is in the future."
+      };
+    }
+    return { since: since, until: until };
+  }
+
+  // Opening the picker for the first time fills it with the whole local days
+  // the window on screen falls inside, which is the closest a pair of dates
+  // can come to the range already drawn: the fields hold days and nothing
+  // finer, so a rolling preset cannot be reproduced exactly. Applying an
+  // untouched 24h default therefore asks for yesterday from midnight rather
+  // than this time yesterday, and reads a few hours wider than the button it
+  // came from. Wider is the right way to miss: the narrower pair would drop
+  // hours the reader can already see.
+  function fillCustomDefaults() {
+    if (customStart.value && customEnd.value) { return; }
+    var today = new Date();
+    var span = windowSpan() || 24 * 60 * 60;
+    customStart.value = dayValue(new Date(today.getTime() - span * 1000));
+    customEnd.value = dayValue(today);
+  }
+
+  function toggleCustomPanel(open) {
+    customPanel.classList.toggle("open", open);
+    if (!open) { return; }
+    fillCustomDefaults();
+    // Nothing has been recorded for a day that has not happened, so neither
+    // field offers one.
+    customStart.max = dayValue(new Date());
+    customEnd.max = customStart.max;
+  }
+
+  // Sanitized tracing for the range picker, so a console trace can explain
+  // why a picked window did or did not become a request. Only a fixed action
+  // name, one of the fixed reason names above, and a count of days are
+  // passed; the dates the reader entered never reach the console.
+  function traceRange(action, reason, days) {
+    console.debug("feast chart range:", action, reason, days);
+  }
+
+  function applyCustomRange() {
+    var picked = pickedWindow();
+    if (picked.error) {
+      // The refusal ends the workflow here, without a request, so this is the
+      // only place a trace can say the reader asked for a window and did not
+      // get one.
+      traceRange("refuse", picked.reason, 0);
+      customError.textContent = picked.error;
+      return;
+    }
+    customError.textContent = "";
+    customWindow = picked;
+    state.range = "custom";
+    traceRange("apply", "ok", Math.round((picked.until - picked.since) / 86400));
+    syncRangeButtons();
+    refresh();
+  }
+
+  // The query the current selection asks for: a preset window by name, or the
+  // applied pair of epoch seconds.
+  function rangeQuery() {
+    if (state.range === "custom" && customWindow) {
+      return "?range=custom&start=" +
+        encodeURIComponent(String(customWindow.since)) +
+        "&end=" + encodeURIComponent(String(customWindow.until));
+    }
+    return "?range=" + encodeURIComponent(state.range);
+  }
+
   function syncRangeButtons() {
     document.querySelectorAll("[data-range]").forEach(function (button) {
       var active = button.getAttribute("data-range") === state.range;
@@ -2073,7 +2311,7 @@ button:focus-visible {
 
   function refresh() {
     chartStatus.textContent = "Loading\\u2026";
-    fetch("/api/food?range=" + encodeURIComponent(state.range))
+    fetch("/api/food" + rangeQuery())
       .then(function (response) {
         if (response.status === 401) {
           location.href = "/login";
@@ -2106,9 +2344,27 @@ button:focus-visible {
 
   document.querySelectorAll("[data-range]").forEach(function (button) {
     button.addEventListener("click", function () {
-      state.range = button.getAttribute("data-range");
+      var picked = button.getAttribute("data-range");
+      if (picked === "custom") {
+        // The Custom button only reveals the picker; the range itself does not
+        // move until a pair of dates is applied, so a stray tap costs nothing.
+        toggleCustomPanel(!customPanel.classList.contains("open"));
+        return;
+      }
+      toggleCustomPanel(false);
+      state.range = picked;
       syncRangeButtons();
       refresh();
+    });
+  });
+  document.getElementById("custom-apply").addEventListener(
+    "click", applyCustomRange);
+  [customStart, customEnd].forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyCustomRange();
+      }
     });
   });
   // Redraw when the breakpoint flips so the chart adopts the layout for the
@@ -2180,6 +2436,31 @@ button {
 button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
+/* The date picker is a second header row that stays out of the way until the
+   Custom button reveals it, so the preset windows remain one tap apart. */
+.custom {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex-basis: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.custom.open { display: flex; }
+.custom input[type="date"] {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  /* Asks the browser for the dark spelling of its own calendar popup, which
+     would otherwise open as a white sheet over a dark page. */
+  color-scheme: dark;
+}
+.custom .custom-error { color: var(--full); }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
 header a { font-size: 0.85rem; }
@@ -2278,6 +2559,7 @@ main {
   border-radius: 50%;
   flex-shrink: 0;
 }
+.chart-tooltip .tip-row .name { overflow-wrap: anywhere; }
 .chart-tooltip .tip-row .val {
   margin-left: auto;
   padding-left: 0.75rem;
@@ -2306,6 +2588,13 @@ table.changes th, table.changes td {
   border-bottom: 1px solid var(--border);
 }
 table.changes th { color: var(--muted); font-weight: 600; }
+/* A Guild Wars 2 account name has no spaces to break at, so a long one used
+   to widen the table past the card it sits in and carry the right-hand
+   columns off the page. Breaking inside the word is what bounds the column,
+   and `anywhere` rather than `break-word` because only `anywhere` also
+   shrinks the column's minimum width - which is the width the table lays
+   itself out from, so it is what keeps the table itself inside the card. */
+table.changes td.name, table.changes td.by { overflow-wrap: anywhere; }
 table.changes td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -2343,6 +2632,7 @@ button:focus-visible {
   #brand { grid-column: 2; grid-row: 1; justify-self: center; }
   header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
   #whoami { display: none; }
   .signout-icon { display: inline-block; }
   .signout-label { display: none; }
@@ -2352,6 +2642,25 @@ button:focus-visible {
   /* The account a change is about is the column worth the width on a phone;
      who did the kicking is shown in the chart tooltip instead. */
   table.changes .by { display: none; }
+  /* The dot's colour already says which kind of change it was, and the word
+     beside it costs the account column width it has none of to spare. The
+     word stays in the table, out of sight rather than out of the document,
+     so a screen reader still reads each row's change out. */
+  table.changes .change-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  table.changes .change .dot { margin-right: 0; }
+  /* With nothing but the dot left in it, the column reads as a column of dots
+     rather than one dot per row hanging off a ragged left edge. The heading
+     goes with them so the two stay over each other. */
+  table.changes .change { text-align: center; }
 }
 </style>
 </head>
@@ -2362,6 +2671,7 @@ button:focus-visible {
     <button type="button" data-range="24h">24h</button>
     <button type="button" data-range="7d">7d</button>
     <button type="button" data-range="30d">30d</button>
+    <button type="button" data-range="custom">Custom</button>
   </nav>
   <span class="spacer"></span>
   <span id="whoami"></span>
@@ -2377,6 +2687,15 @@ button:focus-visible {
       <span class="signout-label">Log out</span>
     </button>
   </form>
+  <div id="custom-range" class="custom">
+    <label for="custom-start">From</label>
+    <input type="date" id="custom-start">
+    <label for="custom-end">To</label>
+    <input type="date" id="custom-end">
+    <button type="button" id="custom-apply">Apply</button>
+    <span id="custom-error" class="custom-error" role="status"
+      aria-live="polite"></span>
+  </div>
 </header>
 <main>
   <section class="card">
@@ -2506,9 +2825,17 @@ button:focus-visible {
     return M.top + (1 - (value - scale.low) / span) * plotH();
   }
 
+  // How wide the drawn window is, in seconds.
+  function windowSpan() {
+    return state.data ? state.data.now - state.data.since : 0;
+  }
+
   function formatTick(t) {
     var date = new Date(t * 1000);
-    if (state.range === "24h") {
+    // A window of about a day or less is read off the clock and a wider one
+    // off the calendar. The span decides rather than the range's name, so a
+    // custom pair of dates is labelled like the preset it resembles.
+    if (windowSpan() <= 48 * 60 * 60) {
       return date.toLocaleTimeString(
         undefined, { hour: "numeric", minute: "2-digit" });
     }
@@ -2953,10 +3280,14 @@ button:focus-visible {
       item.appendChild(document.createTextNode(" " + pair[0].toLowerCase()));
       totals.appendChild(item);
     });
+    // A preset window runs to the moment of the request, so its closing
+    // count is the count now; a picked one can close months ago, where the
+    // only thing that count is true of is the window's own end.
     nowCount.textContent = state.data.member_count === null ||
       state.data.member_count === undefined
       ? ""
-      : "\\u2014 " + state.data.member_count + " now";
+      : "\\u2014 " + state.data.member_count +
+        (state.range === "custom" ? " at the end" : " now");
   }
 
   function renderTable() {
@@ -2977,7 +3308,7 @@ button:focus-visible {
     var head = el("tr");
     head.appendChild(el("th", null, "Time"));
     head.appendChild(el("th", null, "Account"));
-    head.appendChild(el("th", null, "Change"));
+    head.appendChild(el("th", "change", "Change"));
     var byHead = el("th", "by", "By");
     head.appendChild(byHead);
     head.appendChild(el("th", "num", "Members"));
@@ -2985,13 +3316,15 @@ button:focus-visible {
     pageRows.forEach(function (change) {
       var row = el("tr");
       row.appendChild(el("td", null, formatMoment(change.t)));
-      row.appendChild(el("td", null, change.name));
+      row.appendChild(el("td", "name", change.name));
       var kindCell = el("td", "change");
       var dot = el("span", "dot");
       dot.style.background = kindOf(change.kind).color;
       kindCell.appendChild(dot);
+      // The name of the change is its own element so the phone layout can put
+      // it out of sight and leave the dot standing for it.
       kindCell.appendChild(
-        document.createTextNode(kindOf(change.kind).label));
+        el("span", "change-label", kindOf(change.kind).label));
       row.appendChild(kindCell);
       row.appendChild(el("td", "by", change.actor || ""));
       row.appendChild(el("td", "num",
@@ -3029,6 +3362,146 @@ button:focus-visible {
     renderTable();
   }
 
+  // The longest custom window the server will serve, mirrored here so a
+  // range too wide to draw is named as such instead of coming back as a
+  // failed load.
+  var MAX_CUSTOM_DAYS = 366;
+
+  // The window a pair of applied dates asks for, as whole epoch seconds, or
+  // null while the reader is still on one of the presets.
+  var customWindow = null;
+
+  var customPanel = document.getElementById("custom-range");
+  var customStart = document.getElementById("custom-start");
+  var customEnd = document.getElementById("custom-end");
+  var customError = document.getElementById("custom-error");
+
+  // A local calendar day in the spelling a date input reads and writes.
+  function dayValue(date) {
+    return date.getFullYear() + "-" +
+      String(date.getMonth() + 1).padStart(2, "0") + "-" +
+      String(date.getDate()).padStart(2, "0");
+  }
+
+  // Reads one date input as a local calendar day. The parts are re-read off
+  // the Date afterwards, so a day that does not exist - the 31st of a 30-day
+  // month, typed into the field - is refused rather than silently rolled into
+  // the month after it.
+  function parseDay(value) {
+    var parts = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value || "");
+    if (!parts) { return null; }
+    var year = Number(parts[1]);
+    var month = Number(parts[2]);
+    var day = Number(parts[3]);
+    var date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 ||
+        date.getDate() !== day) {
+      return null;
+    }
+    return date;
+  }
+
+  // The window the two fields describe, or the reason it cannot be drawn. A
+  // picked pair covers whole local days: it opens at midnight on the first and
+  // closes at the last second of the second, so picking one day twice is that
+  // whole day rather than an empty instant.
+  // Each refusal carries a fixed reason name beside the sentence the reader
+  // sees, because the sentence is prose meant for them and the name is what
+  // the console trace is allowed to say about their dates.
+  function pickedWindow() {
+    var from = parseDay(customStart.value);
+    var to = parseDay(customEnd.value);
+    if (!from || !to) {
+      return {
+        reason: "no-dates", error: "Pick a start and an end date."
+      };
+    }
+    var since = Math.floor(from.getTime() / 1000);
+    var until = Math.floor(new Date(
+      to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() / 1000) - 1;
+    if (until <= since) {
+      return {
+        reason: "backwards",
+        error: "The end date is before the start date."
+      };
+    }
+    if (until - since > MAX_CUSTOM_DAYS * 86400) {
+      return {
+        reason: "too-wide",
+        error: "Pick a range of " + MAX_CUSTOM_DAYS + " days or fewer."
+      };
+    }
+    if (since > Math.floor(Date.now() / 1000)) {
+      return {
+        reason: "future-start", error: "The start date is in the future."
+      };
+    }
+    return { since: since, until: until };
+  }
+
+  // Opening the picker for the first time fills it with the whole local days
+  // the window on screen falls inside, which is the closest a pair of dates
+  // can come to the range already drawn: the fields hold days and nothing
+  // finer, so a rolling preset cannot be reproduced exactly. Applying an
+  // untouched 24h default therefore asks for yesterday from midnight rather
+  // than this time yesterday, and reads a few hours wider than the button it
+  // came from. Wider is the right way to miss: the narrower pair would drop
+  // hours the reader can already see.
+  function fillCustomDefaults() {
+    if (customStart.value && customEnd.value) { return; }
+    var today = new Date();
+    var span = windowSpan() || 24 * 60 * 60;
+    customStart.value = dayValue(new Date(today.getTime() - span * 1000));
+    customEnd.value = dayValue(today);
+  }
+
+  function toggleCustomPanel(open) {
+    customPanel.classList.toggle("open", open);
+    if (!open) { return; }
+    fillCustomDefaults();
+    // Nothing has been recorded for a day that has not happened, so neither
+    // field offers one.
+    customStart.max = dayValue(new Date());
+    customEnd.max = customStart.max;
+  }
+
+  // Sanitized tracing for the range picker, so a console trace can explain
+  // why a picked window did or did not become a request. Only a fixed action
+  // name, one of the fixed reason names above, and a count of days are
+  // passed; the dates the reader entered never reach the console.
+  function traceRange(action, reason, days) {
+    console.debug("roster chart range:", action, reason, days);
+  }
+
+  function applyCustomRange() {
+    var picked = pickedWindow();
+    if (picked.error) {
+      // The refusal ends the workflow here, without a request, so this is the
+      // only place a trace can say the reader asked for a window and did not
+      // get one.
+      traceRange("refuse", picked.reason, 0);
+      customError.textContent = picked.error;
+      return;
+    }
+    customError.textContent = "";
+    customWindow = picked;
+    state.range = "custom";
+    traceRange("apply", "ok", Math.round((picked.until - picked.since) / 86400));
+    syncRangeButtons();
+    refresh();
+  }
+
+  // The query the current selection asks for: a preset window by name, or the
+  // applied pair of epoch seconds.
+  function rangeQuery() {
+    if (state.range === "custom" && customWindow) {
+      return "?range=custom&start=" +
+        encodeURIComponent(String(customWindow.since)) +
+        "&end=" + encodeURIComponent(String(customWindow.until));
+    }
+    return "?range=" + encodeURIComponent(state.range);
+  }
+
   function syncRangeButtons() {
     document.querySelectorAll("[data-range]").forEach(function (button) {
       var active = button.getAttribute("data-range") === state.range;
@@ -3039,7 +3512,7 @@ button:focus-visible {
 
   function refresh() {
     chartStatus.textContent = "Loading\\u2026";
-    fetch("/api/roster?range=" + encodeURIComponent(state.range))
+    fetch("/api/roster" + rangeQuery())
       .then(function (response) {
         if (response.status === 401) {
           location.href = "/login";
@@ -3069,9 +3542,27 @@ button:focus-visible {
 
   document.querySelectorAll("[data-range]").forEach(function (button) {
     button.addEventListener("click", function () {
-      state.range = button.getAttribute("data-range");
+      var picked = button.getAttribute("data-range");
+      if (picked === "custom") {
+        // The Custom button only reveals the picker; the range itself does not
+        // move until a pair of dates is applied, so a stray tap costs nothing.
+        toggleCustomPanel(!customPanel.classList.contains("open"));
+        return;
+      }
+      toggleCustomPanel(false);
+      state.range = picked;
       syncRangeButtons();
       refresh();
+    });
+  });
+  document.getElementById("custom-apply").addEventListener(
+    "click", applyCustomRange);
+  [customStart, customEnd].forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyCustomRange();
+      }
     });
   });
   // Redraw when the breakpoint flips so the chart adopts the layout for the

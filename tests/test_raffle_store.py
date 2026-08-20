@@ -1699,6 +1699,37 @@ class TestRaffleStore:
             assert series[1089].samples == ()
             store.close()
 
+    def test_feast_stock_series_stops_at_the_window_end(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 50}, 100.0)
+            store.record_feast_counts({1078: 44}, 300.0)
+            store.record_feast_counts({1078: 40}, 500.0)
+
+            series = store.get_feast_stock_series(since=200.0, until=400.0)
+
+            # A sample recorded after the window belongs to no part of the
+            # chart being drawn, so a bounded window leaves it out.
+            assert [
+                (sample.recorded_at, sample.count)
+                for sample in series[1078].samples
+            ] == [(300.0, 44)]
+            # The count entering the window is still the one before it.
+            assert series[1078].prior_count == 50
+            store.close()
+
+    def test_feast_stock_series_keeps_a_sample_on_the_end_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 44}, 400.0)
+
+            series = store.get_feast_stock_series(since=200.0, until=400.0)
+
+            assert [
+                sample.count for sample in series[1078].samples
+            ] == [44]
+            store.close()
+
     def test_feast_stock_series_orders_samples_by_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")

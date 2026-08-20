@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from factories import config_from_env, forbidden_error, not_found_error
@@ -113,6 +114,23 @@ def bot(
     return FakeBot(store, guild, raffle_store)
 
 
+async def quiet_test_server(app: web.Application) -> TestServer:
+    """A test server whose runner is built the way ``WebServer.start`` builds
+    its own.
+
+    aiohttp's access log prints whole request targets, so every query string -
+    an OAuth code, a custom window's bounds - would reach the console through
+    it. ``WebServer.start`` passes ``access_log=None`` for exactly that
+    reason, but the test server builds its own runner and only its
+    ``start_server`` forwards runner keywords, so it is started here rather
+    than by the client. Without this the credential-leak assertions below
+    would be reading the harness's log instead of the bot's.
+    """
+    test_server = TestServer(app)
+    await test_server.start_server(access_log=None)
+    return test_server
+
+
 @pytest.fixture
 async def client(bot: FakeBot):
     server = WebServer(
@@ -120,8 +138,7 @@ async def client(bot: FakeBot):
         make_config(),
         cast(aiohttp.ClientSession, None),
     )
-    test_client = TestClient(TestServer(server.app))
-    await test_client.start_server()
+    test_client = TestClient(await quiet_test_server(server.app))
     yield test_client
     await test_client.close()
 
@@ -356,8 +373,7 @@ class TestAuthGate:
             make_config(),
             cast(aiohttp.ClientSession, None),
         )
-        test_client = TestClient(TestServer(server.app))
-        await test_client.start_server()
+        test_client = TestClient(await quiet_test_server(server.app))
         try:
             response = await test_client.get(
                 "/",
@@ -938,6 +954,177 @@ class TestFoodApi:
         assert response.status == 200
         assert (await response.json())["range"] == "24h"
 
+    async def test_a_custom_window_is_drawn_between_its_own_edges(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 50}, now - 5000)
+        raffle_store.record_feast_counts({1078: 44}, now - 3000)
+        # After the window's end, so it belongs to no part of the chart.
+        raffle_store.record_feast_counts({1078: 40}, now - 1000)
+
+        response = await client.get(
+            "/api/food",
+            params={
+                "range": "custom",
+                "start": str(int(now - 4000)),
+                "end": str(int(now - 2000)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert (payload["since"], payload["now"]) == (
+            float(int(now - 4000)),
+            float(int(now - 2000)),
+        )
+        tracked = payload["feasts"][0]
+        assert [point["count"] for point in tracked["points"]] == [44]
+        # The drop into the window is still measured against the count that
+        # entered it, which was recorded before the left-hand edge.
+        assert [
+            (removal["amount"], removal["remaining"])
+            for removal in tracked["removals"]
+        ] == [(6, 44)]
+
+    async def test_a_custom_window_stops_at_the_present(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = time.time()
+
+        response = await client.get(
+            "/api/food",
+            params={
+                "range": "custom",
+                "start": str(int(now - 3600)),
+                "end": str(int(now + 90 * 86400)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        # Nothing has been recorded for a day that has not happened, so the
+        # window closes at the moment of the request instead.
+        assert payload["now"] <= time.time()
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"range": "custom"}, id="no-bounds"),
+            pytest.param(
+                {"range": "custom", "start": "100"}, id="one-bound"
+            ),
+            pytest.param(
+                {"range": "custom", "start": "abc", "end": "200"},
+                id="unreadable",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "200.5", "end": "400"},
+                id="fractional",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "400", "end": "200"},
+                id="backwards",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "200", "end": "200"},
+                id="empty",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "1" * 310, "end": "200"},
+                id="too-large-to-hold",
+            ),
+        ],
+    )
+    async def test_rejects_a_custom_window_it_cannot_draw(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        params: dict[str, str],
+    ) -> None:
+        response = await client.get(
+            "/api/food",
+            params=params,
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+
+    async def test_a_custom_window_never_logs_the_query_it_came_from(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The custom range is the one query these dashboards read values out
+        # of, and both the refusal and the acceptance log a line about it. A
+        # marker is planted in every part of the query a caller controls, and
+        # none of it may come back out of the console.
+        marker = "s3cret-marker-never-log-me"
+        now = int(time.time())
+
+        with caplog.at_level("DEBUG"):
+            refused = await client.get(
+                "/api/food",
+                params={
+                    "range": "custom",
+                    "start": marker,
+                    "end": marker,
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+            served = await client.get(
+                "/api/food",
+                params={
+                    "range": "custom",
+                    "start": str(now - 3600),
+                    "end": str(now),
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+
+        assert refused.status == 400
+        assert served.status == 200
+        # The refusal names a fixed reason and the acceptance a count of days;
+        # neither carries any part of the query that produced it, and the
+        # session cookie's signing secret never reaches a log either.
+        assert marker not in caplog.text
+        assert SESSION_SECRET not in caplog.text
+        assert "reason=custom-bounds" in caplog.text
+        assert "feast usage window; days=0" in caplog.text
+
+    async def test_rejects_a_custom_window_wider_than_a_year(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = int(time.time())
+
+        response = await client.get(
+            "/api/food",
+            params={
+                "range": "custom",
+                "start": str(now - 400 * 86400),
+                "end": str(now),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
     async def test_unreachable_discord_returns_503_json(
         self,
         client: TestClient,
@@ -1129,6 +1316,158 @@ class TestRosterApi:
 
         assert response.status == 200
         assert (await response.json())["range"] == "24h"
+
+    async def test_a_custom_window_is_counted_back_from_the_anchor(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.import_membership_events(
+            [
+                ImportedMembershipEvent(1, now - 5000, JOIN, "One.1234"),
+                # Both after the window's end, so the count it closes at has
+                # to be recovered by unwinding them from the anchor.
+                ImportedMembershipEvent(2, now - 1500, LEAVE, "Two.5678"),
+                ImportedMembershipEvent(3, now - 1200, LEAVE, "Three.9012"),
+            ]
+        )
+        raffle_store.record_member_count(400, 2, now - 500)
+
+        response = await client.get(
+            "/api/roster",
+            params={
+                "range": "custom",
+                "start": str(int(now - 6000)),
+                "end": str(int(now - 2000)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert (payload["since"], payload["now"]) == (
+            float(int(now - 6000)),
+            float(int(now - 2000)),
+        )
+        # Only the join falls in the window, and it stands two members above
+        # where the roster ended up.
+        assert [
+            (change["kind"], change["name"], change["count"])
+            for change in payload["events"]
+        ] == [(JOIN, "One.1234", 402)]
+        assert (payload["joins"], payload["leaves"], payload["kicks"]) == (
+            1,
+            0,
+            0,
+        )
+        assert payload["member_count"] == 402
+        assert [point["count"] for point in payload["points"]] == [
+            401,
+            402,
+            402,
+        ]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"range": "custom"}, id="no-bounds"),
+            pytest.param(
+                {"range": "custom", "start": "abc", "end": "200"},
+                id="unreadable",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "400", "end": "200"},
+                id="backwards",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "200", "end": "9" * 310},
+                id="too-large-to-hold",
+            ),
+        ],
+    )
+    async def test_rejects_a_custom_window_it_cannot_draw(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        params: dict[str, str],
+    ) -> None:
+        response = await client.get(
+            "/api/roster",
+            params=params,
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+
+    async def test_a_custom_window_never_logs_the_query_it_came_from(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The custom range is the one query these dashboards read values out
+        # of, and both the refusal and the acceptance log a line about it. A
+        # marker is planted in every part of the query a caller controls, and
+        # none of it may come back out of the console.
+        marker = "s3cret-marker-never-log-me"
+        now = int(time.time())
+
+        with caplog.at_level("DEBUG"):
+            refused = await client.get(
+                "/api/roster",
+                params={
+                    "range": "custom",
+                    "start": marker,
+                    "end": marker,
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+            served = await client.get(
+                "/api/roster",
+                params={
+                    "range": "custom",
+                    "start": str(now - 3600),
+                    "end": str(now),
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+
+        assert refused.status == 400
+        assert served.status == 200
+        # The refusal names a fixed reason and the acceptance a count of days;
+        # neither carries any part of the query that produced it, and the
+        # session cookie's signing secret never reaches a log either.
+        assert marker not in caplog.text
+        assert SESSION_SECRET not in caplog.text
+        assert "reason=custom-bounds" in caplog.text
+        assert "roster history window; days=0" in caplog.text
+
+    async def test_rejects_a_custom_window_wider_than_a_year(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = int(time.time())
+
+        response = await client.get(
+            "/api/roster",
+            params={
+                "range": "custom",
+                "start": str(now - 400 * 86400),
+                "end": str(now),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
 
     async def test_unreachable_discord_returns_503_json(
         self,

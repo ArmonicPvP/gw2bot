@@ -1,6 +1,7 @@
 import re
 
-from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE
+from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE, ROSTER_PAGE
+from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 
 
 def _call_arguments(source: str, name: str) -> list[list[str]]:
@@ -250,13 +251,49 @@ class TestFoodPage:
 
     def test_legend_sits_below_the_chart_as_tappable_swatches(self) -> None:
         # The legend follows the chart in the DOM and each entry is a button
-        # that reveals its feast name when tapped.
+        # that switches its feast off and back on.
         chart_index = FOOD_PAGE.index('<div id="chart">')
         legend_index = FOOD_PAGE.index('<div id="legend"')
         assert chart_index < legend_index
-        assert 'var item = el("button", "item");' in FOOD_PAGE
-        assert 'item.classList.toggle("show-name");' in FOOD_PAGE
-        assert ".legend .item.show-name .legend-name { display: inline; }" in (
+        assert 'var item = el("button", hidden ? "item off" : "item");' in (
+            FOOD_PAGE
+        )
+        assert 'item.setAttribute("aria-pressed", hidden ? "false" : "true")' in (
+            FOOD_PAGE
+        )
+
+    def test_the_legend_switches_a_feast_off_and_back_on(self) -> None:
+        # Clicking an entry drops its feast out of the drawing entirely, so
+        # the hover and the tooltip lose it too rather than leaving an
+        # invisible line still selectable.
+        assert "if (isHidden(feast)) { return; }" in FOOD_PAGE
+        assert "state.hidden[feast.id] = true;" in FOOD_PAGE
+        assert "delete state.hidden[feast.id];" in FOOD_PAGE
+        assert "renderLegend();\n        renderChart();" in FOOD_PAGE
+
+    def test_a_switched_off_feast_keeps_its_place_in_the_legend(self) -> None:
+        # It is dimmed with its colour reduced to an outline, so what is
+        # missing from the chart is still named and one click puts it back.
+        assert ".legend .item.off { opacity: 0.55; }" in FOOD_PAGE
+        assert 'swatch.style.boxShadow = "inset 0 0 0 2px " + color;' in (
+            FOOD_PAGE
+        )
+        mobile = FOOD_PAGE[FOOD_PAGE.index("@media (max-width: 640px)"):]
+        # On a phone the names stay hidden, except on a feast switched off:
+        # a tap still answers "which one is this?", by taking the line away
+        # and labelling what went.
+        assert ".legend .legend-name { display: none; }" in mobile
+        assert ".legend .item.off .legend-name { display: inline; }" in mobile
+        assert "show-name" not in FOOD_PAGE
+
+    def test_an_all_off_legend_says_so_instead_of_reading_as_no_data(
+        self,
+    ) -> None:
+        # An empty window and a legend switched all the way off are different
+        # states, and only one of them is worth waiting for more data over.
+        assert "function chartStatusText(plottedCount) {" in FOOD_PAGE
+        assert "if (feasts().length && !visibleFeasts().length) {" in FOOD_PAGE
+        assert '"Every feast is switched off. Click one in the legend to draw "' in (
             FOOD_PAGE
         )
 
@@ -407,6 +444,16 @@ class TestFoodPage:
                 '"page-" + eventKind(event)'
             ), call
 
+    def test_legend_traces_carry_no_feast_name_or_count(self) -> None:
+        # The legend trace is held to the same rule: a fixed action name and a
+        # count of the feasts left on, never a feast name or a stock value.
+        assert "function traceLegend(action, count) {" in FOOD_PAGE
+        for call in _call_arguments(FOOD_PAGE, "traceLegend"):
+            assert call == [
+                'hidden ? "show" : "hide"',
+                "visibleFeasts().length",
+            ], call
+
     def test_traced_pointer_and_event_names_are_narrowed(self) -> None:
         # pointerType and type are reflected into the console, so both are
         # mapped onto a closed set of spec names first.
@@ -424,15 +471,20 @@ class TestFoodPage:
         assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
-        # Two console calls exist on this page and no others: the sanitized
-        # selection trace, and the load failure that logs an error's type and
-        # message. Anything else would be an unreviewed path to the console.
+        # Four console calls exist on this page and no others: the sanitized
+        # selection, legend and range traces, and the load failure that logs
+        # an error's type and message. Anything else would be an unreviewed
+        # path to the console.
         assert re.findall(r"console\.\w+", FOOD_PAGE) == [
+            "console.debug",
+            "console.debug",
             "console.debug",
             "console.error",
         ]
         assert _call_arguments(FOOD_PAGE, "console.debug") == [
-            ['"feast chart selection:"', "action", "reason", "count"]
+            ['"feast chart selection:"', "action", "reason", "count"],
+            ['"feast chart legend:"', "action", "count"],
+            ['"feast chart range:"', "action", "reason", "days"],
         ]
 
     def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:
@@ -471,3 +523,173 @@ class TestFoodPage:
         # Like the calendar, feast names and rows are only ever set through
         # textContent or attributes, never innerHTML.
         assert "innerHTML" not in FOOD_PAGE
+
+
+class TestCustomRangePicker:
+    """Both dashboards offer the same picker, so both are checked together."""
+
+    def test_both_dashboards_offer_a_custom_range(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert 'data-range="custom"' in page
+            assert 'id="custom-start"' in page
+            assert 'id="custom-end"' in page
+            assert 'id="custom-apply"' in page
+
+    def test_the_picker_stays_hidden_until_the_button_reveals_it(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert ".custom {\n  display: none;" in page
+            assert ".custom.open { display: flex; }" in page
+            assert 'if (picked === "custom") {' in page
+            assert (
+                "toggleCustomPanel(!customPanel.classList.contains(\"open\"));"
+            ) in page
+
+    def test_a_picked_pair_covers_whole_local_days(self) -> None:
+        # The window opens at midnight on the first day and closes on the last
+        # second of the second, so one day picked twice is that whole day.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "var since = Math.floor(from.getTime() / 1000);" in page
+            assert (
+                "to.getFullYear(), to.getMonth(), to.getDate() + 1"
+            ) in page
+
+    def test_a_range_that_cannot_be_drawn_is_named_not_fetched(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert 'error: "Pick a start and an end date."' in page
+            assert 'error: "The end date is before the start date."' in page
+            assert 'error: "The start date is in the future."' in page
+            # The refusal is traced, reaches the reader, and returns before
+            # any request is made.
+            refusal = page.split("if (picked.error) {", 1)[1]
+            refusal = refusal.split("    }", 1)[0]
+            assert 'traceRange("refuse", picked.reason, 0);' in refusal
+            assert "customError.textContent = picked.error;" in refusal
+            assert "return;" in refusal
+            assert "fetch(" not in refusal
+
+    def test_untouched_defaults_cover_the_window_in_whole_days(self) -> None:
+        # The fields hold days and nothing finer, so the defaults are the
+        # whole local days the drawn window falls inside rather than a copy of
+        # it. Applying an untouched 24h default reads a few hours wider than
+        # the button it came from, which is the right way to miss: the
+        # narrower pair would drop hours the reader can already see.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "var span = windowSpan() || 24 * 60 * 60;" in page
+            assert (
+                "customStart.value = "
+                "dayValue(new Date(today.getTime() - span * 1000));"
+            ) in page
+            assert "customEnd.value = dayValue(today);" in page
+
+    def test_a_refused_range_is_traced_with_a_fixed_reason(self) -> None:
+        # A refusal ends the workflow in the browser, without a request, so
+        # this trace is the only place a console can say the reader asked for
+        # a window and did not get one.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "function traceRange(action, reason, days) {" in page
+            traced = _call_arguments(page, "traceRange")
+            assert traced == [
+                ['"refuse"', "picked.reason", "0"],
+                [
+                    '"apply"',
+                    '"ok"',
+                    "Math.round((picked.until - picked.since) / 86400)",
+                ],
+            ], traced
+            # Every way pickedWindow can refuse names itself, so none of them
+            # reaches the trace as an undefined reason.
+            for reason in (
+                '"no-dates"',
+                '"backwards"',
+                '"too-wide"',
+                '"future-start"',
+            ):
+                assert "reason: %s" % reason in page
+
+    def test_range_traces_carry_no_dates_the_reader_entered(self) -> None:
+        # The trace is held to the same rule as the selection and legend ones:
+        # a fixed action name, a fixed reason name and a count of days. The
+        # picked dates and the sentence shown to the reader stay out of it.
+        allowed = re.compile(
+            r"""^(
+                "(refuse|apply|ok)"
+                | picked\.reason
+                | 0
+                | Math\.round\(\(picked\.until\ -\ picked\.since\)\ /\ 86400\)
+            )$""",
+            re.X,
+        )
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            for call in _call_arguments(page, "traceRange"):
+                assert len(call) == 3, call
+                for arg in call:
+                    assert allowed.match(arg), arg
+
+    def test_the_picker_mirrors_the_servers_own_ceiling(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "var MAX_CUSTOM_DAYS = 366;" in page
+        assert MAX_CUSTOM_WINDOW_SECONDS == 366 * 24 * 60 * 60
+
+    def test_an_applied_pair_is_sent_as_epoch_seconds(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert '"?range=custom&start=" +' in page
+            assert (
+                'encodeURIComponent(String(customWindow.since))'
+            ) in page
+        assert 'fetch("/api/food" + rangeQuery())' in FOOD_PAGE
+        assert 'fetch("/api/roster" + rangeQuery())' in ROSTER_PAGE
+
+    def test_axis_labels_follow_the_windows_width(self) -> None:
+        # A custom window has no preset name to key the label format off, so
+        # the span decides: about a day or less reads off the clock.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "if (windowSpan() <= 48 * 60 * 60) {" in page
+            assert 'if (state.range === "24h") {' not in page
+
+
+class TestRosterTable:
+    def test_a_long_account_name_wraps_instead_of_widening_the_table(
+        self,
+    ) -> None:
+        # A guild account name has no spaces to break at, so without this the
+        # table grows past its card and carries the rest of the row off the
+        # page. `anywhere` is what also shrinks the column's minimum width,
+        # which is the width the table lays itself out from.
+        assert (
+            "table.changes td.name, table.changes td.by "
+            "{ overflow-wrap: anywhere; }"
+        ) in ROSTER_PAGE
+        assert 'el("td", "name", change.name)' in ROSTER_PAGE
+        assert ".chart-tooltip .tip-row .name { overflow-wrap: anywhere; }" in (
+            ROSTER_PAGE
+        )
+
+    def test_a_phone_shows_the_change_as_its_dot_alone(self) -> None:
+        # The word beside the dot says nothing the colour does not, and it
+        # costs the account column width a phone has none of to spare.
+        assert 'el("span", "change-label", kindOf(change.kind).label)' in (
+            ROSTER_PAGE
+        )
+        mobile = ROSTER_PAGE[ROSTER_PAGE.index("@media (max-width: 640px)"):]
+        assert "table.changes .change-label {" in mobile
+        # Out of sight rather than out of the document, so a screen reader
+        # still reads each row's change out.
+        assert "clip-path: inset(50%);" in mobile
+        assert "display: none" not in mobile.split(
+            "table.changes .change-label {"
+        )[1].split("}")[0]
+
+    def test_the_lone_dot_sits_under_its_heading(self) -> None:
+        # With only the dot left in the cell, the column is centred so it
+        # reads as a column of dots; the heading carries the same class so
+        # the two stay over each other.
+        assert 'el("th", "change", "Change")' in ROSTER_PAGE
+        mobile = ROSTER_PAGE[ROSTER_PAGE.index("@media (max-width: 640px)"):]
+        assert "table.changes .change { text-align: center; }" in mobile
+        assert "table.changes .change .dot { margin-right: 0; }" in mobile
+        desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
+        assert "text-align: center" not in desktop
+
+    def test_the_desktop_layout_keeps_the_word(self) -> None:
+        desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
+        assert "change-label" not in desktop

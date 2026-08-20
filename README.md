@@ -1118,6 +1118,22 @@ feast's on-hand count over the last 24 hours, 7 days, or 30 days, and lists the
 removals in that window — when each drop happened, how large it was, and what
 was left afterwards — with one tab per feast.
 
+Clicking a colour in the legend below the chart switches that feast off, and
+clicking it again brings it back — useful when one feast's line sits on top of
+another's. A feast that is off keeps its place in the legend, dimmed with its
+colour reduced to an outline, and its line, points and hover readings are gone
+from the chart until it is switched back on. The choice survives a change of
+range, and the tabbed removals list below is unaffected. On a phone, where the
+legend is a compact row of colours, a switched-off feast shows its name.
+
+**Custom** opens a pair of date fields beside the preset buttons. The window
+they describe covers whole local days, from midnight on the first through the
+last second of the second, and it is drawn once **Apply** is pressed — the
+preset buttons keep working until then. A range that runs past today stops at
+the present, because nothing has been recorded for a day that has not happened,
+and a range wider than 366 days or ending before it starts is refused with the
+reason in the header rather than loaded.
+
 Access is narrower than the calendar's: on top of being a signed-in guild
 member, the viewer must hold role `1317124663847157880`, the role that also
 gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
@@ -1137,9 +1153,21 @@ on a phone, names the account and shows the count it left the roster at. Below
 the chart every change in the window is listed newest first, with who did the
 kicking where the guild log named them.
 
+**Custom** opens the same pair of date fields the feast dashboard has, with the
+same whole-day window, the same **Apply**, and the same limits. A window that
+closes in the past is counted back from the last member count the bot observed,
+so its right-hand edge reads the roster as it stood then rather than as it
+stands now; the count beside the heading says "at the end" instead of "now"
+to match.
+
 The y axis covers the counts the window actually reached rather than the whole
 500-member ceiling, so a handful of departures is visible rather than a flat
 line near the top.
+
+A long account name wraps inside its column rather than widening the table, and
+on a phone each row's change is the coloured dot alone — the word beside it says
+nothing the colour does not, and the account column needs the width. The word
+stays in the table for a screen reader to read out.
 
 Access is gated by `/settings roles roster_page`, which starts as the role that
 draws the raffle, because the page names who was kicked and by whom. Point it
