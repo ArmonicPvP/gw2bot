@@ -471,11 +471,12 @@ class TestFoodPage:
         assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
-        # Three console calls exist on this page and no others: the sanitized
-        # selection and legend traces, and the load failure that logs an
-        # error's type and message. Anything else would be an unreviewed path
-        # to the console.
+        # Four console calls exist on this page and no others: the sanitized
+        # selection, legend and range traces, and the load failure that logs
+        # an error's type and message. Anything else would be an unreviewed
+        # path to the console.
         assert re.findall(r"console\.\w+", FOOD_PAGE) == [
+            "console.debug",
             "console.debug",
             "console.debug",
             "console.error",
@@ -483,6 +484,7 @@ class TestFoodPage:
         assert _call_arguments(FOOD_PAGE, "console.debug") == [
             ['"feast chart selection:"', "action", "reason", "count"],
             ['"feast chart legend:"', "action", "count"],
+            ['"feast chart range:"', "action", "reason", "days"],
         ]
 
     def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:
@@ -556,10 +558,58 @@ class TestCustomRangePicker:
             assert 'error: "Pick a start and an end date."' in page
             assert 'error: "The end date is before the start date."' in page
             assert 'error: "The start date is in the future."' in page
-            # The refusal reaches the reader and no request is made.
-            assert (
-                "if (picked.error) {\n      customError.textContent"
-            ) in page
+            # The refusal is traced, reaches the reader, and returns before
+            # any request is made.
+            refusal = page.split("if (picked.error) {", 1)[1]
+            refusal = refusal.split("    }", 1)[0]
+            assert 'traceRange("refuse", picked.reason, 0);' in refusal
+            assert "customError.textContent = picked.error;" in refusal
+            assert "return;" in refusal
+            assert "fetch(" not in refusal
+
+    def test_a_refused_range_is_traced_with_a_fixed_reason(self) -> None:
+        # A refusal ends the workflow in the browser, without a request, so
+        # this trace is the only place a console can say the reader asked for
+        # a window and did not get one.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "function traceRange(action, reason, days) {" in page
+            traced = _call_arguments(page, "traceRange")
+            assert traced == [
+                ['"refuse"', "picked.reason", "0"],
+                [
+                    '"apply"',
+                    '"ok"',
+                    "Math.round((picked.until - picked.since) / 86400)",
+                ],
+            ], traced
+            # Every way pickedWindow can refuse names itself, so none of them
+            # reaches the trace as an undefined reason.
+            for reason in (
+                '"no-dates"',
+                '"backwards"',
+                '"too-wide"',
+                '"future-start"',
+            ):
+                assert "reason: %s" % reason in page
+
+    def test_range_traces_carry_no_dates_the_reader_entered(self) -> None:
+        # The trace is held to the same rule as the selection and legend ones:
+        # a fixed action name, a fixed reason name and a count of days. The
+        # picked dates and the sentence shown to the reader stay out of it.
+        allowed = re.compile(
+            r"""^(
+                "(refuse|apply|ok)"
+                | picked\.reason
+                | 0
+                | Math\.round\(\(picked\.until\ -\ picked\.since\)\ /\ 86400\)
+            )$""",
+            re.X,
+        )
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            for call in _call_arguments(page, "traceRange"):
+                assert len(call) == 3, call
+                for arg in call:
+                    assert allowed.match(arg), arg
 
     def test_the_picker_mirrors_the_servers_own_ceiling(self) -> None:
         for page in (FOOD_PAGE, ROSTER_PAGE):

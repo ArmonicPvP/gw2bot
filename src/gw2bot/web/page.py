@@ -2204,25 +2204,36 @@ button:focus-visible {
   // picked pair covers whole local days: it opens at midnight on the first and
   // closes at the last second of the second, so picking one day twice is that
   // whole day rather than an empty instant.
+  // Each refusal carries a fixed reason name beside the sentence the reader
+  // sees, because the sentence is prose meant for them and the name is what
+  // the console trace is allowed to say about their dates.
   function pickedWindow() {
     var from = parseDay(customStart.value);
     var to = parseDay(customEnd.value);
     if (!from || !to) {
-      return { error: "Pick a start and an end date." };
+      return {
+        reason: "no-dates", error: "Pick a start and an end date."
+      };
     }
     var since = Math.floor(from.getTime() / 1000);
     var until = Math.floor(new Date(
       to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() / 1000) - 1;
     if (until <= since) {
-      return { error: "The end date is before the start date." };
+      return {
+        reason: "backwards",
+        error: "The end date is before the start date."
+      };
     }
     if (until - since > MAX_CUSTOM_DAYS * 86400) {
       return {
+        reason: "too-wide",
         error: "Pick a range of " + MAX_CUSTOM_DAYS + " days or fewer."
       };
     }
     if (since > Math.floor(Date.now() / 1000)) {
-      return { error: "The start date is in the future." };
+      return {
+        reason: "future-start", error: "The start date is in the future."
+      };
     }
     return { since: since, until: until };
   }
@@ -2248,15 +2259,28 @@ button:focus-visible {
     customEnd.max = customStart.max;
   }
 
+  // Sanitized tracing for the range picker, so a console trace can explain
+  // why a picked window did or did not become a request. Only a fixed action
+  // name, one of the fixed reason names above, and a count of days are
+  // passed; the dates the reader entered never reach the console.
+  function traceRange(action, reason, days) {
+    console.debug("feast chart range:", action, reason, days);
+  }
+
   function applyCustomRange() {
     var picked = pickedWindow();
     if (picked.error) {
+      // The refusal ends the workflow here, without a request, so this is the
+      // only place a trace can say the reader asked for a window and did not
+      // get one.
+      traceRange("refuse", picked.reason, 0);
       customError.textContent = picked.error;
       return;
     }
     customError.textContent = "";
     customWindow = picked;
     state.range = "custom";
+    traceRange("apply", "ok", Math.round((picked.until - picked.since) / 86400));
     syncRangeButtons();
     refresh();
   }
@@ -3376,25 +3400,36 @@ button:focus-visible {
   // picked pair covers whole local days: it opens at midnight on the first and
   // closes at the last second of the second, so picking one day twice is that
   // whole day rather than an empty instant.
+  // Each refusal carries a fixed reason name beside the sentence the reader
+  // sees, because the sentence is prose meant for them and the name is what
+  // the console trace is allowed to say about their dates.
   function pickedWindow() {
     var from = parseDay(customStart.value);
     var to = parseDay(customEnd.value);
     if (!from || !to) {
-      return { error: "Pick a start and an end date." };
+      return {
+        reason: "no-dates", error: "Pick a start and an end date."
+      };
     }
     var since = Math.floor(from.getTime() / 1000);
     var until = Math.floor(new Date(
       to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() / 1000) - 1;
     if (until <= since) {
-      return { error: "The end date is before the start date." };
+      return {
+        reason: "backwards",
+        error: "The end date is before the start date."
+      };
     }
     if (until - since > MAX_CUSTOM_DAYS * 86400) {
       return {
+        reason: "too-wide",
         error: "Pick a range of " + MAX_CUSTOM_DAYS + " days or fewer."
       };
     }
     if (since > Math.floor(Date.now() / 1000)) {
-      return { error: "The start date is in the future." };
+      return {
+        reason: "future-start", error: "The start date is in the future."
+      };
     }
     return { since: since, until: until };
   }
@@ -3420,15 +3455,28 @@ button:focus-visible {
     customEnd.max = customStart.max;
   }
 
+  // Sanitized tracing for the range picker, so a console trace can explain
+  // why a picked window did or did not become a request. Only a fixed action
+  // name, one of the fixed reason names above, and a count of days are
+  // passed; the dates the reader entered never reach the console.
+  function traceRange(action, reason, days) {
+    console.debug("roster chart range:", action, reason, days);
+  }
+
   function applyCustomRange() {
     var picked = pickedWindow();
     if (picked.error) {
+      // The refusal ends the workflow here, without a request, so this is the
+      // only place a trace can say the reader asked for a window and did not
+      // get one.
+      traceRange("refuse", picked.reason, 0);
       customError.textContent = picked.error;
       return;
     }
     customError.textContent = "";
     customWindow = picked;
     state.range = "custom";
+    traceRange("apply", "ok", Math.round((picked.until - picked.since) / 86400));
     syncRangeButtons();
     refresh();
   }
