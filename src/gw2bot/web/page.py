@@ -2238,9 +2238,14 @@ button:focus-visible {
     return { since: since, until: until };
   }
 
-  // Opening the picker for the first time fills it with the window already on
-  // screen, so applying without touching either field draws the same stretch
-  // of history the preset button did.
+  // Opening the picker for the first time fills it with the whole local days
+  // the window on screen falls inside, which is the closest a pair of dates
+  // can come to the range already drawn: the fields hold days and nothing
+  // finer, so a rolling preset cannot be reproduced exactly. Applying an
+  // untouched 24h default therefore asks for yesterday from midnight rather
+  // than this time yesterday, and reads a few hours wider than the button it
+  // came from. Wider is the right way to miss: the narrower pair would drop
+  // hours the reader can already see.
   function fillCustomDefaults() {
     if (customStart.value && customEnd.value) { return; }
     var today = new Date();
@@ -3434,9 +3439,14 @@ button:focus-visible {
     return { since: since, until: until };
   }
 
-  // Opening the picker for the first time fills it with the window already on
-  // screen, so applying without touching either field draws the same stretch
-  // of history the preset button did.
+  // Opening the picker for the first time fills it with the whole local days
+  // the window on screen falls inside, which is the closest a pair of dates
+  // can come to the range already drawn: the fields hold days and nothing
+  // finer, so a rolling preset cannot be reproduced exactly. Applying an
+  // untouched 24h default therefore asks for yesterday from midnight rather
+  // than this time yesterday, and reads a few hours wider than the button it
+  // came from. Wider is the right way to miss: the narrower pair would drop
+  // hours the reader can already see.
   function fillCustomDefaults() {
     if (customStart.value && customEnd.value) { return; }
     var today = new Date();

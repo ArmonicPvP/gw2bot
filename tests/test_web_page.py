@@ -567,6 +567,20 @@ class TestCustomRangePicker:
             assert "return;" in refusal
             assert "fetch(" not in refusal
 
+    def test_untouched_defaults_cover_the_window_in_whole_days(self) -> None:
+        # The fields hold days and nothing finer, so the defaults are the
+        # whole local days the drawn window falls inside rather than a copy of
+        # it. Applying an untouched 24h default reads a few hours wider than
+        # the button it came from, which is the right way to miss: the
+        # narrower pair would drop hours the reader can already see.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "var span = windowSpan() || 24 * 60 * 60;" in page
+            assert (
+                "customStart.value = "
+                "dayValue(new Date(today.getTime() - span * 1000));"
+            ) in page
+            assert "customEnd.value = dayValue(today);" in page
+
     def test_a_refused_range_is_traced_with_a_fixed_reason(self) -> None:
         # A refusal ends the workflow in the browser, without a request, so
         # this trace is the only place a console can say the reader asked for
