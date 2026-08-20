@@ -283,6 +283,15 @@ class RaffleStore:
         moving it to the latest observation puts the whole gap behind the
         anchor, where the missing changes can no longer be double-counted.
 
+        The anchor's moment only ever moves forward, whether the count moved
+        or not. A clock stepped back between two polls - an NTP correction, a
+        host resumed from suspend - would otherwise backdate it, and every
+        change between that stamp and the previous observation would be
+        replayed forward on top of a count that already includes them. The
+        event times those changes carry come from the Guild Wars 2 API rather
+        than this host, so a local clock going backwards moves the anchor out
+        from under them; refusing to let it is what keeps the two comparable.
+
         The pending-invite count recorded alongside is whatever stood at that
         moment, not a series of its own - it moves without the member count
         and so is not what decides that a row is written.
@@ -293,14 +302,15 @@ class RaffleStore:
                 .order_by(GuildMemberCountLogRecord.log_id.desc())
                 .limit(1)
             ).first()
+            observed_at = (
+                recorded_at
+                if latest is None
+                else max(recorded_at, latest.recorded_at)
+            )
             if latest is not None and latest.member_count == member_count:
-                # Only ever forward. An observation older than the one on the
-                # row - a clock stepped back, a late caller - would otherwise
-                # drag the anchor into the past and re-open the gap this
-                # refresh exists to close.
-                refreshed = recorded_at > latest.recorded_at
+                refreshed = observed_at > latest.recorded_at
                 if refreshed:
-                    latest.recorded_at = recorded_at
+                    latest.recorded_at = observed_at
                     latest.pending_invite_count = pending_invite_count
                 LOGGER.debug(
                     "Guild member count unchanged; anchor_refreshed=%s "
@@ -313,7 +323,7 @@ class RaffleStore:
                 GuildMemberCountLogRecord(
                     member_count=member_count,
                     pending_invite_count=pending_invite_count,
-                    recorded_at=recorded_at,
+                    recorded_at=observed_at,
                 )
             )
         LOGGER.debug(

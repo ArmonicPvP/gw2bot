@@ -326,6 +326,48 @@ class TestMemberCountLog:
         assert latest is not None
         assert (latest.recorded_at, latest.pending_invite_count) == (NOW, 3)
 
+    def test_a_backdated_changed_count_keeps_the_anchor_where_it_was(
+        self,
+        store: RaffleStore,
+        tmp_path: Path,
+    ) -> None:
+        # The count moving is no reason to let a stepped-back clock backdate
+        # the anchor: membership events carry Guild Wars 2 times, so an anchor
+        # dragged behind them would see them as still to come and replay them
+        # onto a count that already holds them.
+        store.record_member_count(400, 3, NOW)
+
+        assert store.record_member_count(401, 3, NOW - 600)
+
+        latest = store.get_last_member_count()
+        assert latest is not None
+        assert (latest.member_count, latest.recorded_at) == (401, NOW)
+        # The new count is still a row of its own; only its moment is held.
+        assert count_log_rows(tmp_path) == 2
+
+    def test_a_backdated_count_does_not_replay_a_counted_change(
+        self,
+        store: RaffleStore,
+    ) -> None:
+        # The join is older than the 401 observation, so that count already
+        # holds it. A backdated anchor would sit behind the join and count it
+        # a second time; holding the anchor where it was keeps it behind.
+        store.import_membership_events(
+            [ImportedMembershipEvent(1, NOW - 200, JOIN, "New.1234")]
+        )
+        store.record_member_count(401, 0, NOW - 100)
+
+        store.record_member_count(402, 0, NOW - 500)
+
+        series = build_roster_series(
+            store.get_membership_events(NOW - 2000),
+            store.get_last_member_count(),
+            NOW - 2000,
+            NOW,
+        )
+
+        assert series.points[-1].member_count == 402
+
     def test_reports_no_sample_before_the_first_poll(
         self,
         store: RaffleStore,
