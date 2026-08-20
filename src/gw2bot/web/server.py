@@ -664,12 +664,14 @@ class WebServer:
 
         Both bounds are whole seconds the page computed from the dates the
         reader picked, so the pair is read as integers and anything else is
-        refused rather than coerced.
+        refused rather than coerced. A whole number too large to be a float is
+        refused with them: Python holds it happily, and the window is carried
+        as seconds from the epoch the rest of the way.
         """
         try:
             since = float(int(request.query["start"]))
             requested_end = float(int(request.query["end"]))
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, OverflowError):
             LOGGER.debug("Rejected %s request; reason=custom-bounds", subject)
             return self._json({"error": "invalid range"}, status=400)
         # Nothing has been recorded for a moment that has not happened, so a

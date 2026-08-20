@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from factories import config_from_env, forbidden_error, not_found_error
@@ -113,6 +114,23 @@ def bot(
     return FakeBot(store, guild, raffle_store)
 
 
+async def quiet_test_server(app: web.Application) -> TestServer:
+    """A test server whose runner is built the way ``WebServer.start`` builds
+    its own.
+
+    aiohttp's access log prints whole request targets, so every query string -
+    an OAuth code, a custom window's bounds - would reach the console through
+    it. ``WebServer.start`` passes ``access_log=None`` for exactly that
+    reason, but the test server builds its own runner and only its
+    ``start_server`` forwards runner keywords, so it is started here rather
+    than by the client. Without this the credential-leak assertions below
+    would be reading the harness's log instead of the bot's.
+    """
+    test_server = TestServer(app)
+    await test_server.start_server(access_log=None)
+    return test_server
+
+
 @pytest.fixture
 async def client(bot: FakeBot):
     server = WebServer(
@@ -120,8 +138,7 @@ async def client(bot: FakeBot):
         make_config(),
         cast(aiohttp.ClientSession, None),
     )
-    test_client = TestClient(TestServer(server.app))
-    await test_client.start_server()
+    test_client = TestClient(await quiet_test_server(server.app))
     yield test_client
     await test_client.close()
 
@@ -356,8 +373,7 @@ class TestAuthGate:
             make_config(),
             cast(aiohttp.ClientSession, None),
         )
-        test_client = TestClient(TestServer(server.app))
-        await test_client.start_server()
+        test_client = TestClient(await quiet_test_server(server.app))
         try:
             response = await test_client.get(
                 "/",
@@ -1022,6 +1038,10 @@ class TestFoodApi:
                 {"range": "custom", "start": "200", "end": "200"},
                 id="empty",
             ),
+            pytest.param(
+                {"range": "custom", "start": "1" * 310, "end": "200"},
+                id="too-large-to-hold",
+            ),
         ],
     )
     async def test_rejects_a_custom_window_it_cannot_draw(
@@ -1038,6 +1058,52 @@ class TestFoodApi:
 
         assert response.status == 400
         assert await response.json() == {"error": "invalid range"}
+
+
+    async def test_a_custom_window_never_logs_the_query_it_came_from(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The custom range is the one query these dashboards read values out
+        # of, and both the refusal and the acceptance log a line about it. A
+        # marker is planted in every part of the query a caller controls, and
+        # none of it may come back out of the console.
+        marker = "s3cret-marker-never-log-me"
+        now = int(time.time())
+
+        with caplog.at_level("DEBUG"):
+            refused = await client.get(
+                "/api/food",
+                params={
+                    "range": "custom",
+                    "start": marker,
+                    "end": marker,
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+            served = await client.get(
+                "/api/food",
+                params={
+                    "range": "custom",
+                    "start": str(now - 3600),
+                    "end": str(now),
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+
+        assert refused.status == 400
+        assert served.status == 200
+        # The refusal names a fixed reason and the acceptance a count of days;
+        # neither carries any part of the query that produced it, and the
+        # session cookie's signing secret never reaches a log either.
+        assert marker not in caplog.text
+        assert SESSION_SECRET not in caplog.text
+        assert "reason=custom-bounds" in caplog.text
+        assert "feast usage window; days=0" in caplog.text
 
     async def test_rejects_a_custom_window_wider_than_a_year(
         self,
@@ -1316,6 +1382,10 @@ class TestRosterApi:
                 {"range": "custom", "start": "400", "end": "200"},
                 id="backwards",
             ),
+            pytest.param(
+                {"range": "custom", "start": "200", "end": "9" * 310},
+                id="too-large-to-hold",
+            ),
         ],
     )
     async def test_rejects_a_custom_window_it_cannot_draw(
@@ -1332,6 +1402,52 @@ class TestRosterApi:
 
         assert response.status == 400
         assert await response.json() == {"error": "invalid range"}
+
+
+    async def test_a_custom_window_never_logs_the_query_it_came_from(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The custom range is the one query these dashboards read values out
+        # of, and both the refusal and the acceptance log a line about it. A
+        # marker is planted in every part of the query a caller controls, and
+        # none of it may come back out of the console.
+        marker = "s3cret-marker-never-log-me"
+        now = int(time.time())
+
+        with caplog.at_level("DEBUG"):
+            refused = await client.get(
+                "/api/roster",
+                params={
+                    "range": "custom",
+                    "start": marker,
+                    "end": marker,
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+            served = await client.get(
+                "/api/roster",
+                params={
+                    "range": "custom",
+                    "start": str(now - 3600),
+                    "end": str(now),
+                    "token": marker,
+                },
+                headers=self._officer_headers(guild),
+            )
+
+        assert refused.status == 400
+        assert served.status == 200
+        # The refusal names a fixed reason and the acceptance a count of days;
+        # neither carries any part of the query that produced it, and the
+        # session cookie's signing secret never reaches a log either.
+        assert marker not in caplog.text
+        assert SESSION_SECRET not in caplog.text
+        assert "reason=custom-bounds" in caplog.text
+        assert "roster history window; days=0" in caplog.text
 
     async def test_rejects_a_custom_window_wider_than_a_year(
         self,
