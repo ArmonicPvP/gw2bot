@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +45,19 @@ def store(tmp_path: Path):
     store = RaffleStore(str(tmp_path / "gw2bot.db"), "guild-id")
     yield store
     store.close()
+
+
+def count_log_rows(tmp_path: Path) -> int:
+    """How many rows the member count log holds, read outside the store.
+
+    The store deliberately offers no way to count them - nothing in the bot
+    needs to - so the claim that an unchanged poll adds no row is checked
+    against the database itself.
+    """
+    with sqlite3.connect(tmp_path / "gw2bot.db") as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM guild_member_count_log"
+        ).fetchone()[0]
 
 
 def event(
@@ -279,6 +293,38 @@ class TestMemberCountLog:
         latest = store.get_last_member_count()
         assert latest is not None
         assert (latest.member_count, latest.recorded_at) == (401, NOW + 120)
+
+    def test_an_unchanged_count_moves_the_anchor_without_adding_a_row(
+        self,
+        store: RaffleStore,
+        tmp_path: Path,
+    ) -> None:
+        store.record_member_count(400, 3, NOW)
+
+        assert not store.record_member_count(400, 5, NOW + 60)
+
+        latest = store.get_last_member_count()
+        assert latest is not None
+        assert (
+            latest.member_count,
+            latest.pending_invite_count,
+            latest.recorded_at,
+        ) == (400, 5, NOW + 60)
+        assert count_log_rows(tmp_path) == 1
+
+    def test_the_anchor_never_moves_backwards(
+        self,
+        store: RaffleStore,
+    ) -> None:
+        # A clock stepped back would otherwise drag the anchor into the past
+        # and re-open the gap the refresh exists to close.
+        store.record_member_count(400, 3, NOW)
+
+        assert not store.record_member_count(400, 4, NOW - 600)
+
+        latest = store.get_last_member_count()
+        assert latest is not None
+        assert (latest.recorded_at, latest.pending_invite_count) == (NOW, 3)
 
     def test_reports_no_sample_before_the_first_poll(
         self,
@@ -754,6 +800,33 @@ class TestRosterSeriesAgainstStoredHistory:
         ]
         assert series.points[0].member_count == 401
         assert series.points[-1].member_count == 400
+
+    def test_a_gap_in_the_guild_log_falls_behind_a_fresh_observation(
+        self,
+        store: RaffleStore,
+    ) -> None:
+        # The guild log keeps only about a hundred events per type, so an
+        # outage can drop a departure for good. Here a leave was lost and the
+        # join that followed it was captured, leaving the roster back where it
+        # started. The next poll observes that unchanged count and moves the
+        # anchor past the gap, so the captured join is measured from before it
+        # rather than replayed on top of it.
+        store.record_member_count(400, 0, NOW - 3000)
+        store.import_membership_events(
+            [ImportedMembershipEvent(1, NOW - 2000, JOIN, "Back.1234")]
+        )
+
+        store.record_member_count(400, 0, NOW - 100)
+
+        series = build_roster_series(
+            store.get_membership_events(NOW - 4000),
+            store.get_last_member_count(),
+            NOW - 4000,
+            NOW,
+        )
+
+        assert series.points[-1].member_count == 400
+        assert [change.member_count for change in series.events] == [400]
 
 
 class TestRosterRanges:

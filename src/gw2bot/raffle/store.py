@@ -265,15 +265,27 @@ class RaffleStore:
         pending_invite_count: int,
         recorded_at: float,
     ) -> bool:
-        """Log an observed guild member count, reporting whether it was new.
+        """Log an observed guild member count, reporting whether it moved.
 
-        Only a count that differs from the last logged one is written: the
+        Only a count that differs from the last logged one gets a row: the
         roster poll runs every minute and the number moves a handful of times
-        a week, so logging every poll would store the same row a thousand
-        times over for each change worth seeing. The pending-invite count
-        recorded alongside is whatever stood at that moment, not a series of
-        its own - it moves without the member count and so is not what decides
-        that a row is written.
+        a week, so a row per poll would store the same value a thousand times
+        over for each change worth seeing. A row therefore reads as "the count
+        was this, when last seen at this moment", and an unchanged observation
+        moves the newest row's moment forward rather than adding another.
+
+        That refresh is the point, not bookkeeping. The newest row is the
+        anchor every derived count is measured from, and the guild log returns
+        only about a hundred events per type, so an outage long enough to push
+        events out of it leaves changes the bot will never see. Leaving the
+        anchor where it was would then replay the changes that *were* captured
+        forward from a stale count and disagree with the channel description;
+        moving it to the latest observation puts the whole gap behind the
+        anchor, where the missing changes can no longer be double-counted.
+
+        The pending-invite count recorded alongside is whatever stood at that
+        moment, not a series of its own - it moves without the member count
+        and so is not what decides that a row is written.
         """
         with self._sessions.begin() as session:
             latest = session.scalars(
@@ -282,8 +294,18 @@ class RaffleStore:
                 .limit(1)
             ).first()
             if latest is not None and latest.member_count == member_count:
+                # Only ever forward. An observation older than the one on the
+                # row - a clock stepped back, a late caller - would otherwise
+                # drag the anchor into the past and re-open the gap this
+                # refresh exists to close.
+                refreshed = recorded_at > latest.recorded_at
+                if refreshed:
+                    latest.recorded_at = recorded_at
+                    latest.pending_invite_count = pending_invite_count
                 LOGGER.debug(
-                    "Guild member count unchanged; nothing logged; members=%s",
+                    "Guild member count unchanged; anchor_refreshed=%s "
+                    "members=%s",
+                    refreshed,
                     member_count,
                 )
                 return False

@@ -974,6 +974,13 @@ observation rather than the oldest keeps the right-hand edge of the graph — th
 part you would check against the channel description — true even if an older
 stretch of changes was never recorded.
 
+A poll that sees the count unchanged therefore still moves that newest row's
+moment forward rather than adding a row. This matters after a long outage: the
+guild log only returns about a hundred events of each type, so changes that
+scroll out of it while the bot is down are gone for good. Keeping the anchor at
+the latest observation puts that whole gap behind it, where the changes the bot
+*did* capture cannot be replayed on top of a stale count.
+
 Both need `/settings gw2_api_key` and `/settings gw2_guild_id`, and the count
 poll additionally needs `/settings discord_notification_channel_id`, because it
 is the same poll that writes the channel description.
