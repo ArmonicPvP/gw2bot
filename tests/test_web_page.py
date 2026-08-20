@@ -251,13 +251,49 @@ class TestFoodPage:
 
     def test_legend_sits_below_the_chart_as_tappable_swatches(self) -> None:
         # The legend follows the chart in the DOM and each entry is a button
-        # that reveals its feast name when tapped.
+        # that switches its feast off and back on.
         chart_index = FOOD_PAGE.index('<div id="chart">')
         legend_index = FOOD_PAGE.index('<div id="legend"')
         assert chart_index < legend_index
-        assert 'var item = el("button", "item");' in FOOD_PAGE
-        assert 'item.classList.toggle("show-name");' in FOOD_PAGE
-        assert ".legend .item.show-name .legend-name { display: inline; }" in (
+        assert 'var item = el("button", hidden ? "item off" : "item");' in (
+            FOOD_PAGE
+        )
+        assert 'item.setAttribute("aria-pressed", hidden ? "false" : "true")' in (
+            FOOD_PAGE
+        )
+
+    def test_the_legend_switches_a_feast_off_and_back_on(self) -> None:
+        # Clicking an entry drops its feast out of the drawing entirely, so
+        # the hover and the tooltip lose it too rather than leaving an
+        # invisible line still selectable.
+        assert "if (isHidden(feast)) { return; }" in FOOD_PAGE
+        assert "state.hidden[feast.id] = true;" in FOOD_PAGE
+        assert "delete state.hidden[feast.id];" in FOOD_PAGE
+        assert "renderLegend();\n        renderChart();" in FOOD_PAGE
+
+    def test_a_switched_off_feast_keeps_its_place_in_the_legend(self) -> None:
+        # It is dimmed with its colour reduced to an outline, so what is
+        # missing from the chart is still named and one click puts it back.
+        assert ".legend .item.off { opacity: 0.55; }" in FOOD_PAGE
+        assert 'swatch.style.boxShadow = "inset 0 0 0 2px " + color;' in (
+            FOOD_PAGE
+        )
+        mobile = FOOD_PAGE[FOOD_PAGE.index("@media (max-width: 640px)"):]
+        # On a phone the names stay hidden, except on a feast switched off:
+        # a tap still answers "which one is this?", by taking the line away
+        # and labelling what went.
+        assert ".legend .legend-name { display: none; }" in mobile
+        assert ".legend .item.off .legend-name { display: inline; }" in mobile
+        assert "show-name" not in FOOD_PAGE
+
+    def test_an_all_off_legend_says_so_instead_of_reading_as_no_data(
+        self,
+    ) -> None:
+        # An empty window and a legend switched all the way off are different
+        # states, and only one of them is worth waiting for more data over.
+        assert "function chartStatusText(plottedCount) {" in FOOD_PAGE
+        assert "if (feasts().length && !visibleFeasts().length) {" in FOOD_PAGE
+        assert '"Every feast is switched off. Click one in the legend to draw "' in (
             FOOD_PAGE
         )
 
@@ -408,6 +444,16 @@ class TestFoodPage:
                 '"page-" + eventKind(event)'
             ), call
 
+    def test_legend_traces_carry_no_feast_name_or_count(self) -> None:
+        # The legend trace is held to the same rule: a fixed action name and a
+        # count of the feasts left on, never a feast name or a stock value.
+        assert "function traceLegend(action, count) {" in FOOD_PAGE
+        for call in _call_arguments(FOOD_PAGE, "traceLegend"):
+            assert call == [
+                'hidden ? "show" : "hide"',
+                "visibleFeasts().length",
+            ], call
+
     def test_traced_pointer_and_event_names_are_narrowed(self) -> None:
         # pointerType and type are reflected into the console, so both are
         # mapped onto a closed set of spec names first.
@@ -425,15 +471,18 @@ class TestFoodPage:
         assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
-        # Two console calls exist on this page and no others: the sanitized
-        # selection trace, and the load failure that logs an error's type and
-        # message. Anything else would be an unreviewed path to the console.
+        # Three console calls exist on this page and no others: the sanitized
+        # selection and legend traces, and the load failure that logs an
+        # error's type and message. Anything else would be an unreviewed path
+        # to the console.
         assert re.findall(r"console\.\w+", FOOD_PAGE) == [
+            "console.debug",
             "console.debug",
             "console.error",
         ]
         assert _call_arguments(FOOD_PAGE, "console.debug") == [
-            ['"feast chart selection:"', "action", "reason", "count"]
+            ['"feast chart selection:"', "action", "reason", "count"],
+            ['"feast chart legend:"', "action", "count"],
         ]
 
     def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:

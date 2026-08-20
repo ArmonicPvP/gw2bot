@@ -1118,6 +1118,14 @@ feast's on-hand count over the last 24 hours, 7 days, or 30 days, and lists the
 removals in that window — when each drop happened, how large it was, and what
 was left afterwards — with one tab per feast.
 
+Clicking a colour in the legend below the chart switches that feast off, and
+clicking it again brings it back — useful when one feast's line sits on top of
+another's. A feast that is off keeps its place in the legend, dimmed with its
+colour reduced to an outline, and its line, points and hover readings are gone
+from the chart until it is switched back on. The choice survives a change of
+range, and the tabbed removals list below is unaffected. On a phone, where the
+legend is a compact row of colours, a switched-off feast shows its name.
+
 **Custom** opens a pair of date fields beside the preset buttons. The window
 they describe covers whole local days, from midnight on the first through the
 last second of the second, and it is drawn once **Apply** is pressed — the

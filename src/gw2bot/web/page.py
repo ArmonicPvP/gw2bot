@@ -1376,6 +1376,10 @@ main {
 }
 .legend .swatch { width: 0.9rem; height: 0.9rem; border-radius: 3px; flex-shrink: 0; }
 .legend .legend-name { display: inline; }
+/* A feast switched off keeps its place in the legend, dimmed and with its
+   colour reduced to an outline, so what is missing from the chart is still
+   named and one more click puts it back. */
+.legend .item.off { opacity: 0.55; }
 /* The chart is a fixed-viewBox SVG that scales to its container width, so
    every plotted coordinate is computed once against the viewBox and the
    browser handles resizing without a re-render. */
@@ -1471,9 +1475,11 @@ button:focus-visible {
   .signout { padding: 0.35rem 0.5rem; }
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
-  /* Names are hidden until a swatch is tapped, leaving a compact colour key. */
+  /* Names are hidden, leaving a compact colour key. A feast switched off
+     names itself, so a tap still answers "which one is this?" - it answers by
+     taking the line away and labelling what went. */
   .legend .legend-name { display: none; }
-  .legend .item.show-name .legend-name { display: inline; }
+  .legend .item.off .legend-name { display: inline; }
 }
 </style>
 </head>
@@ -1554,7 +1560,12 @@ button:focus-visible {
   function plotW() { return M.w - M.left - M.right; }
   function plotH() { return M.h - M.top - M.bottom; }
 
-  var state = { range: "24h", data: null, activeFeast: 0, tablePage: 0 };
+  // hidden holds the feasts the reader has switched off in the legend, keyed
+  // by guild storage id so the choice outlives a range change and the redraw
+  // it brings.
+  var state = {
+    range: "24h", data: null, activeFeast: 0, tablePage: 0, hidden: {}
+  };
 
   // A pinned touch selection listens on the whole page, so the chart it
   // belongs to is torn down before another one is drawn.
@@ -1588,6 +1599,12 @@ button:focus-visible {
   }
   function activeFeast() {
     return feasts()[state.activeFeast] || null;
+  }
+  function isHidden(feast) {
+    return state.hidden[feast.id] === true;
+  }
+  function visibleFeasts() {
+    return feasts().filter(function (feast) { return !isHidden(feast); });
   }
 
   function scaleX(t) {
@@ -1681,6 +1698,10 @@ button:focus-visible {
     // marker is also collected so the hover can snap to it.
     var plotted = [];
     feasts().forEach(function (feast, index) {
+      // A feast switched off in the legend is left out of the drawing
+      // entirely, so it is absent from the hover and the tooltip too rather
+      // than invisible but still selectable.
+      if (isHidden(feast)) { return; }
       var color = COLORS[index % COLORS.length];
       var points = feast.points || [];
       if (points.length > 1) {
@@ -1717,10 +1738,19 @@ button:focus-visible {
     detachHover = attachHover(canvas, plotted);
     chart.appendChild(canvas);
 
-    var total = plotted.length;
-    chartStatus.textContent = total
-      ? ""
-      : "No feast counts were recorded in this period.";
+    chartStatus.textContent = chartStatusText(plotted.length);
+  }
+
+  // What the chart says about itself when it has drawn nothing: an empty
+  // window and a legend switched all the way off are different states, and
+  // only one of them is worth waiting for more data over.
+  function chartStatusText(plottedCount) {
+    if (plottedCount) { return ""; }
+    if (feasts().length && !visibleFeasts().length) {
+      return "Every feast is switched off. Click one in the legend to draw " +
+        "it again.";
+    }
+    return "No feast counts were recorded in this period.";
   }
 
   // Samples that share a timestamp (one storage poll can log several feasts at
@@ -2010,21 +2040,45 @@ button:focus-visible {
     return function () { release("redraw"); };
   }
 
+  // Sanitized tracing for the legend, so a console trace can explain why the
+  // chart is drawing fewer lines than the window holds. Only a fixed action
+  // name and a count of the feasts left on are passed; no feast name, count
+  // or timestamp reaches the console.
+  function traceLegend(action, count) {
+    console.debug("feast chart legend:", action, count);
+  }
+
   function renderLegend() {
     legend.replaceChildren();
     feasts().forEach(function (feast, index) {
-      // Each entry is a button so a tap can reveal which feast a colour is
-      // for; the name is always exposed to assistive tech through aria-label.
-      var item = el("button", "item");
+      // Each entry is a button that switches its feast off and back on. The
+      // name is always exposed to assistive tech through aria-label, and
+      // aria-pressed carries whether the feast is currently drawn.
+      var hidden = isHidden(feast);
+      var item = el("button", hidden ? "item off" : "item");
       item.type = "button";
       item.setAttribute("aria-label", feast.name);
+      item.setAttribute("aria-pressed", hidden ? "false" : "true");
       item.title = feast.name;
+      var color = COLORS[index % COLORS.length];
       var swatch = el("span", "swatch");
-      swatch.style.background = COLORS[index % COLORS.length];
+      if (hidden) {
+        swatch.style.background = "transparent";
+        swatch.style.boxShadow = "inset 0 0 0 2px " + color;
+      } else {
+        swatch.style.background = color;
+      }
       item.appendChild(swatch);
       item.appendChild(el("span", "legend-name", feast.name));
       item.addEventListener("click", function () {
-        item.classList.toggle("show-name");
+        if (hidden) {
+          delete state.hidden[feast.id];
+        } else {
+          state.hidden[feast.id] = true;
+        }
+        traceLegend(hidden ? "show" : "hide", visibleFeasts().length);
+        renderLegend();
+        renderChart();
       });
       legend.appendChild(item);
     });
