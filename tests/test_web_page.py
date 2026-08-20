@@ -1,6 +1,7 @@
 import re
 
-from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE
+from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE, ROSTER_PAGE
+from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 
 
 def _call_arguments(source: str, name: str) -> list[list[str]]:
@@ -471,3 +472,100 @@ class TestFoodPage:
         # Like the calendar, feast names and rows are only ever set through
         # textContent or attributes, never innerHTML.
         assert "innerHTML" not in FOOD_PAGE
+
+
+class TestCustomRangePicker:
+    """Both dashboards offer the same picker, so both are checked together."""
+
+    def test_both_dashboards_offer_a_custom_range(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert 'data-range="custom"' in page
+            assert 'id="custom-start"' in page
+            assert 'id="custom-end"' in page
+            assert 'id="custom-apply"' in page
+
+    def test_the_picker_stays_hidden_until_the_button_reveals_it(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert ".custom {\n  display: none;" in page
+            assert ".custom.open { display: flex; }" in page
+            assert 'if (picked === "custom") {' in page
+            assert (
+                "toggleCustomPanel(!customPanel.classList.contains(\"open\"));"
+            ) in page
+
+    def test_a_picked_pair_covers_whole_local_days(self) -> None:
+        # The window opens at midnight on the first day and closes on the last
+        # second of the second, so one day picked twice is that whole day.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "var since = Math.floor(from.getTime() / 1000);" in page
+            assert (
+                "to.getFullYear(), to.getMonth(), to.getDate() + 1"
+            ) in page
+
+    def test_a_range_that_cannot_be_drawn_is_named_not_fetched(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert 'error: "Pick a start and an end date."' in page
+            assert 'error: "The end date is before the start date."' in page
+            assert 'error: "The start date is in the future."' in page
+            # The refusal reaches the reader and no request is made.
+            assert (
+                "if (picked.error) {\n      customError.textContent"
+            ) in page
+
+    def test_the_picker_mirrors_the_servers_own_ceiling(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "var MAX_CUSTOM_DAYS = 366;" in page
+        assert MAX_CUSTOM_WINDOW_SECONDS == 366 * 24 * 60 * 60
+
+    def test_an_applied_pair_is_sent_as_epoch_seconds(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert '"?range=custom&start=" +' in page
+            assert (
+                'encodeURIComponent(String(customWindow.since))'
+            ) in page
+        assert 'fetch("/api/food" + rangeQuery())' in FOOD_PAGE
+        assert 'fetch("/api/roster" + rangeQuery())' in ROSTER_PAGE
+
+    def test_axis_labels_follow_the_windows_width(self) -> None:
+        # A custom window has no preset name to key the label format off, so
+        # the span decides: about a day or less reads off the clock.
+        for page in (FOOD_PAGE, ROSTER_PAGE):
+            assert "if (windowSpan() <= 48 * 60 * 60) {" in page
+            assert 'if (state.range === "24h") {' not in page
+
+
+class TestRosterTable:
+    def test_a_long_account_name_wraps_instead_of_widening_the_table(
+        self,
+    ) -> None:
+        # A guild account name has no spaces to break at, so without this the
+        # table grows past its card and carries the rest of the row off the
+        # page. `anywhere` is what also shrinks the column's minimum width,
+        # which is the width the table lays itself out from.
+        assert (
+            "table.changes td.name, table.changes td.by "
+            "{ overflow-wrap: anywhere; }"
+        ) in ROSTER_PAGE
+        assert 'el("td", "name", change.name)' in ROSTER_PAGE
+        assert ".chart-tooltip .tip-row .name { overflow-wrap: anywhere; }" in (
+            ROSTER_PAGE
+        )
+
+    def test_a_phone_shows_the_change_as_its_dot_alone(self) -> None:
+        # The word beside the dot says nothing the colour does not, and it
+        # costs the account column width a phone has none of to spare.
+        assert 'el("span", "change-label", kindOf(change.kind).label)' in (
+            ROSTER_PAGE
+        )
+        mobile = ROSTER_PAGE[ROSTER_PAGE.index("@media (max-width: 640px)"):]
+        assert "table.changes .change-label {" in mobile
+        # Out of sight rather than out of the document, so a screen reader
+        # still reads each row's change out.
+        assert "clip-path: inset(50%);" in mobile
+        assert "display: none" not in mobile.split(
+            "table.changes .change-label {"
+        )[1].split("}")[0]
+
+    def test_the_desktop_layout_keeps_the_word(self) -> None:
+        desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
+        assert "change-label" not in desktop

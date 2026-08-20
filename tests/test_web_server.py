@@ -938,6 +938,127 @@ class TestFoodApi:
         assert response.status == 200
         assert (await response.json())["range"] == "24h"
 
+    async def test_a_custom_window_is_drawn_between_its_own_edges(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 50}, now - 5000)
+        raffle_store.record_feast_counts({1078: 44}, now - 3000)
+        # After the window's end, so it belongs to no part of the chart.
+        raffle_store.record_feast_counts({1078: 40}, now - 1000)
+
+        response = await client.get(
+            "/api/food",
+            params={
+                "range": "custom",
+                "start": str(int(now - 4000)),
+                "end": str(int(now - 2000)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert (payload["since"], payload["now"]) == (
+            float(int(now - 4000)),
+            float(int(now - 2000)),
+        )
+        tracked = payload["feasts"][0]
+        assert [point["count"] for point in tracked["points"]] == [44]
+        # The drop into the window is still measured against the count that
+        # entered it, which was recorded before the left-hand edge.
+        assert [
+            (removal["amount"], removal["remaining"])
+            for removal in tracked["removals"]
+        ] == [(6, 44)]
+
+    async def test_a_custom_window_stops_at_the_present(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = time.time()
+
+        response = await client.get(
+            "/api/food",
+            params={
+                "range": "custom",
+                "start": str(int(now - 3600)),
+                "end": str(int(now + 90 * 86400)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        # Nothing has been recorded for a day that has not happened, so the
+        # window closes at the moment of the request instead.
+        assert payload["now"] <= time.time()
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"range": "custom"}, id="no-bounds"),
+            pytest.param(
+                {"range": "custom", "start": "100"}, id="one-bound"
+            ),
+            pytest.param(
+                {"range": "custom", "start": "abc", "end": "200"},
+                id="unreadable",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "200.5", "end": "400"},
+                id="fractional",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "400", "end": "200"},
+                id="backwards",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "200", "end": "200"},
+                id="empty",
+            ),
+        ],
+    )
+    async def test_rejects_a_custom_window_it_cannot_draw(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        params: dict[str, str],
+    ) -> None:
+        response = await client.get(
+            "/api/food",
+            params=params,
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_rejects_a_custom_window_wider_than_a_year(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = int(time.time())
+
+        response = await client.get(
+            "/api/food",
+            params={
+                "range": "custom",
+                "start": str(now - 400 * 86400),
+                "end": str(now),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
     async def test_unreachable_discord_returns_503_json(
         self,
         client: TestClient,
@@ -1129,6 +1250,108 @@ class TestRosterApi:
 
         assert response.status == 200
         assert (await response.json())["range"] == "24h"
+
+    async def test_a_custom_window_is_counted_back_from_the_anchor(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.import_membership_events(
+            [
+                ImportedMembershipEvent(1, now - 5000, JOIN, "One.1234"),
+                # Both after the window's end, so the count it closes at has
+                # to be recovered by unwinding them from the anchor.
+                ImportedMembershipEvent(2, now - 1500, LEAVE, "Two.5678"),
+                ImportedMembershipEvent(3, now - 1200, LEAVE, "Three.9012"),
+            ]
+        )
+        raffle_store.record_member_count(400, 2, now - 500)
+
+        response = await client.get(
+            "/api/roster",
+            params={
+                "range": "custom",
+                "start": str(int(now - 6000)),
+                "end": str(int(now - 2000)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert (payload["since"], payload["now"]) == (
+            float(int(now - 6000)),
+            float(int(now - 2000)),
+        )
+        # Only the join falls in the window, and it stands two members above
+        # where the roster ended up.
+        assert [
+            (change["kind"], change["name"], change["count"])
+            for change in payload["events"]
+        ] == [(JOIN, "One.1234", 402)]
+        assert (payload["joins"], payload["leaves"], payload["kicks"]) == (
+            1,
+            0,
+            0,
+        )
+        assert payload["member_count"] == 402
+        assert [point["count"] for point in payload["points"]] == [
+            401,
+            402,
+            402,
+        ]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"range": "custom"}, id="no-bounds"),
+            pytest.param(
+                {"range": "custom", "start": "abc", "end": "200"},
+                id="unreadable",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "400", "end": "200"},
+                id="backwards",
+            ),
+        ],
+    )
+    async def test_rejects_a_custom_window_it_cannot_draw(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        params: dict[str, str],
+    ) -> None:
+        response = await client.get(
+            "/api/roster",
+            params=params,
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_rejects_a_custom_window_wider_than_a_year(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = int(time.time())
+
+        response = await client.get(
+            "/api/roster",
+            params={
+                "range": "custom",
+                "start": str(now - 400 * 86400),
+                "end": str(now),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
 
     async def test_unreachable_discord_returns_503_json(
         self,

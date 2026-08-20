@@ -1305,6 +1305,31 @@ button {
 button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
+/* The date picker is a second header row that stays out of the way until the
+   Custom button reveals it, so the preset windows remain one tap apart. */
+.custom {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex-basis: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.custom.open { display: flex; }
+.custom input[type="date"] {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  /* Asks the browser for the dark spelling of its own calendar popup, which
+     would otherwise open as a white sheet over a dark page. */
+  color-scheme: dark;
+}
+.custom .custom-error { color: var(--full); }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
 header a { font-size: 0.85rem; }
@@ -1439,6 +1464,7 @@ button:focus-visible {
   #brand { grid-column: 2; grid-row: 1; justify-self: center; }
   header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
   #whoami { display: none; }
   .signout-icon { display: inline-block; }
   .signout-label { display: none; }
@@ -1458,6 +1484,7 @@ button:focus-visible {
     <button type="button" data-range="24h">24h</button>
     <button type="button" data-range="7d">7d</button>
     <button type="button" data-range="30d">30d</button>
+    <button type="button" data-range="custom">Custom</button>
   </nav>
   <span class="spacer"></span>
   <span id="whoami"></span>
@@ -1473,6 +1500,15 @@ button:focus-visible {
       <span class="signout-label">Log out</span>
     </button>
   </form>
+  <div id="custom-range" class="custom">
+    <label for="custom-start">From</label>
+    <input type="date" id="custom-start">
+    <label for="custom-end">To</label>
+    <input type="date" id="custom-end">
+    <button type="button" id="custom-apply">Apply</button>
+    <span id="custom-error" class="custom-error" role="status"
+      aria-live="polite"></span>
+  </div>
 </header>
 <main>
   <section class="card">
@@ -1570,9 +1606,17 @@ button:focus-visible {
     return M.top + (1 - value / Y_MAX) * plotH();
   }
 
+  // How wide the drawn window is, in seconds.
+  function windowSpan() {
+    return state.data ? state.data.now - state.data.since : 0;
+  }
+
   function formatTick(t) {
     var date = new Date(t * 1000);
-    if (state.range === "24h") {
+    // A window of about a day or less is read off the clock and a wider one
+    // off the calendar. The span decides rather than the range's name, so a
+    // custom pair of dates is labelled like the preset it resembles.
+    if (windowSpan() <= 48 * 60 * 60) {
       return date.toLocaleTimeString(
         undefined, { hour: "numeric", minute: "2-digit" });
     }
@@ -2063,6 +2107,117 @@ button:focus-visible {
     renderTable();
   }
 
+  // The longest custom window the server will serve, mirrored here so a
+  // range too wide to draw is named as such instead of coming back as a
+  // failed load.
+  var MAX_CUSTOM_DAYS = 366;
+
+  // The window a pair of applied dates asks for, as whole epoch seconds, or
+  // null while the reader is still on one of the presets.
+  var customWindow = null;
+
+  var customPanel = document.getElementById("custom-range");
+  var customStart = document.getElementById("custom-start");
+  var customEnd = document.getElementById("custom-end");
+  var customError = document.getElementById("custom-error");
+
+  // A local calendar day in the spelling a date input reads and writes.
+  function dayValue(date) {
+    return date.getFullYear() + "-" +
+      String(date.getMonth() + 1).padStart(2, "0") + "-" +
+      String(date.getDate()).padStart(2, "0");
+  }
+
+  // Reads one date input as a local calendar day. The parts are re-read off
+  // the Date afterwards, so a day that does not exist - the 31st of a 30-day
+  // month, typed into the field - is refused rather than silently rolled into
+  // the month after it.
+  function parseDay(value) {
+    var parts = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value || "");
+    if (!parts) { return null; }
+    var year = Number(parts[1]);
+    var month = Number(parts[2]);
+    var day = Number(parts[3]);
+    var date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 ||
+        date.getDate() !== day) {
+      return null;
+    }
+    return date;
+  }
+
+  // The window the two fields describe, or the reason it cannot be drawn. A
+  // picked pair covers whole local days: it opens at midnight on the first and
+  // closes at the last second of the second, so picking one day twice is that
+  // whole day rather than an empty instant.
+  function pickedWindow() {
+    var from = parseDay(customStart.value);
+    var to = parseDay(customEnd.value);
+    if (!from || !to) {
+      return { error: "Pick a start and an end date." };
+    }
+    var since = Math.floor(from.getTime() / 1000);
+    var until = Math.floor(new Date(
+      to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() / 1000) - 1;
+    if (until <= since) {
+      return { error: "The end date is before the start date." };
+    }
+    if (until - since > MAX_CUSTOM_DAYS * 86400) {
+      return {
+        error: "Pick a range of " + MAX_CUSTOM_DAYS + " days or fewer."
+      };
+    }
+    if (since > Math.floor(Date.now() / 1000)) {
+      return { error: "The start date is in the future." };
+    }
+    return { since: since, until: until };
+  }
+
+  // Opening the picker for the first time fills it with the window already on
+  // screen, so applying without touching either field draws the same stretch
+  // of history the preset button did.
+  function fillCustomDefaults() {
+    if (customStart.value && customEnd.value) { return; }
+    var today = new Date();
+    var span = windowSpan() || 24 * 60 * 60;
+    customStart.value = dayValue(new Date(today.getTime() - span * 1000));
+    customEnd.value = dayValue(today);
+  }
+
+  function toggleCustomPanel(open) {
+    customPanel.classList.toggle("open", open);
+    if (!open) { return; }
+    fillCustomDefaults();
+    // Nothing has been recorded for a day that has not happened, so neither
+    // field offers one.
+    customStart.max = dayValue(new Date());
+    customEnd.max = customStart.max;
+  }
+
+  function applyCustomRange() {
+    var picked = pickedWindow();
+    if (picked.error) {
+      customError.textContent = picked.error;
+      return;
+    }
+    customError.textContent = "";
+    customWindow = picked;
+    state.range = "custom";
+    syncRangeButtons();
+    refresh();
+  }
+
+  // The query the current selection asks for: a preset window by name, or the
+  // applied pair of epoch seconds.
+  function rangeQuery() {
+    if (state.range === "custom" && customWindow) {
+      return "?range=custom&start=" +
+        encodeURIComponent(String(customWindow.since)) +
+        "&end=" + encodeURIComponent(String(customWindow.until));
+    }
+    return "?range=" + encodeURIComponent(state.range);
+  }
+
   function syncRangeButtons() {
     document.querySelectorAll("[data-range]").forEach(function (button) {
       var active = button.getAttribute("data-range") === state.range;
@@ -2073,7 +2228,7 @@ button:focus-visible {
 
   function refresh() {
     chartStatus.textContent = "Loading\\u2026";
-    fetch("/api/food?range=" + encodeURIComponent(state.range))
+    fetch("/api/food" + rangeQuery())
       .then(function (response) {
         if (response.status === 401) {
           location.href = "/login";
@@ -2106,9 +2261,27 @@ button:focus-visible {
 
   document.querySelectorAll("[data-range]").forEach(function (button) {
     button.addEventListener("click", function () {
-      state.range = button.getAttribute("data-range");
+      var picked = button.getAttribute("data-range");
+      if (picked === "custom") {
+        // The Custom button only reveals the picker; the range itself does not
+        // move until a pair of dates is applied, so a stray tap costs nothing.
+        toggleCustomPanel(!customPanel.classList.contains("open"));
+        return;
+      }
+      toggleCustomPanel(false);
+      state.range = picked;
       syncRangeButtons();
       refresh();
+    });
+  });
+  document.getElementById("custom-apply").addEventListener(
+    "click", applyCustomRange);
+  [customStart, customEnd].forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyCustomRange();
+      }
     });
   });
   // Redraw when the breakpoint flips so the chart adopts the layout for the
@@ -2180,6 +2353,31 @@ button {
 button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
+/* The date picker is a second header row that stays out of the way until the
+   Custom button reveals it, so the preset windows remain one tap apart. */
+.custom {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex-basis: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.custom.open { display: flex; }
+.custom input[type="date"] {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  /* Asks the browser for the dark spelling of its own calendar popup, which
+     would otherwise open as a white sheet over a dark page. */
+  color-scheme: dark;
+}
+.custom .custom-error { color: var(--full); }
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
 header a { font-size: 0.85rem; }
@@ -2278,6 +2476,7 @@ main {
   border-radius: 50%;
   flex-shrink: 0;
 }
+.chart-tooltip .tip-row .name { overflow-wrap: anywhere; }
 .chart-tooltip .tip-row .val {
   margin-left: auto;
   padding-left: 0.75rem;
@@ -2306,6 +2505,13 @@ table.changes th, table.changes td {
   border-bottom: 1px solid var(--border);
 }
 table.changes th { color: var(--muted); font-weight: 600; }
+/* A Guild Wars 2 account name has no spaces to break at, so a long one used
+   to widen the table past the card it sits in and carry the right-hand
+   columns off the page. Breaking inside the word is what bounds the column,
+   and `anywhere` rather than `break-word` because only `anywhere` also
+   shrinks the column's minimum width - which is the width the table lays
+   itself out from, so it is what keeps the table itself inside the card. */
+table.changes td.name, table.changes td.by { overflow-wrap: anywhere; }
 table.changes td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -2343,6 +2549,7 @@ button:focus-visible {
   #brand { grid-column: 2; grid-row: 1; justify-self: center; }
   header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
+  .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
   #whoami { display: none; }
   .signout-icon { display: inline-block; }
   .signout-label { display: none; }
@@ -2352,6 +2559,21 @@ button:focus-visible {
   /* The account a change is about is the column worth the width on a phone;
      who did the kicking is shown in the chart tooltip instead. */
   table.changes .by { display: none; }
+  /* The dot's colour already says which kind of change it was, and the word
+     beside it costs the account column width it has none of to spare. The
+     word stays in the table, out of sight rather than out of the document,
+     so a screen reader still reads each row's change out. */
+  table.changes .change-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  table.changes .change .dot { margin-right: 0; }
 }
 </style>
 </head>
@@ -2362,6 +2584,7 @@ button:focus-visible {
     <button type="button" data-range="24h">24h</button>
     <button type="button" data-range="7d">7d</button>
     <button type="button" data-range="30d">30d</button>
+    <button type="button" data-range="custom">Custom</button>
   </nav>
   <span class="spacer"></span>
   <span id="whoami"></span>
@@ -2377,6 +2600,15 @@ button:focus-visible {
       <span class="signout-label">Log out</span>
     </button>
   </form>
+  <div id="custom-range" class="custom">
+    <label for="custom-start">From</label>
+    <input type="date" id="custom-start">
+    <label for="custom-end">To</label>
+    <input type="date" id="custom-end">
+    <button type="button" id="custom-apply">Apply</button>
+    <span id="custom-error" class="custom-error" role="status"
+      aria-live="polite"></span>
+  </div>
 </header>
 <main>
   <section class="card">
@@ -2506,9 +2738,17 @@ button:focus-visible {
     return M.top + (1 - (value - scale.low) / span) * plotH();
   }
 
+  // How wide the drawn window is, in seconds.
+  function windowSpan() {
+    return state.data ? state.data.now - state.data.since : 0;
+  }
+
   function formatTick(t) {
     var date = new Date(t * 1000);
-    if (state.range === "24h") {
+    // A window of about a day or less is read off the clock and a wider one
+    // off the calendar. The span decides rather than the range's name, so a
+    // custom pair of dates is labelled like the preset it resembles.
+    if (windowSpan() <= 48 * 60 * 60) {
       return date.toLocaleTimeString(
         undefined, { hour: "numeric", minute: "2-digit" });
     }
@@ -2953,10 +3193,14 @@ button:focus-visible {
       item.appendChild(document.createTextNode(" " + pair[0].toLowerCase()));
       totals.appendChild(item);
     });
+    // A preset window runs to the moment of the request, so its closing
+    // count is the count now; a picked one can close months ago, where the
+    // only thing that count is true of is the window's own end.
     nowCount.textContent = state.data.member_count === null ||
       state.data.member_count === undefined
       ? ""
-      : "\\u2014 " + state.data.member_count + " now";
+      : "\\u2014 " + state.data.member_count +
+        (state.range === "custom" ? " at the end" : " now");
   }
 
   function renderTable() {
@@ -2985,13 +3229,15 @@ button:focus-visible {
     pageRows.forEach(function (change) {
       var row = el("tr");
       row.appendChild(el("td", null, formatMoment(change.t)));
-      row.appendChild(el("td", null, change.name));
+      row.appendChild(el("td", "name", change.name));
       var kindCell = el("td", "change");
       var dot = el("span", "dot");
       dot.style.background = kindOf(change.kind).color;
       kindCell.appendChild(dot);
+      // The name of the change is its own element so the phone layout can put
+      // it out of sight and leave the dot standing for it.
       kindCell.appendChild(
-        document.createTextNode(kindOf(change.kind).label));
+        el("span", "change-label", kindOf(change.kind).label));
       row.appendChild(kindCell);
       row.appendChild(el("td", "by", change.actor || ""));
       row.appendChild(el("td", "num",
@@ -3029,6 +3275,117 @@ button:focus-visible {
     renderTable();
   }
 
+  // The longest custom window the server will serve, mirrored here so a
+  // range too wide to draw is named as such instead of coming back as a
+  // failed load.
+  var MAX_CUSTOM_DAYS = 366;
+
+  // The window a pair of applied dates asks for, as whole epoch seconds, or
+  // null while the reader is still on one of the presets.
+  var customWindow = null;
+
+  var customPanel = document.getElementById("custom-range");
+  var customStart = document.getElementById("custom-start");
+  var customEnd = document.getElementById("custom-end");
+  var customError = document.getElementById("custom-error");
+
+  // A local calendar day in the spelling a date input reads and writes.
+  function dayValue(date) {
+    return date.getFullYear() + "-" +
+      String(date.getMonth() + 1).padStart(2, "0") + "-" +
+      String(date.getDate()).padStart(2, "0");
+  }
+
+  // Reads one date input as a local calendar day. The parts are re-read off
+  // the Date afterwards, so a day that does not exist - the 31st of a 30-day
+  // month, typed into the field - is refused rather than silently rolled into
+  // the month after it.
+  function parseDay(value) {
+    var parts = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value || "");
+    if (!parts) { return null; }
+    var year = Number(parts[1]);
+    var month = Number(parts[2]);
+    var day = Number(parts[3]);
+    var date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 ||
+        date.getDate() !== day) {
+      return null;
+    }
+    return date;
+  }
+
+  // The window the two fields describe, or the reason it cannot be drawn. A
+  // picked pair covers whole local days: it opens at midnight on the first and
+  // closes at the last second of the second, so picking one day twice is that
+  // whole day rather than an empty instant.
+  function pickedWindow() {
+    var from = parseDay(customStart.value);
+    var to = parseDay(customEnd.value);
+    if (!from || !to) {
+      return { error: "Pick a start and an end date." };
+    }
+    var since = Math.floor(from.getTime() / 1000);
+    var until = Math.floor(new Date(
+      to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() / 1000) - 1;
+    if (until <= since) {
+      return { error: "The end date is before the start date." };
+    }
+    if (until - since > MAX_CUSTOM_DAYS * 86400) {
+      return {
+        error: "Pick a range of " + MAX_CUSTOM_DAYS + " days or fewer."
+      };
+    }
+    if (since > Math.floor(Date.now() / 1000)) {
+      return { error: "The start date is in the future." };
+    }
+    return { since: since, until: until };
+  }
+
+  // Opening the picker for the first time fills it with the window already on
+  // screen, so applying without touching either field draws the same stretch
+  // of history the preset button did.
+  function fillCustomDefaults() {
+    if (customStart.value && customEnd.value) { return; }
+    var today = new Date();
+    var span = windowSpan() || 24 * 60 * 60;
+    customStart.value = dayValue(new Date(today.getTime() - span * 1000));
+    customEnd.value = dayValue(today);
+  }
+
+  function toggleCustomPanel(open) {
+    customPanel.classList.toggle("open", open);
+    if (!open) { return; }
+    fillCustomDefaults();
+    // Nothing has been recorded for a day that has not happened, so neither
+    // field offers one.
+    customStart.max = dayValue(new Date());
+    customEnd.max = customStart.max;
+  }
+
+  function applyCustomRange() {
+    var picked = pickedWindow();
+    if (picked.error) {
+      customError.textContent = picked.error;
+      return;
+    }
+    customError.textContent = "";
+    customWindow = picked;
+    state.range = "custom";
+    syncRangeButtons();
+    refresh();
+  }
+
+  // The query the current selection asks for: a preset window by name, or the
+  // applied pair of epoch seconds.
+  function rangeQuery() {
+    if (state.range === "custom" && customWindow) {
+      return "?range=custom&start=" +
+        encodeURIComponent(String(customWindow.since)) +
+        "&end=" + encodeURIComponent(String(customWindow.until));
+    }
+    return "?range=" + encodeURIComponent(state.range);
+  }
+
   function syncRangeButtons() {
     document.querySelectorAll("[data-range]").forEach(function (button) {
       var active = button.getAttribute("data-range") === state.range;
@@ -3039,7 +3396,7 @@ button:focus-visible {
 
   function refresh() {
     chartStatus.textContent = "Loading\\u2026";
-    fetch("/api/roster?range=" + encodeURIComponent(state.range))
+    fetch("/api/roster" + rangeQuery())
       .then(function (response) {
         if (response.status === 401) {
           location.href = "/login";
@@ -3069,9 +3426,27 @@ button:focus-visible {
 
   document.querySelectorAll("[data-range]").forEach(function (button) {
     button.addEventListener("click", function () {
-      state.range = button.getAttribute("data-range");
+      var picked = button.getAttribute("data-range");
+      if (picked === "custom") {
+        // The Custom button only reveals the picker; the range itself does not
+        // move until a pair of dates is applied, so a stray tap costs nothing.
+        toggleCustomPanel(!customPanel.classList.contains("open"));
+        return;
+      }
+      toggleCustomPanel(false);
+      state.range = picked;
       syncRangeButtons();
       refresh();
+    });
+  });
+  document.getElementById("custom-apply").addEventListener(
+    "click", applyCustomRange);
+  [customStart, customEnd].forEach(function (input) {
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyCustomRange();
+      }
     });
   });
   // Redraw when the breakpoint flips so the chart adopts the layout for the

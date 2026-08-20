@@ -206,8 +206,15 @@ class RaffleStore:
     def get_feast_stock_series(
         self,
         since: float,
+        until: float | None = None,
     ) -> dict[int, FeastStockSeries]:
-        """Return each tracked feast's recorded counts at or after ``since``.
+        """Return each tracked feast's recorded counts within a window.
+
+        The window runs from ``since`` to ``until``, both inclusive; without an
+        ``until`` it runs to the newest sample there is, which is what a window
+        ending at the present asks for. A custom window ending in the past
+        needs the bound, because a sample after it belongs to no part of the
+        chart being drawn.
 
         Every tracked feast is present in the result even when it has no
         samples in the window. Each series also carries ``prior_count``: the
@@ -218,11 +225,14 @@ class RaffleStore:
         with self._sessions() as session:
             for feast in TRACKED_FEASTS:
                 feast_id = feast.guild_storage_id
+                window = [FeastStockLogRecord.recorded_at >= since]
+                if until is not None:
+                    window.append(FeastStockLogRecord.recorded_at <= until)
                 rows = session.scalars(
                     select(FeastStockLogRecord)
                     .where(
                         FeastStockLogRecord.guild_storage_id == feast_id,
-                        FeastStockLogRecord.recorded_at >= since,
+                        *window,
                     )
                     .order_by(
                         FeastStockLogRecord.recorded_at,
@@ -253,9 +263,10 @@ class RaffleStore:
                     ),
                 )
         LOGGER.debug(
-            "Loaded feast stock series; feasts=%s samples=%s",
+            "Loaded feast stock series; feasts=%s samples=%s bounded=%s",
             len(series),
             sum(len(item.samples) for item in series.values()),
+            until is not None,
         )
         return series
 

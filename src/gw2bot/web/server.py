@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -43,6 +45,15 @@ LOGGER = logging.getLogger(__name__)
 MAX_RANGE_DAYS = 62
 NAME_CACHE_TTL_SECONDS = 3600
 
+# The ``range`` value both dashboards send when the reader picked their own
+# dates instead of one of the preset windows.
+CUSTOM_RANGE = "custom"
+
+# The longest custom window either dashboard will serve. A hand-typed range is
+# otherwise unbounded, and every row between its edges is read into memory
+# before anything is drawn.
+MAX_CUSTOM_WINDOW_SECONDS = 366 * 24 * 60 * 60
+
 # A session cookie only proves the holder was a guild member when they signed
 # in, so membership is re-checked on later requests too. The cache keeps that
 # off Discord's API on every request while bounding how long a departed or
@@ -75,6 +86,19 @@ PUBLIC_PATHS = frozenset(
 _Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 SESSION_KEY = web.RequestKey("web_session", auth.SessionData)
+
+
+@dataclass(frozen=True, slots=True)
+class _Window:
+    """The stretch of history one dashboard request asks to be drawn.
+
+    ``key`` is echoed back to the page as the range it got, which is the
+    preset's own name or ``CUSTOM_RANGE``.
+    """
+
+    key: str
+    since: float
+    until: float
 
 
 def _redirect(location: str) -> web.Response:
@@ -609,39 +633,95 @@ class WebServer:
             return denied
         return self._html(FOOD_PAGE)
 
+    def _resolve_window(
+        self,
+        request: web.Request,
+        ranges: Mapping[str, int],
+        subject: str,
+    ) -> _Window | web.Response:
+        """The window a dashboard request asks for, or the refusal to serve it.
+
+        ``subject`` names the dashboard in the debug trace and nothing else; no
+        part of the query reaches the log.
+        """
+        range_key = request.query.get("range", "24h")
+        now = datetime.now(UTC).timestamp()
+        if range_key == CUSTOM_RANGE:
+            return self._custom_window(request, now, subject)
+        window = ranges.get(range_key)
+        if window is None:
+            LOGGER.debug("Rejected %s request; reason=range", subject)
+            return self._json({"error": "invalid range"}, status=400)
+        return _Window(key=range_key, since=now - window, until=now)
+
+    def _custom_window(
+        self,
+        request: web.Request,
+        now: float,
+        subject: str,
+    ) -> _Window | web.Response:
+        """The window a pair of ``start`` and ``end`` epoch seconds asks for.
+
+        Both bounds are whole seconds the page computed from the dates the
+        reader picked, so the pair is read as integers and anything else is
+        refused rather than coerced.
+        """
+        try:
+            since = float(int(request.query["start"]))
+            requested_end = float(int(request.query["end"]))
+        except (KeyError, ValueError):
+            LOGGER.debug("Rejected %s request; reason=custom-bounds", subject)
+            return self._json({"error": "invalid range"}, status=400)
+        # Nothing has been recorded for a moment that has not happened, so a
+        # window running past the present stops there instead of drawing a flat
+        # run out to it.
+        until = min(requested_end, now)
+        if until <= since:
+            LOGGER.debug("Rejected %s request; reason=custom-order", subject)
+            return self._json({"error": "invalid range"}, status=400)
+        if until - since > MAX_CUSTOM_WINDOW_SECONDS:
+            LOGGER.debug("Rejected %s request; reason=custom-span", subject)
+            return self._json({"error": "invalid range"}, status=400)
+        LOGGER.debug(
+            "Accepted a custom %s window; days=%s ended_early=%s",
+            subject,
+            int((until - since) // 86400),
+            until < requested_end,
+        )
+        return _Window(key=CUSTOM_RANGE, since=since, until=until)
+
     async def _food_data(self, request: web.Request) -> web.StreamResponse:
         denied = await self._require_food_access(request)
         if denied is not None:
             return denied
-        range_key = request.query.get("range", "24h")
-        window = FEAST_USAGE_RANGES.get(range_key)
-        if window is None:
-            LOGGER.debug("Rejected feast usage request; reason=range")
-            return self._json({"error": "invalid range"}, status=400)
+        window = self._resolve_window(
+            request, FEAST_USAGE_RANGES, "feast usage"
+        )
+        if isinstance(window, web.Response):
+            return window
 
-        now = datetime.now(UTC).timestamp()
-        since = now - window
         # get_feast_stock_series is synchronous SQLite sharing the Discord
         # client's event loop, so run it off-loop like the calendar query.
         series = await asyncio.to_thread(
             self._bot.raffle_store.get_feast_stock_series,
-            since,
+            window.since,
+            window.until,
         )
         payload = [
             self._serialize_feast(feast, series) for feast in TRACKED_FEASTS
         ]
         LOGGER.debug(
             "Served feast usage; range=%s feasts=%s samples=%s removals=%s",
-            range_key,
+            window.key,
             len(payload),
             sum(len(item.samples) for item in series.values()),
             sum(len(feast_removals(item)) for item in series.values()),
         )
         return self._json(
             {
-                "range": range_key,
-                "since": since,
-                "now": now,
+                "range": window.key,
+                "since": window.since,
+                "now": window.until,
                 "feasts": payload,
             }
         )
@@ -686,14 +766,12 @@ class WebServer:
         denied = await self._require_roster_access(request)
         if denied is not None:
             return denied
-        range_key = request.query.get("range", "24h")
-        window = ROSTER_RANGES.get(range_key)
-        if window is None:
-            LOGGER.debug("Rejected roster history request; reason=range")
-            return self._json({"error": "invalid range"}, status=400)
+        window = self._resolve_window(
+            request, ROSTER_RANGES, "roster history"
+        )
+        if isinstance(window, web.Response):
+            return window
 
-        now = datetime.now(UTC).timestamp()
-        since = now - window
         # Both reads are synchronous SQLite on the Discord client's event
         # loop, so they go to a worker thread like the calendar's query. The
         # store pools its connections per thread, so one thread is safe.
@@ -703,17 +781,25 @@ class WebServer:
         # Events are read from the earlier of the window and the anchor: the
         # count at any moment is measured by walking the events between it and
         # the anchor, so an anchor older than the window still needs the
-        # events that stand between them.
-        lookback = since if anchor is None else min(since, anchor.recorded_at)
+        # events that stand between them. An anchor newer than the window's end
+        # needs the ones after it just as much, and those are read anyway
+        # because the query has no upper bound.
+        lookback = (
+            window.since
+            if anchor is None
+            else min(window.since, anchor.recorded_at)
+        )
         events = await asyncio.to_thread(
             self._bot.raffle_store.get_membership_events,
             lookback,
         )
-        series = build_roster_series(events, anchor, since, now)
+        series = build_roster_series(
+            events, anchor, window.since, window.until
+        )
         LOGGER.debug(
             "Served roster history; range=%s events=%s joins=%s leaves=%s "
             "kicks=%s points=%s counted=%s",
-            range_key,
+            window.key,
             len(series.events),
             series.joins,
             series.leaves,
@@ -723,11 +809,11 @@ class WebServer:
         )
         return self._json(
             {
-                "range": range_key,
-                "since": since,
-                "now": now,
-                # The count as it stands now, or None when none has ever
-                # been observed and the line is therefore empty.
+                "range": window.key,
+                "since": window.since,
+                "now": window.until,
+                # The count as it stood at the window's end, or None when none
+                # has ever been observed and the line is therefore empty.
                 "member_count": (
                     series.points[-1].member_count if series.points else None
                 ),

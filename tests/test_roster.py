@@ -268,6 +268,49 @@ class TestBuildRosterSeries:
         assert len(series.events) == 1
         assert series.points[-1].member_count == 11
 
+    def test_a_window_that_ends_early_unwinds_the_changes_after_it(
+        self,
+    ) -> None:
+        # The window closes long before the anchor was observed, so the four
+        # departures between the two have to come back off the count that
+        # stands now to place the window's own right-hand edge.
+        series = build_roster_series(
+            [
+                event(-900, JOIN),
+                event(-500, LEAVE),
+                event(-400, LEAVE),
+                event(-300, LEAVE),
+                event(-200, LEAVE),
+            ],
+            anchor(-100, 10),
+            NOW - 1000,
+            NOW - 600,
+        )
+
+        assert [(change.kind, change.member_count) for change in series.events] == [
+            (JOIN, 14),
+        ]
+        assert [(point.at, point.member_count) for point in series.points] == [
+            (NOW - 1000, 13),
+            (NOW - 900, 14),
+            (NOW - 600, 14),
+        ]
+
+    def test_a_change_on_the_window_end_closes_the_line_at_its_count(
+        self,
+    ) -> None:
+        series = build_roster_series(
+            [event(-600, LEAVE), event(-200, LEAVE)],
+            anchor(-100, 10),
+            NOW - 1000,
+            NOW - 600,
+        )
+
+        assert len(series.events) == 1
+        # The closing vertex sits on the same moment as the departure's own
+        # dot, so it carries the count that departure left behind.
+        assert [point.member_count for point in series.points] == [12, 11, 11]
+
     def test_counts_each_kind_of_change(self) -> None:
         series = build_roster_series(
             [
