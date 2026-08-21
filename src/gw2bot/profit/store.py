@@ -74,10 +74,24 @@ class ProfitStore:
             else:
                 record.encrypted_api_key = encrypted
                 record.updated_at = now
+                session.execute(
+                    delete(ProfitTransactionRecord).where(
+                        ProfitTransactionRecord.discord_user_id
+                        == discord_user_id
+                    )
+                )
+                session.execute(
+                    delete(ProfitCacheSyncRecord).where(
+                        ProfitCacheSyncRecord.discord_user_id
+                        == discord_user_id
+                    )
+                )
         LOGGER.debug(
-            "Stored profit API key; user_id=%s created=%s characters=%s",
+            "Stored profit API key; user_id=%s created=%s "
+            "cache_cleared=%s characters=%s",
             discord_user_id,
             created,
+            not created,
             len(api_key),
         )
 

@@ -17,6 +17,7 @@ from gw2bot.logging_setup import SecretRegistry
 from gw2bot.profit.api import ProfitApiClient, ProfitApiError
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.models import (
+    BuyLot,
     Transaction,
     allocated_net_revenue,
     calculate_realized_profit,
@@ -102,6 +103,26 @@ class TestProfitCalculation:
         assert result.unmatched_buys[1][0].remaining == 3
         assert result.unmatched_buys[1][1].remaining == 2
 
+    def test_preserves_sale_revenue_remainder_across_fifo_lots(self) -> None:
+        buys = [
+            transaction("buy-1", price=10, quantity=2),
+            transaction("buy-2", price=20, quantity=1),
+        ]
+        sells = [
+            transaction(
+                "sell",
+                price=101,
+                quantity=3,
+                occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+            )
+        ]
+
+        result = calculate_realized_profit(buys, sells)
+
+        assert result.total_net_revenue == 256
+        assert result.items[1].net_revenue == 256
+        assert result.days["2026-08-02"].net_revenue == 256
+
     def test_projects_only_unmatched_buys_that_are_currently_listed(self) -> None:
         realized = calculate_realized_profit(
             [transaction("buy", price=100, quantity=5)],
@@ -138,6 +159,27 @@ class TestProfitCalculation:
         assert unrealized.total_projected_net_revenue == 510
         assert unrealized.total_projected_profit == 310
 
+    def test_preserves_listing_revenue_remainder_across_fifo_lots(self) -> None:
+        unrealized = calculate_unrealized_profit(
+            {
+                1: (
+                    BuyLot(2, 10, datetime(2026, 8, 1, tzinfo=UTC)),
+                    BuyLot(1, 20, datetime(2026, 8, 2, tzinfo=UTC)),
+                )
+            },
+            [
+                transaction(
+                    "listing",
+                    price=101,
+                    quantity=3,
+                    occurred_at=datetime(2026, 8, 3, tzinfo=UTC),
+                )
+            ],
+        )
+
+        assert unrealized.total_projected_net_revenue == 256
+        assert unrealized.items[1].projected_net_revenue == 256
+
 
 class TestProfitStore:
     def test_encrypts_and_isolates_each_members_api_key(
@@ -172,6 +214,55 @@ class TestProfitStore:
         assert store.delete_api_key(101)
         assert store.get_api_key(101) is None
         assert store.get_api_key(202) == "second-secret"
+
+    def test_replacing_a_key_clears_only_that_members_cached_data(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.set_api_key(101, "old-secret")
+        store.set_api_key(202, "other-secret")
+        for transaction_kind in (
+            "history_buys",
+            "history_sells",
+            "current_sells",
+        ):
+            store.store_transactions(
+                101,
+                transaction_kind,
+                [transaction(f"old-{transaction_kind}")],
+                now=now,
+            )
+            store.touch_cache(101, transaction_kind, now=now)
+        store.store_transactions(
+            202,
+            "history_buys",
+            [transaction("other")],
+            now=now,
+        )
+        store.touch_cache(202, "history_buys", now=now)
+
+        store.set_api_key(101, "replacement-secret")
+
+        assert store.get_api_key(101) == "replacement-secret"
+        for transaction_kind in (
+            "history_buys",
+            "history_sells",
+            "current_sells",
+        ):
+            assert store.get_transactions(101, transaction_kind) == []
+            assert not store.is_cache_fresh(
+                101,
+                transaction_kind,
+                300,
+                now=now,
+            )
+        assert [
+            row.transaction_id
+            for row in store.get_transactions(202, "history_buys")
+        ] == ["other"]
+        assert store.is_cache_fresh(202, "history_buys", 300, now=now)
 
     def test_transaction_caches_are_isolated_by_member(
         self,

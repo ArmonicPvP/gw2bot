@@ -126,12 +126,29 @@ def allocated_net_revenue(
     unit_price: int,
     sold_quantity: int,
     matched_quantity: int,
+    *,
+    previously_matched_quantity: int = 0,
 ) -> int:
+    """Allocate a sale's net revenue without losing FIFO slice remainders."""
     if sold_quantity <= 0:
         raise ValueError("sold_quantity must be positive")
+    if matched_quantity < 0:
+        raise ValueError("matched_quantity cannot be negative")
+    if previously_matched_quantity < 0:
+        raise ValueError("previously_matched_quantity cannot be negative")
+    if previously_matched_quantity + matched_quantity > sold_quantity:
+        raise ValueError("matched quantities cannot exceed sold_quantity")
     gross = unit_price * sold_quantity
     net = gross - sale_fee_total(unit_price, sold_quantity)
-    return math.floor(net * (matched_quantity / sold_quantity))
+    allocated_before = (
+        net * previously_matched_quantity // sold_quantity
+    )
+    allocated_through_match = (
+        net
+        * (previously_matched_quantity + matched_quantity)
+        // sold_quantity
+    )
+    return allocated_through_match - allocated_before
 
 
 def calculate_realized_profit(
@@ -189,6 +206,7 @@ def calculate_realized_profit(
                 continue
 
             sell_remaining = event.quantity
+            sell_matched = 0
             while sell_remaining > 0 and buy_lots:
                 buy_lot = buy_lots[0]
                 matched = min(sell_remaining, buy_lot.remaining)
@@ -197,6 +215,7 @@ def calculate_realized_profit(
                     event.unit_price,
                     event.quantity,
                     matched,
+                    previously_matched_quantity=sell_matched,
                 )
                 profit = net_revenue - cost
                 item.matched_quantity += matched
@@ -213,6 +232,7 @@ def calculate_realized_profit(
 
                 buy_lot.remaining -= matched
                 sell_remaining -= matched
+                sell_matched += matched
                 if buy_lot.remaining == 0:
                     buy_lots.popleft()
 
@@ -314,6 +334,9 @@ def calculate_unrealized_profit(
                 sell_listing.unit_price,
                 sell_listing.original_quantity,
                 matched,
+                previously_matched_quantity=(
+                    sell_listing.original_quantity - sell_listing.remaining
+                ),
             )
             quantity += matched
             cost += matched_cost
