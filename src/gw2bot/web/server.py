@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 import aiohttp
 import discord
 from aiohttp import web
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config
 from gw2bot.discord_utils import resolve_display_name, user_has_role
@@ -22,6 +23,11 @@ from gw2bot.feast_stock import (
     feast_removals,
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
+from gw2bot.profit.api import ProfitApiError
+from gw2bot.profit.service import (
+    MissingProfitApiKey,
+    serialize_profit_report,
+)
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
@@ -39,6 +45,7 @@ from gw2bot.web.page import (
     SIGN_IN_PAGE,
     SIGNED_OUT_PAGE,
 )
+from gw2bot.web.profit_page import PROFIT_PAGE
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -89,7 +96,9 @@ PUBLIC_PATHS = frozenset(
 
 _Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
-SESSION_KEY = web.RequestKey("web_session", auth.SessionData)
+# Request mappings accept string keys. aiohttp 3.13 removed the RequestKey
+# helper that used to add generic typing around this entry.
+SESSION_KEY = "web_session"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +177,8 @@ class WebServer:
                 web.get("/api/roster", self._roster_data),
                 web.get("/gold", self._gold),
                 web.get("/api/gold", self._gold_data),
+                web.get("/profit", self._profit),
+                web.get("/api/profit", self._profit_data),
             ]
         )
 
@@ -643,6 +654,58 @@ class WebServer:
     async def _me(self, request: web.Request) -> web.StreamResponse:
         session = request[SESSION_KEY]
         return self._json({"name": session.name})
+
+    async def _profit(self, request: web.Request) -> web.StreamResponse:
+        LOGGER.debug("Serving profit dashboard page")
+        return self._html(PROFIT_PAGE)
+
+    async def _profit_data(self, request: web.Request) -> web.StreamResponse:
+        raw_days = request.query.get("days", "30")
+        try:
+            days = int(raw_days)
+        except ValueError:
+            LOGGER.debug("Rejected profit report; reason=days-malformed")
+            return self._json({"error": "invalid days"}, status=400)
+        if not 1 <= days <= 90:
+            LOGGER.debug("Rejected profit report; reason=days-range")
+            return self._json({"error": "invalid days"}, status=400)
+        service = self._bot.profit_service
+        if service is None:
+            LOGGER.error("Could not serve profit report; service=unavailable")
+            return self._json({"error": "unavailable"}, status=503)
+        session = request[SESSION_KEY]
+        try:
+            report = await service.load_report(session.user_id, days)
+        except MissingProfitApiKey:
+            LOGGER.debug(
+                "Rejected profit report; user_id=%s reason=api-key-unset",
+                session.user_id,
+            )
+            return self._json({"error": "api_key_missing"}, status=409)
+        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
+            LOGGER.warning(
+                "Could not serve profit report; user_id=%s error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "upstream unavailable"}, status=502)
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not build profit report; user_id=%s error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "report unavailable"}, status=500)
+        payload = serialize_profit_report(report)
+        LOGGER.debug(
+            "Served profit report; user_id=%s days=%s realized_items=%s "
+            "unrealized_items=%s",
+            session.user_id,
+            days,
+            len(report.realized.items),
+            len(report.unrealized.items),
+        )
+        return self._json(payload)
 
     async def _food(self, request: web.Request) -> web.StreamResponse:
         denied = await self._require_food_access(request)

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import stat
 from pathlib import Path
@@ -56,6 +57,11 @@ from gw2bot.settings.migration import (
     legacy_variables_present,
 )
 from gw2bot.settings.store import SettingsStore
+
+POSIX_MODE_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows reports ACL-controlled writable files as mode 0666",
+)
 
 BOOTSTRAP = BootstrapConfig(
     discord_token="discord-token",
@@ -189,6 +195,7 @@ class TestSettingsEncryption:
 
         assert "gw2-secret" not in caplog.text
 
+    @POSIX_MODE_ONLY
     def test_generates_a_private_key_file_beside_the_database(
         self,
         tmp_path: Path,
@@ -1033,6 +1040,7 @@ class TestSecretHandlingGuards:
 
 
 class TestEncryptionKeyFile:
+    @POSIX_MODE_ONLY
     def test_narrows_a_key_file_that_arrives_world_readable(
         self,
         tmp_path: Path,
@@ -1051,6 +1059,7 @@ class TestEncryptionKeyFile:
         assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
         assert "readable beyond its owner" in caplog.text
 
+    @POSIX_MODE_ONLY
     def test_leaves_an_already_private_key_file_alone(
         self,
         tmp_path: Path,

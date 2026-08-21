@@ -10,6 +10,7 @@ from sqlalchemy import (
     Column,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     create_engine,
@@ -57,6 +58,60 @@ class BotSettingRecord(Base):
         nullable=False,
         default=False,
     )
+
+
+class ProfitApiKeyRecord(Base):
+    """One encrypted Trading Post API key per Discord member."""
+
+    __tablename__ = "gw2_profit_api_keys"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    encrypted_api_key: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitCacheSyncRecord(Base):
+    """Freshness marker for one member's cached Trading Post collection."""
+
+    __tablename__ = "gw2_profit_cache_syncs"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cache_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    synced_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitTransactionRecord(Base):
+    """The fields from a Trading Post transaction needed by the reports."""
+
+    __tablename__ = "gw2_profit_transactions"
+    __table_args__ = (
+        Index(
+            "idx_gw2_profit_transactions_lookup",
+            "discord_user_id",
+            "transaction_kind",
+            "occurred_at",
+        ),
+    )
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    transaction_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    transaction_id: Mapped[str] = mapped_column(String, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitItemRecord(Base):
+    """Shared item names fetched from the public Guild Wars 2 endpoint."""
+
+    __tablename__ = "gw2_profit_items"
+
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class RaffleTotalRecord(Base):

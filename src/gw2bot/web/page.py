@@ -507,6 +507,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   </div>
   <span id="period" aria-live="polite"></span>
   <span class="spacer"></span>
+  <a href="/profit">Profit</a>
   <span id="whoami"></span>
   <form method="post" action="/logout">
     <button type="submit" class="signout" aria-label="Sign out">

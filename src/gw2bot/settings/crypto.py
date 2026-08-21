@@ -154,18 +154,13 @@ def _require_private(path: Path) -> None:
     The bot writes the file 0600, but one restored from a backup or dropped in
     by hand arrives with whatever mode it had, and a group- or world-readable
     key hands every stored credential to any other local user. Tightening it
-    beats refusing to start over a permissions bit; a filesystem that cannot
-    represent the mode is reported and the bot carries on.
+    beats refusing to start over a permissions bit; a file whose permissions
+    cannot even be inspected cannot be trusted and is refused.
     """
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
     except OSError as exc:
-        LOGGER.warning(
-            "Could not read the settings encryption key file's permissions; "
-            "error_type=%s",
-            type(exc).__name__,
-        )
-        return
+        raise _unreadable_key(path, exc) from exc
     if not mode & ~KEY_FILE_MODE:
         return
     LOGGER.warning(
