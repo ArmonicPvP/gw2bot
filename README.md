@@ -1284,7 +1284,10 @@ observed, so its right-hand edge reads the bank as it stood then rather than as
 it stands now; the figure beside the heading says "at the end" instead of "now"
 to match.
 
-Amounts are shown in gold. The y axis covers the balances the window actually
+Amounts use the game's compact gold, silver, and copper notation (for example,
+`1g`, `1g1s`, `1g0s1c`, or `10c`) without trailing zero denominations. Table
+movements are a bare `+` deposit or `-` withdrawal followed by that amount.
+The y axis covers the balances the window actually
 reached rather than starting at zero, and its gridlines round to 1, 2 or 5
 times a power of ten, so a week of small movements is visible rather than a
 flat line at the top of an axis scaled to the whole treasury.
@@ -1292,8 +1295,7 @@ flat line at the top of an axis scaled to the whole treasury.
 A long account name wraps inside its column rather than widening the table, and
 on a phone the running balance column gives way — the amount and its sign are
 what a reader is scanning for, and the line above already shows where the
-balance went. The direction's name is likewise reduced to its dot, and stays in
-the table for a screen reader to read out.
+balance went.
 
 Access is gated by `/settings roles gold_page`, which starts as the role that
 draws the raffle, because the page names who took gold out. Point it at a wider

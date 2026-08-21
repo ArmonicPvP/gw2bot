@@ -3805,13 +3805,6 @@ table.changes th.num, table.changes td.num {
   font-variant-numeric: tabular-nums;
 }
 table.changes td.amount { white-space: nowrap; }
-table.changes .dot {
-  display: inline-block;
-  width: 0.6rem;
-  height: 0.6rem;
-  border-radius: 50%;
-  margin-right: 0.4rem;
-}
 .empty { color: var(--muted); padding: 0.6rem; }
 .pager {
   display: flex;
@@ -3849,20 +3842,6 @@ button:focus-visible {
      above already shows where the balance went. It is still in the chart
      tooltip. */
   table.changes .balance { display: none; }
-  /* The dot's colour already says which way the gold went, and the word
-     beside it costs the account column width it has none of to spare. The
-     word stays in the table, out of sight rather than out of the document,
-     so a screen reader still reads each row out. */
-  table.changes .amount-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
 }
 </style>
 </head>
@@ -3927,10 +3906,10 @@ button:focus-visible {
   var LINE_COLOR = "#56B4E9";
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 10;
-  // Copper is what the guild log, the API and the ledger all deal in; gold is
-  // what a reader thinks in. One place knows the factor so no other line has
-  // to remember it.
+  // Copper is what the guild log, the API and the ledger all deal in. The
+  // chart scale uses gold, while displayed amounts retain exact coin values.
   var COPPER_PER_GOLD = 10000;
+  var COPPER_PER_SILVER = 100;
   // Smallest number of gold the y axis ever spans, so a quiet week does not
   // turn one small withdrawal into a cliff.
   var MIN_SPAN_GOLD = 10;
@@ -3996,16 +3975,22 @@ button:focus-visible {
 
   function gold(copper) { return copper / COPPER_PER_GOLD; }
 
-  // Whole gold for a round figure and two decimals for anything else, which
-  // is as fine as a reader ever needs: the silver and copper under a gold
-  // piece move the balance by a rounding error.
-  function formatGold(copper) {
-    return gold(copper).toLocaleString(
-      undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  // Spell an exact copper value in GW2's denominations, omitting only trailing
+  // zero denominations: 1g, 1g1s, 1g0s1c and 10c all remain unambiguous.
+  function formatCoins(copper) {
+    var remaining = Math.max(0, Math.round(copper));
+    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
+    remaining %= COPPER_PER_GOLD;
+    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
+    var copperCoins = remaining % COPPER_PER_SILVER;
+    var text = goldCoins ? goldCoins.toLocaleString() + "g" : "";
+    if (silverCoins || (goldCoins && copperCoins)) { text += silverCoins + "s"; }
+    if (copperCoins || !text) { text += copperCoins + "c"; }
+    return text;
   }
   function formatSigned(copper, operation) {
-    var sign = operation === "withdraw" ? "\\u2212" : "+";
-    return sign + formatGold(copper);
+    var sign = operation === "withdraw" ? "-" : "+";
+    return sign + formatCoins(copper);
   }
 
   // A gridline step of 1, 2 or 5 times a power of ten, which is what makes
@@ -4131,7 +4116,7 @@ button:focus-visible {
       var yLabel = svg("text", {
         "class": "y-label", x: M.left - 6, y: y + 4
       });
-      yLabel.textContent = formatGold(value * COPPER_PER_GOLD);
+      yLabel.textContent = formatCoins(value * COPPER_PER_GOLD);
       canvas.appendChild(yLabel);
     }
 
@@ -4297,12 +4282,19 @@ button:focus-visible {
     tooltip.style.visibility = "hidden";
     chart.appendChild(tooltip);
 
-    function nearestColumn(vbX) {
+    // Pick from the actual dots in two dimensions, then return its time
+    // column. Close timestamps can occupy nearly the same x coordinate, so
+    // x-only navigation made their different y positions impossible to use.
+    function nearestColumn(vbX, vbY) {
       var best = null;
       var bestDist = Infinity;
       columns.forEach(function (column) {
-        var dist = Math.abs(column.x - vbX);
-        if (dist < bestDist) { bestDist = dist; best = column; }
+        column.points.forEach(function (point) {
+          var dx = point.x - vbX;
+          var dy = point.y - vbY;
+          var dist = dx * dx + dy * dy;
+          if (dist < bestDist) { bestDist = dist; best = column; }
+        });
       });
       return best;
     }
@@ -4323,7 +4315,7 @@ button:focus-visible {
         tooltip.appendChild(row);
       });
       tooltip.appendChild(el("div", "tip-note",
-        "Bank held " + formatGold(emphasized.movement.after) + " gold."));
+        "Bank held " + formatCoins(emphasized.movement.after) + "."));
       // Anchor to the point nearest the cursor and flip below the axis top
       // when there is no room to sit above it.
       var leftPct = Math.max(10, Math.min(90, emphasized.x / m.w * 100));
@@ -4437,7 +4429,7 @@ button:focus-visible {
       if (!columns.length) { return { column: null, reason: "no-movements" }; }
       var at = pointFromEvent(event);
       if (!at) { return { column: null, reason: "unsized-canvas" }; }
-      var column = nearestColumn(at.x);
+      var column = nearestColumn(at.x, at.y);
       if (!column) { return { column: null, reason: "no-nearest" }; }
       return { column: column, at: at, reason: "ok" };
     }
@@ -4512,16 +4504,16 @@ button:focus-visible {
     // A net of nothing is written plainly: a sign in front of a zero claims a
     // direction the window did not go.
     var netText = net === 0
-      ? formatGold(0)
+      ? formatCoins(0)
       : formatSigned(Math.abs(net), net < 0 ? "withdraw" : "deposit");
     [
-      ["deposited", formatGold(state.data.deposited || 0)],
-      ["withdrawn", formatGold(state.data.withdrawn || 0)],
+      ["deposited", formatCoins(state.data.deposited || 0)],
+      ["withdrawn", formatCoins(state.data.withdrawn || 0)],
       ["net", netText]
     ].forEach(function (pair) {
       var item = el("span", null);
       item.appendChild(el("span", "num", pair[1]));
-      item.appendChild(document.createTextNode(" gold " + pair[0]));
+      item.appendChild(document.createTextNode(" " + pair[0]));
       totals.appendChild(item);
     });
     // A preset window runs to the moment of the request, so its closing
@@ -4530,7 +4522,7 @@ button:focus-visible {
     nowBalance.textContent = state.data.coins === null ||
       state.data.coins === undefined
       ? ""
-      : "\\u2014 " + formatGold(state.data.coins) +
+      : "\\u2014 " + formatCoins(state.data.coins) +
         (state.range === "custom" ? " at the end" : " now");
   }
 
@@ -4560,18 +4552,11 @@ button:focus-visible {
       row.appendChild(el("td", null, formatMoment(movement.t)));
       row.appendChild(el("td", "name", movement.name));
       var amountCell = el("td", "num amount");
-      var dot = el("span", "dot");
-      dot.style.background = operationOf(movement.operation).color;
-      amountCell.appendChild(dot);
-      // The name of the direction is its own element so the phone layout can
-      // put it out of sight and leave the dot and the sign standing for it.
-      amountCell.appendChild(el("span", "amount-label",
-        operationOf(movement.operation).label + " "));
       amountCell.appendChild(el("span", null,
         formatSigned(movement.coins, movement.operation)));
       row.appendChild(amountCell);
       row.appendChild(el("td", "num balance",
-        movement.after === null ? "" : formatGold(movement.after)));
+        movement.after === null ? "" : formatCoins(movement.after)));
       table.appendChild(row);
     });
     tableBox.appendChild(table);
