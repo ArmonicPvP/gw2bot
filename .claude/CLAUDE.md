@@ -124,10 +124,12 @@ Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 | `bot.py` | The `discord.py` client: wires pollers, background tasks, and command groups. |
 | `database.py` | SQLite engine, schema, and in-place migrations (Alembic operations). |
 | `gw2_api.py` | GW2 API client. Endpoint notes are in `docs/gw2-api.md`. |
-| `guild_log.py`, `guild_storage.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
+| `guild_log.py`, `guild_storage.py`, `guild_stash.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
+| `anchored_series.py` | Deriving a running total from an observed value and the changes around it, shared by the roster and gold histories. |
 | `notifications.py`, `poll_status.py` | Delivery to the notification channel, plus the `diag` previews. |
 | `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
 | `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import` from the log channel. |
+| `gold/` | Guild bank gold history: the series the gold page draws, and the one-time `/gold import` from the guild log. |
 | `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
 | `events/` | Guild events: models, store, posting, scheduler, reminders, views, `/event` commands. |
 | `web/` | Optional aiohttp site: Discord OAuth, calendar, feast usage and guild roster pages. |

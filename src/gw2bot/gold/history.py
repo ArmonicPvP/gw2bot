@@ -83,14 +83,16 @@ def build_gold_series(
             _plot(ordered[index], coins_after[index]) for index in in_window
         ),
     )
+    # The balance itself never reaches the console: what the guild holds is
+    # the page's whole subject, and this line only has to say that a series
+    # was built and how much of one.
     LOGGER.debug(
         "Built gold series; movements=%s in_window=%s points=%s "
-        "anchor_offset_seconds=%s end_coins=%s",
+        "anchor_offset_seconds=%s",
         len(ordered),
         len(in_window),
         len(series.points),
         int(until - anchor.recorded_at),
-        coins_at_end,
     )
     return series
 

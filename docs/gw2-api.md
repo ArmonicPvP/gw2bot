@@ -69,8 +69,18 @@ This endpoint is the best fit for incremental Discord notifications. Persisting
 the last processed event ID will be necessary to avoid replaying events after a
 restart.
 
-Gold deposits are `stash` events with `operation` set to `deposit`. The `coins`
-field is measured in copper, where `10000` copper is one gold. The API does not
+Gold deposits are `stash` events with `operation` set to `deposit`, and
+withdrawals the same events with `operation` set to `withdraw`; a third
+operation, `move`, shuffles items between vault tabs and carries no coins. The
+`coins` field is measured in copper, where `10000` copper is one gold. An item
+deposit or withdrawal is a `stash` event too and reports `coins` as zero, so
+the amount is what tells a coin movement from an item one.
+
+The bot records both directions in a ledger of its own, separate from the
+raffle's deposit table, and announces each withdrawal in the notification
+channel. Because the log returns only about a hundred events per type, that
+ledger reaches back only as far as the log does; `/gold import` reads the whole
+log once, without `since`, to recover as much of it as remains. The API does not
 identify which guild-vault section received the deposit. The stash snapshot
 endpoint exposes current tab contents but cannot reliably attribute a tab
 balance change to a specific guild-log event or depositor. As a result,
@@ -107,6 +117,12 @@ Returns each rank's ID, sort order, permission IDs, and icon URL.
 ### `/v2/guild/:id/stash`
 
 Returns guild vault sections, coins, notes, and slot-by-slot item contents.
+
+The bot polls this endpoint on the Guild Storage interval and sums `coins`
+across every section into one balance. The guild log never says which section a
+coin movement reached, and the gold history tracks the bank rather than any one
+tab, so a single balance is what it records. That reading is the anchor every
+derived balance on the `/gold` page is measured back from.
 
 ### `/v2/guild/:id/storage`
 

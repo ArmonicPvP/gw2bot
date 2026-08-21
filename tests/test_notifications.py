@@ -39,6 +39,10 @@ class TestAutomatedMessageDiagnostics:
             "<@0> removed 2 purchased raffle tickets from DiagnosticUser.1234."
             in output
         )
+        assert (
+            "**Gold withdrawal notification (test)**\n"
+            "DiagnosticUser.1234 withdrew 5 gold from the guild bank."
+        ) in output
         assert "DiagnosticUser.1234 has joined the guild." in output
         assert "DiagnosticUser.1234 has left the guild." in output
         assert (

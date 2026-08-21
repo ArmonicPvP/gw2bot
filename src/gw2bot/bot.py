@@ -492,7 +492,9 @@ class Gw2Bot(discord.Client):
                 "Guild Wars 2 features are disabled because %s %s not set: "
                 "Guild Storage polling, feast stock alerts, guild log polling, "
                 "guild join, leave, invite and rank-change notifications, "
-                "raffle deposit tracking, the overdue Trial member report, the "
+                "gold withdrawal notifications, raffle deposit tracking, the "
+                "guild bank ledger and the stash poll that anchors it, the "
+                "overdue Trial member report, the "
                 "guild member count channel description and the roster "
                 "history it records, and guild member "
                 "lookups in /raffle, /check and /track",
@@ -502,11 +504,13 @@ class Gw2Bot(discord.Client):
         if not self._config.notifications_enabled:
             LOGGER.warning(
                 "Notification channel delivery is disabled because %s is not "
-                "set: no guild membership, raffle audit, feast stock or Trial "
+                "set: no guild membership, gold withdrawal, raffle audit, "
+                "feast stock or Trial "
                 "member message is delivered there, the guild member count "
                 "channel description is not updated and the roster history "
                 "records no counts, and the diag previews do "
-                "not run; the raffle contribution channel is unaffected",
+                "not run; the guild bank ledger and the raffle contribution "
+                "channel are unaffected",
                 f"/settings {NOTIFICATION_CHANNEL_SETTING}",
             )
         missing_web = self._config.missing_web_settings
@@ -517,8 +521,8 @@ class Gw2Bot(discord.Client):
             LOGGER.warning(
                 "The web calendar is disabled because %s %s not set, even "
                 "though WEB_ENABLED is true: the calendar, the feast usage "
-                "page and the roster history are not served and nothing "
-                "listens on port %s",
+                "page, the roster history and the gold history are not served "
+                "and nothing listens on port %s",
                 ", ".join(f"/settings {name}" for name in missing_web),
                 "is" if len(missing_web) == 1 else "are",
                 self._config.web_port,
