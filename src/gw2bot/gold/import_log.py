@@ -48,16 +48,24 @@ async def import_gold_history(bot: Gw2Bot) -> GoldImportResult:
     # is the whole point: the cursor names where the poller got to, and this
     # is meant to reach behind it.
     events = await bot._api.get_guild_log(guild_id)
+    # Both reads happen before either write. Storing the movements first and
+    # then failing to read the stash would leave the command telling the
+    # officer that nothing was imported while a partial import stood in the
+    # database - and that is the sentence they would decide whether to retry
+    # from. The stash reading is also timestamped here rather than after the
+    # writes, because what the anchor records is when the balance was
+    # observed, not when the row happened to be written.
+    stash = await bot._api.get_guild_stash(guild_id)
+    coins = stash_coin_balance(stash)
+    observed_at = time.time()
+
     entries: list[GoldLedgerEntry] = []
     for event in events:
         movement = parse_stash_coin_movement(event)
         if movement is not None:
             entries.append(movement)
     imported = bot._raffle_store.import_gold_movements(entries)
-
-    stash = await bot._api.get_guild_stash(guild_id)
-    coins = stash_coin_balance(stash)
-    balance_recorded = bot._raffle_store.record_stash_balance(coins, time.time())
+    balance_recorded = bot._raffle_store.record_stash_balance(coins, observed_at)
 
     result = GoldImportResult(
         fetched=len(events),

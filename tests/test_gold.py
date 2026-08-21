@@ -613,6 +613,25 @@ class TestImportGoldHistory:
         assert result.balance_recorded
         assert len(store.get_gold_movements(0.0)) == 2
 
+    async def test_a_failed_stash_read_writes_nothing_at_all(
+        self,
+        store: RaffleStore,
+    ) -> None:
+        # Both reads happen before either write, so the command's "nothing was
+        # imported" is true when it says it. Storing the movements first would
+        # leave that sentence false and an officer deciding whether to retry
+        # from it.
+        bot = self._bot(
+            store, [gold_deposit(101, "Member.1234", 20_000)], []
+        )
+        bot._api.get_guild_stash = AsyncMock(side_effect=aiohttp.ClientError())
+
+        with pytest.raises(aiohttp.ClientError):
+            await import_gold_history(cast(Gw2Bot, bot))
+
+        assert store.get_gold_movements(0.0) == []
+        assert store.get_last_stash_balance() is None
+
     async def test_a_second_run_adds_only_what_is_new(
         self,
         store: RaffleStore,
