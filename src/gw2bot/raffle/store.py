@@ -392,7 +392,7 @@ class RaffleStore:
             joins = session.scalars(select(GuildJoinRecord)).all()
             leaves = session.scalars(select(GuildLeaveRecord)).all()
         for join in joins:
-            occurred_at = _membership_time(join.event_time)
+            occurred_at = _row_moment(join.event_time)
             if occurred_at is None:
                 unreadable += 1
                 continue
@@ -407,7 +407,7 @@ class RaffleStore:
                 )
             )
         for leave in leaves:
-            occurred_at = _membership_time(leave.event_time)
+            occurred_at = _row_moment(leave.event_time)
             if occurred_at is None:
                 unreadable += 1
                 continue
@@ -455,7 +455,7 @@ class RaffleStore:
         moments = [
             moment
             for moment in (
-                _membership_time(value)
+                _row_moment(value)
                 for value in (*join_times, *leave_times)
             )
             if moment is not None
@@ -607,7 +607,7 @@ class RaffleStore:
         with self._sessions() as session:
             rows = session.scalars(select(GuildStashCoinLogRecord)).all()
         for row in rows:
-            occurred_at = _membership_time(row.event_time)
+            occurred_at = _row_moment(row.event_time)
             if occurred_at is None:
                 unreadable += 1
                 continue
@@ -1865,7 +1865,8 @@ class RaffleStore:
         LOGGER.debug("Validated raffle database guild binding")
 
 
-def _membership_time(event_time: str) -> float | None:
+def _row_moment(event_time: str) -> float | None:
+    """A stored guild-log timestamp as a UTC epoch, or None if unreadable."""
     parsed = parse_event_time(event_time)
     return None if parsed is None else parsed.timestamp()
 
