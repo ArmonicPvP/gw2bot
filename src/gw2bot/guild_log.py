@@ -87,6 +87,7 @@ async def poll_guild_log(bot: Gw2Bot) -> None:
         try:
             await bot.refresh_guild_log()
             await bot._send_pending_raffle_notifications()
+            await bot._send_pending_gold_withdrawal_notifications()
             await bot._send_pending_deposit_audit_notifications()
             await bot._send_pending_raffle_milestones()
             await bot._send_pending_join_notifications()
@@ -121,6 +122,15 @@ async def send_pending_raffle_notifications(bot: Gw2Bot) -> None:
             raffle_deposit_embed(deposit)
         ):
             bot._raffle_store.mark_notification_sent(deposit.event_id)
+
+async def send_pending_gold_withdrawal_notifications(bot: Gw2Bot) -> None:
+    pending = bot._raffle_store.get_pending_gold_withdrawal_notifications()
+    LOGGER.debug("Found %s pending gold withdrawal notifications", len(pending))
+    for withdrawal in pending:
+        if await bot._try_send_notification(withdrawal.message):
+            bot._raffle_store.mark_gold_withdrawal_notification_sent(
+                withdrawal.event_id
+            )
 
 async def send_pending_deposit_audit_notifications(bot: Gw2Bot) -> None:
     pending = bot._raffle_store.get_pending_deposit_audit_notifications()

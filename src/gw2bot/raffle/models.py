@@ -34,6 +34,26 @@ class RaffleDeposit:
 
 
 @dataclass(frozen=True, slots=True)
+class GoldWithdrawal:
+    """One withdrawal of coins from the guild stash, as the log reports it.
+
+    The raffle has nothing to say about a withdrawal - no tickets are bought
+    back and no total moves - but the guild bank's balance does, so this is
+    recorded and announced for its own sake.
+    """
+
+    event_id: int
+    username: str
+    coins_withdrawn: int
+    event_time: str
+
+    @property
+    def message(self) -> str:
+        gold = format_gold(self.coins_withdrawn)
+        return f"{self.username} withdrew {gold} gold from the guild bank."
+
+
+@dataclass(frozen=True, slots=True)
 class RaffleTotal:
     username: str
     coins_deposited: int

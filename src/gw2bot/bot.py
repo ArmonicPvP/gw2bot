@@ -12,7 +12,13 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from gw2bot import guild_log, guild_storage, member_count, notifications
+from gw2bot import (
+    guild_log,
+    guild_stash,
+    guild_storage,
+    member_count,
+    notifications,
+)
 from gw2bot.config import (
     NOTIFICATION_CHANNEL_SETTING,
     BootstrapConfig,
@@ -28,6 +34,7 @@ from gw2bot.events.views import (
     EventSignOutButton,
     EventSignUpButton,
 )
+from gw2bot.gold.commands import GoldCommands
 from gw2bot.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.poll_status import PollStatusTracker
@@ -165,6 +172,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(SettingsCommands(self))
         self.tree.add_command(EventCommands(self))
         self.tree.add_command(RosterCommands(self))
+        self.tree.add_command(GoldCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
@@ -235,6 +243,7 @@ class Gw2Bot(discord.Client):
             # These read the GW2 API on every pass, so without a key and a
             # guild id they have nothing to poll.
             wanted["gw2-guild-storage-poller"] = self._poll_guild_storage
+            wanted["gw2-guild-stash-poller"] = self._poll_guild_stash
             wanted["gw2-guild-log-poller"] = self._poll_guild_log
         if gw2_api_enabled and notifications_enabled:
             # Both read the GW2 API and exist only to write to the
@@ -378,6 +387,7 @@ class Gw2Bot(discord.Client):
             # one only reaches them through a fresh task.
             restart_tasks |= {
                 "gw2-guild-storage-poller",
+                "gw2-guild-stash-poller",
                 "gw2-guild-log-poller",
             }
 
@@ -386,6 +396,7 @@ class Gw2Bot(discord.Client):
         # interval would not take effect for as long as the old one had left.
         if "poll_interval_seconds" in changed:
             restart_tasks.add("gw2-guild-storage-poller")
+            restart_tasks.add("gw2-guild-stash-poller")
         if "guild_log_poll_interval_seconds" in changed:
             restart_tasks.add("gw2-guild-log-poller")
 
@@ -438,6 +449,7 @@ class Gw2Bot(discord.Client):
             "web_session_ttl_seconds",
             "food_page_role_id",
             "roster_page_role_id",
+            "gold_page_role_id",
             "raffle_draw_role_id",
         }
         web_outcome = await self._reconcile_web_server(bool(changed & web_fields))
@@ -855,6 +867,12 @@ class Gw2Bot(discord.Client):
             guild_id,
         )
 
+    async def _poll_guild_stash(self) -> None:
+        await guild_stash.poll_guild_stash(self)
+
+    async def _record_guild_stash_balance(self) -> int:
+        return await guild_stash.record_guild_stash_balance(self)
+
     async def _poll_guild_storage(self) -> None:
         await guild_storage.poll_guild_storage(self)
 
@@ -964,6 +982,9 @@ class Gw2Bot(discord.Client):
 
     async def _send_pending_raffle_notifications(self) -> None:
         await guild_log.send_pending_raffle_notifications(self)
+
+    async def _send_pending_gold_withdrawal_notifications(self) -> None:
+        await guild_log.send_pending_gold_withdrawal_notifications(self)
 
     async def _send_pending_deposit_audit_notifications(self) -> None:
         await guild_log.send_pending_deposit_audit_notifications(self)

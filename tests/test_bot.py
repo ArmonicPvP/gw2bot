@@ -436,6 +436,7 @@ class TestOptionalConfiguration:
     }
     GW2_POLLERS = {
         "gw2-guild-storage-poller",
+        "gw2-guild-stash-poller",
         "gw2-guild-log-poller",
     }
     NOTIFICATION_POLLERS = {
@@ -820,7 +821,11 @@ class TestSettingsHotApply:
     """
 
     ALWAYS_RUNNING = {"gw2-raffle-contribution-poller", "gw2-event-scheduler"}
-    GW2_POLLERS = {"gw2-guild-storage-poller", "gw2-guild-log-poller"}
+    GW2_POLLERS = {
+        "gw2-guild-storage-poller",
+        "gw2-guild-stash-poller",
+        "gw2-guild-log-poller",
+    }
 
     def _config(self, tmp_path: Path, **values: str) -> Config:
         return config_from_env(

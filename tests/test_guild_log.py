@@ -107,6 +107,7 @@ class TestGuildLogRefresh:
             _api=object(),
             refresh_guild_log=AsyncMock(),
             _send_pending_raffle_notifications=AsyncMock(),
+            _send_pending_gold_withdrawal_notifications=AsyncMock(),
             _send_pending_deposit_audit_notifications=AsyncMock(),
             _send_pending_raffle_milestones=AsyncMock(),
             _send_pending_join_notifications=AsyncMock(),
@@ -123,6 +124,7 @@ class TestGuildLogRefresh:
         await Gw2Bot._poll_guild_log(cast(Gw2Bot, bot))
 
         bot._send_pending_raffle_notifications.assert_awaited_once()
+        bot._send_pending_gold_withdrawal_notifications.assert_awaited_once()
         bot._send_pending_deposit_audit_notifications.assert_awaited_once()
         bot._send_pending_invite_notifications.assert_awaited_once()
         bot._send_pending_rank_change_notifications.assert_awaited_once()

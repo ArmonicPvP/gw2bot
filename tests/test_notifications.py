@@ -296,13 +296,13 @@ class TestAutomatedMessageDiagnostics:
 
         assert secret not in caplog.text
         assert (
-            "Prepared automated message diagnostics; messages=13 contributors=1"
+            "Prepared automated message diagnostics; messages=14 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 17
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 17
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 18
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 18
         assert (
-            "Automated message diagnostics completed; attempted=17 delivered=17 "
+            "Automated message diagnostics completed; attempted=18 delivered=18 "
             "failed=0"
             in caplog.text
         )
@@ -314,7 +314,7 @@ class TestAutomatedMessageDiagnostics:
         secret = "diagnostic-failure-secret"
         channel = SimpleNamespace(
             send=AsyncMock(
-                side_effect=[None, RuntimeError(secret)] + [None] * 15
+                side_effect=[None, RuntimeError(secret)] + [None] * 16
             )
         )
         bot = SimpleNamespace(
@@ -333,7 +333,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 17
+        assert channel.send.await_count == 18
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -341,7 +341,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=17 delivered=16 "
+            "Automated message diagnostics completed; attempted=18 delivered=17 "
             "failed=1"
             in caplog.text
         )
