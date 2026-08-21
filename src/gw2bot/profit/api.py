@@ -13,6 +13,12 @@ LOGGER = logging.getLogger(__name__)
 
 PAGE_SIZE = 200
 ITEM_CHUNK_SIZE = 200
+TRANSACTION_PATHS = {
+    "history_buys": "/v2/commerce/transactions/history/buys",
+    "history_sells": "/v2/commerce/transactions/history/sells",
+    "current_sells": "/v2/commerce/transactions/current/sells",
+}
+REQUIRED_TRANSACTION_PATHS = frozenset(TRANSACTION_PATHS.values())
 
 
 class ProfitApiError(RuntimeError):
@@ -37,12 +43,30 @@ class ProfitApiClient:
         permissions = payload.get("permissions")
         if not isinstance(permissions, list):
             raise ProfitApiError("GW2 token information had no permissions")
-        valid = "tradingpost" in {
+        has_tradingpost = "tradingpost" in {
             permission
             for permission in permissions
             if isinstance(permission, str)
         }
-        LOGGER.debug("Validated profit API key; tradingpost=%s", valid)
+        raw_urls = payload.get("urls")
+        route_access = True
+        route_restricted = raw_urls is not None
+        if route_restricted:
+            if not isinstance(raw_urls, list) or not all(
+                isinstance(path, str) for path in raw_urls
+            ):
+                raise ProfitApiError(
+                    "GW2 token information had invalid URL restrictions"
+                )
+            route_access = REQUIRED_TRANSACTION_PATHS.issubset(raw_urls)
+        valid = has_tradingpost and route_access
+        LOGGER.debug(
+            "Validated profit API key; tradingpost=%s "
+            "route_restricted=%s required_routes=%s",
+            has_tradingpost,
+            route_restricted,
+            route_access,
+        )
         return valid
 
     async def fetch_transactions(

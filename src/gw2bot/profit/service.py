@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
-from gw2bot.profit.api import ProfitApiClient
+from gw2bot.profit.api import ProfitApiClient, TRANSACTION_PATHS
 from gw2bot.profit.models import (
     ProfitReport,
     Transaction,
@@ -20,13 +20,6 @@ LOGGER = logging.getLogger(__name__)
 CACHE_TTL_SECONDS = 300
 MIN_REPORT_DAYS = 1
 MAX_REPORT_DAYS = 90
-
-TRANSACTION_PATHS = {
-    "history_buys": "/v2/commerce/transactions/history/buys",
-    "history_sells": "/v2/commerce/transactions/history/sells",
-    "current_sells": "/v2/commerce/transactions/current/sells",
-}
-
 
 class MissingProfitApiKey(RuntimeError):
     """The signed-in Discord member has not configured a profit API key."""

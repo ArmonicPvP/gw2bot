@@ -24,7 +24,11 @@ Relevant response fields are:
 The bot needs `account` for `/v2/account`. The listed guild detail endpoints
 also require `guilds`. A member key saved with `/profit setkey` is separate and
 needs `tradingpost`; the command verifies that permission here before storing
-the key.
+the key. If `urls` is present, it also requires
+`/v2/commerce/transactions/history/buys`,
+`/v2/commerce/transactions/history/sells`, and
+`/v2/commerce/transactions/current/sells`; an unrestricted key has no `urls`
+field.
 
 ### `/v2/createsubtoken`
 

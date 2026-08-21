@@ -65,13 +65,15 @@ class ProfitApiKeyModal(discord.ui.Modal, title="Save GW2 Profit API Key"):
             return
         if not valid:
             LOGGER.debug(
-                "Rejected profit API key; user_id=%s reason=permission",
+                "Rejected profit API key; user_id=%s "
+                "reason=scope-or-route-access",
                 interaction.user.id,
             )
             await send_interaction_notice(
                 interaction,
-                "That key is valid, but it is missing the `tradingpost` "
-                "permission.",
+                "That key must grant the `tradingpost` permission and access "
+                "to all Trading Post transaction routes. Check any subtoken "
+                "URL restrictions.",
             )
             return
         try:

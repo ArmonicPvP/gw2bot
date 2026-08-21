@@ -14,7 +14,11 @@ from cryptography.fernet import Fernet
 
 from factories import default_config
 from gw2bot.logging_setup import SecretRegistry
-from gw2bot.profit.api import ProfitApiClient, ProfitApiError
+from gw2bot.profit.api import (
+    TRANSACTION_PATHS,
+    ProfitApiClient,
+    ProfitApiError,
+)
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.models import (
     BuyLot,
@@ -206,14 +210,40 @@ class TestProfitStore:
     def test_deleting_one_members_key_does_not_touch_another(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         store, _, _ = profit_store
-        store.set_api_key(101, "first-secret")
+        first_secret = "first-secret"
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.set_api_key(101, first_secret)
         store.set_api_key(202, "second-secret")
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("first")],
+            now=now,
+        )
+        store.touch_cache(101, "history_buys", now=now)
+        store.store_transactions(
+            202,
+            "history_buys",
+            [transaction("second")],
+            now=now,
+        )
+        store.touch_cache(202, "history_buys", now=now)
 
-        assert store.delete_api_key(101)
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert store.delete_api_key(101)
         assert store.get_api_key(101) is None
         assert store.get_api_key(202) == "second-secret"
+        assert store.get_transactions(101, "history_buys") == []
+        assert not store.is_cache_fresh(101, "history_buys", 300, now=now)
+        assert [
+            row.transaction_id
+            for row in store.get_transactions(202, "history_buys")
+        ] == ["second"]
+        assert store.is_cache_fresh(202, "history_buys", 300, now=now)
+        assert first_secret not in caplog.text
 
     def test_replacing_a_key_clears_only_that_members_cached_data(
         self,
@@ -432,6 +462,60 @@ class _FakeResponse:
 
 
 class TestProfitApiLogging:
+    @pytest.mark.parametrize(
+        "restricted_urls",
+        [None, list(TRANSACTION_PATHS.values())],
+        ids=("unrestricted", "required-routes"),
+    )
+    async def test_accepts_keys_with_required_transaction_route_access(
+        self,
+        restricted_urls: list[str] | None,
+    ) -> None:
+        payload: dict[str, object] = {"permissions": ["tradingpost"]}
+        if restricted_urls is not None:
+            payload["urls"] = restricted_urls
+        http = SimpleNamespace(
+            get=MagicMock(return_value=_FakeResponse(200, payload))
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        assert await client.validate_key("member-key")
+
+    async def test_rejects_subtoken_without_every_transaction_route(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "route-restricted-member-key"
+        payload_secret = "tokeninfo-name-secret"
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    200,
+                    {
+                        "name": payload_secret,
+                        "permissions": ["tradingpost"],
+                        "urls": [
+                            TRANSACTION_PATHS["history_buys"],
+                            TRANSACTION_PATHS["history_sells"],
+                        ],
+                    },
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert not await client.validate_key(secret)
+
+        assert secret not in caplog.text
+        assert payload_secret not in caplog.text
+
     async def test_paginates_and_parses_transaction_collections(self) -> None:
         http = SimpleNamespace(
             get=MagicMock(

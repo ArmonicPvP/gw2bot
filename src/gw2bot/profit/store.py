@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.database import (
     ProfitApiKeyRecord,
@@ -74,24 +74,13 @@ class ProfitStore:
             else:
                 record.encrypted_api_key = encrypted
                 record.updated_at = now
-                session.execute(
-                    delete(ProfitTransactionRecord).where(
-                        ProfitTransactionRecord.discord_user_id
-                        == discord_user_id
-                    )
-                )
-                session.execute(
-                    delete(ProfitCacheSyncRecord).where(
-                        ProfitCacheSyncRecord.discord_user_id
-                        == discord_user_id
-                    )
-                )
+            _clear_member_cache(session, discord_user_id)
         LOGGER.debug(
             "Stored profit API key; user_id=%s created=%s "
             "cache_cleared=%s characters=%s",
             discord_user_id,
             created,
-            not created,
+            True,
             len(api_key),
         )
 
@@ -124,8 +113,10 @@ class ProfitStore:
             removed = record is not None
             if record is not None:
                 session.delete(record)
+            _clear_member_cache(session, discord_user_id)
         LOGGER.debug(
-            "Deleted profit API key; user_id=%s removed=%s",
+            "Deleted profit API key; user_id=%s removed=%s "
+            "cache_cleared=true",
             discord_user_id,
             removed,
         )
@@ -371,3 +362,16 @@ class ProfitStore:
 def _require_kind(transaction_kind: str) -> None:
     if transaction_kind not in TRANSACTION_KINDS:
         raise ValueError(f"Unknown profit transaction kind: {transaction_kind}")
+
+
+def _clear_member_cache(session: Session, discord_user_id: int) -> None:
+    session.execute(
+        delete(ProfitTransactionRecord).where(
+            ProfitTransactionRecord.discord_user_id == discord_user_id
+        )
+    )
+    session.execute(
+        delete(ProfitCacheSyncRecord).where(
+            ProfitCacheSyncRecord.discord_user_id == discord_user_id
+        )
+    )

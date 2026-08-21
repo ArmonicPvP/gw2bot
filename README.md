@@ -1210,11 +1210,13 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
 `settings.key` used by encrypted settings.
 
 - `/profit setkey` opens a private modal, checks the key with `/v2/tokeninfo`,
-  and saves it only when the `tradingpost` permission is present.
+  and saves it only when the `tradingpost` permission is present. A
+  route-restricted subtoken must allow the history buys, history sells, and
+  current sells transaction endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
   window defaults to 30 days and accepts 1 through 90.
-- `/profit deletekey` removes the caller's encrypted key. It cannot affect any
-  other member's key.
+- `/profit deletekey` removes the caller's encrypted key and cached Trading
+  Post data. It cannot affect any other member's key or cache.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents all four
