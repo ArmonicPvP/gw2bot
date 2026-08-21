@@ -524,6 +524,20 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         validates=ValidationTarget.ROLE,
     ),
     SettingDefinition(
+        name="gold_page",
+        field="gold_page_role_id",
+        group=ROLES_GROUP,
+        default=DEFAULT_RAFFLE_DRAW_ROLE_ID,
+        description=(
+            "Role allowed to open the guild bank gold history page on the "
+            "web calendar. It defaults to the role that draws the raffle, "
+            "because the page names who took gold out; set it to a wider "
+            "role to open the history to the whole guild."
+        ),
+        parse=_parse_discord_id("gold_page"),
+        validates=ValidationTarget.ROLE,
+    ),
+    SettingDefinition(
         name="raffle_contribution",
         field="raffle_contribution_channel_id",
         group=CHANNELS_GROUP,
