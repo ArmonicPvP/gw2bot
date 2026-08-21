@@ -700,3 +700,23 @@ class TestRosterTable:
     def test_the_desktop_layout_keeps_the_word(self) -> None:
         desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
         assert "change-label" not in desktop
+
+
+class TestGoldPage:
+    def test_coin_values_use_compact_exact_denominations(self) -> None:
+        assert "function formatCoins(copper)" in GOLD_PAGE
+        assert 'goldCoins.toLocaleString() + "g"' in GOLD_PAGE
+        assert 'text += silverCoins + "s"' in GOLD_PAGE
+        assert 'text += copperCoins + "c"' in GOLD_PAGE
+        assert "formatGold" not in GOLD_PAGE
+
+    def test_table_amount_is_only_an_ascii_sign_and_value(self) -> None:
+        assert 'operation === "withdraw" ? "-" : "+"' in GOLD_PAGE
+        assert 'el("span", "amount-label"' not in GOLD_PAGE
+        assert 'el("span", "dot")' not in GOLD_PAGE
+
+    def test_hover_uses_both_pointer_coordinates(self) -> None:
+        assert "function nearestColumn(vbX, vbY)" in GOLD_PAGE
+        assert "var dx = point.x - vbX;" in GOLD_PAGE
+        assert "var dy = point.y - vbY;" in GOLD_PAGE
+        assert "nearestColumn(at.x, at.y)" in GOLD_PAGE
