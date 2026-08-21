@@ -248,6 +248,59 @@ class GuildMemberCountLogRecord(Base):
     recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class GuildStashCoinLogRecord(Base):
+    """One movement of coins in or out of the guild stash.
+
+    The bank ledger the /gold page draws, and deliberately not the raffle's
+    deposit table: that one is filtered by the raffle's own rules - an
+    oversized Officer deposit earns no tickets and is never written there - so
+    a balance derived from it would drift away from the guild's real one. This
+    table records every coin movement the guild log reports, whatever the
+    raffle made of it.
+
+    ``event_id`` is the guild log's own id, which is what makes both the
+    poller and the one-time import idempotent against each other: whichever
+    sees an event first writes the row, and the other finds it already there.
+    """
+
+    __tablename__ = "guild_stash_coin_log"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    # "deposit" or "withdraw"; see gw2bot.raffle.events.
+    operation: Mapped[str] = mapped_column(String, nullable=False)
+    coins: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+    # Only a withdrawal is announced, so a deposit's row is written already
+    # marked sent - the raffle's own deposit embed is that announcement.
+    notification_sent: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+
+class GuildStashBalanceLogRecord(Base):
+    """One observed guild stash coin balance, written only when it changes.
+
+    The /gold page derives its line from the coin movements above, but those
+    only say how the balance moved; this says where it actually stood. The
+    newest row is the anchor every derived balance is measured from, which is
+    what keeps a stretch of events the guild log dropped from shifting the
+    present rather than the past.
+    """
+
+    __tablename__ = "guild_stash_balance_log"
+
+    log_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    coins: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class RaffleRunRecord(Base):
     __tablename__ = "raffle_runs"
 

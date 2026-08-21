@@ -436,6 +436,7 @@ class TestOptionalConfiguration:
     }
     GW2_POLLERS = {
         "gw2-guild-storage-poller",
+        "gw2-guild-stash-poller",
         "gw2-guild-log-poller",
     }
     NOTIFICATION_POLLERS = {
@@ -561,13 +562,20 @@ class TestOptionalConfiguration:
             "gw2_api_key, /settings gw2_guild_id are not set" in warnings[0]
         )
         assert "Guild Storage polling" in warnings[0]
+        # The bank ledger is fed by the guild log and anchored by the stash
+        # poll, so both halves of the gold history stop with the credentials.
+        assert "the guild bank ledger and the stash poll" in warnings[0]
         assert (
             "Notification channel delivery is disabled because /settings "
             "discord_notification_channel_id is not set" in warnings[1]
         )
-        # The raffle contribution channel keeps posting, so the warning must
-        # not read as "the bot has gone silent".
-        assert "raffle contribution channel is unaffected" in warnings[1]
+        # The raffle contribution channel keeps posting and the bank ledger
+        # keeps recording, so the warning must not read as "the bot has gone
+        # silent" or "the gold history has stopped".
+        assert (
+            "the guild bank ledger and the raffle contribution channel are "
+            "unaffected" in warnings[1]
+        )
 
     def test_an_enabled_calendar_missing_its_settings_warns(
         self,
@@ -820,7 +828,11 @@ class TestSettingsHotApply:
     """
 
     ALWAYS_RUNNING = {"gw2-raffle-contribution-poller", "gw2-event-scheduler"}
-    GW2_POLLERS = {"gw2-guild-storage-poller", "gw2-guild-log-poller"}
+    GW2_POLLERS = {
+        "gw2-guild-storage-poller",
+        "gw2-guild-stash-poller",
+        "gw2-guild-log-poller",
+    }
 
     def _config(self, tmp_path: Path, **values: str) -> Config:
         return config_from_env(

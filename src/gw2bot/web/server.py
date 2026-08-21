@@ -21,12 +21,15 @@ from gw2bot.feast_stock import (
     FeastStockSeries,
     feast_removals,
 )
+from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
 from gw2bot.web.page import (
     CALENDAR_PAGE,
     FOOD_PAGE,
+    GOLD_OFFICER_ONLY_PAGE,
+    GOLD_PAGE,
     LOGIN_FAILED_PAGE,
     MEMBERS_ONLY_PAGE,
     OFFICER_ONLY_PAGE,
@@ -69,9 +72,10 @@ MEMBERSHIP_FAILURE_BACKOFF_SECONDS = 60
 UNKNOWN_NAME = "Unknown"
 
 # The feast usage dashboard is gated behind the role /settings roles food_page
-# names, which follows /raffle removetickets' role until it is set apart, and
-# the roster history behind /settings roles roster_page, which starts from the
-# same role.
+# names, which follows /raffle removetickets' role until it is set apart, the
+# roster history behind /settings roles roster_page, and the guild bank's gold
+# history behind /settings roles gold_page; both of those start from the same
+# role.
 
 # Every response this server sends is scoped to one signed-in member, so none
 # of it may be kept by the reverse proxy the README asks operators to run, by a
@@ -140,8 +144,8 @@ class WebServer:
         self._members: dict[int, tuple[bool, float]] = {}
         # (role id, user id) -> (holds the role, monotonic expiry). Cached
         # with the same TTL and outage backoff as _members. Keyed by the role
-        # as well as the user because two pages are gated by two settings, and
-        # an operator may point them at different roles.
+        # as well as the user because three pages are gated by three settings,
+        # and an operator may point them at different roles.
         self._role_members: dict[tuple[int, int], tuple[bool, float]] = {}
         self.app = web.Application(
             middlewares=[self._log_middleware, self._auth_middleware]
@@ -162,6 +166,8 @@ class WebServer:
                 web.get("/api/food", self._food_data),
                 web.get("/roster", self._roster),
                 web.get("/api/roster", self._roster_data),
+                web.get("/gold", self._gold),
+                web.get("/api/gold", self._gold_data),
             ]
         )
 
@@ -617,6 +623,17 @@ class WebServer:
             "roster",
         )
 
+    async def _require_gold_access(
+        self,
+        request: web.Request,
+    ) -> web.Response | None:
+        return await self._require_role_access(
+            request,
+            self._config.gold_page_role_id,
+            GOLD_OFFICER_ONLY_PAGE,
+            "gold",
+        )
+
     async def _logout(self, request: web.Request) -> web.StreamResponse:
         response = self._html(SIGNED_OUT_PAGE)
         response.del_cookie(auth.SESSION_COOKIE, path="/")
@@ -844,6 +861,88 @@ class WebServer:
             "actor": event.actor,
             "count": event.member_count,
             "imported": event.imported,
+        }
+
+    async def _gold(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_gold_access(request)
+        if denied is not None:
+            return denied
+        return self._html(GOLD_PAGE)
+
+    async def _gold_data(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_gold_access(request)
+        if denied is not None:
+            return denied
+        window = self._resolve_window(request, GOLD_RANGES, "gold history")
+        if isinstance(window, web.Response):
+            return window
+
+        # Both reads are synchronous SQLite on the Discord client's event
+        # loop, so they go to a worker thread like the calendar's query. The
+        # store pools its connections per thread, so one thread is safe.
+        anchor = await asyncio.to_thread(
+            self._bot.raffle_store.get_last_stash_balance
+        )
+        # Movements are read from the earlier of the window and the anchor:
+        # the balance at any moment is measured by walking the movements
+        # between it and the anchor, so an anchor older than the window still
+        # needs the movements that stand between them. An anchor newer than
+        # the window's end needs the ones after it just as much, and those are
+        # read anyway because the query has no upper bound.
+        lookback = (
+            window.since
+            if anchor is None
+            else min(window.since, anchor.recorded_at)
+        )
+        movements = await asyncio.to_thread(
+            self._bot.raffle_store.get_gold_movements,
+            lookback,
+        )
+        series = build_gold_series(
+            movements, anchor, window.since, window.until
+        )
+        LOGGER.debug(
+            "Served gold history; range=%s movements=%s points=%s "
+            "anchored=%s",
+            window.key,
+            len(series.movements),
+            len(series.points),
+            anchor is not None,
+        )
+        return self._json(
+            {
+                "range": window.key,
+                "since": window.since,
+                "now": window.until,
+                # The balance as it stood at the window's end, or None when
+                # none has ever been observed and the line is therefore empty.
+                "coins": (
+                    series.points[-1].coins if series.points else None
+                ),
+                "points": [
+                    {"t": point.at, "coins": point.coins}
+                    for point in series.points
+                ],
+                # Newest first: the table below the chart reads like a bank
+                # statement.
+                "movements": [
+                    self._serialize_gold_movement(movement)
+                    for movement in reversed(series.movements)
+                ],
+                "deposited": series.deposited,
+                "withdrawn": series.withdrawn,
+                "net": series.net,
+            }
+        )
+
+    @staticmethod
+    def _serialize_gold_movement(movement: GoldEvent) -> dict[str, object]:
+        return {
+            "t": movement.occurred_at,
+            "operation": movement.operation,
+            "name": movement.username,
+            "coins": movement.coins,
+            "after": movement.coins_after,
         }
 
     async def _events(self, request: web.Request) -> web.StreamResponse:

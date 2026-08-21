@@ -77,7 +77,7 @@ override it.
 | `/settings gw2_guild_id` | unset | Guild ID listed in `/v2/account.guild_leader`. Must be a GUID, and is stored in lower case whatever form you paste. **Set `gw2_api_key` first:** with a valid key the ID is checked against `/v2/account.guild_leader` before being stored. If the API rejects the key the change is refused, and if the API is unreachable or erroring the ID is stored with the reply saying it went unchecked. This matters because the raffle ledger records the first guild ID it is given and refuses a different one afterwards, and that cannot be undone from Discord. |
 | `/settings raffle_excluded_accounts` | unset | Guild Wars 2 account names barred from the raffle, separated by commas (for example `Someone.1234, Another.5678`). Matched case-insensitively, and capped at 1500 characters so `/settings` can always show the list back to you. See [Excluding Someone From The Raffle](#excluding-someone-from-the-raffle). |
 | `/settings feast_notification_user_id` | unset | Discord user who also receives feast stock alerts by private message. |
-| `/settings gw2_poll_interval_seconds` | `300` | Guild Storage polling interval in seconds. At least `30`. |
+| `/settings gw2_poll_interval_seconds` | `300` | Guild Storage and guild stash polling interval in seconds. At least `30`. |
 | `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
 | `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime in seconds. |
 | `/settings timezone` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times, to name event threads, and to define weekly repeat days. |
@@ -140,6 +140,7 @@ that nothing answers to is how a guild silently loses a feature.
 | `/settings roles sunborne` | `1317140660188352584` | Marks a Discord member as a full member in the same reports. |
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
 | `/settings roles roster_page` | `1317124663847157880` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
+| `/settings roles gold_page` | `1317124663847157880` | The guild bank gold history page. Set it to a wider role to open the history to the whole guild. |
 | `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
 | `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
 | `/settings channels trial_accepted_tag` | `1317349209619562587` | Tag marking an accepted application; only tagged posts are indexed. |
@@ -217,8 +218,11 @@ missing disables all of it, because every Guild Wars 2 request needs both:
 
 - Guild Storage polling stops, so there are no feast stock alerts and no feast
   count history.
-- Guild log polling stops, so there are no join, leave, invite or rank-change
-  messages, and no gold deposits are turned into raffle tickets.
+- Guild log polling stops, so there are no join, leave, invite, rank-change
+  or gold withdrawal messages, no gold deposits are turned into raffle
+  tickets, and the guild bank ledger records nothing.
+- The guild stash poll stops, so the bank's balance is not observed and the
+  gold history has nothing to measure against.
 - The overdue Trial member report and the guild member count channel
   description stop.
 - `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`,
@@ -237,8 +241,10 @@ one you set afterwards. Setting a *different* one later is refused, and
 Without `/settings discord_notification_channel_id`, nothing is posted to the
 notification channel:
 
-- Guild membership messages, raffle deposit audit lines, raffle command audit
-  lines, feast stock alerts and Trial member reports are skipped.
+- Guild membership messages, gold withdrawal messages, raffle deposit audit
+  lines, raffle command audit lines, feast stock alerts and Trial member
+  reports are skipped. The bank ledger still records every movement; only the
+  announcements are skipped.
 - The channel description is not updated with the guild member count.
 - The `diag` message is ignored, so the previews in
   [Automated Message Diagnostics](#automated-message-diagnostics) do not run.
@@ -946,8 +952,21 @@ Username.1234's guild rank changed from Trial to Sunborne.
 Invite and rank-change delivery state is persisted like joins and leaves, so each
 message is posted once per event, including across restarts.
 
-Guild membership messages, raffle deposit audit messages, raffle command audit
-messages, stock alerts, and
+The same poller reports gold leaving the guild bank. For every `stash` event
+carrying coins with the operation `withdraw`, the bot posts:
+
+```text
+Officer.5678 withdrew 12.5 gold from the guild bank.
+```
+
+Only withdrawals are announced here. A deposit already has the raffle's own
+purchase embed, so announcing it a second time would say the same thing twice.
+Withdrawal delivery state is persisted like every other membership message, so
+each one is posted once per event, including across restarts. Both directions
+are recorded either way — see [Guild Bank Gold History](#guild-bank-gold-history).
+
+Guild membership messages, gold withdrawal messages, raffle deposit audit
+messages, raffle command audit messages, stock alerts, and
 polling-status messages are posted in the channel named by
 `/settings discord_notification_channel_id`.
 Every minute, the bot updates that channel's description to the current GW2
@@ -1020,6 +1039,71 @@ the notification, so imported changes are recorded as already delivered.
 Reading years of history takes minutes, not seconds. Run it once after
 upgrading; there is nothing to schedule.
 
+### Guild Bank Gold History
+
+Every coin movement the guild log reports — deposits and withdrawals alike — is
+recorded in a ledger of its own, and a five-minute poll of `/v2/guild/:id/stash`
+writes a row whenever the bank's balance itself changes. Together they are what
+the [Guild Bank page](#guild-bank-gold-history-page) draws.
+
+The ledger is deliberately separate from the raffle's deposit table. That one
+is filtered by the raffle's rules — an oversized Officer deposit buys no
+tickets and is never written there — so a balance derived from it would drift
+away from the guild's real one. This one takes every coin movement, whatever
+the raffle made of it.
+
+The balance reading is what the history is measured from, exactly as the member
+count is for the roster. A movement on its own says how much gold moved, not
+how much there was, so the page walks back from the newest recorded balance
+through the movements between. Measuring from the newest observation rather
+than the oldest keeps the right-hand edge of the graph — the part you would
+check against the vault in game — true even if an older stretch of movements
+was never recorded.
+
+A poll that sees the balance unchanged therefore still moves that newest row's
+moment forward rather than adding a row, for the same reason the roster's count
+poll does: the guild log returns only about a hundred events of each type, so
+movements that scroll out of it while the bot is down are gone for good, and
+keeping the anchor at the latest observation puts that whole gap behind it.
+
+Both need `/settings gw2_api_key` and `/settings gw2_guild_id`. Neither needs a
+notification channel; the withdrawal *messages* do.
+
+#### Importing The History From The Guild Log
+
+The bot only started keeping coin movements when this feature shipped, and the
+guild-log poller sets its cursor to the newest event on its very first pass, so
+everything before that was seen and thrown away. Both halves of the history are
+still recoverable, because the guild log keeps roughly its latest hundred
+events of each type and the stash endpoint says what the bank holds right now.
+`/gold import` reads both:
+
+```text
+/gold import
+```
+
+It asks for the whole log rather than the slice after the poller's cursor —
+reaching behind that cursor is the point — stores every coin movement in it,
+and logs the current stash balance beside them. The reversal that turns those
+two into a history happens when the page is drawn: each movement is subtracted
+from the observed balance in turn to recover the balance that stood before it.
+
+The command is limited to `/settings roles raffle_officer` and answers
+privately with what it read, what it imported and what the bank holds. It is
+safe to run more than once:
+
+- every row is keyed by the guild log's own event id, so a second run finds its
+  own rows and adds nothing;
+- an event the poller has already recorded is left exactly as it stands,
+  including whether its notification was sent, and an event this import writes
+  first is left alone by the poller when its cursor reaches it;
+- imported movements are recorded as already announced, because a withdrawal
+  from months ago is history rather than news.
+
+What the guild log no longer holds cannot be recovered, so the imported history
+reaches back as far as the log does and no further. Run it once after
+upgrading; there is nothing to schedule.
+
 ## Automated Message Diagnostics
 
 When a non-bot user sends exactly `diag`, ignoring case and surrounding spaces,
@@ -1030,8 +1114,8 @@ in the notification channel, the bot posts read-only previews of:
 - a gold-deposit ticket purchase embed, a raffle draw announcement, and a raffle
   audit;
 - a guild join, guild leave, guild invite, guild rank change, gold-deposit audit
-  log, manual ticket audit, purchased-ticket removal audit, and next
-  reward-tier message;
+  log, gold withdrawal, manual ticket audit, purchased-ticket removal audit,
+  and next reward-tier message;
 - a low feast-stock alert, overdue Trial member report, and Trial 7-day warning
   report;
 - the guild member count channel description as it currently stands.
@@ -1179,6 +1263,48 @@ Until the member count poll has written its first row there is no count to
 measure against, so the page says so and lists the changes without a line. That
 resolves itself within a minute of the bot starting with the Guild Wars 2
 settings in place.
+
+### Guild Bank Gold History Page
+
+The same site serves a **Guild Bank** page at `/gold`, built from the ledger
+described under [Guild Bank Gold History](#guild-bank-gold-history). It charts
+the bank's balance over the last 24 hours, 7 days, or 30 days as a step — a
+balance holds until somebody deposits or withdraws, then jumps — with one dot
+per movement, green for a deposit and red for a withdrawal. Hovering a dot, or
+tapping it on a phone, names the account, shows the amount with its sign, and
+says what the bank held afterwards. Below the chart every movement in the
+window is listed newest first, like a bank statement, with the running balance
+beside each one. Above it are the window's totals: deposited, withdrawn, and
+the net between them.
+
+**Custom** opens the same pair of date fields the other two dashboards have,
+with the same whole-day window, the same **Apply**, and the same limits. A
+window that closes in the past is measured back from the last balance the bot
+observed, so its right-hand edge reads the bank as it stood then rather than as
+it stands now; the figure beside the heading says "at the end" instead of "now"
+to match.
+
+Amounts are shown in gold. The y axis covers the balances the window actually
+reached rather than starting at zero, and its gridlines round to 1, 2 or 5
+times a power of ten, so a week of small movements is visible rather than a
+flat line at the top of an axis scaled to the whole treasury.
+
+A long account name wraps inside its column rather than widening the table, and
+on a phone the running balance column gives way — the amount and its sign are
+what a reader is scanning for, and the line above already shows where the
+balance went. The direction's name is likewise reduced to its dot, and stays in
+the table for a screen reader to read out.
+
+Access is gated by `/settings roles gold_page`, which starts as the role that
+draws the raffle, because the page names who took gold out. Point it at a wider
+role to open the history to the whole guild. Membership and the role are
+re-checked on the same schedule as calendar access. The page is not linked from
+the calendar; browse to `/gold` directly.
+
+Until the stash poll has written its first balance there is no reading to
+measure against, so the page says so and lists the movements without a line.
+That resolves itself within one poll interval of the bot starting with the
+Guild Wars 2 settings in place.
 
 ## Run With Docker
 

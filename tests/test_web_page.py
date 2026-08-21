@@ -1,6 +1,11 @@
 import re
 
-from gw2bot.web.page import CALENDAR_PAGE, FOOD_PAGE, ROSTER_PAGE
+from gw2bot.web.page import (
+    CALENDAR_PAGE,
+    FOOD_PAGE,
+    GOLD_PAGE,
+    ROSTER_PAGE,
+)
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 
 
@@ -526,17 +531,18 @@ class TestFoodPage:
 
 
 class TestCustomRangePicker:
-    """Both dashboards offer the same picker, so both are checked together."""
+    """All three dashboards offer the same picker, so all three are
+    checked together."""
 
     def test_both_dashboards_offer_a_custom_range(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert 'data-range="custom"' in page
             assert 'id="custom-start"' in page
             assert 'id="custom-end"' in page
             assert 'id="custom-apply"' in page
 
     def test_the_picker_stays_hidden_until_the_button_reveals_it(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert ".custom {\n  display: none;" in page
             assert ".custom.open { display: flex; }" in page
             assert 'if (picked === "custom") {' in page
@@ -547,14 +553,14 @@ class TestCustomRangePicker:
     def test_a_picked_pair_covers_whole_local_days(self) -> None:
         # The window opens at midnight on the first day and closes on the last
         # second of the second, so one day picked twice is that whole day.
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "var since = Math.floor(from.getTime() / 1000);" in page
             assert (
                 "to.getFullYear(), to.getMonth(), to.getDate() + 1"
             ) in page
 
     def test_a_range_that_cannot_be_drawn_is_named_not_fetched(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert 'error: "Pick a start and an end date."' in page
             assert 'error: "The end date is before the start date."' in page
             assert 'error: "The start date is in the future."' in page
@@ -573,7 +579,7 @@ class TestCustomRangePicker:
         # it. Applying an untouched 24h default reads a few hours wider than
         # the button it came from, which is the right way to miss: the
         # narrower pair would drop hours the reader can already see.
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "var span = windowSpan() || 24 * 60 * 60;" in page
             assert (
                 "customStart.value = "
@@ -585,7 +591,7 @@ class TestCustomRangePicker:
         # A refusal ends the workflow in the browser, without a request, so
         # this trace is the only place a console can say the reader asked for
         # a window and did not get one.
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "function traceRange(action, reason, days) {" in page
             traced = _call_arguments(page, "traceRange")
             assert traced == [
@@ -619,30 +625,31 @@ class TestCustomRangePicker:
             )$""",
             re.X,
         )
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             for call in _call_arguments(page, "traceRange"):
                 assert len(call) == 3, call
                 for arg in call:
                     assert allowed.match(arg), arg
 
     def test_the_picker_mirrors_the_servers_own_ceiling(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "var MAX_CUSTOM_DAYS = 366;" in page
         assert MAX_CUSTOM_WINDOW_SECONDS == 366 * 24 * 60 * 60
 
     def test_an_applied_pair_is_sent_as_epoch_seconds(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert '"?range=custom&start=" +' in page
             assert (
                 'encodeURIComponent(String(customWindow.since))'
             ) in page
         assert 'fetch("/api/food" + rangeQuery())' in FOOD_PAGE
         assert 'fetch("/api/roster" + rangeQuery())' in ROSTER_PAGE
+        assert 'fetch("/api/gold" + rangeQuery())' in GOLD_PAGE
 
     def test_axis_labels_follow_the_windows_width(self) -> None:
         # A custom window has no preset name to key the label format off, so
         # the span decides: about a day or less reads off the clock.
-        for page in (FOOD_PAGE, ROSTER_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "if (windowSpan() <= 48 * 60 * 60) {" in page
             assert 'if (state.range === "24h") {' not in page
 

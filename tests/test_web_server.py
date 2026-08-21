@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
 from gw2bot.web import server as server_module
 from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
+from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
 from gw2bot.web.server import WebServer
 
@@ -1479,6 +1481,302 @@ class TestRosterApi:
 
         response = await client.get(
             "/api/roster",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+        assert await response.json() == {"error": "unavailable"}
+
+
+class TestGoldPageGate:
+    async def test_unauthenticated_page_shows_sign_in(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/gold")
+
+        assert response.status == 401
+        assert "Sign in with Discord" in await response.text()
+
+    async def test_member_without_role_gets_officers_only(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/gold",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert "guild bank gold history" in await response.text()
+
+    async def test_officer_reaches_gold_page(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+
+        response = await client.get(
+            "/gold",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 200
+        assert "Guild Bank" in await response.text()
+
+    async def test_unreachable_discord_returns_503(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/gold",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+
+
+class TestGoldApi:
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    def _record(
+        self,
+        raffle_store: RaffleStore,
+        now: float,
+        entries: list[tuple[int, float, str, str, int]],
+    ) -> None:
+        raffle_store.import_gold_movements(
+            [
+                GoldLedgerEntry(
+                    event_id=event_id,
+                    username=username,
+                    operation=operation,
+                    coins=coins,
+                    event_time=datetime.fromtimestamp(
+                        now + offset, UTC
+                    ).isoformat(),
+                )
+                for event_id, offset, operation, username, coins in entries
+            ]
+        )
+
+    async def test_member_without_role_is_forbidden(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/api/gold",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert await response.json() == {"error": "forbidden"}
+
+    async def test_rejects_unknown_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/gold",
+            params={"range": "90d"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_returns_the_line_and_the_movements(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        self._record(
+            raffle_store,
+            now,
+            [
+                (1, -3000, DEPOSIT, "One.1234", 500_000),
+                (2, -2000, WITHDRAW, "Two.5678", 200_000),
+                (3, -1000, DEPOSIT, "Three.9012", 100_000),
+            ],
+        )
+        raffle_store.record_stash_balance(900_000, now - 500)
+
+        response = await client.get(
+            "/api/gold",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "24h"
+        assert payload["coins"] == 900_000
+        assert (payload["deposited"], payload["withdrawn"], payload["net"]) == (
+            600_000,
+            200_000,
+            400_000,
+        )
+        # Newest first, each carrying the balance it left the bank at.
+        assert [
+            (item["operation"], item["name"], item["coins"], item["after"])
+            for item in payload["movements"]
+        ] == [
+            (DEPOSIT, "Three.9012", 100_000, 900_000),
+            (WITHDRAW, "Two.5678", 200_000, 800_000),
+            (DEPOSIT, "One.1234", 500_000, 1_000_000),
+        ]
+        # The line spans the whole window: an opening vertex, one per
+        # movement, and a closing one at the moment of the request that
+        # carries the balance forward to the right-hand edge.
+        assert [point["coins"] for point in payload["points"]] == [
+            500_000,
+            1_000_000,
+            800_000,
+            900_000,
+            900_000,
+        ]
+
+    async def test_reports_no_line_before_a_balance_is_observed(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        self._record(
+            raffle_store, now, [(1, -100, DEPOSIT, "One.1234", 500_000)]
+        )
+
+        response = await client.get(
+            "/api/gold",
+            headers=self._officer_headers(guild),
+        )
+
+        payload = await response.json()
+        assert payload["points"] == []
+        assert payload["coins"] is None
+        assert payload["movements"][0]["after"] is None
+
+    async def test_defaults_to_the_24h_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/gold",
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        assert (await response.json())["range"] == "24h"
+
+    async def test_a_custom_window_is_measured_back_from_the_anchor(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        self._record(
+            raffle_store,
+            now,
+            [
+                (1, -5000, DEPOSIT, "One.1234", 500_000),
+                # Both after the window's end, so the balance it closes at has
+                # to be recovered by unwinding them from the anchor.
+                (2, -1500, WITHDRAW, "Two.5678", 200_000),
+                (3, -1200, WITHDRAW, "Three.9012", 100_000),
+            ],
+        )
+        raffle_store.record_stash_balance(900_000, now - 500)
+
+        response = await client.get(
+            "/api/gold",
+            params={
+                "range": "custom",
+                "start": str(int(now - 6000)),
+                "end": str(int(now - 2000)),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        # Only the deposit falls in the window, and it stands 300,000 above
+        # where the bank ended up.
+        assert [
+            (item["operation"], item["name"], item["after"])
+            for item in payload["movements"]
+        ] == [(DEPOSIT, "One.1234", 1_200_000)]
+        assert payload["coins"] == 1_200_000
+
+    async def test_serving_names_no_account_or_balance(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The guild's holdings and who moved them are the page's whole
+        # subject; the console has no business carrying either.
+        now = time.time()
+        self._record(
+            raffle_store, now, [(1, -100, WITHDRAW, "Secret.1234", 4_242_424)]
+        )
+        raffle_store.record_stash_balance(4_242_424, now - 50)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.get(
+                "/api/gold",
+                headers=self._officer_headers(guild),
+            )
+
+        assert response.status == 200
+        assert "Secret.1234" not in caplog.text
+        assert "4242424" not in caplog.text
+        assert "Served gold history; range=24h movements=1" in caplog.text
+
+    async def test_rejects_a_custom_window_wider_than_a_year(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        now = int(time.time())
+
+        response = await client.get(
+            "/api/gold",
+            params={
+                "range": "custom",
+                "start": str(now - 400 * 86400),
+                "end": str(now),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_unreachable_discord_returns_503_json(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/api/gold",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 

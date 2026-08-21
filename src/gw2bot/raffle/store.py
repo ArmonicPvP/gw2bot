@@ -19,6 +19,8 @@ from gw2bot.database import (
     GuildLeaveRecord,
     GuildMemberCountLogRecord,
     GuildRankChangeRecord,
+    GuildStashBalanceLogRecord,
+    GuildStashCoinLogRecord,
     RaffleAccountLinkRecord,
     RaffleDepositRecord,
     RaffleManualTicketRecord,
@@ -38,6 +40,13 @@ from gw2bot.feast_stock import (
     FeastStockSample,
     FeastStockSeries,
 )
+from gw2bot.gold.models import (
+    DEPOSIT,
+    WITHDRAW,
+    GoldBalanceSample,
+    GoldLedgerEntry,
+    GoldMovement,
+)
 from gw2bot.raffle.events import (
     event_in_window,
     parse_event_time,
@@ -46,6 +55,7 @@ from gw2bot.raffle.events import (
     parse_guild_join,
     parse_guild_leave,
     parse_guild_rank_change,
+    parse_stash_coin_movement,
 )
 from gw2bot.raffle.models import (
     COPPER_PER_GOLD,
@@ -54,6 +64,7 @@ from gw2bot.raffle.models import (
     OFFICER_MAX_TICKET_DEPOSIT_COINS,
     RAFFLE_DRAW_TIERS,
     RAFFLE_REWARD_TIERS,
+    GoldWithdrawal,
     GuildInvite,
     GuildJoin,
     GuildLeave,
@@ -381,7 +392,7 @@ class RaffleStore:
             joins = session.scalars(select(GuildJoinRecord)).all()
             leaves = session.scalars(select(GuildLeaveRecord)).all()
         for join in joins:
-            occurred_at = _membership_time(join.event_time)
+            occurred_at = _row_moment(join.event_time)
             if occurred_at is None:
                 unreadable += 1
                 continue
@@ -396,7 +407,7 @@ class RaffleStore:
                 )
             )
         for leave in leaves:
-            occurred_at = _membership_time(leave.event_time)
+            occurred_at = _row_moment(leave.event_time)
             if occurred_at is None:
                 unreadable += 1
                 continue
@@ -444,7 +455,7 @@ class RaffleStore:
         moments = [
             moment
             for moment in (
-                _membership_time(value)
+                _row_moment(value)
                 for value in (*join_times, *leave_times)
             )
             if moment is not None
@@ -514,6 +525,183 @@ class RaffleStore:
         )
         return imported
 
+    def record_stash_balance(self, coins: int, recorded_at: float) -> bool:
+        """Log an observed stash coin balance, reporting whether it moved.
+
+        The counterpart of :meth:`record_member_count`, and written the same
+        way and for the same reasons: only a balance that differs from the
+        last logged one gets a row, and an unchanged observation moves the
+        newest row's moment forward instead of adding another.
+
+        That refresh is the point. The newest row is the anchor every derived
+        balance is measured from, and the guild log returns only about a
+        hundred stash events, so an outage long enough to push movements out
+        of it leaves coins the bot will never account for. Moving the anchor
+        to the latest observation puts that gap behind it, where the missing
+        movements can no longer be replayed on top of a balance that already
+        includes them.
+
+        The anchor's moment only ever moves forward. A clock stepped back
+        between two polls would otherwise backdate it, and every movement
+        between that stamp and the previous observation would be replayed on
+        top of a balance that already holds them; the movements carry Guild
+        Wars 2 timestamps rather than this host's, so refusing to let the
+        anchor go backwards is what keeps the two comparable.
+        """
+        with self._sessions.begin() as session:
+            latest = session.scalars(
+                select(GuildStashBalanceLogRecord)
+                .order_by(GuildStashBalanceLogRecord.log_id.desc())
+                .limit(1)
+            ).first()
+            observed_at = (
+                recorded_at
+                if latest is None
+                else max(recorded_at, latest.recorded_at)
+            )
+            if latest is not None and latest.coins == coins:
+                refreshed = observed_at > latest.recorded_at
+                if refreshed:
+                    latest.recorded_at = observed_at
+                LOGGER.debug(
+                    "Guild stash balance unchanged; anchor_refreshed=%s",
+                    refreshed,
+                )
+                return False
+            session.add(
+                GuildStashBalanceLogRecord(
+                    coins=coins,
+                    recorded_at=observed_at,
+                )
+            )
+        LOGGER.debug("Logged a changed guild stash balance")
+        return True
+
+    def get_last_stash_balance(self) -> GoldBalanceSample | None:
+        """The newest observed stash balance, or None before the first poll."""
+        with self._sessions() as session:
+            record = session.scalars(
+                select(GuildStashBalanceLogRecord)
+                .order_by(GuildStashBalanceLogRecord.log_id.desc())
+                .limit(1)
+            ).first()
+        if record is None:
+            LOGGER.debug("No guild stash balance has been logged yet")
+            return None
+        LOGGER.debug("Loaded the newest logged guild stash balance")
+        return GoldBalanceSample(
+            recorded_at=record.recorded_at,
+            coins=record.coins,
+        )
+
+    def get_gold_movements(self, since: float) -> list[GoldMovement]:
+        """Every coin movement recorded at or after ``since``.
+
+        Timestamps are stored as the guild log's own text, so they are parsed
+        here rather than compared in SQL. A row whose time cannot be read is
+        dropped: placing it would mean guessing when it happened, and every
+        balance after it would inherit that guess.
+        """
+        unreadable = 0
+        movements: list[GoldMovement] = []
+        with self._sessions() as session:
+            rows = session.scalars(select(GuildStashCoinLogRecord)).all()
+        for row in rows:
+            occurred_at = _row_moment(row.event_time)
+            if occurred_at is None:
+                unreadable += 1
+                continue
+            if occurred_at < since:
+                continue
+            movements.append(
+                GoldMovement(
+                    occurred_at=occurred_at,
+                    operation=row.operation,
+                    username=row.username,
+                    coins=row.coins,
+                )
+            )
+        movements.sort(key=lambda movement: movement.occurred_at)
+        LOGGER.debug(
+            "Loaded guild stash coin movements; rows=%s in_window=%s "
+            "unreadable=%s",
+            len(rows),
+            len(movements),
+            unreadable,
+        )
+        return movements
+
+    def import_gold_movements(
+        self,
+        entries: Sequence[GoldLedgerEntry],
+    ) -> int:
+        """Store coin movements read out of a full guild log sweep.
+
+        Each row is keyed by the guild log's own event id, so a second sweep
+        over the same log finds its own rows and adds nothing - and so does
+        the poller when its cursor later reaches an event this already wrote.
+        Delivery is marked done for every imported row: these movements are
+        history, and announcing a withdrawal from months ago would say
+        something is happening now.
+        """
+        if not entries:
+            return 0
+        imported = 0
+        with self._sessions.begin() as session:
+            for entry in entries:
+                if (
+                    session.get(GuildStashCoinLogRecord, entry.event_id)
+                    is not None
+                ):
+                    continue
+                session.add(
+                    GuildStashCoinLogRecord(
+                        event_id=entry.event_id,
+                        username=entry.username,
+                        operation=entry.operation,
+                        coins=entry.coins,
+                        event_time=entry.event_time,
+                        notification_sent=True,
+                    )
+                )
+                imported += 1
+        LOGGER.debug(
+            "Imported guild stash coin movements; offered=%s imported=%s",
+            len(entries),
+            imported,
+        )
+        return imported
+
+    def get_pending_gold_withdrawal_notifications(self) -> list[GoldWithdrawal]:
+        statement = (
+            select(GuildStashCoinLogRecord)
+            .where(
+                GuildStashCoinLogRecord.operation == WITHDRAW,
+                GuildStashCoinLogRecord.notification_sent.is_(False),
+            )
+            .order_by(GuildStashCoinLogRecord.event_id)
+        )
+        with self._sessions() as session:
+            results = [
+                _to_gold_withdrawal(record)
+                for record in session.scalars(statement).all()
+            ]
+        LOGGER.debug(
+            "Loaded %s pending gold withdrawal notifications",
+            len(results),
+        )
+        return results
+
+    def mark_gold_withdrawal_notification_sent(self, event_id: int) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(GuildStashCoinLogRecord, event_id)
+            if record is not None:
+                record.notification_sent = True
+                LOGGER.debug(
+                    "Marked gold withdrawal notification sent for event %s",
+                    event_id,
+                )
+
     def initialize_cursor(self, event_id: int) -> None:
         with self._sessions.begin() as session:
             if session.get(SettingRecord, "guild_log_cursor") is None:
@@ -531,6 +719,8 @@ class RaffleStore:
         processed = 0
         deposits = 0
         officer_deposits_skipped = 0
+        coin_movements = 0
+        withdrawals = 0
         joins = 0
         leaves = 0
         invites = 0
@@ -580,6 +770,33 @@ class RaffleStore:
                             awards_tickets=awards,
                         )
                         deposits += 1
+
+                # The bank ledger, written apart from the raffle's own
+                # deposit bookkeeping above and unfiltered by it: a deposit
+                # the raffle turned away still put gold in the bank. A
+                # withdrawal is the only one of the two that has to be
+                # announced, so it is the only one left pending.
+                movement = parse_stash_coin_movement(event)
+                if (
+                    movement is not None
+                    and session.get(
+                        GuildStashCoinLogRecord, movement.event_id
+                    )
+                    is None
+                ):
+                    session.add(
+                        GuildStashCoinLogRecord(
+                            event_id=movement.event_id,
+                            username=movement.username,
+                            operation=movement.operation,
+                            coins=movement.coins,
+                            event_time=movement.event_time,
+                            notification_sent=movement.operation == DEPOSIT,
+                        )
+                    )
+                    coin_movements += 1
+                    if movement.operation == WITHDRAW:
+                        withdrawals += 1
 
                 join = parse_guild_join(event)
                 if (
@@ -650,13 +867,16 @@ class RaffleStore:
             cursor_record.value = str(cursor)
         LOGGER.debug(
             "Processed guild log events; fetched=%s new=%s deposits=%s "
-            "officer_deposits_skipped=%s excluded_deposits=%s joins=%s "
+            "officer_deposits_skipped=%s excluded_deposits=%s "
+            "coin_movements=%s withdrawals=%s joins=%s "
             "leaves=%s invites=%s rank_changes=%s cursor=%s",
             len(events),
             processed,
             deposits,
             officer_deposits_skipped,
             excluded_deposits,
+            coin_movements,
+            withdrawals,
             joins,
             leaves,
             invites,
@@ -1645,7 +1865,8 @@ class RaffleStore:
         LOGGER.debug("Validated raffle database guild binding")
 
 
-def _membership_time(event_time: str) -> float | None:
+def _row_moment(event_time: str) -> float | None:
+    """A stored guild-log timestamp as a UTC epoch, or None if unreadable."""
     parsed = parse_event_time(event_time)
     return None if parsed is None else parsed.timestamp()
 
@@ -1656,6 +1877,15 @@ def _to_raffle_deposit(record: RaffleDepositRecord) -> RaffleDeposit:
         username=record.username,
         coins_deposited=record.coins_deposited,
         raffle_tickets=record.raffle_tickets,
+        event_time=record.event_time,
+    )
+
+
+def _to_gold_withdrawal(record: GuildStashCoinLogRecord) -> GoldWithdrawal:
+    return GoldWithdrawal(
+        event_id=record.event_id,
+        username=record.username,
+        coins_withdrawn=record.coins,
         event_time=record.event_time,
     )
 

@@ -41,6 +41,24 @@ def gold_deposit(
     }
 
 
+def gold_withdrawal(
+    event_id: int,
+    username: str = "Officer.5678",
+    coins: int = 10_000,
+    event_time: str = "2026-06-07T06:26:17.000Z",
+) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "time": event_time,
+        "type": "stash",
+        "user": username,
+        "operation": "withdraw",
+        "coins": coins,
+        "item_id": 0,
+        "count": 0,
+    }
+
+
 def guild_leave(
     event_id: int,
     username: str = "Username.1234",

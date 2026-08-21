@@ -26,6 +26,7 @@ from gw2bot.raffle.formatting import (
     raffle_result_embed,
 )
 from gw2bot.raffle.models import (
+    GoldWithdrawal,
     GuildInvite,
     GuildJoin,
     GuildLeave,
@@ -184,6 +185,15 @@ def format_automated_message_diagnostics(
                     username="DiagnosticUser.1234",
                     coins_deposited=30_000,
                     raffle_tickets=3,
+                    event_time="",
+                ).message
+            ),
+            (
+                "**Gold withdrawal notification (test)**\n"
+                + GoldWithdrawal(
+                    event_id=0,
+                    username="DiagnosticUser.1234",
+                    coins_withdrawn=50_000,
                     event_time="",
                 ).message
             ),

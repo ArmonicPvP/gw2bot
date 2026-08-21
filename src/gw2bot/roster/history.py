@@ -4,6 +4,11 @@ import logging
 import re
 from collections.abc import Sequence
 
+from gw2bot.anchored_series import (
+    derive_values,
+    value_before,
+    value_through,
+)
 from gw2bot.roster.models import (
     JOIN,
     KICK,
@@ -103,12 +108,16 @@ def build_roster_series(
             ),
         )
 
-    counts_after, baseline = _derive_counts(ordered, anchor)
-    count_at_end = _count_through(ordered, counts_after, baseline, until)
+    counts_after, baseline = derive_values(
+        ordered, anchor.recorded_at, anchor.member_count
+    )
+    count_at_end = value_through(ordered, counts_after, baseline, until)
     points = [
         RosterPoint(
             at=since,
-            member_count=_count_before(ordered, counts_after, baseline, since),
+            member_count=value_before(
+                ordered, counts_after, baseline, since
+            ),
         )
     ]
     points.extend(
@@ -146,65 +155,3 @@ def _plot(event: MembershipEvent, member_count: int | None) -> RosterEvent:
         member_count=member_count,
         imported=event.imported,
     )
-
-
-def _derive_counts(
-    ordered: Sequence[MembershipEvent],
-    anchor: MemberCountSample,
-) -> tuple[list[int], int]:
-    """Return the count after each event, and the one before the oldest.
-
-    ``ordered`` is oldest first. Events at or before the anchor are walked
-    backwards from it, subtracting each change to recover the count that stood
-    before it; events after the anchor are walked forwards, adding each change.
-    """
-    counts_after = [0] * len(ordered)
-    running = anchor.member_count
-    for index in range(len(ordered) - 1, -1, -1):
-        if ordered[index].occurred_at > anchor.recorded_at:
-            continue
-        counts_after[index] = running
-        running -= ordered[index].delta
-    baseline = running
-    running = anchor.member_count
-    for index, event in enumerate(ordered):
-        if event.occurred_at <= anchor.recorded_at:
-            continue
-        running += event.delta
-        counts_after[index] = running
-    return counts_after, baseline
-
-
-def _count_before(
-    ordered: Sequence[MembershipEvent],
-    counts_after: Sequence[int],
-    baseline: int,
-    moment: float,
-) -> int:
-    """The member count as it stood just before ``moment``."""
-    result = baseline
-    for index, event in enumerate(ordered):
-        if event.occurred_at >= moment:
-            break
-        result = counts_after[index]
-    return result
-
-
-def _count_through(
-    ordered: Sequence[MembershipEvent],
-    counts_after: Sequence[int],
-    baseline: int,
-    moment: float,
-) -> int:
-    """The member count as it stood once every change up to ``moment`` landed.
-
-    Unlike ``_count_before`` a change dated exactly ``moment`` counts, because
-    this places the line's closing vertex and that vertex sits on the same x as
-    the change's own dot.
-    """
-    result = baseline
-    for index, event in enumerate(ordered):
-        if event.occurred_at > moment:
-            break
-        result = counts_after[index]
-    return result
