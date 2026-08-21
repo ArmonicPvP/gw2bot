@@ -117,6 +117,8 @@ class ProfitService:
         item_names = await asyncio.to_thread(
             self._store.get_item_names,
             item_ids,
+            CACHE_TTL_SECONDS,
+            now=loaded_at,
         )
         missing_ids = item_ids - set(item_names)
         if missing_ids:
@@ -125,6 +127,7 @@ class ProfitService:
                 await asyncio.to_thread(
                     self._store.store_item_names,
                     fetched_names,
+                    now=loaded_at,
                 )
                 item_names.update(fetched_names)
         for item_id in item_ids:

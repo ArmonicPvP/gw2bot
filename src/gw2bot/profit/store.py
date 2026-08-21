@@ -309,9 +309,18 @@ class ProfitStore:
         )
         return transactions
 
-    def get_item_names(self, item_ids: set[int]) -> dict[int, str]:
+    def get_item_names(
+        self,
+        item_ids: set[int],
+        ttl_seconds: int,
+        *,
+        now: datetime | None = None,
+    ) -> dict[int, str]:
         if not item_ids:
-            LOGGER.debug("Read profit item names; requested=0 found=0")
+            LOGGER.debug(
+                "Read profit item names; requested=0 found=0 expired=0 "
+                "invalid_timestamps=0"
+            )
             return {}
         with self._sessions() as session:
             records = list(
@@ -321,11 +330,29 @@ class ProfitStore:
                     )
                 )
             )
-        names = {record.item_id: record.name for record in records}
+        checked_at = datetime.now(UTC) if now is None else now
+        names: dict[int, str] = {}
+        expired = 0
+        invalid_timestamps = 0
+        for record in records:
+            try:
+                age = (
+                    checked_at - parse_gw2_time(record.updated_at)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                invalid_timestamps += 1
+                continue
+            if 0 <= age < ttl_seconds:
+                names[record.item_id] = record.name
+            else:
+                expired += 1
         LOGGER.debug(
-            "Read profit item names; requested=%s found=%s",
+            "Read profit item names; requested=%s found=%s expired=%s "
+            "invalid_timestamps=%s",
             len(item_ids),
             len(names),
+            expired,
+            invalid_timestamps,
         )
         return names
 

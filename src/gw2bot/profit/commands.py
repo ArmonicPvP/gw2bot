@@ -24,7 +24,7 @@ class ProfitApiKeyModal(discord.ui.Modal, title="Save GW2 Profit API Key"):
         placeholder="Paste a key with the tradingpost permission",
         style=discord.TextStyle.short,
         required=True,
-        max_length=200,
+        max_length=4000,
     )
 
     def __init__(self, bot: Gw2Bot) -> None:

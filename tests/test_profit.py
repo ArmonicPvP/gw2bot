@@ -361,6 +361,29 @@ class TestProfitStore:
             now=now + timedelta(seconds=300),
         )
 
+    def test_item_name_cache_excludes_expired_and_future_rows(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_item_names(
+            {1: "Expired"},
+            now=now - timedelta(seconds=300),
+        )
+        store.store_item_names(
+            {2: "Fresh"},
+            now=now - timedelta(seconds=299),
+        )
+        store.store_item_names(
+            {3: "Future"},
+            now=now + timedelta(seconds=1),
+        )
+
+        assert store.get_item_names({1, 2, 3}, 300, now=now) == {
+            2: "Fresh"
+        }
+
 
 class TestProfitService:
     async def test_refreshes_stale_collections_then_uses_the_member_cache(
@@ -438,6 +461,57 @@ class TestProfitService:
 
         with pytest.raises(MissingProfitApiKey):
             await service.load_report(202, 30)
+
+    async def test_refreshes_an_expired_item_name(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.set_api_key(101, "member-secret")
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", quantity=1)],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [
+                transaction(
+                    "sell",
+                    price=200,
+                    quantity=1,
+                    occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+                )
+            ],
+            now=now,
+        )
+        store.store_transactions(101, "current_sells", [], now=now)
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        store.store_item_names(
+            {1: "Old Name"},
+            now=now - timedelta(seconds=300),
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={1: "New Name"}),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        report = await service.load_report(101, 30, now=now)
+
+        assert report.item_names == {1: "New Name"}
+        api.fetch_transactions.assert_not_awaited()
+        api.fetch_item_names.assert_awaited_once_with({1})
+        assert store.get_item_names({1}, 300, now=now) == {1: "New Name"}
 
 
 class _FakeResponse:
@@ -632,6 +706,11 @@ class TestProfitCommands:
             "deletekey",
             "view",
         }
+
+    def test_key_modal_allows_full_length_subtokens(self) -> None:
+        modal = ProfitApiKeyModal(cast(Any, object()))
+
+        assert modal.api_key.max_length == 4000
 
     async def test_view_links_the_combined_web_dashboard(self) -> None:
         bot = SimpleNamespace(
