@@ -1173,7 +1173,8 @@ of `DISCORD_COMMAND_GUILD_ID`. Non-members receive a members-only page.
 Sessions last `/settings web_session_ttl_seconds` (seven days by default). Membership is
 re-checked at sign-in and then at most every five minutes for the life of the
 session, so a member who leaves or is banned loses access within minutes rather
-than keeping it until the cookie expires.
+than keeping it until the cookie expires. Calendar and dashboard pages share
+the same compact header and **Sign out** control.
 
 To enable it:
 

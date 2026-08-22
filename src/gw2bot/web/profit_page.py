@@ -1,6 +1,6 @@
 """Static browser dashboard for a member's Trading Post profit reports."""
 
-from gw2bot.web.page import _SHARED_STYLE
+from gw2bot.web.page import _DASHBOARD_HEADER_STYLE, _SHARED_STYLE
 
 PROFIT_PAGE = (
     """<!DOCTYPE html>
@@ -12,22 +12,10 @@ PROFIT_PAGE = (
 <title>Trading Post Profit</title>
 <style>"""
     + _SHARED_STYLE
+    + _DASHBOARD_HEADER_STYLE
     + """
 body { display: flex; flex-direction: column; }
-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 1rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-header h1 { font-size: 1.05rem; }
-header a { font-size: 0.85rem; }
-.spacer { flex: 1; }
-#whoami { color: var(--muted); font-size: 0.85rem; }
-header form { display: flex; align-items: center; gap: 0.45rem; }
+#range-form { align-items: center; gap: 0.45rem; }
 label { color: var(--muted); font-size: 0.85rem; }
 input {
   width: 4.6rem;
@@ -35,19 +23,10 @@ input {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 0.4rem 0.5rem;
+  padding: 0.35rem 0.5rem;
   font: inherit;
+  font-size: 0.85rem;
 }
-button {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.4rem 0.75rem;
-  font: inherit;
-  cursor: pointer;
-}
-button:hover { background: var(--border); }
 .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 main { width: min(100%, 88rem); margin: 0 auto; padding: 1rem; }
 #status {
@@ -139,10 +118,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 .chart-label { fill: var(--muted); font-size: 11px; }
 .chart-empty { fill: var(--muted); font-size: 13px; text-anchor: middle; }
 @media (max-width: 640px) {
-  header { align-items: flex-start; }
-  header h1 { width: 100%; }
+  #range-form {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: center;
+  }
+  header a { grid-column: 1; grid-row: 1; justify-self: start; }
   .spacer { display: none; }
-  #whoami { margin-left: auto; }
   main { padding: 0.75rem; }
   th, td { padding: 0.55rem 0.65rem; }
   .chart-grid { grid-template-columns: 1fr; padding: 0 0.75rem 0.75rem; }
@@ -151,7 +133,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 </head>
 <body>
 <header>
-  <h1>Trading Post Profit</h1>
+  <h1 id="brand">Trading Post Profit</h1>
   <form id="range-form">
     <label for="days">Days</label>
     <input id="days" name="days" type="number" min="1" max="90" value="30" required>
@@ -161,7 +143,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   <a href="/">Calendar</a>
   <span id="whoami"></span>
   <form method="post" action="/logout">
-    <button type="submit">Sign out</button>
+    <button type="submit" class="signout" aria-label="Sign out">
+      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
+        fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>
+      <span class="signout-label">Sign out</span>
+    </button>
   </form>
 </header>
 <main>

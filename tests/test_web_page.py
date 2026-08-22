@@ -165,6 +165,39 @@ class TestProfitPage:
         assert '<a href="/">Calendar</a>' in PROFIT_PAGE
 
 
+class TestDashboardHeaders:
+    def test_every_dashboard_uses_the_same_sign_out_control(self) -> None:
+        for page in (
+            CALENDAR_PAGE,
+            PROFIT_PAGE,
+            FOOD_PAGE,
+            ROSTER_PAGE,
+            GOLD_PAGE,
+        ):
+            assert page.count(
+                '<button type="submit" class="signout" '
+                'aria-label="Sign out">'
+            ) == 1
+            assert page.count(
+                '<span class="signout-label">Sign out</span>'
+            ) == 1
+            assert page.count('class="signout-icon"') == 1
+            assert "Log out" not in page
+
+    def test_every_dashboard_uses_the_shared_header_dimensions(self) -> None:
+        for page in (
+            CALENDAR_PAGE,
+            PROFIT_PAGE,
+            FOOD_PAGE,
+            ROSTER_PAGE,
+            GOLD_PAGE,
+        ):
+            assert "padding: 0.6rem 1rem;" in page
+            assert "padding: 0.35rem 0.7rem;" in page
+            assert 'header form[action="/logout"] {' in page
+            assert '<h1 id="brand">' in page
+
+
 class TestCalendarTimeGrid:
     def test_day_and_week_render_an_hour_gutter(self) -> None:
         assert (
@@ -307,7 +340,8 @@ class TestCalendarMobile:
         assert 'class="signout-icon"' in CALENDAR_PAGE
         # The stepper and username are hidden on mobile; the period label is
         # not, so the month stays on screen.
-        assert ".controls, #whoami { display: none; }" in CALENDAR_PAGE
+        assert ".controls { display: none; }" in CALENDAR_PAGE
+        assert "#whoami { display: none; }" in CALENDAR_PAGE
 
     def test_period_label_keeps_the_top_left_corner_on_mobile(self) -> None:
         # Swiping changes the period and the month grid shows bare day numbers,
