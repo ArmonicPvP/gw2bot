@@ -299,6 +299,7 @@ def calculate_unrealized_profit(
     total_cost = 0
     total_projected_net_revenue = 0
     total_projected_profit = 0
+    chronology_blocked_listings = 0
 
     for item_id, buy_lots in unmatched_buys.items():
         sell_listings = sells_by_item.get(item_id, [])
@@ -308,46 +309,52 @@ def calculate_unrealized_profit(
             _MutableLot(lot.remaining, lot.unit_price, lot.occurred_at)
             for lot in sorted(buy_lots, key=lambda lot: lot.occurred_at)
         )
-        sell_queue = deque(
-            _MutableListing(
-                transaction.quantity,
-                transaction.price,
-                transaction.occurred_at,
-                transaction.quantity,
-            )
-            for transaction in sorted(
-                sell_listings,
-                key=lambda listing: listing.occurred_at,
-            )
-        )
         quantity = 0
         cost = 0
         projected_net_revenue = 0
         projected_profit = 0
 
-        while buy_queue and sell_queue:
-            buy_lot = buy_queue[0]
-            sell_listing = sell_queue[0]
-            matched = min(buy_lot.remaining, sell_listing.remaining)
-            matched_cost = buy_lot.unit_price * matched
-            matched_revenue = allocated_net_revenue(
-                sell_listing.unit_price,
-                sell_listing.original_quantity,
-                matched,
-                previously_matched_quantity=(
-                    sell_listing.original_quantity - sell_listing.remaining
-                ),
+        for transaction in sorted(
+            sell_listings,
+            key=lambda listing: listing.occurred_at,
+        ):
+            sell_listing = _MutableListing(
+                transaction.quantity,
+                transaction.price,
+                transaction.occurred_at,
+                transaction.quantity,
             )
-            quantity += matched
-            cost += matched_cost
-            projected_net_revenue += matched_revenue
-            projected_profit += matched_revenue - matched_cost
-            buy_lot.remaining -= matched
-            sell_listing.remaining -= matched
-            if buy_lot.remaining == 0:
-                buy_queue.popleft()
-            if sell_listing.remaining == 0:
-                sell_queue.popleft()
+            while (
+                buy_queue
+                and sell_listing.remaining > 0
+                and buy_queue[0].occurred_at <= sell_listing.occurred_at
+            ):
+                buy_lot = buy_queue[0]
+                matched = min(buy_lot.remaining, sell_listing.remaining)
+                matched_cost = buy_lot.unit_price * matched
+                matched_revenue = allocated_net_revenue(
+                    sell_listing.unit_price,
+                    sell_listing.original_quantity,
+                    matched,
+                    previously_matched_quantity=(
+                        sell_listing.original_quantity
+                        - sell_listing.remaining
+                    ),
+                )
+                quantity += matched
+                cost += matched_cost
+                projected_net_revenue += matched_revenue
+                projected_profit += matched_revenue - matched_cost
+                buy_lot.remaining -= matched
+                sell_listing.remaining -= matched
+                if buy_lot.remaining == 0:
+                    buy_queue.popleft()
+            if (
+                buy_queue
+                and sell_listing.remaining > 0
+                and buy_queue[0].occurred_at > sell_listing.occurred_at
+            ):
+                chronology_blocked_listings += 1
 
         if quantity == 0:
             continue
@@ -371,9 +378,10 @@ def calculate_unrealized_profit(
     )
     LOGGER.debug(
         "Calculated unrealized Trading Post profit; listings=%s items=%s "
-        "matched=%s",
+        "matched=%s chronology_blocked=%s",
         len(current_sells),
         len(result.items),
         result.total_quantity,
+        chronology_blocked_listings,
     )
     return result

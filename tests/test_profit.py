@@ -184,6 +184,45 @@ class TestProfitCalculation:
         assert unrealized.total_projected_net_revenue == 256
         assert unrealized.items[1].projected_net_revenue == 256
 
+    def test_matches_a_purchase_only_to_a_listing_created_after_it(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        older_id = "older-listing-secret"
+        newer_id = "newer-listing-secret"
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            unrealized = calculate_unrealized_profit(
+                {
+                    1: (
+                        BuyLot(
+                            1,
+                            100,
+                            datetime(2026, 8, 2, tzinfo=UTC),
+                        ),
+                    )
+                },
+                [
+                    transaction(
+                        older_id,
+                        price=200,
+                        occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+                    ),
+                    transaction(
+                        newer_id,
+                        price=300,
+                        occurred_at=datetime(2026, 8, 3, tzinfo=UTC),
+                    ),
+                ],
+            )
+
+        assert unrealized.total_quantity == 1
+        assert unrealized.total_cost == 100
+        assert unrealized.total_projected_net_revenue == 255
+        assert unrealized.total_projected_profit == 155
+        assert "chronology_blocked=1" in caplog.text
+        assert older_id not in caplog.text
+        assert newer_id not in caplog.text
+
 
 class TestProfitStore:
     def test_encrypts_and_isolates_each_members_api_key(
