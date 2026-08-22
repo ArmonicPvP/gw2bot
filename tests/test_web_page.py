@@ -77,6 +77,75 @@ class TestProfitPage:
         )
         assert "location.pathname + location.search" in PROFIT_PAGE
 
+    def test_detail_tables_have_accessible_sort_buttons(self) -> None:
+        assert PROFIT_PAGE.count('data-sort-table="') == 3
+        assert PROFIT_PAGE.count('class="sort-button"') == 20
+        assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
+        assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
+        assert (
+            'id="unrealized-table" data-sort-table="unrealized"'
+            in PROFIT_PAGE
+        )
+        assert 'th[aria-sort="ascending"]' in PROFIT_PAGE
+        assert 'th[aria-sort="descending"]' in PROFIT_PAGE
+
+    def test_sorting_uses_raw_values_and_leaves_totals_out(self) -> None:
+        assert 'node.dataset.sortValue = String(sortValue);' in PROFIT_PAGE
+        assert 'body.querySelectorAll("tr[data-sort-row]")' in PROFIT_PAGE
+        assert 'row.dataset.sortRow = "true";' in PROFIT_PAGE
+        assert 'var rows = Array.prototype.slice.call(' in PROFIT_PAGE
+        assert 'rows.forEach(function (row) { body.appendChild(row); });' in (
+            PROFIT_PAGE
+        )
+
+    def test_a_new_report_keeps_each_tables_selected_sort(self) -> None:
+        assert 'applySort("items-table");' in PROFIT_PAGE
+        assert 'applySort("days-table");' in PROFIT_PAGE
+        assert 'applySort("unrealized-table");' in PROFIT_PAGE
+        assert 'var sortStates = {};' in PROFIT_PAGE
+
+    def test_profit_metrics_are_visible_and_sortable(self) -> None:
+        for heading in (
+            "ROI",
+            "Median Hold",
+            "Profit Share",
+            "Projected ROI",
+        ):
+            assert f">{heading}</button>" in PROFIT_PAGE
+        assert "item.median_hold_seconds" in PROFIT_PAGE
+        assert "item.profit_share_percent" in PROFIT_PAGE
+        assert "item.roi_percent" in PROFIT_PAGE
+
+    def test_summary_contains_best_and_worst_highlights(self) -> None:
+        assert '["Best item", highlight(bestItem, "name")' in PROFIT_PAGE
+        assert '["Worst item", highlight(worstItem, "name")' in PROFIT_PAGE
+        assert (
+            '["Best trading day", highlight(bestDay, "date")'
+            in PROFIT_PAGE
+        )
+        assert (
+            '["Worst trading day", highlight(worstDay, "date")'
+            in PROFIT_PAGE
+        )
+        assert '["Realized ROI", percent(summary.roi_percent)' in PROFIT_PAGE
+        assert '["Unrealized ROI", percent(unrealized.roi_percent)' in (
+            PROFIT_PAGE
+        )
+
+    def test_daily_trend_charts_include_zero_days_and_rolling_profit(
+        self,
+    ) -> None:
+        assert "Daily Profit and Average" in PROFIT_PAGE
+        assert "7-Day Rolling Average" in PROFIT_PAGE
+        assert "Cumulative Profit" in PROFIT_PAGE
+        assert 'id="daily-profit-chart"' in PROFIT_PAGE
+        assert 'id="rolling-profit-chart"' in PROFIT_PAGE
+        assert 'id="cumulative-profit-chart"' in PROFIT_PAGE
+        assert 'profitByDate[date] : 0' in PROFIT_PAGE
+        assert "rollingTotal / 7" in PROFIT_PAGE
+        assert "cumulative += point.profit;" in PROFIT_PAGE
+        assert 'document.createElementNS(SVG_NS, name)' in PROFIT_PAGE
+
     def test_sign_in_target_is_escaped_before_becoming_markup(self) -> None:
         document = sign_in_page('"><script>target-secret</script>')
 

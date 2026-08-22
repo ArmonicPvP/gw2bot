@@ -22,13 +22,19 @@ from gw2bot.profit.api import (
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.models import (
     BuyLot,
+    ProfitReport,
     Transaction,
+    UnrealizedProfit,
     allocated_net_revenue,
     calculate_realized_profit,
     calculate_unrealized_profit,
     sale_fee_total,
 )
-from gw2bot.profit.service import MissingProfitApiKey, ProfitService
+from gw2bot.profit.service import (
+    MissingProfitApiKey,
+    ProfitService,
+    serialize_profit_report,
+)
 from gw2bot.profit.store import ProfitStore
 from gw2bot.settings.crypto import SettingsCipher
 
@@ -102,10 +108,83 @@ class TestProfitCalculation:
         assert result.items[1].cost == 700
         assert result.items[1].net_revenue == 1_317
         assert result.items[1].profit == 617
+        assert result.items[1].median_hold_seconds == 2 * 86_400
         assert result.days["2026-08-03"].profit == 280
         assert result.days["2026-08-04"].profit == 337
         assert result.unmatched_buys[1][0].remaining == 3
         assert result.unmatched_buys[1][1].remaining == 2
+
+    def test_median_holding_time_is_weighted_by_matched_units(self) -> None:
+        buys = [
+            transaction(
+                "older-buy",
+                quantity=1,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "newer-buy",
+                quantity=9,
+                occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            transaction(
+                "sell",
+                price=200,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 11, tzinfo=UTC),
+            )
+        ]
+
+        result = calculate_realized_profit(buys, sells)
+
+        assert result.items[1].median_hold_seconds == 86_400
+
+    def test_profit_share_is_each_items_signed_part_of_net_profit(
+        self,
+    ) -> None:
+        buys = [
+            transaction("buy-1", item_id=1),
+            transaction("buy-2", item_id=2),
+        ]
+        sells = [
+            transaction(
+                "sell-1",
+                item_id=1,
+                price=200,
+                occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-2",
+                item_id=2,
+                price=50,
+                occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+            ),
+        ]
+        realized = calculate_realized_profit(buys, sells)
+        report = ProfitReport(
+            days=30,
+            window_start=datetime(2026, 8, 1, tzinfo=UTC),
+            window_end=datetime(2026, 8, 31, tzinfo=UTC),
+            buy_transaction_count=2,
+            sell_transaction_count=2,
+            realized=realized,
+            unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
+            item_names={1: "Winner", 2: "Loser"},
+        )
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        items = {row["item_id"]: row for row in payload["items"]}
+
+        assert items[1]["profit_share_percent"] == pytest.approx(
+            70 / 12 * 100
+        )
+        assert items[2]["profit_share_percent"] == pytest.approx(
+            -58 / 12 * 100
+        )
+        assert sum(
+            row["profit_share_percent"] for row in items.values()
+        ) == pytest.approx(100)
 
     def test_preserves_sale_revenue_remainder_across_fifo_lots(self) -> None:
         buys = [
@@ -515,6 +594,13 @@ class TestProfitService:
         assert first.item_names == {1: "Test Item"}
         assert first.realized.total_profit == 70
         assert first.unrealized.total_projected_profit == 155
+        payload = cast(dict[str, Any], serialize_profit_report(first))
+        assert payload["summary"]["roi_percent"] == 70
+        assert payload["items"][0]["roi_percent"] == 70
+        assert payload["items"][0]["median_hold_seconds"] == 86_400
+        assert payload["items"][0]["profit_share_percent"] == 100
+        assert payload["unrealized"]["roi_percent"] == 155
+        assert payload["unrealized"]["items"][0]["roi_percent"] == 155
         assert api.fetch_transactions.await_count == 3
         api.fetch_item_names.assert_awaited_once_with({1})
 

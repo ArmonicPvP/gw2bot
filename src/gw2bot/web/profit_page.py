@@ -86,11 +86,58 @@ th, td {
 }
 th { color: var(--muted); font-weight: 600; background: var(--panel-2); }
 th:first-child, td:first-child { text-align: left; }
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  font: inherit;
+  font-weight: inherit;
+}
+th:first-child .sort-button { justify-content: flex-start; }
+.sort-button:hover { color: var(--text); background: transparent; }
+.sort-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.sort-button::after { content: "\\2195"; color: var(--muted); font-size: 0.75rem; }
+th[aria-sort="ascending"] .sort-button::after { content: "\\25B2"; color: var(--text); }
+th[aria-sort="descending"] .sort-button::after { content: "\\25BC"; color: var(--text); }
 td.name { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
 tfoot td { font-weight: 700; background: var(--panel-2); }
 .positive { color: #74dc9a; }
 .negative { color: #ff8f86; }
 .empty { color: var(--muted); text-align: center !important; padding: 1.2rem; }
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 0 1rem 1rem;
+}
+.chart-panel {
+  min-width: 0;
+  padding: 0.75rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.chart-panel h3 { font-size: 0.88rem; margin-bottom: 0.1rem; }
+.chart-panel p { color: var(--muted); font-size: 0.75rem; min-height: 2.1rem; }
+.chart-panel svg { display: block; width: 100%; height: auto; margin-top: 0.4rem; }
+.chart-gridline { stroke: var(--border); stroke-width: 1; }
+.chart-zero { stroke: var(--muted); stroke-width: 1; }
+.chart-average { stroke: #f1c40f; stroke-width: 2; stroke-dasharray: 6 4; }
+.chart-rolling { fill: none; stroke: #58a6ff; stroke-width: 2.5; }
+.chart-cumulative { fill: none; stroke: #74dc9a; stroke-width: 2.5; }
+.chart-point-rolling { fill: #58a6ff; }
+.chart-point-cumulative { fill: #74dc9a; }
+.chart-bar-positive { fill: #74dc9a; }
+.chart-bar-negative { fill: #ff8f86; }
+.chart-label { fill: var(--muted); font-size: 11px; }
+.chart-empty { fill: var(--muted); font-size: 13px; text-anchor: middle; }
 @media (max-width: 640px) {
   header { align-items: flex-start; }
   header h1 { width: 100%; }
@@ -98,6 +145,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   #whoami { margin-left: auto; }
   main { padding: 0.75rem; }
   th, td { padding: 0.55rem 0.65rem; }
+  .chart-grid { grid-template-columns: 1fr; padding: 0 0.75rem 0.75rem; }
 }
 </style>
 </head>
@@ -125,33 +173,78 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   <div class="cards" id="reports" hidden>
     <section class="card">
       <h2>Summary</h2>
-      <p class="note">Realized profit from FIFO-matched purchases and sales in the selected window.</p>
+      <p class="note">FIFO-matched realized results and current-listing projections for the selected window.</p>
       <div class="table-scroll"><table>
         <thead><tr><th>Measure</th><th>Value</th></tr></thead>
         <tbody id="summary-body"></tbody>
       </table></div>
     </section>
     <section class="card">
+      <h2>Daily Profit Trends</h2>
+      <p class="note">UTC sale dates; days without matched sales count as zero profit.</p>
+      <div class="chart-grid">
+        <figure class="chart-panel">
+          <h3>Daily Profit and Average</h3>
+          <p>Realized profit each day with the whole-window daily average.</p>
+          <svg id="daily-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Daily realized profit and average"></svg>
+        </figure>
+        <figure class="chart-panel">
+          <h3>7-Day Rolling Average</h3>
+          <p>Trailing mean across seven UTC date buckets.</p>
+          <svg id="rolling-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Seven-day rolling average realized profit"></svg>
+        </figure>
+        <figure class="chart-panel">
+          <h3>Cumulative Profit</h3>
+          <p>Running realized profit across the selected window.</p>
+          <svg id="cumulative-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Cumulative realized profit"></svg>
+        </figure>
+      </div>
+    </section>
+    <section class="card">
       <h2>Realized Profit by Item</h2>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Item</th><th>Units</th><th>Cost</th><th>Net Revenue</th><th>Profit</th><th>Profit / Unit</th></tr></thead>
+      <p class="note">Median Hold is weighted by matched units. Profit Share is signed item profit divided by total realized profit.</p>
+      <div class="table-scroll"><table id="items-table" data-sort-table="items">
+        <thead><tr>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="net-revenue" data-sort-default="descending">Net Revenue</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="profit" data-sort-default="descending">Profit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="roi" data-sort-default="descending">ROI</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="profit-per-unit" data-sort-default="descending">Profit / Unit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="median-hold" data-sort-default="ascending">Median Hold</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="profit-share" data-sort-default="descending">Profit Share</button></th>
+        </tr></thead>
         <tbody id="items-body"></tbody>
         <tfoot id="items-foot"></tfoot>
       </table></div>
     </section>
     <section class="card">
       <h2>Realized Profit by Day</h2>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Date</th><th>Units</th><th>Cost</th><th>Net Revenue</th><th>Profit</th></tr></thead>
+      <div class="table-scroll"><table id="days-table" data-sort-table="days">
+        <thead><tr>
+          <th aria-sort="ascending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="net-revenue" data-sort-default="descending">Net Revenue</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="profit" data-sort-default="descending">Profit</button></th>
+        </tr></thead>
         <tbody id="days-body"></tbody>
         <tfoot id="days-foot"></tfoot>
       </table></div>
     </section>
     <section class="card">
       <h2>Unrealized Profit</h2>
-      <p class="note">Unmatched purchases from the selected window that are currently listed for sale.</p>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Item</th><th>Units</th><th>Cost</th><th>Projected Sale</th><th>Projected Profit</th></tr></thead>
+      <p class="note">Unmatched purchases from the selected window that are currently listed for sale. Projected ROI is projected profit divided by their matched cost.</p>
+      <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
+        <thead><tr>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="projected-sale" data-sort-default="descending">Projected Sale</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="projected-profit" data-sort-default="descending">Projected Profit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="projected-roi" data-sort-default="descending">Projected ROI</button></th>
+        </tr></thead>
         <tbody id="unrealized-body"></tbody>
         <tfoot id="unrealized-foot"></tfoot>
       </table></div>
@@ -166,9 +259,15 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var status = document.getElementById("status");
   var reports = document.getElementById("reports");
   var keyHelp = document.getElementById("key-help");
+  var sortStates = {};
 
   function trace(action, rows) {
     console.debug("Profit dashboard", action, "rows=" + rows);
+  }
+
+  function traceSort(table, column, direction, rows) {
+    console.debug(
+      "Profit dashboard sort", table, column, direction, "rows=" + rows);
   }
 
   function coin(value) {
@@ -188,16 +287,357 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     return units > 0 ? coin(Math.round(profit / units)) : "0c";
   }
 
-  function cell(row, value, className) {
+  function percent(value) {
+    return value === null ? "\u2014" : value.toFixed(1) + "%";
+  }
+
+  function duration(seconds) {
+    if (seconds < 60) { return Math.round(seconds) + "s"; }
+    if (seconds < 3600) { return Math.round(seconds / 60) + "m"; }
+    if (seconds < 172800) {
+      return (seconds / 3600).toFixed(1).replace(".0", "") + "h";
+    }
+    return (seconds / 86400).toFixed(1).replace(".0", "") + "d";
+  }
+
+  function tone(value) {
+    return value < 0 ? "negative" : "positive";
+  }
+
+  function cell(row, value, className, sortValue) {
     var node = document.createElement("td");
     node.textContent = String(value);
     if (className) { node.className = className; }
+    if (sortValue !== undefined) {
+      node.dataset.sortValue = String(sortValue);
+    }
     row.appendChild(node);
     return node;
   }
 
   function profitCell(row, value) {
-    return cell(row, coin(value), value < 0 ? "negative" : "positive");
+    return cell(row, coin(value), tone(value), value);
+  }
+
+  function percentCell(row, value, toneValue) {
+    return cell(
+      row, percent(value), value === null ? ""
+        : tone(toneValue === undefined ? value : toneValue),
+      value === null ? 0 : value);
+  }
+
+  function sortableRow(index) {
+    var row = document.createElement("tr");
+    row.dataset.sortRow = "true";
+    row.dataset.renderOrder = String(index);
+    return row;
+  }
+
+  function compareValues(left, right, kind) {
+    if (kind === "number") {
+      return Number(left) - Number(right);
+    }
+    return String(left).localeCompare(
+      String(right), undefined, { sensitivity: "base", numeric: true });
+  }
+
+  function sortTable(table, state) {
+    var body = table.tBodies[0];
+    var rows = Array.prototype.slice.call(
+      body.querySelectorAll("tr[data-sort-row]"));
+    var multiplier = state.direction === "ascending" ? 1 : -1;
+    rows.sort(function (left, right) {
+      var compared = compareValues(
+        left.cells[state.column].dataset.sortValue,
+        right.cells[state.column].dataset.sortValue,
+        state.kind);
+      if (compared) { return compared * multiplier; }
+      return Number(left.dataset.renderOrder) - Number(right.dataset.renderOrder);
+    });
+    rows.forEach(function (row) { body.appendChild(row); });
+    table.querySelectorAll("th[aria-sort]").forEach(function (heading) {
+      heading.setAttribute("aria-sort", "none");
+    });
+    table.querySelector(
+      '[data-sort-index="' + state.column + '"]').parentElement.setAttribute(
+        "aria-sort", state.direction);
+    return rows.length;
+  }
+
+  function applySort(tableId) {
+    var table = document.getElementById(tableId);
+    sortTable(table, sortStates[table.dataset.sortTable]);
+  }
+
+  function initializeSorters() {
+    document.querySelectorAll("table[data-sort-table]").forEach(
+      function (table) {
+        var selected = table.querySelector(
+          'th[aria-sort="ascending"], th[aria-sort="descending"]');
+        var selectedButton = selected.querySelector(".sort-button");
+        sortStates[table.dataset.sortTable] = {
+          column: Number(selectedButton.dataset.sortIndex),
+          direction: selected.getAttribute("aria-sort"),
+          kind: selectedButton.dataset.sortKind
+        };
+        table.querySelectorAll(".sort-button").forEach(function (button) {
+          button.addEventListener("click", function () {
+            var key = table.dataset.sortTable;
+            var column = Number(button.dataset.sortIndex);
+            var previous = sortStates[key];
+            var direction = button.dataset.sortDefault;
+            if (previous.column === column) {
+              direction = previous.direction === "ascending"
+                ? "descending" : "ascending";
+            }
+            sortStates[key] = {
+              column: column,
+              direction: direction,
+              kind: button.dataset.sortKind
+            };
+            var rows = sortTable(table, sortStates[key]);
+            traceSort(key, button.dataset.sortKey, direction, rows);
+          });
+        });
+      });
+  }
+
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  function svgNode(name, attributes, textValue) {
+    var node = document.createElementNS(SVG_NS, name);
+    Object.keys(attributes).forEach(function (key) {
+      node.setAttribute(key, String(attributes[key]));
+    });
+    if (textValue !== undefined) { node.textContent = String(textValue); }
+    return node;
+  }
+
+  function isoDay(date) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  function buildDailySeries(data) {
+    var profitByDate = Object.create(null);
+    data.days_table.forEach(function (day) {
+      profitByDate[day.date] = day.profit;
+    });
+    var start = new Date(data.window.start_date + "T00:00:00Z");
+    var end = new Date(data.window.end_date + "T00:00:00Z");
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())
+      || start > end) {
+      trace("charts-invalid-window", 0);
+      return [];
+    }
+    var points = [];
+    var cursor = new Date(start.getTime());
+    while (cursor <= end && points.length < 92) {
+      var date = isoDay(cursor);
+      points.push({
+        date: date,
+        profit: Object.prototype.hasOwnProperty.call(profitByDate, date)
+          ? profitByDate[date] : 0,
+        rolling: null,
+        cumulative: 0
+      });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+    if (cursor <= end) {
+      trace("charts-window-too-wide", points.length);
+      return [];
+    }
+    var cumulative = 0;
+    points.forEach(function (point, index) {
+      cumulative += point.profit;
+      point.cumulative = cumulative;
+      if (index >= 6) {
+        var rollingTotal = 0;
+        for (var offset = index - 6; offset <= index; offset += 1) {
+          rollingTotal += points[offset].profit;
+        }
+        point.rolling = rollingTotal / 7;
+      }
+    });
+    return points;
+  }
+
+  function emptyChart(svg, message) {
+    svg.replaceChildren();
+    svg.appendChild(svgNode("text", {
+      x: 320,
+      y: 110,
+      "class": "chart-empty"
+    }, message));
+  }
+
+  function chartFrame(svg, points, values, title) {
+    var width = 640;
+    var height = 220;
+    var left = 62;
+    var right = 16;
+    var top = 14;
+    var bottom = 34;
+    var plotWidth = width - left - right;
+    var plotHeight = height - top - bottom;
+    var minimum = Math.min.apply(null, [0].concat(values));
+    var maximum = Math.max.apply(null, [0].concat(values));
+    if (minimum === maximum) {
+      minimum -= 1;
+      maximum += 1;
+    }
+    var y = function (value) {
+      return top + (maximum - value) / (maximum - minimum) * plotHeight;
+    };
+    var x = function (index) {
+      return left + (index + 0.5) / points.length * plotWidth;
+    };
+
+    svg.replaceChildren();
+    svg.appendChild(svgNode("title", {}, title));
+    [maximum, (maximum + minimum) / 2, minimum].forEach(function (value) {
+      svg.appendChild(svgNode("line", {
+        x1: left,
+        y1: y(value),
+        x2: width - right,
+        y2: y(value),
+        "class": Math.abs(value) < 0.0001
+          ? "chart-zero" : "chart-gridline"
+      }));
+      svg.appendChild(svgNode("text", {
+        x: left - 7,
+        y: y(value) + 4,
+        "text-anchor": "end",
+        "class": "chart-label"
+      }, coin(Math.round(value))));
+    });
+    if (minimum < 0 && maximum > 0) {
+      svg.appendChild(svgNode("line", {
+        x1: left,
+        y1: y(0),
+        x2: width - right,
+        y2: y(0),
+        "class": "chart-zero"
+      }));
+    }
+    svg.appendChild(svgNode("text", {
+      x: left,
+      y: height - 8,
+      "class": "chart-label"
+    }, points[0].date));
+    svg.appendChild(svgNode("text", {
+      x: width - right,
+      y: height - 8,
+      "text-anchor": "end",
+      "class": "chart-label"
+    }, points[points.length - 1].date));
+    return {
+      left: left,
+      plotWidth: plotWidth,
+      right: width - right,
+      x: x,
+      y: y
+    };
+  }
+
+  function renderDailyProfitChart(points, dailyAverage) {
+    var svg = document.getElementById("daily-profit-chart");
+    var values = points.map(function (point) { return point.profit; });
+    values.push(dailyAverage);
+    var frame = chartFrame(
+      svg, points, values, "Daily realized profit and window average");
+    var barWidth = Math.max(
+      2, Math.min(18, frame.plotWidth / points.length * 0.68));
+    points.forEach(function (point, index) {
+      var profitY = frame.y(point.profit);
+      var zeroY = frame.y(0);
+      var bar = svgNode("rect", {
+        x: frame.x(index) - barWidth / 2,
+        y: Math.min(profitY, zeroY),
+        width: barWidth,
+        height: point.profit === 0
+          ? 0 : Math.max(1, Math.abs(profitY - zeroY)),
+        "class": point.profit < 0
+          ? "chart-bar-negative" : "chart-bar-positive"
+      });
+      bar.appendChild(svgNode(
+        "title", {}, point.date + ": " + coin(point.profit)));
+      svg.appendChild(bar);
+    });
+    var averageLine = svgNode("line", {
+      x1: frame.left,
+      y1: frame.y(dailyAverage),
+      x2: frame.right,
+      y2: frame.y(dailyAverage),
+      "class": "chart-average"
+    });
+    averageLine.appendChild(svgNode(
+      "title", {}, "Daily average: " + coin(Math.round(dailyAverage))));
+    svg.appendChild(averageLine);
+  }
+
+  function renderLineChart(
+    svgId, points, field, lineClass, pointClass, title, emptyMessage
+  ) {
+    var svg = document.getElementById(svgId);
+    var plotted = [];
+    points.forEach(function (point, index) {
+      if (typeof point[field] === "number") {
+        plotted.push({ index: index, point: point, value: point[field] });
+      }
+    });
+    if (!plotted.length) {
+      emptyChart(svg, emptyMessage);
+      return;
+    }
+    var values = plotted.map(function (entry) { return entry.value; });
+    var frame = chartFrame(svg, points, values, title);
+    var pathData = plotted.map(function (entry, index) {
+      return (index ? "L" : "M") + frame.x(entry.index) + " "
+        + frame.y(entry.value);
+    }).join(" ");
+    svg.appendChild(svgNode("path", {
+      d: pathData,
+      "class": lineClass
+    }));
+    plotted.forEach(function (entry) {
+      var point = svgNode("circle", {
+        cx: frame.x(entry.index),
+        cy: frame.y(entry.value),
+        r: 3,
+        "class": pointClass
+      });
+      point.appendChild(svgNode(
+        "title", {}, entry.point.date + ": "
+        + coin(Math.round(entry.value))));
+      svg.appendChild(point);
+    });
+  }
+
+  function renderCharts(data) {
+    var points = buildDailySeries(data);
+    if (!points.length || !data.days_table.length) {
+      emptyChart(
+        document.getElementById("daily-profit-chart"),
+        "No realized profit in this window.");
+      emptyChart(
+        document.getElementById("rolling-profit-chart"),
+        "No realized profit in this window.");
+      emptyChart(
+        document.getElementById("cumulative-profit-chart"),
+        "No realized profit in this window.");
+      trace("charts-empty", points.length);
+      return;
+    }
+    renderDailyProfitChart(points, data.summary.profit / data.days);
+    renderLineChart(
+      "rolling-profit-chart", points, "rolling", "chart-rolling",
+      "chart-point-rolling", "Seven-day rolling average realized profit",
+      "Seven date buckets are needed.");
+    renderLineChart(
+      "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
+      "chart-point-cumulative", "Cumulative realized profit",
+      "No cumulative profit in this window.");
+    trace("charts-render", points.length);
   }
 
   function emptyRow(body, columns, message) {
@@ -220,8 +660,30 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     foot.appendChild(row);
   }
 
+  function extreme(rows, best) {
+    if (!rows.length) { return null; }
+    return rows.reduce(function (selected, candidate) {
+      if (best ? candidate.profit > selected.profit
+        : candidate.profit < selected.profit) {
+        return candidate;
+      }
+      return selected;
+    });
+  }
+
+  function highlight(entry, labelKey) {
+    return entry === null
+      ? "\u2014"
+      : entry[labelKey] + " (" + coin(entry.profit) + ")";
+  }
+
   function renderSummary(data) {
     var summary = data.summary;
+    var unrealized = data.unrealized;
+    var bestItem = extreme(data.items, true);
+    var worstItem = extreme(data.items, false);
+    var bestDay = extreme(data.days_table, true);
+    var worstDay = extreme(data.days_table, false);
     var rows = [
       ["Window", "Last " + data.days + " day" + (data.days === 1 ? "" : "s")],
       ["Buy transactions", summary.buy_transactions],
@@ -229,8 +691,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       ["Matched units", summary.matched_units],
       ["Matched cost", coin(summary.cost)],
       ["Net revenue", coin(summary.net_revenue)],
-      ["Estimated profit", coin(summary.profit)],
-      ["Profit / unit", average(summary.profit, summary.matched_units)]
+      ["Realized profit", coin(summary.profit), summary.profit],
+      ["Realized ROI", percent(summary.roi_percent), summary.roi_percent],
+      ["Profit / unit", average(summary.profit, summary.matched_units), summary.profit],
+      ["Average daily profit", coin(Math.round(summary.profit / data.days)), summary.profit],
+      ["Unrealized projected profit", coin(unrealized.projected_profit), unrealized.projected_profit],
+      ["Unrealized ROI", percent(unrealized.roi_percent), unrealized.roi_percent],
+      ["Best item", highlight(bestItem, "name"), bestItem && bestItem.profit],
+      ["Worst item", highlight(worstItem, "name"), worstItem && worstItem.profit],
+      ["Best trading day", highlight(bestDay, "date"), bestDay && bestDay.profit],
+      ["Worst trading day", highlight(worstDay, "date"), worstDay && worstDay.profit]
     ];
     var body = document.getElementById("summary-body");
     body.replaceChildren();
@@ -238,8 +708,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       var row = document.createElement("tr");
       cell(row, values[0]);
       var valueCell = cell(row, values[1]);
-      if (values[0] === "Estimated profit" || values[0] === "Profit / unit") {
-        valueCell.className = summary.profit < 0 ? "negative" : "positive";
+      if (typeof values[2] === "number") {
+        valueCell.className = tone(values[2]);
       }
       body.appendChild(row);
     });
@@ -248,35 +718,43 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   function renderItems(data) {
     var body = document.getElementById("items-body");
     body.replaceChildren();
-    data.items.forEach(function (item) {
-      var row = document.createElement("tr");
-      cell(row, item.name, "name");
-      cell(row, item.units);
-      cell(row, coin(item.cost));
-      cell(row, coin(item.net_revenue));
+    data.items.forEach(function (item, index) {
+      var row = sortableRow(index);
+      cell(row, item.name, "name", item.name);
+      cell(row, item.units, "", item.units);
+      cell(row, coin(item.cost), "", item.cost);
+      cell(row, coin(item.net_revenue), "", item.net_revenue);
       profitCell(row, item.profit);
+      percentCell(row, item.roi_percent);
       profitCell(row, Math.round(item.profit / item.units));
+      cell(
+        row, duration(item.median_hold_seconds), "",
+        item.median_hold_seconds);
+      percentCell(row, item.profit_share_percent, item.profit);
       body.appendChild(row);
     });
     if (!data.items.length) {
-      emptyRow(body, 6, "No matched flips were found in this window.");
+      emptyRow(body, 9, "No matched flips were found in this window.");
     }
     totalRow(document.getElementById("items-foot"), [
       "Total", data.summary.matched_units, coin(data.summary.cost),
       coin(data.summary.net_revenue), data.summary.profit,
-      average(data.summary.profit, data.summary.matched_units)
+      percent(data.summary.roi_percent),
+      average(data.summary.profit, data.summary.matched_units), "\u2014",
+      data.summary.profit === 0 ? "\u2014" : "100.0%"
     ], 4);
+    applySort("items-table");
   }
 
   function renderDays(data) {
     var body = document.getElementById("days-body");
     body.replaceChildren();
-    data.days_table.forEach(function (day) {
-      var row = document.createElement("tr");
-      cell(row, day.date);
-      cell(row, day.units);
-      cell(row, coin(day.cost));
-      cell(row, coin(day.net_revenue));
+    data.days_table.forEach(function (day, index) {
+      var row = sortableRow(index);
+      cell(row, day.date, "", day.date);
+      cell(row, day.units, "", day.units);
+      cell(row, coin(day.cost), "", day.cost);
+      cell(row, coin(day.net_revenue), "", day.net_revenue);
       profitCell(row, day.profit);
       body.appendChild(row);
     });
@@ -287,32 +765,39 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       "Total", data.summary.matched_units, coin(data.summary.cost),
       coin(data.summary.net_revenue), data.summary.profit
     ], 4);
+    applySort("days-table");
   }
 
   function renderUnrealized(data) {
     var unrealized = data.unrealized;
     var body = document.getElementById("unrealized-body");
     body.replaceChildren();
-    unrealized.items.forEach(function (item) {
-      var row = document.createElement("tr");
-      cell(row, item.name, "name");
-      cell(row, item.units);
-      cell(row, coin(item.cost));
-      cell(row, coin(item.projected_net_revenue));
+    unrealized.items.forEach(function (item, index) {
+      var row = sortableRow(index);
+      cell(row, item.name, "name", item.name);
+      cell(row, item.units, "", item.units);
+      cell(row, coin(item.cost), "", item.cost);
+      cell(
+        row, coin(item.projected_net_revenue), "",
+        item.projected_net_revenue);
       profitCell(row, item.projected_profit);
+      percentCell(row, item.roi_percent);
       body.appendChild(row);
     });
     if (!unrealized.items.length) {
-      emptyRow(body, 5, "No currently listed unmatched purchases were found.");
+      emptyRow(body, 6, "No currently listed unmatched purchases were found.");
     }
     totalRow(document.getElementById("unrealized-foot"), [
       "Total", unrealized.units, coin(unrealized.cost),
-      coin(unrealized.projected_net_revenue), unrealized.projected_profit
+      coin(unrealized.projected_net_revenue), unrealized.projected_profit,
+      percent(unrealized.roi_percent)
     ], 4);
+    applySort("unrealized-table");
   }
 
   function render(data) {
     renderSummary(data);
+    renderCharts(data);
     renderItems(data);
     renderDays(data);
     renderUnrealized(data);
@@ -370,6 +855,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     event.preventDefault();
     load();
   });
+  initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
   if (Number.isInteger(initial) && initial >= 1 && initial <= 90) {
     daysInput.value = String(initial);
