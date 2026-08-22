@@ -46,12 +46,17 @@ SESSION_USER_ID = 1
 
 
 def profit_report(days: int = 30) -> ProfitReport:
+    window_end = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
     return ProfitReport(
         days=days,
+        window_start=(
+            window_end.replace(hour=0, minute=0) - timedelta(days=days - 1)
+        ),
+        window_end=window_end,
         buy_transaction_count=4,
         sell_transaction_count=2,
         realized=RealizedProfit(
-            items={1: ItemProfit(2, 200, 340, 140)},
+            items={1: ItemProfit(2, 200, 340, 140, 86_400)},
             days={"2026-08-20": DayProfit(2, 200, 340, 140)},
             unmatched_buys={},
             total_cost=200,
@@ -927,9 +932,17 @@ class TestProfitPage:
         payload = await response.json()
         assert payload["days"] == 60
         assert payload["summary"]["profit"] == 140
+        assert payload["summary"]["roi_percent"] == 70
+        assert payload["window"] == {
+            "start_date": "2026-06-23",
+            "end_date": "2026-08-21",
+        }
         assert payload["items"][0]["name"] == "Realized Item"
+        assert payload["items"][0]["median_hold_seconds"] == 86_400
+        assert payload["items"][0]["profit_share_percent"] == 100
         assert payload["days_table"][0]["date"] == "2026-08-20"
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
+        assert payload["unrealized"]["roi_percent"] == 155
         bot.profit_service.load_report.assert_awaited_once_with(
             other_user_id,
             60,

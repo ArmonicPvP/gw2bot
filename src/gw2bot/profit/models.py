@@ -24,6 +24,7 @@ class ItemProfit:
     cost: int
     net_revenue: int
     profit: int
+    median_hold_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,8 @@ class UnrealizedProfit:
 @dataclass(frozen=True, slots=True)
 class ProfitReport:
     days: int
+    window_start: datetime
+    window_end: datetime
     buy_transaction_count: int
     sell_transaction_count: int
     realized: RealizedProfit
@@ -108,6 +111,28 @@ class _Totals:
     cost: int = 0
     net_revenue: int = 0
     profit: int = 0
+
+
+def _weighted_median_seconds(
+    durations: list[tuple[float, int]],
+) -> float:
+    """Return the per-unit median without expanding large transaction lots."""
+    total_units = sum(quantity for _, quantity in durations)
+    if total_units <= 0:
+        return 0.0
+    lower_index = (total_units - 1) // 2
+    upper_index = total_units // 2
+    cumulative = 0
+    lower_value: float | None = None
+    for seconds, quantity in sorted(durations):
+        cumulative += quantity
+        if lower_value is None and cumulative > lower_index:
+            lower_value = seconds
+        if cumulative > upper_index:
+            if lower_value is None:
+                lower_value = seconds
+            return (lower_value + seconds) / 2
+    raise RuntimeError("Weighted median could not resolve its target unit")
 
 
 def parse_gw2_time(value: str) -> datetime:
@@ -193,6 +218,7 @@ def calculate_realized_profit(
         )
         buy_lots: deque[_MutableLot] = deque()
         item = _Totals()
+        holding_durations: list[tuple[float, int]] = []
 
         for event in events:
             if event.kind == "buy":
@@ -218,6 +244,15 @@ def calculate_realized_profit(
                     previously_matched_quantity=sell_matched,
                 )
                 profit = net_revenue - cost
+                holding_seconds = max(
+                    0.0,
+                    (
+                        event.occurred_at - buy_lot.occurred_at
+                    ).total_seconds(),
+                )
+                holding_durations.append(
+                    (holding_seconds, matched)
+                )
                 item.matched_quantity += matched
                 item.cost += cost
                 item.net_revenue += net_revenue
@@ -250,6 +285,7 @@ def calculate_realized_profit(
             item.cost,
             item.net_revenue,
             item.profit,
+            _weighted_median_seconds(holding_durations),
         )
         total_matched_quantity += item.matched_quantity
         total_cost += item.cost

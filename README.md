@@ -1214,8 +1214,9 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   route-restricted subtoken must allow the history buys, history sells, and
   current sells transaction endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window defaults to 30 days and accepts 1 through 90. If the web session has
-  expired, Discord sign-in returns the member to that same profit window.
+  window defaults to 30 days and accepts 1 through 90 UTC calendar dates,
+  including today. If the web session has expired, Discord sign-in returns the
+  member to that same profit window.
 - `/profit deletekey` removes the caller's encrypted key and cached Trading
   Post data. It cannot affect any other member's key or cache.
 
@@ -1225,7 +1226,17 @@ reports together: the realized summary, realized profit grouped by item,
 realized profit grouped by sale date, and projected profit for unmatched buys
 currently listed for sale. Coin amounts account for the Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
-the original profit bot.
+the original profit bot. Click any column heading in the three detail tables to
+sort it; click the same heading again to reverse the order. The totals remain
+pinned below the sortable rows. Realized and projected ROI are profit divided
+by their corresponding matched cost. Each realized item also shows its
+unit-weighted median time from purchase to sale and its signed percentage of
+total realized profit; the percentage is unavailable when total profit is zero.
+
+The summary names the best and worst realized item and UTC sale day in the
+window. Three daily charts fill dates without matched sales with zero: realized
+profit with its whole-window daily average, the trailing seven-day average once
+seven date buckets are available, and cumulative realized profit.
 
 History, current listings, and item names are cached for five minutes in rows
 keyed by Discord user ID. The signed web session supplies that same ID; the API

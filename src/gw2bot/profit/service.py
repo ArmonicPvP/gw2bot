@@ -55,6 +55,12 @@ class ProfitService:
         if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
             raise ValueError("Profit report days must be between 1 and 90")
         loaded_at = datetime.now(UTC) if now is None else now
+        window_start = loaded_at.replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        ) - timedelta(days=days - 1)
         LOGGER.debug(
             "Loading profit report; user_id=%s days=%s",
             discord_user_id,
@@ -62,7 +68,7 @@ class ProfitService:
         )
         await self._refresh_transactions(discord_user_id, loaded_at)
 
-        cutoff = loaded_at - timedelta(days=days)
+        cutoff = window_start
         buys, sells, current_sells = await asyncio.to_thread(
             self._read_transactions,
             discord_user_id,
@@ -100,6 +106,8 @@ class ProfitService:
 
         report = ProfitReport(
             days=days,
+            window_start=window_start,
+            window_end=loaded_at,
             buy_transaction_count=len(buys),
             sell_transaction_count=len(sells),
             realized=realized,
@@ -215,6 +223,10 @@ class ProfitService:
 def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
     realized = report.realized
     unrealized = report.unrealized
+
+    def percentage(numerator: int, denominator: int) -> float | None:
+        return numerator / denominator * 100 if denominator else None
+
     items = [
         {
             "item_id": item_id,
@@ -223,6 +235,12 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "cost": totals.cost,
             "net_revenue": totals.net_revenue,
             "profit": totals.profit,
+            "roi_percent": percentage(totals.profit, totals.cost),
+            "median_hold_seconds": totals.median_hold_seconds,
+            "profit_share_percent": percentage(
+                totals.profit,
+                realized.total_profit,
+            ),
         }
         for item_id, totals in sorted(
             realized.items.items(),
@@ -248,6 +266,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "cost": totals.cost,
             "projected_net_revenue": totals.projected_net_revenue,
             "projected_profit": totals.projected_profit,
+            "roi_percent": percentage(
+                totals.projected_profit,
+                totals.cost,
+            ),
         }
         for item_id, totals in sorted(
             unrealized.items.items(),
@@ -257,6 +279,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
     ]
     return {
         "days": report.days,
+        "window": {
+            "start_date": report.window_start.date().isoformat(),
+            "end_date": report.window_end.date().isoformat(),
+        },
         "summary": {
             "buy_transactions": report.buy_transaction_count,
             "sell_transactions": report.sell_transaction_count,
@@ -264,6 +290,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "cost": realized.total_cost,
             "net_revenue": realized.total_net_revenue,
             "profit": realized.total_profit,
+            "roi_percent": percentage(
+                realized.total_profit,
+                realized.total_cost,
+            ),
         },
         "items": items,
         "days_table": day_rows,
@@ -273,5 +303,9 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "cost": unrealized.total_cost,
             "projected_net_revenue": unrealized.total_projected_net_revenue,
             "projected_profit": unrealized.total_projected_profit,
+            "roi_percent": percentage(
+                unrealized.total_projected_profit,
+                unrealized.total_cost,
+            ),
         },
     }
