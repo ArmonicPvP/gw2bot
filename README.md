@@ -1235,9 +1235,12 @@ unit-weighted median time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
 
 The summary names the best and worst realized item and UTC sale day in the
-window. Three daily charts fill dates without matched sales with zero: realized
-profit with its whole-window daily average, the trailing seven-day average once
-seven date buckets are available, and cumulative realized profit.
+window. The dashboard uses the full available browser width. Three daily charts
+fill dates without matched sales with zero: realized profit with its whole-window
+daily average, the trailing seven-day average once seven date buckets are
+available, and cumulative realized profit. Hover anywhere in a chart's plot to
+snap to the nearest date and see its exact value (and the daily average where
+applicable).
 
 History, current listings, and item names are cached for five minutes in rows
 keyed by Discord user ID. The signed web session supplies that same ID; the API

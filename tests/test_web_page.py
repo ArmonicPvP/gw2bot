@@ -154,6 +154,27 @@ class TestProfitPage:
         assert "cumulative += point.profit;" in PROFIT_PAGE
         assert 'document.createElementNS(SVG_NS, name)' in PROFIT_PAGE
 
+    def test_profit_dashboard_and_charts_fill_the_available_width(self) -> None:
+        assert "main { width: 100%; margin: 0; padding: 1rem; }" in PROFIT_PAGE
+        assert "width: min(100%, 88rem)" not in PROFIT_PAGE
+        assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in (
+            PROFIT_PAGE
+        )
+
+    def test_profit_chart_hover_shows_the_nearest_date_values(self) -> None:
+        assert 'class="profit-chart"' in PROFIT_PAGE
+        assert '"class": "chart-crosshair"' in PROFIT_PAGE
+        assert '"class": "chart-hover-ring"' in PROFIT_PAGE
+        assert 'tooltipNode("chart-tooltip")' in PROFIT_PAGE
+        assert "function nearestColumn(vbX)" in PROFIT_PAGE
+        assert 'overlay.addEventListener("pointermove"' in PROFIT_PAGE
+        assert 'overlay.addEventListener("pointerleave"' in PROFIT_PAGE
+        for label in ("Daily profit", "Daily average"):
+            assert f'label: "{label}"' in PROFIT_PAGE
+        assert "label: valueLabel" in PROFIT_PAGE
+        assert '"7-day average", "#58a6ff"' in PROFIT_PAGE
+        assert '"Cumulative profit", "#74dc9a"' in PROFIT_PAGE
+
     def test_sign_in_target_is_escaped_before_becoming_markup(self) -> None:
         document = sign_in_page('"><script>target-secret</script>')
 

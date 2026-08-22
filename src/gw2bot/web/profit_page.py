@@ -28,7 +28,7 @@ input {
   font-size: 0.85rem;
 }
 .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-main { width: min(100%, 88rem); margin: 0 auto; padding: 1rem; }
+main { width: 100%; margin: 0; padding: 1rem; }
 #status {
   color: var(--muted);
   min-height: 1.5rem;
@@ -105,7 +105,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 }
 .chart-panel h3 { font-size: 0.88rem; margin-bottom: 0.1rem; }
 .chart-panel p { color: var(--muted); font-size: 0.75rem; min-height: 2.1rem; }
-.chart-panel svg { display: block; width: 100%; height: auto; margin-top: 0.4rem; }
+.profit-chart { position: relative; margin-top: 0.4rem; }
+.chart-panel svg { display: block; width: 100%; height: auto; }
 .chart-gridline { stroke: var(--border); stroke-width: 1; }
 .chart-zero { stroke: var(--muted); stroke-width: 1; }
 .chart-average { stroke: #f1c40f; stroke-width: 2; stroke-dasharray: 6 4; }
@@ -117,6 +118,40 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 .chart-bar-negative { fill: #ff8f86; }
 .chart-label { fill: var(--muted); font-size: 11px; }
 .chart-empty { fill: var(--muted); font-size: 13px; text-anchor: middle; }
+.chart-overlay { fill: transparent; cursor: crosshair; }
+.chart-crosshair {
+  stroke: rgba(128, 128, 128, 0.45);
+  stroke-width: 1;
+  pointer-events: none;
+}
+.chart-hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
+.chart-tooltip {
+  position: absolute;
+  z-index: 2;
+  min-width: 9rem;
+  max-width: 16rem;
+  padding: 0.45rem 0.55rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.78rem;
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+.chart-tooltip .tip-date { color: var(--muted); margin-bottom: 0.3rem; }
+.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
+.chart-tooltip .swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.chart-tooltip .tip-value {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
 @media (max-width: 640px) {
   #range-form {
     grid-column: 1 / -1;
@@ -177,17 +212,17 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <figure class="chart-panel">
           <h3>Daily Profit and Average</h3>
           <p>Realized profit each day with the whole-window daily average.</p>
-          <svg id="daily-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Daily realized profit and average"></svg>
+          <div class="profit-chart"><svg id="daily-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Daily realized profit and average"></svg></div>
         </figure>
         <figure class="chart-panel">
           <h3>7-Day Rolling Average</h3>
           <p>Trailing mean across seven UTC date buckets.</p>
-          <svg id="rolling-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Seven-day rolling average realized profit"></svg>
+          <div class="profit-chart"><svg id="rolling-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Seven-day rolling average realized profit"></svg></div>
         </figure>
         <figure class="chart-panel">
           <h3>Cumulative Profit</h3>
           <p>Running realized profit across the selected window.</p>
-          <svg id="cumulative-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Cumulative realized profit"></svg>
+          <div class="profit-chart"><svg id="cumulative-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Cumulative realized profit"></svg></div>
         </figure>
       </div>
     </section>
@@ -455,6 +490,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   }
 
   function emptyChart(svg, message) {
+    var tooltip = svg.parentElement.querySelector(".chart-tooltip");
+    if (tooltip) { tooltip.remove(); }
     svg.replaceChildren();
     svg.appendChild(svgNode("text", {
       x: 320,
@@ -524,12 +561,136 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       "class": "chart-label"
     }, points[points.length - 1].date));
     return {
+      width: width,
+      height: height,
       left: left,
+      top: top,
+      bottom: bottom,
       plotWidth: plotWidth,
+      plotHeight: plotHeight,
       right: width - right,
       x: x,
       y: y
     };
+  }
+
+  function tooltipNode(className, textValue) {
+    var node = document.createElement("div");
+    node.className = className;
+    if (textValue !== undefined) { node.textContent = String(textValue); }
+    return node;
+  }
+
+  function attachChartHover(svg, columns, frame) {
+    var container = svg.parentElement;
+    var previousTooltip = container.querySelector(".chart-tooltip");
+    if (previousTooltip) { previousTooltip.remove(); }
+
+    var crosshair = svgNode("line", {
+      x1: frame.left,
+      x2: frame.left,
+      y1: frame.top,
+      y2: frame.top + frame.plotHeight,
+      "class": "chart-crosshair"
+    });
+    crosshair.style.visibility = "hidden";
+    var rings = svgNode("g", {});
+    var overlay = svgNode("rect", {
+      x: frame.left,
+      y: frame.top,
+      width: frame.plotWidth,
+      height: frame.plotHeight,
+      "class": "chart-overlay"
+    });
+    svg.appendChild(crosshair);
+    svg.appendChild(rings);
+    svg.appendChild(overlay);
+
+    var tooltip = tooltipNode("chart-tooltip");
+    tooltip.style.visibility = "hidden";
+    container.appendChild(tooltip);
+
+    function nearestColumn(vbX) {
+      var nearest = null;
+      var distance = Infinity;
+      columns.forEach(function (column) {
+        var candidateDistance = Math.abs(column.x - vbX);
+        if (candidateDistance < distance) {
+          nearest = column;
+          distance = candidateDistance;
+        }
+      });
+      return nearest;
+    }
+
+    function showHover(column, vbY) {
+      crosshair.setAttribute("x1", String(column.x));
+      crosshair.setAttribute("x2", String(column.x));
+      crosshair.style.visibility = "visible";
+      rings.replaceChildren();
+      tooltip.replaceChildren();
+      tooltip.appendChild(tooltipNode("tip-date", column.date));
+
+      var anchorY = column.rows[0].y;
+      var anchorDistance = Infinity;
+      column.rows.forEach(function (reading) {
+        rings.appendChild(svgNode("circle", {
+          cx: column.x,
+          cy: reading.y,
+          r: 7,
+          stroke: reading.color,
+          "class": "chart-hover-ring"
+        }));
+        var row = tooltipNode("tip-row");
+        var swatch = tooltipNode("swatch");
+        swatch.style.background = reading.color;
+        row.appendChild(swatch);
+        row.appendChild(tooltipNode("tip-name", reading.label));
+        row.appendChild(tooltipNode("tip-value", reading.value));
+        tooltip.appendChild(row);
+        var candidateDistance = Math.abs(reading.y - vbY);
+        if (candidateDistance < anchorDistance) {
+          anchorY = reading.y;
+          anchorDistance = candidateDistance;
+        }
+      });
+
+      var leftPercent = Math.max(
+        10, Math.min(90, column.x / frame.width * 100));
+      var topPercent = anchorY / frame.height * 100;
+      tooltip.style.left = leftPercent + "%";
+      tooltip.style.top = topPercent + "%";
+      tooltip.style.transform = topPercent < 32
+        ? "translate(-50%, 14px)"
+        : "translate(-50%, calc(-100% - 14px))";
+      tooltip.style.visibility = "visible";
+    }
+
+    function hideHover() {
+      crosshair.style.visibility = "hidden";
+      rings.replaceChildren();
+      tooltip.style.visibility = "hidden";
+    }
+
+    function pointFromEvent(event) {
+      var bounds = svg.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) { return null; }
+      return {
+        x: (event.clientX - bounds.left) / bounds.width * frame.width,
+        y: (event.clientY - bounds.top) / bounds.height * frame.height
+      };
+    }
+
+    overlay.addEventListener("pointermove", function (event) {
+      if (event.pointerType && event.pointerType !== "mouse") { return; }
+      var point = pointFromEvent(event);
+      if (!point) { return; }
+      var column = nearestColumn(point.x);
+      if (column) { showHover(column, point.y); }
+    });
+    overlay.addEventListener("pointerleave", function (event) {
+      if (!event.pointerType || event.pointerType === "mouse") { hideHover(); }
+    });
   }
 
   function renderDailyProfitChart(points, dailyAverage) {
@@ -566,10 +727,31 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     averageLine.appendChild(svgNode(
       "title", {}, "Daily average: " + coin(Math.round(dailyAverage))));
     svg.appendChild(averageLine);
+    attachChartHover(svg, points.map(function (point, index) {
+      return {
+        date: point.date,
+        x: frame.x(index),
+        rows: [
+          {
+            label: "Daily profit",
+            value: coin(point.profit),
+            color: point.profit < 0 ? "#ff8f86" : "#74dc9a",
+            y: frame.y(point.profit)
+          },
+          {
+            label: "Daily average",
+            value: coin(Math.round(dailyAverage)),
+            color: "#f1c40f",
+            y: frame.y(dailyAverage)
+          }
+        ]
+      };
+    }), frame);
   }
 
   function renderLineChart(
-    svgId, points, field, lineClass, pointClass, title, emptyMessage
+    svgId, points, field, lineClass, pointClass, title, valueLabel, color,
+    emptyMessage
   ) {
     var svg = document.getElementById(svgId);
     var plotted = [];
@@ -604,6 +786,18 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         + coin(Math.round(entry.value))));
       svg.appendChild(point);
     });
+    attachChartHover(svg, plotted.map(function (entry) {
+      return {
+        date: entry.point.date,
+        x: frame.x(entry.index),
+        rows: [{
+          label: valueLabel,
+          value: coin(Math.round(entry.value)),
+          color: color,
+          y: frame.y(entry.value)
+        }]
+      };
+    }), frame);
   }
 
   function renderCharts(data) {
@@ -625,10 +819,12 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     renderLineChart(
       "rolling-profit-chart", points, "rolling", "chart-rolling",
       "chart-point-rolling", "Seven-day rolling average realized profit",
+      "7-day average", "#58a6ff",
       "Seven date buckets are needed.");
     renderLineChart(
       "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
       "chart-point-cumulative", "Cumulative realized profit",
+      "Cumulative profit", "#74dc9a",
       "No cumulative profit in this window.");
     trace("charts-render", points.length);
   }
