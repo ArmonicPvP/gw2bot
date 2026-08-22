@@ -333,6 +333,38 @@ class TestProfitStore:
         ] == ["other"]
         assert store.is_cache_fresh(202, "history_buys", 300, now=now)
 
+    def test_rejects_a_transaction_snapshot_fetched_with_a_replaced_key(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.set_api_key(101, "old-secret")
+        snapshot = store.get_api_key_snapshot(101)
+        assert snapshot is not None
+
+        store.set_api_key(101, "replacement-secret")
+        accepted = store.store_transaction_snapshot(
+            101,
+            snapshot.generation,
+            [
+                ("history_buys", [transaction("old-buy")]),
+                ("history_sells", [transaction("old-sell")]),
+                ("current_sells", [transaction("old-listing")]),
+            ],
+            now=now,
+        )
+
+        assert not accepted
+        for transaction_kind in TRANSACTION_PATHS:
+            assert store.get_transactions(101, transaction_kind) == []
+            assert not store.is_cache_fresh(
+                101,
+                transaction_kind,
+                300,
+                now=now,
+            )
+
     def test_transaction_caches_are_isolated_by_member(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -485,6 +517,79 @@ class TestProfitService:
         assert first.unrealized.total_projected_profit == 155
         assert api.fetch_transactions.await_count == 3
         api.fetch_item_names.assert_awaited_once_with({1})
+
+    async def test_discards_an_old_key_snapshot_and_retries_replacement(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        old_key = "old-member-secret"
+        replacement_key = "replacement-member-secret"
+        store.set_api_key(101, old_key)
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        replaced = False
+
+        async def fetched(path: str, api_key: str) -> list[Transaction]:
+            nonlocal replaced
+            if api_key == old_key:
+                prefix = "old"
+                if not replaced:
+                    replaced = True
+                    store.set_api_key(101, replacement_key)
+            else:
+                assert api_key == replacement_key
+                prefix = "replacement"
+            if path.endswith("history/buys"):
+                return [
+                    transaction(
+                        f"{prefix}-buy",
+                        price=100,
+                        occurred_at=now - timedelta(days=2),
+                    )
+                ]
+            if path.endswith("history/sells"):
+                return [
+                    transaction(
+                        f"{prefix}-sell",
+                        price=200,
+                        occurred_at=now - timedelta(days=1),
+                    )
+                ]
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            report = await service.load_report(101, 30, now=now)
+
+        assert report.realized.total_profit == 70
+        assert api.fetch_transactions.await_count == 6
+        assert [
+            row.transaction_id
+            for row in store.get_transactions(101, "history_buys")
+        ] == ["replacement-buy"]
+        assert [
+            row.transaction_id
+            for row in store.get_transactions(101, "history_sells")
+        ] == ["replacement-sell"]
+        assert store.get_transactions(101, "current_sells") == []
+        assert all(
+            store.is_cache_fresh(101, transaction_kind, 300, now=now)
+            for transaction_kind in TRANSACTION_PATHS
+        )
+        assert "Discarded stale profit transaction snapshot" in caplog.text
+        assert old_key not in caplog.text
+        assert replacement_key not in caplog.text
 
     async def test_refuses_a_member_without_using_another_members_key(
         self,

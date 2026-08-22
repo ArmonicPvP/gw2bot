@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -25,6 +26,12 @@ HISTORY_KINDS = frozenset({"history_buys", "history_sells"})
 CURRENT_KINDS = frozenset({"current_sells"})
 TRANSACTION_KINDS = HISTORY_KINDS | CURRENT_KINDS
 HISTORY_RETENTION_DAYS = 92
+
+
+@dataclass(frozen=True, slots=True)
+class ProfitApiKeySnapshot:
+    api_key: str
+    generation: str
 
 
 class ProfitStore:
@@ -85,6 +92,13 @@ class ProfitStore:
         )
 
     def get_api_key(self, discord_user_id: int) -> str | None:
+        snapshot = self.get_api_key_snapshot(discord_user_id)
+        return snapshot.api_key if snapshot is not None else None
+
+    def get_api_key_snapshot(
+        self,
+        discord_user_id: int,
+    ) -> ProfitApiKeySnapshot | None:
         with self._sessions() as session:
             record = session.get(ProfitApiKeyRecord, discord_user_id)
         if record is None:
@@ -105,7 +119,12 @@ class ProfitStore:
             discord_user_id,
             api_key is not None,
         )
-        return api_key
+        if api_key is None:
+            return None
+        return ProfitApiKeySnapshot(
+            api_key=api_key,
+            generation=record.updated_at,
+        )
 
     def delete_api_key(self, discord_user_id: int) -> bool:
         with self._sessions.begin() as session:
@@ -175,20 +194,12 @@ class ProfitStore:
         _require_kind(cache_kind)
         synced_at = (datetime.now(UTC) if now is None else now).isoformat()
         with self._sessions.begin() as session:
-            record = session.get(
-                ProfitCacheSyncRecord,
-                (discord_user_id, cache_kind),
+            _touch_cache_record(
+                session,
+                discord_user_id,
+                cache_kind,
+                synced_at,
             )
-            if record is None:
-                session.add(
-                    ProfitCacheSyncRecord(
-                        discord_user_id=discord_user_id,
-                        cache_kind=cache_kind,
-                        synced_at=synced_at,
-                    )
-                )
-            else:
-                record.synced_at = synced_at
         LOGGER.debug(
             "Updated profit cache marker; user_id=%s kind=%s",
             discord_user_id,
@@ -204,64 +215,15 @@ class ProfitStore:
         now: datetime | None = None,
     ) -> None:
         _require_kind(transaction_kind)
-        updated_at = (datetime.now(UTC) if now is None else now).isoformat()
-        rows = [
-            {
-                "discord_user_id": discord_user_id,
-                "transaction_kind": transaction_kind,
-                "transaction_id": transaction.transaction_id,
-                "item_id": transaction.item_id,
-                "price": transaction.price,
-                "quantity": transaction.quantity,
-                "occurred_at": transaction.occurred_at.isoformat(),
-                "updated_at": updated_at,
-            }
-            for transaction in transactions
-        ]
+        stored_at = datetime.now(UTC) if now is None else now
         with self._sessions.begin() as session:
-            if transaction_kind in CURRENT_KINDS:
-                session.execute(
-                    delete(ProfitTransactionRecord).where(
-                        ProfitTransactionRecord.discord_user_id
-                        == discord_user_id,
-                        ProfitTransactionRecord.transaction_kind
-                        == transaction_kind,
-                    )
-                )
-            if rows:
-                statement = sqlite_insert(ProfitTransactionRecord)
-                session.execute(
-                    statement.on_conflict_do_update(
-                        index_elements=(
-                            "discord_user_id",
-                            "transaction_kind",
-                            "transaction_id",
-                        ),
-                        set_={
-                            "item_id": statement.excluded.item_id,
-                            "price": statement.excluded.price,
-                            "quantity": statement.excluded.quantity,
-                            "occurred_at": statement.excluded.occurred_at,
-                            "updated_at": statement.excluded.updated_at,
-                        },
-                    ),
-                    rows,
-                )
-            if transaction_kind in HISTORY_KINDS:
-                cutoff = (
-                    datetime.now(UTC) if now is None else now
-                ) - timedelta(days=HISTORY_RETENTION_DAYS)
-                session.execute(
-                    delete(ProfitTransactionRecord).where(
-                        ProfitTransactionRecord.discord_user_id
-                        == discord_user_id,
-                        ProfitTransactionRecord.transaction_kind.in_(
-                            HISTORY_KINDS
-                        ),
-                        ProfitTransactionRecord.occurred_at
-                        < cutoff.isoformat(),
-                    )
-                )
+            _store_transaction_records(
+                session,
+                discord_user_id,
+                transaction_kind,
+                transactions,
+                stored_at,
+            )
         LOGGER.debug(
             "Stored profit transactions; user_id=%s kind=%s records=%s "
             "replace=%s",
@@ -270,6 +232,50 @@ class ProfitStore:
             len(transactions),
             transaction_kind in CURRENT_KINDS,
         )
+
+    def store_transaction_snapshot(
+        self,
+        discord_user_id: int,
+        key_generation: str,
+        collections: list[tuple[str, list[Transaction]]],
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        for transaction_kind, _ in collections:
+            _require_kind(transaction_kind)
+        stored_at = datetime.now(UTC) if now is None else now
+        accepted = False
+        with self._sessions.begin() as session:
+            key_record = session.get(ProfitApiKeyRecord, discord_user_id)
+            if (
+                key_record is not None
+                and key_record.updated_at == key_generation
+            ):
+                for transaction_kind, transactions in collections:
+                    _store_transaction_records(
+                        session,
+                        discord_user_id,
+                        transaction_kind,
+                        transactions,
+                        stored_at,
+                    )
+                    _touch_cache_record(
+                        session,
+                        discord_user_id,
+                        transaction_kind,
+                        stored_at.isoformat(),
+                    )
+                accepted = True
+        LOGGER.debug(
+            "Stored profit transaction snapshot; user_id=%s accepted=%s "
+            "collections=%s records=%s reason=%s",
+            discord_user_id,
+            accepted,
+            len(collections),
+            sum(len(transactions) for _, transactions in collections),
+            "current-key" if accepted else "key-generation-changed",
+        )
+        return accepted
 
     def get_transactions(
         self,
@@ -389,6 +395,85 @@ class ProfitStore:
 def _require_kind(transaction_kind: str) -> None:
     if transaction_kind not in TRANSACTION_KINDS:
         raise ValueError(f"Unknown profit transaction kind: {transaction_kind}")
+
+
+def _touch_cache_record(
+    session: Session,
+    discord_user_id: int,
+    cache_kind: str,
+    synced_at: str,
+) -> None:
+    record = session.get(
+        ProfitCacheSyncRecord,
+        (discord_user_id, cache_kind),
+    )
+    if record is None:
+        session.add(
+            ProfitCacheSyncRecord(
+                discord_user_id=discord_user_id,
+                cache_kind=cache_kind,
+                synced_at=synced_at,
+            )
+        )
+    else:
+        record.synced_at = synced_at
+
+
+def _store_transaction_records(
+    session: Session,
+    discord_user_id: int,
+    transaction_kind: str,
+    transactions: list[Transaction],
+    stored_at: datetime,
+) -> None:
+    rows = [
+        {
+            "discord_user_id": discord_user_id,
+            "transaction_kind": transaction_kind,
+            "transaction_id": transaction.transaction_id,
+            "item_id": transaction.item_id,
+            "price": transaction.price,
+            "quantity": transaction.quantity,
+            "occurred_at": transaction.occurred_at.isoformat(),
+            "updated_at": stored_at.isoformat(),
+        }
+        for transaction in transactions
+    ]
+    if transaction_kind in CURRENT_KINDS:
+        session.execute(
+            delete(ProfitTransactionRecord).where(
+                ProfitTransactionRecord.discord_user_id == discord_user_id,
+                ProfitTransactionRecord.transaction_kind == transaction_kind,
+            )
+        )
+    if rows:
+        statement = sqlite_insert(ProfitTransactionRecord)
+        session.execute(
+            statement.on_conflict_do_update(
+                index_elements=(
+                    "discord_user_id",
+                    "transaction_kind",
+                    "transaction_id",
+                ),
+                set_={
+                    "item_id": statement.excluded.item_id,
+                    "price": statement.excluded.price,
+                    "quantity": statement.excluded.quantity,
+                    "occurred_at": statement.excluded.occurred_at,
+                    "updated_at": statement.excluded.updated_at,
+                },
+            ),
+            rows,
+        )
+    if transaction_kind in HISTORY_KINDS:
+        cutoff = stored_at - timedelta(days=HISTORY_RETENTION_DAYS)
+        session.execute(
+            delete(ProfitTransactionRecord).where(
+                ProfitTransactionRecord.discord_user_id == discord_user_id,
+                ProfitTransactionRecord.transaction_kind.in_(HISTORY_KINDS),
+                ProfitTransactionRecord.occurred_at < cutoff.isoformat(),
+            )
+        )
 
 
 def _clear_member_cache(session: Session, discord_user_id: int) -> None:

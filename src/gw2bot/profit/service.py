@@ -6,7 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 import aiohttp
 
-from gw2bot.profit.api import ProfitApiClient, TRANSACTION_PATHS
+from gw2bot.profit.api import (
+    TRANSACTION_PATHS,
+    ProfitApiClient,
+    ProfitApiError,
+)
 from gw2bot.profit.models import (
     ProfitReport,
     Transaction,
@@ -56,46 +60,7 @@ class ProfitService:
             discord_user_id,
             days,
         )
-        api_key = await asyncio.to_thread(
-            self._store.get_api_key,
-            discord_user_id,
-        )
-        if api_key is None:
-            LOGGER.debug(
-                "Skipped profit report; user_id=%s reason=api-key-unset",
-                discord_user_id,
-            )
-            raise MissingProfitApiKey
-
-        fresh = await asyncio.to_thread(
-            self._cache_freshness,
-            discord_user_id,
-            loaded_at,
-        )
-        stale_kinds = [kind for kind, is_fresh in fresh.items() if not is_fresh]
-        LOGGER.debug(
-            "Resolved profit cache refresh; user_id=%s stale=%s fresh=%s",
-            discord_user_id,
-            len(stale_kinds),
-            len(fresh) - len(stale_kinds),
-        )
-        if stale_kinds:
-            fetched = await asyncio.gather(
-                *(
-                    self._api.fetch_transactions(
-                        TRANSACTION_PATHS[kind],
-                        api_key,
-                    )
-                    for kind in stale_kinds
-                )
-            )
-            await asyncio.to_thread(
-                self._store_fetched,
-                discord_user_id,
-                stale_kinds,
-                fetched,
-                loaded_at,
-            )
+        await self._refresh_transactions(discord_user_id, loaded_at)
 
         cutoff = loaded_at - timedelta(days=days)
         buys, sells, current_sells = await asyncio.to_thread(
@@ -166,23 +131,66 @@ class ProfitService:
             for kind in TRANSACTION_PATHS
         }
 
-    def _store_fetched(
+    async def _refresh_transactions(
         self,
         discord_user_id: int,
-        kinds: list[str],
-        fetched: list[list[Transaction]],
         now: datetime,
     ) -> None:
-        for kind, transactions in zip(kinds, fetched, strict=True):
-            self._store.store_transactions(
+        for attempt in range(2):
+            snapshot = await asyncio.to_thread(
+                self._store.get_api_key_snapshot,
                 discord_user_id,
-                kind,
-                transactions,
+            )
+            if snapshot is None:
+                LOGGER.debug(
+                    "Skipped profit report; user_id=%s reason=api-key-unset",
+                    discord_user_id,
+                )
+                raise MissingProfitApiKey
+            fresh = await asyncio.to_thread(
+                self._cache_freshness,
+                discord_user_id,
+                now,
+            )
+            stale_kinds = [
+                kind for kind, is_fresh in fresh.items() if not is_fresh
+            ]
+            LOGGER.debug(
+                "Resolved profit cache refresh; user_id=%s stale=%s fresh=%s "
+                "attempt=%s",
+                discord_user_id,
+                len(stale_kinds),
+                len(fresh) - len(stale_kinds),
+                attempt + 1,
+            )
+            if not stale_kinds:
+                return
+            fetched = await asyncio.gather(
+                *(
+                    self._api.fetch_transactions(
+                        TRANSACTION_PATHS[kind],
+                        snapshot.api_key,
+                    )
+                    for kind in stale_kinds
+                )
+            )
+            accepted = await asyncio.to_thread(
+                self._store.store_transaction_snapshot,
+                discord_user_id,
+                snapshot.generation,
+                list(zip(stale_kinds, fetched, strict=True)),
                 now=now,
             )
-            # The marker comes after the data write. A restart between them
-            # merely fetches the idempotent collection once more.
-            self._store.touch_cache(discord_user_id, kind, now=now)
+            if accepted:
+                return
+            LOGGER.info(
+                "Discarded stale profit transaction snapshot; user_id=%s "
+                "attempt=%s retry=%s",
+                discord_user_id,
+                attempt + 1,
+                attempt == 0,
+            )
+        raise ProfitApiError("GW2 API key changed during profit refresh")
 
     def _read_transactions(
         self,
