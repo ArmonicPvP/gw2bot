@@ -38,6 +38,9 @@ from gw2bot.gold.commands import GoldCommands
 from gw2bot.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2_api import Gw2ApiClient
 from gw2bot.poll_status import PollStatusTracker
+from gw2bot.profit.commands import ProfitCommands
+from gw2bot.profit.service import ProfitService
+from gw2bot.profit.store import ProfitStore
 from gw2bot.raffle import (
     RaffleAudit,
     RaffleContribution,
@@ -125,6 +128,10 @@ class Gw2Bot(discord.Client):
         # values rather than re-read from an environment that no longer owns
         # them.
         self._bootstrap = _bootstrap_from(config) if bootstrap is None else bootstrap
+        # Tested against None rather than truthiness: an empty SecretRegistry
+        # is falsy, and replacing one would leave the formatter holding a
+        # registry nothing ever registers into.
+        self._secrets = SecretRegistry() if secrets is None else secrets
         self._settings_store = (
             SettingsStore(
                 config.raffle_db_path,
@@ -133,10 +140,6 @@ class Gw2Bot(discord.Client):
             if settings_store is None
             else settings_store
         )
-        # Tested against None rather than truthiness: an empty SecretRegistry
-        # is falsy, and replacing one would leave the formatter holding a
-        # registry nothing ever registers into.
-        self._secrets = SecretRegistry() if secrets is None else secrets
         # Seeded outside that choice on purpose. A caller that built the
         # registry for the formatter need not have known which Config fields
         # hold credentials, and registering is idempotent and one-way, so
@@ -159,8 +162,14 @@ class Gw2Bot(discord.Client):
         self._poll_status = PollStatusTracker(self._secrets)
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._event_store = EventStore(config.raffle_db_path)
+        self._profit_store = ProfitStore(
+            config.raffle_db_path,
+            self._settings_store.cipher,
+            self._secrets,
+        )
         self._event_timezone = ZoneInfo(config.event_timezone)
         self._api: Gw2ApiClient | None = None
+        self._profit_service: ProfitService | None = None
         self._web_server: WebServer | None = None
         self._guild_members: GuildMemberCache | None = None
         self._last_guild_member_count: int | None = None
@@ -173,6 +182,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(EventCommands(self))
         self.tree.add_command(RosterCommands(self))
         self.tree.add_command(GoldCommands(self))
+        self.tree.add_command(ProfitCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
@@ -198,6 +208,11 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Initializing HTTP session and GW2 API client")
         timeout = aiohttp.ClientTimeout(total=30)
         self._session = aiohttp.ClientSession(timeout=timeout)
+        self._profit_service = ProfitService(
+            self._profit_store,
+            self._session,
+            self._config.gw2_api_base_url,
+        )
         self._log_disabled_features()
         self._log_legacy_variables()
         self._rebuild_gw2_api_client()
@@ -353,6 +368,14 @@ class Gw2Bot(discord.Client):
     @property
     def secrets(self) -> SecretRegistry:
         return self._secrets
+
+    @property
+    def profit_store(self) -> ProfitStore:
+        return self._profit_store
+
+    @property
+    def profit_service(self) -> ProfitService | None:
+        return self._profit_service
 
     async def apply_settings_change(self, changed: set[str]) -> list[str]:
         """Reload the configuration and reconcile whatever captured a value.
@@ -521,8 +544,8 @@ class Gw2Bot(discord.Client):
             LOGGER.warning(
                 "The web calendar is disabled because %s %s not set, even "
                 "though WEB_ENABLED is true: the calendar, the feast usage "
-                "page, the roster history and the gold history are not served "
-                "and nothing listens on port %s",
+                "page, the roster history, the gold history and the personal "
+                "profit dashboard are not served and nothing listens on port %s",
                 ", ".join(f"/settings {name}" for name in missing_web),
                 "is" if len(missing_web) == 1 else "are",
                 self._config.web_port,
@@ -571,6 +594,7 @@ class Gw2Bot(discord.Client):
             await self._session.close()
         self._raffle_store.close()
         self._event_store.close()
+        self._profit_store.close()
         self._settings_store.close()
         await super().close()
 

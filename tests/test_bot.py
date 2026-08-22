@@ -263,6 +263,8 @@ class TestBotIntent:
             # Release the SQLite file handle so Windows can delete the
             # temporary directory.
             bot.event_store.close()
+            bot.profit_store.close()
+            bot.settings_store.close()
 
         assert bot.intents.guilds
         assert bot.intents.guild_messages
@@ -294,6 +296,8 @@ class TestBotIntent:
             # Release the SQLite file handle so Windows can delete the
             # temporary directory.
             bot.event_store.close()
+            bot.profit_store.close()
+            bot.settings_store.close()
 
         add_dynamic_items.assert_any_call(RaffleAuditRangesButton)
         # Without registration these pagers would only work while their view

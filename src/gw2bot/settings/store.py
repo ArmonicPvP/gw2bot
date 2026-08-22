@@ -50,6 +50,16 @@ class SettingsStore:
         LOGGER.debug("Closing settings store")
         self._engine.dispose()
 
+    @property
+    def cipher(self) -> SettingsCipher:
+        """The shared cipher for other credential-bearing rows.
+
+        Per-member credentials, such as the profit dashboard's API keys, live
+        outside the operator settings table but must use the exact same key
+        source and recovery behaviour.
+        """
+        return self._cipher
+
     def get_raw(self, definition: SettingDefinition) -> str | None:
         """Stored text for one setting, decrypted when it is a secret."""
         key = setting_key(definition)

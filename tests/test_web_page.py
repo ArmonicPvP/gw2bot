@@ -5,8 +5,10 @@ from gw2bot.web.page import (
     FOOD_PAGE,
     GOLD_PAGE,
     ROSTER_PAGE,
+    sign_in_page,
 )
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
+from gw2bot.web.profit_page import PROFIT_PAGE
 
 
 def _call_arguments(source: str, name: str) -> list[list[str]]:
@@ -52,6 +54,38 @@ class TestCalendarMarkdown:
         assert 'var subtext = /^-#\\s+(.*)$/.exec(line);' in CALENDAR_PAGE
         assert 'el("div", "md-subtext")' in CALENDAR_PAGE
         assert "#tooltip .desc .md-subtext" in CALENDAR_PAGE
+
+
+class TestProfitPage:
+    def test_contains_all_four_reports_from_the_discord_bot(self) -> None:
+        assert "Summary" in PROFIT_PAGE
+        assert "Realized Profit by Item" in PROFIT_PAGE
+        assert "Realized Profit by Day" in PROFIT_PAGE
+        assert "Unrealized Profit" in PROFIT_PAGE
+        assert 'fetch("/api/profit?days=" +' in PROFIT_PAGE
+
+    def test_dynamic_trading_post_values_never_become_markup(self) -> None:
+        assert "innerHTML" not in PROFIT_PAGE
+        assert "textContent" in PROFIT_PAGE
+
+    def test_missing_key_points_to_the_prefixed_command(self) -> None:
+        assert "/profit setkey" in PROFIT_PAGE
+
+    def test_expired_session_login_preserves_the_profit_window(self) -> None:
+        assert 'location.href = "/login?next=" + encodeURIComponent(' in (
+            PROFIT_PAGE
+        )
+        assert "location.pathname + location.search" in PROFIT_PAGE
+
+    def test_sign_in_target_is_escaped_before_becoming_markup(self) -> None:
+        document = sign_in_page('"><script>target-secret</script>')
+
+        assert "<script>target-secret</script>" not in document
+        assert "&quot;&gt;&lt;script&gt;target-secret&lt;/script&gt;" in document
+
+    def test_calendar_and_profit_pages_link_to_each_other(self) -> None:
+        assert '<a href="/profit">Profit</a>' in CALENDAR_PAGE
+        assert '<a href="/">Calendar</a>' in PROFIT_PAGE
 
 
 class TestCalendarTimeGrid:

@@ -22,7 +22,13 @@ Relevant response fields are:
 - `urls`: present when a subtoken is restricted to specific endpoints
 
 The bot needs `account` for `/v2/account`. The listed guild detail endpoints
-also require `guilds`.
+also require `guilds`. A member key saved with `/profit setkey` is separate and
+needs `tradingpost`; the command verifies that permission here before storing
+the key. If `urls` is present, it also requires
+`/v2/commerce/transactions/history/buys`,
+`/v2/commerce/transactions/history/sells`, and
+`/v2/commerce/transactions/current/sells`; an unrestricted key has no `urls`
+field.
 
 ### `/v2/createsubtoken`
 
@@ -50,6 +56,29 @@ Requires `account`. Important fields for guild polling are:
 
 The base account response has some optional fields that depend on additional
 permissions, including `guilds` and `progression`.
+
+## Trading Post
+
+The personal profit dashboard reads the endpoints below with the API key saved
+for the signed-in Discord member. Every collection and cache row is keyed by
+that Discord user ID.
+
+### `/v2/commerce/transactions/history/buys`
+
+### `/v2/commerce/transactions/history/sells`
+
+These `tradingpost`-permission endpoints return completed purchases and sales.
+The client reads every page with `page` and `page_size=200`, caches the fields
+needed for matching, and retains 92 days so the dashboard can serve its maximum
+90-day window. Purchases and sales inside that window are matched FIFO per
+item.
+
+### `/v2/commerce/transactions/current/sells`
+
+Returns the member's current sale listings. The cached collection is replaced
+as a snapshot rather than merged, so cancelled or completed listings disappear
+from the next unrealized-profit report. All three transaction collections are
+refreshed after five minutes.
 
 ## Guilds
 
@@ -133,7 +162,9 @@ IDs resolved from `/v2/guild/upgrades`.
 ### Item endpoints
 
 `/v2/items` returns definitions for inventory items, including the crafted
-Ascended Feast items. Those item IDs are not the IDs returned by Guild Storage.
+Ascended Feast items. The profit dashboard also resolves Trading Post item IDs
+here in chunks of 200 and caches their display names. Those item IDs are not the
+IDs returned by Guild Storage.
 `/v2/itemstats` describes selectable equipment attribute combinations and is
 not relevant to feast storage counts.
 
@@ -147,6 +178,7 @@ need each item. The wiki notes that results may vary inconsistently by language.
 - [Account](https://wiki.guildwars2.com/wiki/API:2/account)
 - [Create subtoken](https://wiki.guildwars2.com/wiki/API:2/createsubtoken)
 - [Token info](https://wiki.guildwars2.com/wiki/API:2/tokeninfo)
+- [Trading Post transactions](https://wiki.guildwars2.com/wiki/API:2/commerce/transactions)
 - [Guild log](https://wiki.guildwars2.com/wiki/API:2/guild/:id/log)
 - [Guild members](https://wiki.guildwars2.com/wiki/API:2/guild/:id/members)
 - [Guild ranks](https://wiki.guildwars2.com/wiki/API:2/guild/:id/ranks)

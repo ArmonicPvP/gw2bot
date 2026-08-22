@@ -3,8 +3,9 @@
 A Python service for one Guild Wars 2 guild's Discord server. It polls Guild
 Storage and the guild log and posts notifications to a server channel, runs the
 guild's ticket raffle off gold deposits, reports overdue Trial members, manages
-guild events with sign-up rosters, and optionally serves a web calendar. The API
-client supports the account, token, and guild endpoints documented in
+guild events with sign-up rosters, tracks each member's Trading Post flip
+profit, and optionally serves a web calendar and dashboards. The API client
+supports the account, token, and guild endpoints documented in
 [docs/gw2-api.md](docs/gw2-api.md).
 
 ## Configuration
@@ -34,11 +35,11 @@ it is allowed to send the API key. Everything else is a `/settings` subcommand.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs. |
-| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. Settings live here too. The Docker image overrides this default with `/app/data/gw2bot.db`. |
-| `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar (see [Web Calendar](#web-calendar)). It opens the listening port; the calendar's four credentials are settings. |
-| `WEB_PORT` | `2222` | Port the web calendar listens on. |
+| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. Settings, encrypted member profit keys, and Trading Post caches live here too. The Docker image overrides this default with `/app/data/gw2bot.db`. |
+| `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar and dashboards (see [Web Calendar](#web-calendar)). It opens the listening port; the site's four credentials are settings. |
+| `WEB_PORT` | `2222` | Port the web site listens on. |
 | `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. It decides where the API key is sent, which is why it is not settable from Discord. |
-| `SETTINGS_ENCRYPTION_KEY` | unset | Fernet key used to encrypt the settings that hold credentials. Leave it unset and the bot generates `settings.key` next to the database on first run. See [Encrypted Settings](#encrypted-settings). |
+| `SETTINGS_ENCRYPTION_KEY` | unset | Fernet key used to encrypt credential settings and member profit API keys. Leave it unset and the bot generates `settings.key` next to the database on first run. See [Encrypted Settings](#encrypted-settings). |
 
 The application loads `.env` automatically. Existing environment variables take
 precedence over `.env`, so an Unraid container can inject the same variables at
@@ -81,7 +82,7 @@ override it.
 | `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
 | `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime in seconds. |
 | `/settings timezone` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times, to name event threads, and to define weekly repeat days. |
-| `/settings web_base_url` | unset | Public base URL of the web calendar, for example `https://calendar.example.com`. Trailing slashes are removed. |
+| `/settings web_base_url` | unset | Public base URL of the web calendar and dashboards, for example `https://calendar.example.com`. Trailing slashes are removed. |
 | `/settings discord_oauth_client_id` | unset | OAuth2 client ID of the bot's Discord application. |
 | `/settings discord_oauth_client_secret` | unset | OAuth2 client secret of the bot's Discord application. **Encrypted.** |
 | `/settings web_session_secret` | unset | Random secret of at least 32 characters that signs web session cookies. Changing it signs every calendar user out. **Encrypted.** |
@@ -152,15 +153,22 @@ the other.
 
 ### Encrypted Settings
 
-The three settings marked **Encrypted** hold credentials and are encrypted in
-the database. `/settings` never shows one back: once set, it reports
+The three settings marked **Encrypted** hold operator credentials and are
+encrypted in the database. `/settings` never shows one back: once set, it reports
 `This secret cannot be viewed once set`, and an unset one reports `Not set`.
 There is no command that reveals the value — set it again to change it.
 
+Each member's `/profit setkey` value is protected by the same cipher and key
+file. It lives in its own row keyed by Discord user ID, is never rendered back,
+and is only decrypted server-side for that member's Guild Wars 2 requests.
+
 If the key is lost or replaced, the encrypted rows survive but cannot be read.
-The bot keeps running with those features switched off, and `/settings`
-reports each affected setting as set but undecryptable rather than as working
+The bot keeps running with those features switched off. `/settings` reports
+each affected operator setting as set but undecryptable rather than as working
 — set it again to recover.
+
+Affected members see the same recovery path on `/profit`: run
+`/profit setkey` again.
 
 The key comes from `SETTINGS_ENCRYPTION_KEY` if you set it, and otherwise from
 `settings.key`, generated beside the database on first run with `0600`
@@ -260,8 +268,8 @@ are set. Raffle draw announcements and the replies to every `/raffle`, `/check`
 and `/track` command go to the channel the command was run in and are likewise
 unaffected.
 
-`WEB_ENABLED=true` without the calendar's four settings is not an error: the
-bot names the missing ones in a startup warning and leaves the calendar off,
+`WEB_ENABLED=true` without the site's four settings is not an error: the bot
+names the missing ones in a startup warning and leaves the site off,
 the same way an unset API key disables Guild Wars 2 polling.
 
 Run the missing `/settings` subcommand and the feature switches on; nothing
@@ -1180,11 +1188,11 @@ To enable it:
    `/settings discord_oauth_client_secret` and `/settings web_session_secret`.
    Generate the session secret with
    `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The
-   calendar starts as soon as the fourth one is set.
+   site starts as soon as the fourth one is set.
 4. Publish the port by uncommenting the `ports` block in `compose.yaml`. It
    follows `WEB_PORT`, so there is nothing to change there if you move the port.
 
-Serve the calendar behind a reverse proxy that terminates TLS. Discord only
+Serve the site behind a reverse proxy that terminates TLS. Discord only
 accepts `https` redirect URIs (localhost excepted), and session cookies are
 marked `Secure` only when `/settings web_base_url` uses `https`.
 
@@ -1192,6 +1200,38 @@ Times are shown in each viewer's local timezone. Weekly repeat days are
 defined in the timezone set with `/settings timezone`, so viewers far from it
 may
 correctly see a repeating event land on an adjacent local weekday.
+
+### Trading Post Profit Dashboard
+
+Every guild member can keep a separate Guild Wars 2 API key and view only their
+own Trading Post history. The key is unrelated to the guild-wide
+`/settings gw2_api_key`: it needs the `tradingpost` permission and is stored in
+the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
+`settings.key` used by encrypted settings.
+
+- `/profit setkey` opens a private modal, checks the key with `/v2/tokeninfo`,
+  and saves it only when the `tradingpost` permission is present. A
+  route-restricted subtoken must allow the history buys, history sells, and
+  current sells transaction endpoints.
+- `/profit view [days]` privately links to the signed-in `/profit` page. The
+  window defaults to 30 days and accepts 1 through 90. If the web session has
+  expired, Discord sign-in returns the member to that same profit window.
+- `/profit deletekey` removes the caller's encrypted key and cached Trading
+  Post data. It cannot affect any other member's key or cache.
+
+The `/profit` page replaces the former `/profit summary`, `/profit item`,
+`/profit day`, and `/profit unrealized` Discord tables. It presents all four
+reports together: the realized summary, realized profit grouped by item,
+realized profit grouped by sale date, and projected profit for unmatched buys
+currently listed for sale. Coin amounts account for the Trading Post's 5%
+listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
+the original profit bot.
+
+History, current listings, and item names are cached for five minutes in rows
+keyed by Discord user ID. The signed web session supplies that same ID; the API
+key never appears in the page, a URL, or a browser response. Access uses the
+site's normal Discord OAuth guild-membership check and needs the four web
+settings plus `WEB_ENABLED=true` described above.
 
 ### Feast Usage Dashboard
 

@@ -24,6 +24,16 @@ from gw2bot.web import auth
 from gw2bot.web import server as server_module
 from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
 from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
+from gw2bot.profit import (
+    DayProfit,
+    ItemProfit,
+    ProfitReport,
+    RealizedProfit,
+    UnrealizedItemProfit,
+    UnrealizedProfit,
+)
+from gw2bot.profit.api import ProfitApiError
+from gw2bot.profit.service import MissingProfitApiKey
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
 from gw2bot.web.server import WebServer
 
@@ -33,6 +43,31 @@ GUILD_ID = 5678
 CLIENT_SECRET = "client-secret-value"
 SESSION_SECRET = "session-secret-value-0123456789abcdef"
 SESSION_USER_ID = 1
+
+
+def profit_report(days: int = 30) -> ProfitReport:
+    return ProfitReport(
+        days=days,
+        buy_transaction_count=4,
+        sell_transaction_count=2,
+        realized=RealizedProfit(
+            items={1: ItemProfit(2, 200, 340, 140)},
+            days={"2026-08-20": DayProfit(2, 200, 340, 140)},
+            unmatched_buys={},
+            total_cost=200,
+            total_net_revenue=340,
+            total_profit=140,
+            total_matched_quantity=2,
+        ),
+        unrealized=UnrealizedProfit(
+            items={2: UnrealizedItemProfit(1, 100, 255, 155)},
+            total_quantity=1,
+            total_cost=100,
+            total_projected_net_revenue=255,
+            total_projected_profit=155,
+        ),
+        item_names={1: "Realized Item", 2: "Listed Item"},
+    )
 
 
 def member(display_name: str = "Kitty", *, officer: bool = False) -> object:
@@ -76,6 +111,9 @@ class FakeBot:
         self.event_store = store
         self.event_timezone = ZoneInfo("UTC")
         self.raffle_store = raffle_store
+        self.profit_service = SimpleNamespace(
+            load_report=AsyncMock(return_value=profit_report())
+        )
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
 
@@ -154,9 +192,16 @@ def session_cookie(user_id: int = SESSION_USER_ID, name: str = "Kitty") -> str:
     )
 
 
-async def begin_login(client: TestClient) -> str:
+async def begin_login(
+    client: TestClient,
+    return_to: str | None = None,
+) -> str:
     """Start the OAuth flow and return the state Discord would echo back."""
-    response = await client.get("/login", allow_redirects=False)
+    response = await client.get(
+        "/login",
+        params={} if return_to is None else {"next": return_to},
+        allow_redirects=False,
+    )
     assert response.status == 302
     location = response.headers["Location"]
     assert location.startswith("https://discord.com/oauth2/authorize?")
@@ -492,7 +537,8 @@ class TestOAuthCallback:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        state = await begin_login(client)
+        return_target_secret = "return-target-secret"
+        return_to = f"/profit?days=60&marker={return_target_secret}"
         monkeypatch.setattr(
             auth,
             "exchange_code",
@@ -510,6 +556,7 @@ class TestOAuthCallback:
         )
 
         with caplog.at_level("DEBUG"):
+            state = await begin_login(client, return_to)
             response = await client.get(
                 "/oauth/callback",
                 params={"code": "secret-oauth-code", "state": state},
@@ -517,7 +564,7 @@ class TestOAuthCallback:
             )
 
         assert response.status == 302
-        assert response.headers["Location"] == "/"
+        assert response.headers["Location"] == return_to
         cookie = response.cookies[auth.SESSION_COOKIE]
         assert cookie["httponly"]
         assert cookie["samesite"] == "Lax"
@@ -533,6 +580,7 @@ class TestOAuthCallback:
         assert "the-access-token" not in caplog.text
         assert CLIENT_SECRET not in caplog.text
         assert SESSION_SECRET not in caplog.text
+        assert return_target_secret not in caplog.text
 
         me = await client.get("/api/me")
         assert me.status == 200
@@ -596,7 +644,7 @@ class TestSilentAuthorizationRetry:
     ) -> None:
         # A first-time user is refused by the silent (prompt=none) attempt;
         # the callback bounces them back to Discord with the prompt enabled.
-        state = await begin_login(client)
+        state = await begin_login(client, "/profit?days=60")
 
         with caplog.at_level("INFO"):
             response = await client.get(
@@ -613,6 +661,10 @@ class TestSilentAuthorizationRetry:
         # The retry rides a fresh, retry-marked state cookie.
         retry_cookie = response.cookies[auth.STATE_COOKIE].value
         assert auth.state_is_consent_retry(SESSION_SECRET, retry_cookie)
+        assert auth.state_return_target(
+            SESSION_SECRET,
+            retry_cookie,
+        ) == "/profit?days=60"
         assert query["state"] == [
             state_token(retry_cookie),
         ]
@@ -795,6 +847,145 @@ class TestEventsApi:
         )
 
         assert response.status == 400
+
+
+class TestProfitPage:
+    @staticmethod
+    def _headers(user_id: int = SESSION_USER_ID) -> dict[str, str]:
+        return {
+            "Cookie": (
+                f"{auth.SESSION_COOKIE}="
+                f"{session_cookie(user_id=user_id)}"
+            )
+        }
+
+    async def test_unauthenticated_page_shows_sign_in(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/profit")
+
+        assert response.status == 401
+        assert "Sign in with Discord" in await response.text()
+
+    async def test_profit_sign_in_link_preserves_its_window(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/profit", params={"days": "60"})
+
+        assert response.status == 401
+        assert (
+            'href="/login?next=%2Fprofit%3Fdays%3D60"'
+            in await response.text()
+        )
+
+    async def test_login_rejects_an_external_return_target(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/login",
+            params={"next": "https://evil.example/profit"},
+            allow_redirects=False,
+        )
+
+        state_cookie = response.cookies[auth.STATE_COOKIE].value
+        assert auth.state_return_target(SESSION_SECRET, state_cookie) == "/"
+
+    async def test_member_reaches_the_combined_profit_page(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/profit", headers=self._headers())
+
+        assert response.status == 200
+        page = await response.text()
+        assert "Trading Post Profit" in page
+        assert "Summary" in page
+        assert "Realized Profit by Item" in page
+        assert "Realized Profit by Day" in page
+        assert "Unrealized Profit" in page
+
+    async def test_api_loads_only_the_signed_in_members_report(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        guild: FakeGuild,
+    ) -> None:
+        other_user_id = 202
+        guild.members[other_user_id] = member("Other Kitty")
+        bot.profit_service.load_report.return_value = profit_report(60)
+
+        response = await client.get(
+            "/api/profit",
+            params={"days": "60"},
+            headers=self._headers(other_user_id),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["days"] == 60
+        assert payload["summary"]["profit"] == 140
+        assert payload["items"][0]["name"] == "Realized Item"
+        assert payload["days_table"][0]["date"] == "2026-08-20"
+        assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
+        bot.profit_service.load_report.assert_awaited_once_with(
+            other_user_id,
+            60,
+        )
+
+    @pytest.mark.parametrize("days", ["0", "91", "abc", "1.5"])
+    async def test_api_rejects_invalid_days_without_loading_data(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        days: str,
+    ) -> None:
+        response = await client.get(
+            "/api/profit",
+            params={"days": days},
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid days"}
+        bot.profit_service.load_report.assert_not_awaited()
+
+    async def test_api_prompts_only_the_member_whose_key_is_missing(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        bot.profit_service.load_report.side_effect = MissingProfitApiKey
+
+        response = await client.get(
+            "/api/profit",
+            headers=self._headers(),
+        )
+
+        assert response.status == 409
+        assert await response.json() == {"error": "api_key_missing"}
+
+    async def test_upstream_failure_does_not_log_or_return_secret_content(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "profit-response-secret"
+        bot.profit_service.load_report.side_effect = ProfitApiError(secret)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.get(
+                "/api/profit",
+                headers=self._headers(),
+            )
+        body = await response.text()
+
+        assert response.status == 502
+        assert secret not in caplog.text
+        assert secret not in body
 
 
 class TestFoodPageGate:
