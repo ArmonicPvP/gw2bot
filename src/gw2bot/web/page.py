@@ -1,14 +1,15 @@
-"""Static HTML documents served by the web calendar.
+"""HTML documents served by the web calendar.
 
-Every document is a fixed string with no server-side interpolation, so
-user-authored content can never be injected into markup. Dynamic data
-reaches the calendar page only through the JSON API and is inserted with
-``textContent`` on the client; event descriptions additionally pass
-through a small client-side Discord-markdown renderer that only ever
-builds DOM nodes and text nodes, never HTML strings.
+Documents are fixed strings except for the sign-in page's escaped, validated
+local login URL. Dynamic data reaches dashboard pages only through JSON APIs
+and is inserted with ``textContent`` on the client; event descriptions
+additionally pass through a small client-side Discord-markdown renderer that
+only ever builds DOM nodes and text nodes, never HTML strings.
 """
 
 from __future__ import annotations
+
+from html import escape
 
 _SHARED_STYLE = """
 :root {
@@ -85,12 +86,22 @@ def _simple_page(title: str, heading: str, body: str, action: str) -> str:
 
 _SIGN_IN_ACTION = '<a class="button" href="/login">Sign in with Discord</a>'
 
-SIGN_IN_PAGE = _simple_page(
-    "Guild Events",
-    "Guild Events Calendar",
-    "Sign in with Discord to view the guild event calendar.",
-    _SIGN_IN_ACTION,
-)
+
+def sign_in_page(login_url: str = "/login") -> str:
+    action = (
+        '<a class="button" href="'
+        + escape(login_url, quote=True)
+        + '">Sign in with Discord</a>'
+    )
+    return _simple_page(
+        "Guild Events",
+        "Guild Events Calendar",
+        "Sign in with Discord to view the guild event calendar.",
+        action,
+    )
+
+
+SIGN_IN_PAGE = sign_in_page()
 
 SIGNED_OUT_PAGE = _simple_page(
     "Signed out",

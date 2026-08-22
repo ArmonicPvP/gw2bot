@@ -9,9 +9,11 @@ from gw2bot.web.auth import (
     exchange_code,
     fetch_identity,
     sanitize_authorize_error,
+    sanitize_return_target,
     sign_session,
     sign_state,
     state_is_consent_retry,
+    state_return_target,
     verify_session,
     verify_state,
 )
@@ -102,9 +104,31 @@ class TestSessionCookie:
 
 class TestStateToken:
     def test_round_trip(self) -> None:
-        state, cookie = sign_state(SECRET, NOW)
+        state, cookie = sign_state(
+            SECRET,
+            NOW,
+            return_to="/profit?days=60",
+        )
 
         assert verify_state(SECRET, cookie, state, NOW)
+        assert state_return_target(SECRET, cookie) == "/profit?days=60"
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "https://evil.example/profit",
+            "//evil.example/profit",
+            "/oauth/callback?code=secret",
+            "/profit#fragment",
+            "/profit\r\nLocation: https://evil.example",
+            "/profit?" + "x" * 1024,
+        ],
+    )
+    def test_rejects_unsafe_return_targets(self, target: str) -> None:
+        assert sanitize_return_target(target) == "/"
+
+    def test_invalid_state_cookie_has_no_return_target(self) -> None:
+        assert state_return_target(SECRET, "garbage") == "/"
 
     def test_rejects_mismatched_state(self) -> None:
         _, cookie = sign_state(SECRET, NOW)

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Awaitable, Callable
+from urllib.parse import urlencode
 
 import aiohttp
 import discord
@@ -42,8 +43,8 @@ from gw2bot.web.page import (
     ROSTER_OFFICER_ONLY_PAGE,
     ROSTER_PAGE,
     SERVICE_UNAVAILABLE_PAGE,
-    SIGN_IN_PAGE,
     SIGNED_OUT_PAGE,
+    sign_in_page,
 )
 from gw2bot.web.profit_page import PROFIT_PAGE
 
@@ -258,7 +259,13 @@ class WebServer:
             )
             if request.path.startswith("/api/"):
                 return self._json({"error": "unauthorized"}, status=401)
-            return self._html(SIGN_IN_PAGE, status=401)
+            return_to = auth.sanitize_return_target(str(request.rel_url))
+            login_url = f"/login?{urlencode({'next': return_to})}"
+            LOGGER.debug(
+                "Offering web sign-in; return_path=%s",
+                return_to.partition("?")[0],
+            )
+            return self._html(sign_in_page(login_url), status=401)
         if await self._cached_membership(session.user_id) is False:
             LOGGER.info(
                 "Revoked web session; signer is no longer a guild member; "
@@ -315,9 +322,11 @@ class WebServer:
         return self._html(CALENDAR_PAGE)
 
     async def _login(self, request: web.Request) -> web.StreamResponse:
+        return_to = auth.sanitize_return_target(request.query.get("next"))
         state, cookie = auth.sign_state(
             self._session_secret,
             datetime.now(UTC),
+            return_to=return_to,
         )
         response = _redirect(
             auth.authorize_url(self._client_id, self._redirect_uri, state)
@@ -328,7 +337,10 @@ class WebServer:
             cookie,
             auth.STATE_TTL_SECONDS,
         )
-        LOGGER.debug("Redirecting web login to Discord authorization")
+        LOGGER.debug(
+            "Redirecting web login to Discord authorization; return_path=%s",
+            return_to.partition("?")[0],
+        )
         return response
 
     async def _callback(self, request: web.Request) -> web.StreamResponse:
@@ -357,6 +369,10 @@ class WebServer:
             response = self._html(LOGIN_FAILED_PAGE, status=403)
             response.del_cookie(auth.STATE_COOKIE, path="/")
             return response
+        return_to = auth.state_return_target(
+            self._session_secret,
+            state_cookie,
+        )
         try:
             token = await auth.exchange_code(
                 self._http,
@@ -394,7 +410,7 @@ class WebServer:
             identity.name,
             now + timedelta(seconds=self._session_ttl),
         )
-        response = _redirect("/")
+        response = _redirect(return_to)
         self._set_cookie(
             response,
             auth.SESSION_COOKIE,
@@ -402,6 +418,10 @@ class WebServer:
             self._session_ttl,
         )
         response.del_cookie(auth.STATE_COOKIE, path="/")
+        LOGGER.debug(
+            "Completed web login redirect; return_path=%s",
+            return_to.partition("?")[0],
+        )
         return response
 
     def _retry_or_fail_authorization(
@@ -427,6 +447,11 @@ class WebServer:
             self._session_secret,
             state_cookie,
         )
+        return_to = (
+            auth.state_return_target(self._session_secret, state_cookie)
+            if valid_state
+            else "/"
+        )
         if promptable and valid_state and not already_retried:
             LOGGER.info(
                 "Silent Discord authorization needs a prompt; retrying with "
@@ -437,6 +462,7 @@ class WebServer:
                 self._session_secret,
                 now,
                 consent_retry=True,
+                return_to=return_to,
             )
             response = _redirect(
                 auth.authorize_url(

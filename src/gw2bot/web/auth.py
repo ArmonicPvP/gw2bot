@@ -9,7 +9,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -24,6 +24,10 @@ DISCORD_TOKEN_URL = "https://discord.com/api/v10/oauth2/token"
 DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
 
 _MAX_SESSION_NAME_LENGTH = 64
+_MAX_RETURN_TARGET_LENGTH = 1024
+_RETURN_TARGET_PATHS = frozenset(
+    {"/", "/food", "/gold", "/profit", "/roster"}
+)
 
 # Authorization errors that a silent (prompt=none) attempt raises purely
 # because it was not allowed to show a screen. An interactive retry that lets
@@ -162,17 +166,45 @@ def verify_session(
     )
 
 
+def sanitize_return_target(value: str | None) -> str:
+    """Return a bounded local page target, or the calendar root."""
+    if (
+        value is None
+        or not value
+        or len(value) > _MAX_RETURN_TARGET_LENGTH
+        or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in value
+        )
+    ):
+        return "/"
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "/"
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.fragment
+        or parsed.path not in _RETURN_TARGET_PATHS
+    ):
+        return "/"
+    return urlunsplit(("", "", parsed.path, parsed.query, ""))
+
+
 def sign_state(
     secret: str,
     now: datetime,
     *,
     consent_retry: bool = False,
+    return_to: str = "/",
 ) -> tuple[str, str]:
     """Return an opaque state token and its signed cookie value.
 
     ``consent_retry`` marks the state minted for the interactive retry after a
     silent authorization failed, so the callback can tell a first prompt from
-    the retry and never bounce a user through the consent screen more than once.
+    the retry and never bounce a user through the consent screen more than
+    once. ``return_to`` is reduced to a known local page before it is signed.
     """
     token = secrets.token_urlsafe(32)
     cookie = _sign_payload(
@@ -181,6 +213,7 @@ def sign_state(
             "state": token,
             "exp": int(now.timestamp()) + STATE_TTL_SECONDS,
             "cr": consent_retry,
+            "rt": sanitize_return_target(return_to),
         },
     )
     return token, cookie
@@ -216,6 +249,19 @@ def state_is_consent_retry(secret: str, cookie_value: str) -> bool:
     """
     payload = _verify_payload(secret, cookie_value)
     return bool(payload is not None and payload.get("cr") is True)
+
+
+def state_return_target(secret: str, cookie_value: str) -> str:
+    """Read the validated local target from a signed state cookie.
+
+    The caller must verify the state match and expiry before trusting this
+    value. Invalid, legacy, and target-less cookies safely return the root.
+    """
+    payload = _verify_payload(secret, cookie_value)
+    raw_target = payload.get("rt") if payload is not None else None
+    return sanitize_return_target(
+        raw_target if isinstance(raw_target, str) else None
+    )
 
 
 def authorize_url(

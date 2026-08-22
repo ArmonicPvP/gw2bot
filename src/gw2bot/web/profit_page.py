@@ -344,7 +344,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     fetch("/api/profit?days=" + encodeURIComponent(String(days)))
       .then(function (response) {
         if (response.status === 401) {
-          location.href = "/login";
+          location.href = "/login?next=" + encodeURIComponent(
+            location.pathname + location.search);
           return null;
         }
         if (response.status === 409) {

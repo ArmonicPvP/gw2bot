@@ -192,9 +192,16 @@ def session_cookie(user_id: int = SESSION_USER_ID, name: str = "Kitty") -> str:
     )
 
 
-async def begin_login(client: TestClient) -> str:
+async def begin_login(
+    client: TestClient,
+    return_to: str | None = None,
+) -> str:
     """Start the OAuth flow and return the state Discord would echo back."""
-    response = await client.get("/login", allow_redirects=False)
+    response = await client.get(
+        "/login",
+        params={} if return_to is None else {"next": return_to},
+        allow_redirects=False,
+    )
     assert response.status == 302
     location = response.headers["Location"]
     assert location.startswith("https://discord.com/oauth2/authorize?")
@@ -530,7 +537,8 @@ class TestOAuthCallback:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        state = await begin_login(client)
+        return_target_secret = "return-target-secret"
+        return_to = f"/profit?days=60&marker={return_target_secret}"
         monkeypatch.setattr(
             auth,
             "exchange_code",
@@ -548,6 +556,7 @@ class TestOAuthCallback:
         )
 
         with caplog.at_level("DEBUG"):
+            state = await begin_login(client, return_to)
             response = await client.get(
                 "/oauth/callback",
                 params={"code": "secret-oauth-code", "state": state},
@@ -555,7 +564,7 @@ class TestOAuthCallback:
             )
 
         assert response.status == 302
-        assert response.headers["Location"] == "/"
+        assert response.headers["Location"] == return_to
         cookie = response.cookies[auth.SESSION_COOKIE]
         assert cookie["httponly"]
         assert cookie["samesite"] == "Lax"
@@ -571,6 +580,7 @@ class TestOAuthCallback:
         assert "the-access-token" not in caplog.text
         assert CLIENT_SECRET not in caplog.text
         assert SESSION_SECRET not in caplog.text
+        assert return_target_secret not in caplog.text
 
         me = await client.get("/api/me")
         assert me.status == 200
@@ -634,7 +644,7 @@ class TestSilentAuthorizationRetry:
     ) -> None:
         # A first-time user is refused by the silent (prompt=none) attempt;
         # the callback bounces them back to Discord with the prompt enabled.
-        state = await begin_login(client)
+        state = await begin_login(client, "/profit?days=60")
 
         with caplog.at_level("INFO"):
             response = await client.get(
@@ -651,6 +661,10 @@ class TestSilentAuthorizationRetry:
         # The retry rides a fresh, retry-marked state cookie.
         retry_cookie = response.cookies[auth.STATE_COOKIE].value
         assert auth.state_is_consent_retry(SESSION_SECRET, retry_cookie)
+        assert auth.state_return_target(
+            SESSION_SECRET,
+            retry_cookie,
+        ) == "/profit?days=60"
         assert query["state"] == [
             state_token(retry_cookie),
         ]
@@ -853,6 +867,31 @@ class TestProfitPage:
 
         assert response.status == 401
         assert "Sign in with Discord" in await response.text()
+
+    async def test_profit_sign_in_link_preserves_its_window(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/profit", params={"days": "60"})
+
+        assert response.status == 401
+        assert (
+            'href="/login?next=%2Fprofit%3Fdays%3D60"'
+            in await response.text()
+        )
+
+    async def test_login_rejects_an_external_return_target(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/login",
+            params={"next": "https://evil.example/profit"},
+            allow_redirects=False,
+        )
+
+        state_cookie = response.cookies[auth.STATE_COOKIE].value
+        assert auth.state_return_target(SESSION_SECRET, state_cookie) == "/"
 
     async def test_member_reaches_the_combined_profit_page(
         self,

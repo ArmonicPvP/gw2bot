@@ -1214,7 +1214,8 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   route-restricted subtoken must allow the history buys, history sells, and
   current sells transaction endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window defaults to 30 days and accepts 1 through 90.
+  window defaults to 30 days and accepts 1 through 90. If the web session has
+  expired, Discord sign-in returns the member to that same profit window.
 - `/profit deletekey` removes the caller's encrypted key and cached Trading
   Post data. It cannot affect any other member's key or cache.
 
