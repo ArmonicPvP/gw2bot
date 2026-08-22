@@ -15,8 +15,10 @@ from cryptography.fernet import Fernet
 from factories import default_config
 from gw2bot.logging_setup import SecretRegistry
 from gw2bot.profit.api import (
+    DELIVERY_PATH,
     TRANSACTION_PATHS,
     ProfitApiClient,
+    ProfitApiAuthorizationError,
     ProfitApiError,
 )
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
@@ -170,6 +172,7 @@ class TestProfitCalculation:
             sell_transaction_count=2,
             realized=realized,
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
+            unclaimed_coins=0,
             item_names={1: "Winner", 2: "Loser"},
         )
 
@@ -583,6 +586,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_delivery_coins=AsyncMock(return_value=12_345),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
         )
         service._api = api  # type: ignore[assignment]
@@ -596,6 +600,7 @@ class TestProfitService:
         assert first.item_names == {1: "Test Item"}
         assert first.realized.total_profit == 70
         assert first.unrealized.total_projected_profit == 155
+        assert first.unclaimed_coins == 12_345
         payload = cast(dict[str, Any], serialize_profit_report(first))
         assert payload["summary"]["roi_percent"] == 70
         assert payload["items"][0]["roi_percent"] == 70
@@ -603,8 +608,76 @@ class TestProfitService:
         assert payload["items"][0]["profit_share_percent"] == 100
         assert payload["unrealized"]["roi_percent"] == 155
         assert payload["unrealized"]["items"][0]["roi_percent"] == 155
+        assert payload["delivery"]["coins"] == 12_345
         assert api.fetch_transactions.await_count == 3
+        assert api.fetch_delivery_coins.await_count == 2
+        api.fetch_delivery_coins.assert_awaited_with("member-secret")
         api.fetch_item_names.assert_awaited_once_with({1})
+
+    async def test_legacy_restricted_key_keeps_its_cached_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        secret = "legacy-route-restricted-secret"
+        store.set_api_key(101, secret)
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery_coins=AsyncMock(
+                side_effect=ProfitApiAuthorizationError(
+                    "GW2 API request returned HTTP 403"
+                )
+            ),
+            fetch_item_names=AsyncMock(),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            report = await service.load_report(101, 30, now=now)
+
+        assert report.unclaimed_coins is None
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert payload["delivery"] == {"coins": None}
+        api.fetch_transactions.assert_not_awaited()
+        api.fetch_delivery_coins.assert_awaited_once_with(secret)
+        assert "reason=unauthorized" in caplog.text
+        assert "unclaimed_gold=unavailable" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_non_authorization_delivery_failure_still_fails_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery_coins=AsyncMock(
+                side_effect=ProfitApiError("GW2 API request returned HTTP 500")
+            ),
+            fetch_item_names=AsyncMock(),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        with pytest.raises(ProfitApiError):
+            await service.load_report(101, 30, now=now)
 
     async def test_discards_an_old_key_snapshot_and_retries_replacement(
         self,
@@ -653,6 +726,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_delivery_coins=AsyncMock(return_value=0),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
         )
         service._api = api  # type: ignore[assignment]
@@ -662,6 +736,7 @@ class TestProfitService:
 
         assert report.realized.total_profit == 70
         assert api.fetch_transactions.await_count == 6
+        api.fetch_delivery_coins.assert_awaited_once_with(replacement_key)
         assert [
             row.transaction_id
             for row in store.get_transactions(101, "history_buys")
@@ -734,6 +809,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
+            fetch_delivery_coins=AsyncMock(return_value=0),
             fetch_item_names=AsyncMock(return_value={1: "New Name"}),
         )
         service._api = api  # type: ignore[assignment]
@@ -770,7 +846,7 @@ class _FakeResponse:
 class TestProfitApiLogging:
     @pytest.mark.parametrize(
         "restricted_urls",
-        [None, list(TRANSACTION_PATHS.values())],
+        [None, [*TRANSACTION_PATHS.values(), DELIVERY_PATH]],
         ids=("unrestricted", "required-routes"),
     )
     async def test_accepts_keys_with_required_transaction_route_access(
@@ -818,6 +894,97 @@ class TestProfitApiLogging:
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             assert not await client.validate_key(secret)
+
+        assert secret not in caplog.text
+        assert payload_secret not in caplog.text
+
+    async def test_rejects_subtoken_without_the_delivery_route(self) -> None:
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    200,
+                    {
+                        "permissions": ["tradingpost"],
+                        "urls": list(TRANSACTION_PATHS.values()),
+                    },
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        assert not await client.validate_key("member-key")
+
+    async def test_fetches_unclaimed_delivery_coins(self) -> None:
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    200,
+                    {"coins": 12_345, "items": [{"id": 1, "count": 2}]},
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        assert await client.fetch_delivery_coins("member-key") == 12_345
+        request = http.get.call_args
+        assert request.args[0] == "https://api.example/v2/commerce/delivery"
+        assert request.kwargs["headers"] == {
+            "Authorization": "Bearer member-key"
+        }
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_delivery_authorization_failure_is_typed_and_sanitized(
+        self,
+        status: int,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "legacy-route-restricted-secret"
+        response_secret = "authorization-response-secret"
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    status,
+                    {"text": response_secret},
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            with pytest.raises(ProfitApiAuthorizationError):
+                await client.fetch_delivery_coins(secret)
+
+        assert secret not in caplog.text
+        assert response_secret not in caplog.text
+
+    async def test_invalid_delivery_never_logs_key_or_payload(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "member-delivery-key"
+        payload_secret = "delivery-payload-secret"
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(200, {"coins": payload_secret})
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            with pytest.raises(ProfitApiError):
+                await client.fetch_delivery_coins(secret)
 
         assert secret not in caplog.text
         assert payload_secret not in caplog.text
@@ -990,3 +1157,23 @@ class TestProfitCommands:
         assert secret not in caplog.text
         reply = invoked.followup.send.await_args.args[0]
         assert secret not in reply
+
+    async def test_modal_names_the_delivery_route_when_rejecting_a_key(
+        self,
+    ) -> None:
+        bot = SimpleNamespace(
+            secrets=SecretRegistry(),
+            profit_service=SimpleNamespace(
+                validate_api_key=AsyncMock(return_value=False)
+            ),
+        )
+        modal = ProfitApiKeyModal(cast(Any, bot))
+        modal.api_key._value = "route-restricted-key"
+        invoked = interaction()
+
+        await modal.on_submit(cast(discord.Interaction, invoked))
+
+        reply = invoked.followup.send.await_args.args[0]
+        assert "all Trading Post transaction routes" in reply
+        assert f"`{DELIVERY_PATH}`" in reply
+        assert "subtoken URL restrictions" in reply

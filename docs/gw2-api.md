@@ -26,9 +26,9 @@ also require `guilds`. A member key saved with `/profit setkey` is separate and
 needs `tradingpost`; the command verifies that permission here before storing
 the key. If `urls` is present, it also requires
 `/v2/commerce/transactions/history/buys`,
-`/v2/commerce/transactions/history/sells`, and
-`/v2/commerce/transactions/current/sells`; an unrestricted key has no `urls`
-field.
+`/v2/commerce/transactions/history/sells`,
+`/v2/commerce/transactions/current/sells`, and
+`/v2/commerce/delivery`; an unrestricted key has no `urls` field.
 
 ### `/v2/createsubtoken`
 
@@ -79,6 +79,17 @@ Returns the member's current sale listings. The cached collection is replaced
 as a snapshot rather than merged, so cancelled or completed listings disappear
 from the next unrealized-profit report. All three transaction collections are
 refreshed after five minutes.
+
+### `/v2/commerce/delivery`
+
+Returns the items and copper waiting for pickup from the Trading Post. The
+profit dashboard reads the current `coins` value when it builds a report and
+shows it as unclaimed Trading Post gold. Route-restricted member subtokens must
+allow this endpoint along with the three transaction endpoints above. A legacy
+subtoken accepted before this route was required can still load its transaction
+report; only the unclaimed amount is marked unavailable after a 401 or 403, with
+the page prompting the member to replace the key. Other delivery errors still
+fail the report.
 
 ## Guilds
 

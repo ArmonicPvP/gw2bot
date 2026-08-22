@@ -79,6 +79,7 @@ class ProfitReport:
     sell_transaction_count: int
     realized: RealizedProfit
     unrealized: UnrealizedProfit
+    unclaimed_coins: int | None
     item_names: dict[int, str]
 
 

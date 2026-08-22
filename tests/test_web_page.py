@@ -57,11 +57,19 @@ class TestCalendarMarkdown:
 
 
 class TestProfitPage:
-    def test_contains_all_four_reports_from_the_discord_bot(self) -> None:
+    def test_contains_all_profit_reports_and_unclaimed_gold(self) -> None:
         assert "Summary" in PROFIT_PAGE
         assert "Realized Profit by Item" in PROFIT_PAGE
         assert "Realized Profit by Day" in PROFIT_PAGE
         assert "Unrealized Profit" in PROFIT_PAGE
+        assert "Unclaimed Trading Post Gold" in PROFIT_PAGE
+        assert 'id="unclaimed-coins"' in PROFIT_PAGE
+        assert 'id="delivery-key-help" hidden' in PROFIT_PAGE
+        assert "coin(data.delivery.coins)" in PROFIT_PAGE
+        assert "data.delivery.coins === null" in PROFIT_PAGE
+        assert 'node.textContent = "Unavailable";' in PROFIT_PAGE
+        assert "help.hidden = false;" in PROFIT_PAGE
+        assert "renderDelivery(data);" in PROFIT_PAGE
         assert 'fetch("/api/profit?days=" +' in PROFIT_PAGE
 
     def test_dynamic_trading_post_values_never_become_markup(self) -> None:

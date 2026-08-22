@@ -9,6 +9,7 @@ import aiohttp
 from gw2bot.profit.api import (
     TRANSACTION_PATHS,
     ProfitApiClient,
+    ProfitApiAuthorizationError,
     ProfitApiError,
 )
 from gw2bot.profit.models import (
@@ -66,7 +67,19 @@ class ProfitService:
             discord_user_id,
             days,
         )
-        await self._refresh_transactions(discord_user_id, loaded_at)
+        api_key = await self._refresh_transactions(discord_user_id, loaded_at)
+        try:
+            unclaimed_coins = await self._api.fetch_delivery_coins(api_key)
+        except ProfitApiAuthorizationError:
+            # Keys accepted before delivery reporting existed may be subtokens
+            # restricted to the original three transaction routes. Preserve
+            # that member's established report and degrade only the new field.
+            unclaimed_coins = None
+            LOGGER.warning(
+                "Could not load Trading Post delivery; user_id=%s "
+                "reason=unauthorized",
+                discord_user_id,
+            )
 
         cutoff = window_start
         buys, sells, current_sells = await asyncio.to_thread(
@@ -112,15 +125,21 @@ class ProfitService:
             sell_transaction_count=len(sells),
             realized=realized,
             unrealized=unrealized,
+            unclaimed_coins=unclaimed_coins,
             item_names=item_names,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s",
+            "unrealized_items=%s unclaimed_gold=%s",
             discord_user_id,
             days,
             len(realized.items),
             len(unrealized.items),
+            (
+                "unavailable"
+                if unclaimed_coins is None
+                else "available" if unclaimed_coins > 0 else "empty"
+            ),
         )
         return report
 
@@ -143,7 +162,7 @@ class ProfitService:
         self,
         discord_user_id: int,
         now: datetime,
-    ) -> None:
+    ) -> str:
         for attempt in range(2):
             snapshot = await asyncio.to_thread(
                 self._store.get_api_key_snapshot,
@@ -172,7 +191,7 @@ class ProfitService:
                 attempt + 1,
             )
             if not stale_kinds:
-                return
+                return snapshot.api_key
             fetched = await asyncio.gather(
                 *(
                     self._api.fetch_transactions(
@@ -190,7 +209,7 @@ class ProfitService:
                 now=now,
             )
             if accepted:
-                return
+                return snapshot.api_key
             LOGGER.info(
                 "Discarded stale profit transaction snapshot; user_id=%s "
                 "attempt=%s retry=%s",
@@ -308,4 +327,5 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
                 unrealized.total_cost,
             ),
         },
+        "delivery": {"coins": report.unclaimed_coins},
     }
