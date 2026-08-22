@@ -276,6 +276,14 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tfoot id="unrealized-foot"></tfoot>
       </table></div>
     </section>
+    <section class="card">
+      <h2>Unclaimed Trading Post Gold</h2>
+      <p class="note">Coins waiting for pickup in your Trading Post delivery box.</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Measure</th><th>Value</th></tr></thead>
+        <tbody><tr><td>Available to collect</td><td id="unclaimed-coins">0c</td></tr></tbody>
+      </table></div>
+    </section>
   </div>
 </main>
 <script>
@@ -994,17 +1002,27 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     applySort("unrealized-table");
   }
 
+  function renderDelivery(data) {
+    var node = document.getElementById("unclaimed-coins");
+    node.textContent = coin(data.delivery.coins);
+    node.className = data.delivery.coins > 0 ? "positive" : "";
+  }
+
   function render(data) {
     renderSummary(data);
     renderCharts(data);
     renderItems(data);
     renderDays(data);
     renderUnrealized(data);
+    renderDelivery(data);
     reports.hidden = false;
     keyHelp.classList.remove("open");
     status.className = "";
     status.textContent = "Updated from your private Trading Post data.";
-    trace("render", data.items.length + data.days_table.length + data.unrealized.items.length);
+    trace(
+      "render",
+      data.items.length + data.days_table.length
+        + data.unrealized.items.length + 1);
   }
 
   function selectedDays() {

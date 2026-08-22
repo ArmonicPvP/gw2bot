@@ -80,6 +80,13 @@ as a snapshot rather than merged, so cancelled or completed listings disappear
 from the next unrealized-profit report. All three transaction collections are
 refreshed after five minutes.
 
+### `/v2/commerce/delivery`
+
+Returns the items and copper waiting for pickup from the Trading Post. The
+profit dashboard reads the current `coins` value when it builds a report and
+shows it as unclaimed Trading Post gold. Route-restricted member subtokens must
+allow this endpoint along with the three transaction endpoints above.
+
 ## Guilds
 
 The detailed endpoints below require both `account` and `guilds`. They only

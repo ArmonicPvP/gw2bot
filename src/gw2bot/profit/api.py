@@ -18,7 +18,8 @@ TRANSACTION_PATHS = {
     "history_sells": "/v2/commerce/transactions/history/sells",
     "current_sells": "/v2/commerce/transactions/current/sells",
 }
-REQUIRED_TRANSACTION_PATHS = frozenset(TRANSACTION_PATHS.values())
+DELIVERY_PATH = "/v2/commerce/delivery"
+REQUIRED_PROFIT_PATHS = frozenset((*TRANSACTION_PATHS.values(), DELIVERY_PATH))
 
 
 class ProfitApiError(RuntimeError):
@@ -58,7 +59,7 @@ class ProfitApiClient:
                 raise ProfitApiError(
                     "GW2 token information had invalid URL restrictions"
                 )
-            route_access = REQUIRED_TRANSACTION_PATHS.issubset(raw_urls)
+            route_access = REQUIRED_PROFIT_PATHS.issubset(raw_urls)
         valid = has_tradingpost and route_access
         LOGGER.debug(
             "Validated profit API key; tradingpost=%s "
@@ -116,6 +117,20 @@ class ProfitApiClient:
             len(transactions),
         )
         return transactions
+
+    async def fetch_delivery_coins(self, api_key: str) -> int:
+        """Return copper waiting for the member in Trading Post delivery."""
+        payload, _ = await self._get(DELIVERY_PATH, api_key=api_key)
+        if not isinstance(payload, dict):
+            raise ProfitApiError("GW2 delivery response was not an object")
+        coins = payload.get("coins")
+        if not isinstance(coins, int) or isinstance(coins, bool) or coins < 0:
+            raise ProfitApiError("GW2 delivery response had invalid coins")
+        LOGGER.debug(
+            "Fetched GW2 Trading Post delivery; coins_available=%s",
+            coins > 0,
+        )
+        return coins
 
     async def fetch_item_names(self, item_ids: set[int]) -> dict[int, str]:
         names: dict[int, str] = {}

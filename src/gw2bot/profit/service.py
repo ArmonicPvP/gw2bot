@@ -66,7 +66,8 @@ class ProfitService:
             discord_user_id,
             days,
         )
-        await self._refresh_transactions(discord_user_id, loaded_at)
+        api_key = await self._refresh_transactions(discord_user_id, loaded_at)
+        unclaimed_coins = await self._api.fetch_delivery_coins(api_key)
 
         cutoff = window_start
         buys, sells, current_sells = await asyncio.to_thread(
@@ -112,15 +113,17 @@ class ProfitService:
             sell_transaction_count=len(sells),
             realized=realized,
             unrealized=unrealized,
+            unclaimed_coins=unclaimed_coins,
             item_names=item_names,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s",
+            "unrealized_items=%s unclaimed_gold=%s",
             discord_user_id,
             days,
             len(realized.items),
             len(unrealized.items),
+            unclaimed_coins > 0,
         )
         return report
 
@@ -143,7 +146,7 @@ class ProfitService:
         self,
         discord_user_id: int,
         now: datetime,
-    ) -> None:
+    ) -> str:
         for attempt in range(2):
             snapshot = await asyncio.to_thread(
                 self._store.get_api_key_snapshot,
@@ -172,7 +175,7 @@ class ProfitService:
                 attempt + 1,
             )
             if not stale_kinds:
-                return
+                return snapshot.api_key
             fetched = await asyncio.gather(
                 *(
                     self._api.fetch_transactions(
@@ -190,7 +193,7 @@ class ProfitService:
                 now=now,
             )
             if accepted:
-                return
+                return snapshot.api_key
             LOGGER.info(
                 "Discarded stale profit transaction snapshot; user_id=%s "
                 "attempt=%s retry=%s",
@@ -308,4 +311,5 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
                 unrealized.total_cost,
             ),
         },
+        "delivery": {"coins": report.unclaimed_coins},
     }

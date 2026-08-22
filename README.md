@@ -1212,8 +1212,8 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
 
 - `/profit setkey` opens a private modal, checks the key with `/v2/tokeninfo`,
   and saves it only when the `tradingpost` permission is present. A
-  route-restricted subtoken must allow the history buys, history sells, and
-  current sells transaction endpoints.
+  route-restricted subtoken must allow the history buys, history sells, current
+  sells, and Trading Post delivery endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
   window defaults to 30 days and accepts 1 through 90 UTC calendar dates,
   including today. If the web session has expired, Discord sign-in returns the
@@ -1222,10 +1222,11 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   Post data. It cannot affect any other member's key or cache.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
-`/profit day`, and `/profit unrealized` Discord tables. It presents all four
-reports together: the realized summary, realized profit grouped by item,
-realized profit grouped by sale date, and projected profit for unmatched buys
-currently listed for sale. Coin amounts account for the Trading Post's 5%
+`/profit day`, and `/profit unrealized` Discord tables. It presents the realized
+summary, realized profit grouped by item, realized profit grouped by sale date,
+projected profit for unmatched buys currently listed for sale, and the coins
+currently awaiting pickup from the Trading Post. Coin amounts account for the
+Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
 the original profit bot. Click any column heading in the three detail tables to
 sort it; click the same heading again to reverse the order. The totals remain
@@ -1243,10 +1244,11 @@ snap to the nearest date and see its exact value (and the daily average where
 applicable).
 
 History, current listings, and item names are cached for five minutes in rows
-keyed by Discord user ID. The signed web session supplies that same ID; the API
-key never appears in the page, a URL, or a browser response. Access uses the
-site's normal Discord OAuth guild-membership check and needs the four web
-settings plus `WEB_ENABLED=true` described above.
+keyed by Discord user ID; unclaimed coins are read when each report is built.
+The signed web session supplies that same ID; the API key never appears in the
+page, a URL, or a browser response. Access uses the site's normal Discord OAuth
+guild-membership check and needs the four web settings plus `WEB_ENABLED=true`
+described above.
 
 ### Feast Usage Dashboard
 
