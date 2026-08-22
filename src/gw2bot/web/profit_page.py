@@ -128,8 +128,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 .chart-tooltip {
   position: absolute;
   z-index: 2;
-  min-width: 9rem;
-  max-width: 16rem;
+  width: max-content;
+  min-width: min(9rem, calc(100% - 1rem));
+  max-width: min(16rem, calc(100% - 1rem));
   padding: 0.45rem 0.55rem;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -655,10 +656,19 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         }
       });
 
-      var leftPercent = Math.max(
-        10, Math.min(90, column.x / frame.width * 100));
+      // Keep the rendered box inside the chart rather than clamping only its
+      // centre. The latter still clips a 9rem tooltip at either edge when
+      // three charts share an ordinary desktop row or on a narrow phone.
+      var containerWidth = container.getBoundingClientRect().width;
+      var tooltipWidth = tooltip.getBoundingClientRect().width;
+      var edgePadding = 8;
+      var anchorPixels = column.x / frame.width * containerWidth;
+      var minimumLeft = edgePadding + tooltipWidth / 2;
+      var maximumLeft = containerWidth - edgePadding - tooltipWidth / 2;
+      var leftPixels = Math.max(
+        minimumLeft, Math.min(maximumLeft, anchorPixels));
       var topPercent = anchorY / frame.height * 100;
-      tooltip.style.left = leftPercent + "%";
+      tooltip.style.left = leftPixels + "px";
       tooltip.style.top = topPercent + "%";
       tooltip.style.transform = topPercent < 32
         ? "translate(-50%, 14px)"

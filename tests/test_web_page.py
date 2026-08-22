@@ -175,6 +175,23 @@ class TestProfitPage:
         assert '"7-day average", "#58a6ff"' in PROFIT_PAGE
         assert '"Cumulative profit", "#74dc9a"' in PROFIT_PAGE
 
+    def test_profit_chart_tooltips_stay_inside_their_panel(self) -> None:
+        assert "width: max-content;" in PROFIT_PAGE
+        assert "min-width: min(9rem, calc(100% - 1rem));" in PROFIT_PAGE
+        assert (
+            "var tooltipWidth = tooltip.getBoundingClientRect().width;"
+            in PROFIT_PAGE
+        )
+        assert "var minimumLeft = edgePadding + tooltipWidth / 2;" in (
+            PROFIT_PAGE
+        )
+        assert (
+            "var maximumLeft = containerWidth - edgePadding "
+            "- tooltipWidth / 2;"
+        ) in PROFIT_PAGE
+        assert 'tooltip.style.left = leftPixels + "px";' in PROFIT_PAGE
+        assert "Math.max(\n        10, Math.min(90" not in PROFIT_PAGE
+
     def test_sign_in_target_is_escaped_before_becoming_markup(self) -> None:
         document = sign_in_page('"><script>target-secret</script>')
 
