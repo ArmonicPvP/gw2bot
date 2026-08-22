@@ -279,6 +279,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     <section class="card">
       <h2>Unclaimed Trading Post Gold</h2>
       <p class="note">Coins waiting for pickup in your Trading Post delivery box.</p>
+      <p class="note" id="delivery-key-help" hidden>Delivery access is unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows the Trading Post delivery endpoint.</p>
       <div class="table-scroll"><table>
         <thead><tr><th>Measure</th><th>Value</th></tr></thead>
         <tbody><tr><td>Available to collect</td><td id="unclaimed-coins">0c</td></tr></tbody>
@@ -1004,8 +1005,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   function renderDelivery(data) {
     var node = document.getElementById("unclaimed-coins");
+    var help = document.getElementById("delivery-key-help");
+    if (data.delivery.coins === null) {
+      node.textContent = "Unavailable";
+      node.className = "";
+      help.hidden = false;
+      return;
+    }
     node.textContent = coin(data.delivery.coins);
     node.className = data.delivery.coins > 0 ? "positive" : "";
+    help.hidden = true;
   }
 
   function render(data) {

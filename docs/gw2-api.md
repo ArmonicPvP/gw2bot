@@ -85,7 +85,11 @@ refreshed after five minutes.
 Returns the items and copper waiting for pickup from the Trading Post. The
 profit dashboard reads the current `coins` value when it builds a report and
 shows it as unclaimed Trading Post gold. Route-restricted member subtokens must
-allow this endpoint along with the three transaction endpoints above.
+allow this endpoint along with the three transaction endpoints above. A legacy
+subtoken accepted before this route was required can still load its transaction
+report; only the unclaimed amount is marked unavailable after a 401 or 403, with
+the page prompting the member to replace the key. Other delivery errors still
+fail the report.
 
 ## Guilds
 

@@ -26,6 +26,10 @@ class ProfitApiError(RuntimeError):
     """A sanitized GW2 response failure safe to show without its payload."""
 
 
+class ProfitApiAuthorizationError(ProfitApiError):
+    """The supplied key cannot access one requested GW2 API route."""
+
+
 class ProfitApiClient:
     """Trading Post calls made with one member's API key."""
 
@@ -197,6 +201,10 @@ class ProfitApiClient:
                 path,
                 response.status,
             )
+            if response.status in {401, 403}:
+                raise ProfitApiAuthorizationError(
+                    f"GW2 API request returned HTTP {response.status}"
+                )
             if response.status >= 400:
                 raise ProfitApiError(
                     f"GW2 API request returned HTTP {response.status}"

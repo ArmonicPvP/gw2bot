@@ -9,6 +9,7 @@ import aiohttp
 from gw2bot.profit.api import (
     TRANSACTION_PATHS,
     ProfitApiClient,
+    ProfitApiAuthorizationError,
     ProfitApiError,
 )
 from gw2bot.profit.models import (
@@ -67,7 +68,18 @@ class ProfitService:
             days,
         )
         api_key = await self._refresh_transactions(discord_user_id, loaded_at)
-        unclaimed_coins = await self._api.fetch_delivery_coins(api_key)
+        try:
+            unclaimed_coins = await self._api.fetch_delivery_coins(api_key)
+        except ProfitApiAuthorizationError:
+            # Keys accepted before delivery reporting existed may be subtokens
+            # restricted to the original three transaction routes. Preserve
+            # that member's established report and degrade only the new field.
+            unclaimed_coins = None
+            LOGGER.warning(
+                "Could not load Trading Post delivery; user_id=%s "
+                "reason=unauthorized",
+                discord_user_id,
+            )
 
         cutoff = window_start
         buys, sells, current_sells = await asyncio.to_thread(
@@ -123,7 +135,11 @@ class ProfitService:
             days,
             len(realized.items),
             len(unrealized.items),
-            unclaimed_coins > 0,
+            (
+                "unavailable"
+                if unclaimed_coins is None
+                else "available" if unclaimed_coins > 0 else "empty"
+            ),
         )
         return report
 

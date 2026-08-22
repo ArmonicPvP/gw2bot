@@ -1245,6 +1245,11 @@ applicable).
 
 History, current listings, and item names are cached for five minutes in rows
 keyed by Discord user ID; unclaimed coins are read when each report is built.
+Keys saved before delivery reporting was added can still load their existing
+reports if a route restriction blocks that new endpoint: the unclaimed amount
+is marked unavailable and the page directs the member to run `/profit setkey`
+again. Other API failures continue to fail the report instead of presenting
+partial data.
 The signed web session supplies that same ID; the API key never appears in the
 page, a URL, or a browser response. Access uses the site's normal Discord OAuth
 guild-membership check and needs the four web settings plus `WEB_ENABLED=true`

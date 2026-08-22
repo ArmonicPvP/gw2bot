@@ -64,7 +64,11 @@ class TestProfitPage:
         assert "Unrealized Profit" in PROFIT_PAGE
         assert "Unclaimed Trading Post Gold" in PROFIT_PAGE
         assert 'id="unclaimed-coins"' in PROFIT_PAGE
+        assert 'id="delivery-key-help" hidden' in PROFIT_PAGE
         assert "coin(data.delivery.coins)" in PROFIT_PAGE
+        assert "data.delivery.coins === null" in PROFIT_PAGE
+        assert 'node.textContent = "Unavailable";' in PROFIT_PAGE
+        assert "help.hidden = false;" in PROFIT_PAGE
         assert "renderDelivery(data);" in PROFIT_PAGE
         assert 'fetch("/api/profit?days=" +' in PROFIT_PAGE
 

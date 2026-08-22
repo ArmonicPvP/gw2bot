@@ -18,6 +18,7 @@ from gw2bot.profit.api import (
     DELIVERY_PATH,
     TRANSACTION_PATHS,
     ProfitApiClient,
+    ProfitApiAuthorizationError,
     ProfitApiError,
 )
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
@@ -613,6 +614,71 @@ class TestProfitService:
         api.fetch_delivery_coins.assert_awaited_with("member-secret")
         api.fetch_item_names.assert_awaited_once_with({1})
 
+    async def test_legacy_restricted_key_keeps_its_cached_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        secret = "legacy-route-restricted-secret"
+        store.set_api_key(101, secret)
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery_coins=AsyncMock(
+                side_effect=ProfitApiAuthorizationError(
+                    "GW2 API request returned HTTP 403"
+                )
+            ),
+            fetch_item_names=AsyncMock(),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            report = await service.load_report(101, 30, now=now)
+
+        assert report.unclaimed_coins is None
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert payload["delivery"] == {"coins": None}
+        api.fetch_transactions.assert_not_awaited()
+        api.fetch_delivery_coins.assert_awaited_once_with(secret)
+        assert "reason=unauthorized" in caplog.text
+        assert "unclaimed_gold=unavailable" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_non_authorization_delivery_failure_still_fails_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery_coins=AsyncMock(
+                side_effect=ProfitApiError("GW2 API request returned HTTP 500")
+            ),
+            fetch_item_names=AsyncMock(),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        with pytest.raises(ProfitApiError):
+            await service.load_report(101, 30, now=now)
+
     async def test_discards_an_old_key_snapshot_and_retries_replacement(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -871,6 +937,34 @@ class TestProfitApiLogging:
         assert request.kwargs["headers"] == {
             "Authorization": "Bearer member-key"
         }
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_delivery_authorization_failure_is_typed_and_sanitized(
+        self,
+        status: int,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "legacy-route-restricted-secret"
+        response_secret = "authorization-response-secret"
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    status,
+                    {"text": response_secret},
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            with pytest.raises(ProfitApiAuthorizationError):
+                await client.fetch_delivery_coins(secret)
+
+        assert secret not in caplog.text
+        assert response_secret not in caplog.text
 
     async def test_invalid_delivery_never_logs_key_or_payload(
         self,
