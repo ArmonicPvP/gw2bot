@@ -429,9 +429,15 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       trace("charts-invalid-window", 0);
       return [];
     }
+    var expectedStart = new Date(end.getTime());
+    expectedStart.setUTCDate(expectedStart.getUTCDate() - data.days + 1);
+    if (isoDay(start) !== isoDay(expectedStart)) {
+      trace("charts-window-mismatch", 0);
+      return [];
+    }
     var points = [];
     var cursor = new Date(start.getTime());
-    while (cursor <= end && points.length < 92) {
+    for (var bucket = 0; bucket < data.days; bucket += 1) {
       var date = isoDay(cursor);
       points.push({
         date: date,
@@ -441,10 +447,6 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         cumulative: 0
       });
       cursor.setUTCDate(cursor.getUTCDate() + 1);
-    }
-    if (cursor <= end) {
-      trace("charts-window-too-wide", points.length);
-      return [];
     }
     var cumulative = 0;
     points.forEach(function (point, index) {

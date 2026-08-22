@@ -55,6 +55,12 @@ class ProfitService:
         if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
             raise ValueError("Profit report days must be between 1 and 90")
         loaded_at = datetime.now(UTC) if now is None else now
+        window_start = loaded_at.replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        ) - timedelta(days=days - 1)
         LOGGER.debug(
             "Loading profit report; user_id=%s days=%s",
             discord_user_id,
@@ -62,7 +68,7 @@ class ProfitService:
         )
         await self._refresh_transactions(discord_user_id, loaded_at)
 
-        cutoff = loaded_at - timedelta(days=days)
+        cutoff = window_start
         buys, sells, current_sells = await asyncio.to_thread(
             self._read_transactions,
             discord_user_id,
@@ -100,7 +106,7 @@ class ProfitService:
 
         report = ProfitReport(
             days=days,
-            window_start=cutoff,
+            window_start=window_start,
             window_end=loaded_at,
             buy_transaction_count=len(buys),
             sell_transaction_count=len(sells),

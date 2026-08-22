@@ -542,7 +542,7 @@ class TestProfitService:
     ) -> None:
         store, _, _ = profit_store
         store.set_api_key(101, "member-secret")
-        now = datetime(2026, 8, 21, tzinfo=UTC)
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
         buys = [
             transaction(
                 "buy",
@@ -591,6 +591,8 @@ class TestProfitService:
         second = await service.load_report(101, 30, now=now)
 
         assert first == second
+        assert first.window_start == datetime(2026, 7, 23, tzinfo=UTC)
+        assert first.window_end == now
         assert first.item_names == {1: "Test Item"}
         assert first.realized.total_profit == 70
         assert first.unrealized.total_projected_profit == 155

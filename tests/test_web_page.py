@@ -142,6 +142,14 @@ class TestProfitPage:
         assert 'id="rolling-profit-chart"' in PROFIT_PAGE
         assert 'id="cumulative-profit-chart"' in PROFIT_PAGE
         assert 'profitByDate[date] : 0' in PROFIT_PAGE
+        assert (
+            "expectedStart.setUTCDate("
+            "expectedStart.getUTCDate() - data.days + 1);"
+        ) in PROFIT_PAGE
+        assert (
+            "for (var bucket = 0; bucket < data.days; bucket += 1)"
+            in PROFIT_PAGE
+        )
         assert "rollingTotal / 7" in PROFIT_PAGE
         assert "cumulative += point.profit;" in PROFIT_PAGE
         assert 'document.createElementNS(SVG_NS, name)' in PROFIT_PAGE

@@ -46,10 +46,13 @@ SESSION_USER_ID = 1
 
 
 def profit_report(days: int = 30) -> ProfitReport:
+    window_end = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
     return ProfitReport(
         days=days,
-        window_start=datetime(2026, 7, 22, tzinfo=UTC),
-        window_end=datetime(2026, 8, 21, tzinfo=UTC),
+        window_start=(
+            window_end.replace(hour=0, minute=0) - timedelta(days=days - 1)
+        ),
+        window_end=window_end,
         buy_transaction_count=4,
         sell_transaction_count=2,
         realized=RealizedProfit(
@@ -931,7 +934,7 @@ class TestProfitPage:
         assert payload["summary"]["profit"] == 140
         assert payload["summary"]["roi_percent"] == 70
         assert payload["window"] == {
-            "start_date": "2026-07-22",
+            "start_date": "2026-06-23",
             "end_date": "2026-08-21",
         }
         assert payload["items"][0]["name"] == "Realized Item"
