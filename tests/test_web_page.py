@@ -154,6 +154,44 @@ class TestProfitPage:
         assert "cumulative += point.profit;" in PROFIT_PAGE
         assert 'document.createElementNS(SVG_NS, name)' in PROFIT_PAGE
 
+    def test_profit_dashboard_and_charts_fill_the_available_width(self) -> None:
+        assert "main { width: 100%; margin: 0; padding: 1rem; }" in PROFIT_PAGE
+        assert "width: min(100%, 88rem)" not in PROFIT_PAGE
+        assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in (
+            PROFIT_PAGE
+        )
+
+    def test_profit_chart_hover_shows_the_nearest_date_values(self) -> None:
+        assert 'class="profit-chart"' in PROFIT_PAGE
+        assert '"class": "chart-crosshair"' in PROFIT_PAGE
+        assert '"class": "chart-hover-ring"' in PROFIT_PAGE
+        assert 'tooltipNode("chart-tooltip")' in PROFIT_PAGE
+        assert "function nearestColumn(vbX)" in PROFIT_PAGE
+        assert 'overlay.addEventListener("pointermove"' in PROFIT_PAGE
+        assert 'overlay.addEventListener("pointerleave"' in PROFIT_PAGE
+        for label in ("Daily profit", "Daily average"):
+            assert f'label: "{label}"' in PROFIT_PAGE
+        assert "label: valueLabel" in PROFIT_PAGE
+        assert '"7-day average", "#58a6ff"' in PROFIT_PAGE
+        assert '"Cumulative profit", "#74dc9a"' in PROFIT_PAGE
+
+    def test_profit_chart_tooltips_stay_inside_their_panel(self) -> None:
+        assert "width: max-content;" in PROFIT_PAGE
+        assert "min-width: min(9rem, calc(100% - 1rem));" in PROFIT_PAGE
+        assert (
+            "var tooltipWidth = tooltip.getBoundingClientRect().width;"
+            in PROFIT_PAGE
+        )
+        assert "var minimumLeft = edgePadding + tooltipWidth / 2;" in (
+            PROFIT_PAGE
+        )
+        assert (
+            "var maximumLeft = containerWidth - edgePadding "
+            "- tooltipWidth / 2;"
+        ) in PROFIT_PAGE
+        assert 'tooltip.style.left = leftPixels + "px";' in PROFIT_PAGE
+        assert "Math.max(\n        10, Math.min(90" not in PROFIT_PAGE
+
     def test_sign_in_target_is_escaped_before_becoming_markup(self) -> None:
         document = sign_in_page('"><script>target-secret</script>')
 
@@ -163,6 +201,39 @@ class TestProfitPage:
     def test_calendar_and_profit_pages_link_to_each_other(self) -> None:
         assert '<a href="/profit">Profit</a>' in CALENDAR_PAGE
         assert '<a href="/">Calendar</a>' in PROFIT_PAGE
+
+
+class TestDashboardHeaders:
+    def test_every_dashboard_uses_the_same_sign_out_control(self) -> None:
+        for page in (
+            CALENDAR_PAGE,
+            PROFIT_PAGE,
+            FOOD_PAGE,
+            ROSTER_PAGE,
+            GOLD_PAGE,
+        ):
+            assert page.count(
+                '<button type="submit" class="signout" '
+                'aria-label="Sign out">'
+            ) == 1
+            assert page.count(
+                '<span class="signout-label">Sign out</span>'
+            ) == 1
+            assert page.count('class="signout-icon"') == 1
+            assert "Log out" not in page
+
+    def test_every_dashboard_uses_the_shared_header_dimensions(self) -> None:
+        for page in (
+            CALENDAR_PAGE,
+            PROFIT_PAGE,
+            FOOD_PAGE,
+            ROSTER_PAGE,
+            GOLD_PAGE,
+        ):
+            assert "padding: 0.6rem 1rem;" in page
+            assert "padding: 0.35rem 0.7rem;" in page
+            assert 'header form[action="/logout"] {' in page
+            assert '<h1 id="brand">' in page
 
 
 class TestCalendarTimeGrid:
@@ -307,7 +378,8 @@ class TestCalendarMobile:
         assert 'class="signout-icon"' in CALENDAR_PAGE
         # The stepper and username are hidden on mobile; the period label is
         # not, so the month stays on screen.
-        assert ".controls, #whoami { display: none; }" in CALENDAR_PAGE
+        assert ".controls { display: none; }" in CALENDAR_PAGE
+        assert "#whoami { display: none; }" in CALENDAR_PAGE
 
     def test_period_label_keeps_the_top_left_corner_on_mobile(self) -> None:
         # Swiping changes the period and the month grid shows bare day numbers,

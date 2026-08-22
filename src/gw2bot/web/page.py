@@ -39,6 +39,57 @@ body {
 a { color: var(--accent); }
 """
 
+_DASHBOARD_HEADER_STYLE = """
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+button:hover { background: var(--border); }
+.spacer { flex: 1; }
+#whoami { color: var(--muted); font-size: 0.85rem; }
+header a { font-size: 0.85rem; }
+header form { display: flex; }
+.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
+.signout-icon { display: none; }
+.signout-icon, .signout-icon * { pointer-events: none; }
+@media (max-width: 640px) {
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    row-gap: 0.4rem;
+    column-gap: 0.4rem;
+    padding: 0.5rem 0.6rem;
+  }
+  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
+  header form[action="/logout"] {
+    grid-column: 3;
+    grid-row: 1;
+    justify-self: end;
+  }
+  #whoami { display: none; }
+  .signout-icon { display: inline-block; }
+  .signout-label { display: none; }
+  .signout { padding: 0.35rem 0.5rem; }
+}
+"""
+
 _SIMPLE_PAGE_STYLE = """
 body { display: flex; align-items: center; justify-content: center; }
 .card {
@@ -164,6 +215,7 @@ CALENDAR_PAGE = (
 <title>Guild Events</title>
 <style>"""
     + _SHARED_STYLE
+    + _DASHBOARD_HEADER_STYLE
     + """
 body {
   display: flex;
@@ -173,37 +225,9 @@ body {
      scrolls, so the page itself must never grow a scrollbar of its own. */
   overflow: hidden;
 }
-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.6rem 1rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
 .controls, .views { display: flex; gap: 0.25rem; }
-button {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.7rem;
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-button:hover { background: var(--border); }
 button.active { background: var(--accent); border-color: var(--accent); }
 #period { font-weight: 600; font-size: 0.95rem; min-width: 11rem; }
-.spacer { flex: 1; }
-#whoami { color: var(--muted); font-size: 0.85rem; }
-header a { font-size: 0.85rem; }
-header form { display: flex; }
-.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
-.signout-icon { display: none; }
-.signout-icon, .signout-icon * { pointer-events: none; }
 main {
   /* min-height:0 lets this flex child shrink to the viewport so its own
      overflow scrolls, instead of pushing the page past 100vh. A column flex
@@ -442,16 +466,6 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
 @media (max-width: 640px) {
   /* Two-row header: the title is centred with the sign-out control pinned to
      the right, and the view switch sits on its own row beneath. */
-  header {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    row-gap: 0.4rem;
-    column-gap: 0.4rem;
-    padding: 0.5rem 0.6rem;
-  }
-  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
-  header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .views { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
   /* Swiping changes the period with no other cue in the month grid, which
      shows bare day numbers, so the period label keeps the top-left corner in
@@ -470,10 +484,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   }
   /* Navigation is by swipe on mobile and the username adds nothing on a
      narrow screen, so the stepper and username are dropped. */
-  .controls, #whoami { display: none; }
-  .signout-icon { display: inline-block; }
-  .signout-label { display: none; }
-  .signout { padding: 0.35rem 0.5rem; }
+  .controls { display: none; }
   main { padding: 0 0.3rem; overflow-x: hidden; }
   #grid.month {
     grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -529,7 +540,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
         <polyline points="16 17 21 12 16 7"></polyline>
         <line x1="21" y1="12" x2="9" y2="12"></line>
       </svg>
-      <span class="signout-label">Log out</span>
+      <span class="signout-label">Sign out</span>
     </button>
   </form>
 </header>
@@ -1294,34 +1305,14 @@ FOOD_PAGE = (
 <title>Feast Usage</title>
 <style>"""
     + _SHARED_STYLE
+    + _DASHBOARD_HEADER_STYLE
     + """
 body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
 }
-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.6rem 1rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
 .ranges { display: flex; gap: 0.25rem; }
-button {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.7rem;
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
 /* The date picker is a second header row that stays out of the way until the
@@ -1349,13 +1340,6 @@ button.active { background: var(--accent); border-color: var(--accent); }
   color-scheme: dark;
 }
 .custom .custom-error { color: var(--full); }
-.spacer { flex: 1; }
-#whoami { color: var(--muted); font-size: 0.85rem; }
-header a { font-size: 0.85rem; }
-header form { display: flex; }
-.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
-.signout-icon { display: none; }
-.signout-icon, .signout-icon * { pointer-events: none; }
 main {
   flex: 1;
   width: 100%;
@@ -1476,22 +1460,8 @@ button:focus-visible {
   outline-offset: 1px;
 }
 @media (max-width: 640px) {
-  header {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    row-gap: 0.4rem;
-    column-gap: 0.4rem;
-    padding: 0.5rem 0.6rem;
-  }
-  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
-  header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
   .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
-  #whoami { display: none; }
-  .signout-icon { display: inline-block; }
-  .signout-label { display: none; }
-  .signout { padding: 0.35rem 0.5rem; }
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
   /* Names are hidden, leaving a compact colour key. A feast switched off
@@ -1522,7 +1492,7 @@ button:focus-visible {
         <polyline points="16 17 21 12 16 7"></polyline>
         <line x1="21" y1="12" x2="9" y2="12"></line>
       </svg>
-      <span class="signout-label">Log out</span>
+      <span class="signout-label">Sign out</span>
     </button>
   </form>
   <div id="custom-range" class="custom">
@@ -2425,34 +2395,14 @@ ROSTER_PAGE = (
 <title>Guild Roster</title>
 <style>"""
     + _SHARED_STYLE
+    + _DASHBOARD_HEADER_STYLE
     + """
 body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
 }
-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.6rem 1rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
 .ranges { display: flex; gap: 0.25rem; }
-button {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.7rem;
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
 /* The date picker is a second header row that stays out of the way until the
@@ -2480,13 +2430,6 @@ button.active { background: var(--accent); border-color: var(--accent); }
   color-scheme: dark;
 }
 .custom .custom-error { color: var(--full); }
-.spacer { flex: 1; }
-#whoami { color: var(--muted); font-size: 0.85rem; }
-header a { font-size: 0.85rem; }
-header form { display: flex; }
-.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
-.signout-icon { display: none; }
-.signout-icon, .signout-icon * { pointer-events: none; }
 main {
   flex: 1;
   width: 100%;
@@ -2640,22 +2583,8 @@ button:focus-visible {
   outline-offset: 1px;
 }
 @media (max-width: 640px) {
-  header {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    row-gap: 0.4rem;
-    column-gap: 0.4rem;
-    padding: 0.5rem 0.6rem;
-  }
-  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
-  header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
   .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
-  #whoami { display: none; }
-  .signout-icon { display: inline-block; }
-  .signout-label { display: none; }
-  .signout { padding: 0.35rem 0.5rem; }
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
   /* The account a change is about is the column worth the width on a phone;
@@ -2703,7 +2632,7 @@ button:focus-visible {
         <polyline points="16 17 21 12 16 7"></polyline>
         <line x1="21" y1="12" x2="9" y2="12"></line>
       </svg>
-      <span class="signout-label">Log out</span>
+      <span class="signout-label">Sign out</span>
     </button>
   </form>
   <div id="custom-range" class="custom">
@@ -3623,34 +3552,14 @@ GOLD_PAGE = (
 <title>Guild Bank</title>
 <style>"""
     + _SHARED_STYLE
+    + _DASHBOARD_HEADER_STYLE
     + """
 body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
 }
-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.6rem 1rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-header h1 { font-size: 1.05rem; margin-right: 0.5rem; }
 .ranges { display: flex; gap: 0.25rem; }
-button {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.7rem;
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-button:hover { background: var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: var(--accent); border-color: var(--accent); }
 /* The date picker is a second header row that stays out of the way until the
@@ -3678,13 +3587,6 @@ button.active { background: var(--accent); border-color: var(--accent); }
   color-scheme: dark;
 }
 .custom .custom-error { color: var(--full); }
-.spacer { flex: 1; }
-#whoami { color: var(--muted); font-size: 0.85rem; }
-header a { font-size: 0.85rem; }
-header form { display: flex; }
-.signout { display: inline-flex; align-items: center; gap: 0.35rem; }
-.signout-icon { display: none; }
-.signout-icon, .signout-icon * { pointer-events: none; }
 main {
   flex: 1;
   width: 100%;
@@ -3831,22 +3733,8 @@ button:focus-visible {
   outline-offset: 1px;
 }
 @media (max-width: 640px) {
-  header {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
-    align-items: center;
-    row-gap: 0.4rem;
-    column-gap: 0.4rem;
-    padding: 0.5rem 0.6rem;
-  }
-  #brand { grid-column: 2; grid-row: 1; justify-self: center; }
-  header form { grid-column: 3; grid-row: 1; justify-self: end; }
   .ranges { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
   .custom { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
-  #whoami { display: none; }
-  .signout-icon { display: inline-block; }
-  .signout-label { display: none; }
-  .signout { padding: 0.35rem 0.5rem; }
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
   /* The balance after each movement is the column that gives way on a phone:
@@ -3877,7 +3765,7 @@ button:focus-visible {
         <polyline points="16 17 21 12 16 7"></polyline>
         <line x1="21" y1="12" x2="9" y2="12"></line>
       </svg>
-      <span class="signout-label">Log out</span>
+      <span class="signout-label">Sign out</span>
     </button>
   </form>
   <div id="custom-range" class="custom">
