@@ -1213,7 +1213,7 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
 - `/profit setkey` opens a private modal, checks the key with `/v2/tokeninfo`,
   and saves it only when the `tradingpost` permission is present. A
   route-restricted subtoken must allow the history buys, history sells, current
-  sells, and Trading Post delivery endpoints.
+  sells, and `/v2/commerce/delivery` endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
   window defaults to 30 days and accepts 1 through 90 UTC calendar dates,
   including today. If the web session has expired, Discord sign-in returns the

@@ -1157,3 +1157,23 @@ class TestProfitCommands:
         assert secret not in caplog.text
         reply = invoked.followup.send.await_args.args[0]
         assert secret not in reply
+
+    async def test_modal_names_the_delivery_route_when_rejecting_a_key(
+        self,
+    ) -> None:
+        bot = SimpleNamespace(
+            secrets=SecretRegistry(),
+            profit_service=SimpleNamespace(
+                validate_api_key=AsyncMock(return_value=False)
+            ),
+        )
+        modal = ProfitApiKeyModal(cast(Any, bot))
+        modal.api_key._value = "route-restricted-key"
+        invoked = interaction()
+
+        await modal.on_submit(cast(discord.Interaction, invoked))
+
+        reply = invoked.followup.send.await_args.args[0]
+        assert "all Trading Post transaction routes" in reply
+        assert f"`{DELIVERY_PATH}`" in reply
+        assert "subtoken URL restrictions" in reply

@@ -10,7 +10,7 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import send_interaction_notice
-from gw2bot.profit.api import ProfitApiError
+from gw2bot.profit.api import DELIVERY_PATH, ProfitApiError
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -72,8 +72,8 @@ class ProfitApiKeyModal(discord.ui.Modal, title="Save GW2 Profit API Key"):
             await send_interaction_notice(
                 interaction,
                 "That key must grant the `tradingpost` permission and access "
-                "to all Trading Post transaction routes. Check any subtoken "
-                "URL restrictions.",
+                "to all Trading Post transaction routes plus "
+                f"`{DELIVERY_PATH}`. Check any subtoken URL restrictions.",
             )
             return
         try:
