@@ -287,6 +287,14 @@ main {
 }
 .tg-daynum { font-size: 1rem; font-weight: 600; }
 .tg-head.today .tg-dow, .tg-head.today .tg-daynum { color: var(--accent); }
+.tg-head.clickable {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
 .tg-hour { height: var(--hour-h); border-top: 1px solid var(--border); }
 .tg-gutter .tg-hour {
   border-top-color: transparent;
@@ -305,16 +313,18 @@ main {
 .tg-col.today { background: var(--panel-2); }
 .chip.tg-ev {
   position: absolute;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
+  /* A short event has room for only one line. Keep the title beside the time
+     so both survive the minimum-height clamp. */
+  flex-direction: row;
+  align-items: center;
+  gap: 0.3rem;
   margin: 0;
   padding: 0.1rem 0.3rem;
   line-height: 1.25;
   z-index: 1;
 }
 .chip.tg-ev .time { font-size: 0.7rem; }
-.chip.tg-ev .name { max-width: 100%; }
+.chip.tg-ev .name { min-width: 0; max-width: 100%; }
 .tg-now {
   position: absolute;
   left: 0;
@@ -346,17 +356,44 @@ main {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.25rem;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   min-height: 0;
+  cursor: pointer;
 }
 .cell.outside { opacity: 0.45; }
 .cell.today { border-color: var(--accent); }
+.day-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
 .daynum {
   font-size: 0.75rem;
   color: var(--muted);
   padding: 0 0.2rem 0.15rem;
 }
+.more {
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0 0.2rem 0.15rem;
+  white-space: nowrap;
+}
 .cell.today .daynum { color: var(--accent); font-weight: 700; }
+.cell-events { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .chip {
   display: flex;
   align-items: center;
@@ -373,7 +410,7 @@ main {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: default;
+  cursor: pointer;
 }
 .chip .time { color: var(--muted); flex-shrink: 0; }
 .chip .name { overflow: hidden; text-overflow: ellipsis; }
@@ -459,7 +496,7 @@ main {
 .badge.over { background: var(--over); }
 .badge.scheduled { background: var(--scheduled); }
 #status { color: var(--muted); font-size: 0.85rem; padding: 0.5rem 0.2rem; }
-button:focus-visible, .cell:focus-visible, .chip:focus-visible {
+button:focus-visible, .chip:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -505,7 +542,6 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   .cell { padding: 0.1rem; border-radius: 5px; overflow: hidden; }
   .daynum { font-size: 0.72rem; padding: 0 0.15rem 0.1rem; }
   .dow { font-size: 0.72rem; padding: 0.15rem 0; }
-  .cell.tappable { cursor: pointer; }
   #grid.month .chip {
     font-size: 0.62rem;
     padding: 0.05rem 0.2rem;
@@ -559,6 +595,9 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   var statusLine = document.getElementById("status");
   var state = { view: "month", anchor: startOfDay(new Date()) };
   var entries = [];
+  var pinnedChip = null;
+  var tooltipChip = null;
+  var collapseFrame = 0;
 
   // A single breakpoint drives every behavioural difference on small screens:
   // the 3-day week, single-letter month, tap-to-open days and swipe steps.
@@ -770,6 +809,9 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     if (entry.projected) { chip.classList.add("projected"); }
     chip.setAttribute("data-i", String(index));
     chip.setAttribute("tabindex", "0");
+    chip.setAttribute("role", "button");
+    chip.setAttribute("aria-haspopup", "true");
+    chip.setAttribute("aria-expanded", "false");
     if (!hideTime) {
       chip.appendChild(el("span", "time", formatTime(start)));
     }
@@ -777,9 +819,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     return chip;
   }
 
-  // On mobile the whole month cell is the tap target: tapping it opens that
-  // day, where the full breakdown lives. Times are dropped and the chips
-  // become plain labels so a whole month fits without scrolling.
+  // Month cells and week headers open the complete day breakdown.
   function openDay(date) {
     state.view = "day";
     state.anchor = startOfDay(date);
@@ -787,11 +827,9 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     refresh();
   }
 
-  // On mobile the cell's explicit aria-label overrides its subtree, so the
-  // chips' titles never reach assistive tech. The day's events therefore have
-  // to ride along in the label itself, or a screen-reader user would hear only
-  // the date for every one of the 42 cells and could not tell which days hold
-  // events without opening each one.
+  // On mobile the chips are hidden from assistive tech, so the day button's
+  // label includes their titles. A screen-reader user can therefore tell
+  // which dates hold events without opening all 42 cells.
   function monthCellLabel(date, dayEntries) {
     var dateName = date.toLocaleDateString(
       undefined, { weekday: "long", month: "long", day: "numeric" });
@@ -815,21 +853,17 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
       var start = new Date(entry.start_epoch * 1000);
       return start >= date && start < next;
     });
-    if (mobile) {
-      cell.classList.add("tappable");
-      cell.setAttribute("role", "button");
-      cell.setAttribute("tabindex", "0");
-      cell.setAttribute("aria-label", monthCellLabel(date, dayEntries));
-      var target = date;
-      cell.addEventListener("click", function () { openDay(target); });
-      cell.addEventListener("keydown", function (event) {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          openDay(target);
-        }
-      });
-    }
-    cell.appendChild(el("div", "daynum", String(date.getDate())));
+    var target = date;
+    var dayLink = el("button", "day-link");
+    dayLink.type = "button";
+    dayLink.setAttribute("aria-label", "Open " + monthCellLabel(
+      date, dayEntries));
+    dayLink.appendChild(el("span", "daynum", String(date.getDate())));
+    var more = el("span", "more");
+    more.hidden = true;
+    dayLink.appendChild(more);
+    cell.appendChild(dayLink);
+    var eventList = el("div", "cell-events");
     entries.forEach(function (entry, index) {
       var start = new Date(entry.start_epoch * 1000);
       if (start >= date && start < next) {
@@ -841,10 +875,57 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
           chip.removeAttribute("tabindex");
           chip.setAttribute("aria-hidden", "true");
         }
-        cell.appendChild(chip);
+        eventList.appendChild(chip);
       }
     });
+    cell.appendChild(eventList);
+    // A chip click controls its details popover. Every other point in the
+    // cell, including the day number and +N overflow marker, opens the day.
+    cell.addEventListener("click", function (event) {
+      if (event.target.closest(".chip")) { return; }
+      openDay(target);
+    });
     return cell;
+  }
+
+  // Month row heights change with the viewport. Measure each event list after
+  // layout, hide only the chips that do not fit, and expose their count beside
+  // the day number instead of allowing a nested scrollbar.
+  function collapseMonthCell(cell) {
+    var eventList = cell.querySelector(".cell-events");
+    var more = cell.querySelector(".more");
+    var chips = Array.prototype.slice.call(
+      eventList.querySelectorAll(".chip"));
+    chips.forEach(function (chip) { chip.hidden = false; });
+    more.hidden = true;
+    var hiddenCount = 0;
+    while (chips.length - hiddenCount > 0 &&
+        eventList.scrollHeight > eventList.clientHeight + 1) {
+      hiddenCount += 1;
+      var hiddenChip = chips[chips.length - hiddenCount];
+      if (hiddenChip === pinnedChip) { unpinTooltip(); }
+      hiddenChip.hidden = true;
+    }
+    if (hiddenCount) {
+      more.textContent = "+" + hiddenCount;
+      more.title = hiddenCount + (hiddenCount === 1
+        ? " more event"
+        : " more events");
+      more.hidden = false;
+    }
+  }
+
+  function collapseMonthCells() {
+    if (state.view !== "month") { return; }
+    grid.querySelectorAll(".cell").forEach(collapseMonthCell);
+  }
+
+  function scheduleMonthCollapse() {
+    if (collapseFrame) { cancelAnimationFrame(collapseFrame); }
+    collapseFrame = requestAnimationFrame(function () {
+      collapseFrame = 0;
+      collapseMonthCells();
+    });
   }
 
   var dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -972,9 +1053,16 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     return gutter;
   }
 
-  function dayHeader(date, longName) {
-    var head = el("div", "tg-head");
+  function dayHeader(date, longName, clickable) {
+    var head = el(clickable ? "button" : "div", "tg-head");
     if (sameDay(date, new Date())) { head.classList.add("today"); }
+    if (clickable) {
+      head.type = "button";
+      head.classList.add("clickable");
+      head.setAttribute("aria-label", "Open " + date.toLocaleDateString(
+        undefined, { weekday: "long", month: "long", day: "numeric" }));
+      head.addEventListener("click", function () { openDay(date); });
+    }
     head.appendChild(el("div", "tg-dow", date.toLocaleDateString(
       undefined, { weekday: longName ? "long" : "short" })));
     head.appendChild(el("div", "tg-daynum", String(date.getDate())));
@@ -1006,7 +1094,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     }
     grid.appendChild(el("div", "tg-corner"));
     dates.forEach(function (date) {
-      grid.appendChild(dayHeader(date, days === 1));
+      grid.appendChild(dayHeader(date, days === 1, days > 1));
     });
     grid.appendChild(hourGutter());
     var earliest = null;
@@ -1030,7 +1118,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
       ? "month"
       : "timegrid " + state.view;
     grid.replaceChildren();
-    hideTooltip();
+    unpinTooltip();
     var range = rangeFor();
     if (state.view === "month") {
       var mobile = isMobile();
@@ -1044,6 +1132,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
         grid.appendChild(buildCell(
           addDays(range.start, offset), state.anchor.getMonth()));
       }
+      scheduleMonthCollapse();
     } else {
       renderTimeGrid(range, state.view === "day" ? 1 : weekSpan());
     }
@@ -1145,6 +1234,11 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   function showTooltip(chip) {
     var entry = entries[Number(chip.getAttribute("data-i"))];
     if (!entry) { return; }
+    if (tooltipChip && tooltipChip !== chip) {
+      tooltipChip.setAttribute("aria-expanded", "false");
+    }
+    tooltipChip = chip;
+    chip.setAttribute("aria-expanded", "true");
     tooltipContent(entry);
     tooltip.style.display = "block";
     var rect = chip.getBoundingClientRect();
@@ -1160,21 +1254,63 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
   }
   function hideTooltip() {
     tooltip.style.display = "none";
+    if (tooltipChip) {
+      tooltipChip.setAttribute("aria-expanded", "false");
+      tooltipChip = null;
+    }
+  }
+  function pinTooltip(chip) {
+    if (pinnedChip && pinnedChip !== chip) {
+      pinnedChip.classList.remove("pinned");
+    }
+    pinnedChip = chip;
+    pinnedChip.classList.add("pinned");
+    showTooltip(chip);
+  }
+  function unpinTooltip() {
+    if (pinnedChip) { pinnedChip.classList.remove("pinned"); }
+    pinnedChip = null;
+    hideTooltip();
   }
 
   grid.addEventListener("mouseover", function (event) {
     var chip = event.target.closest(".chip");
-    if (chip) { showTooltip(chip); }
+    if (chip && !chip.contains(event.relatedTarget) && !pinnedChip) {
+      showTooltip(chip);
+    }
   });
   grid.addEventListener("mouseout", function (event) {
-    if (event.target.closest(".chip")) { hideTooltip(); }
+    var chip = event.target.closest(".chip");
+    if (chip && !chip.contains(event.relatedTarget) && !pinnedChip) {
+      hideTooltip();
+    }
   });
   grid.addEventListener("focusin", function (event) {
     var chip = event.target.closest(".chip");
-    if (chip) { showTooltip(chip); }
+    if (chip && !pinnedChip) { showTooltip(chip); }
   });
   grid.addEventListener("focusout", function (event) {
-    if (event.target.closest(".chip")) { hideTooltip(); }
+    if (event.target.closest(".chip") && !pinnedChip) { hideTooltip(); }
+  });
+  grid.addEventListener("click", function (event) {
+    var chip = event.target.closest(".chip");
+    if (!chip) { return; }
+    event.stopPropagation();
+    if (pinnedChip === chip) {
+      unpinTooltip();
+    } else {
+      pinTooltip(chip);
+    }
+  });
+  grid.addEventListener("keydown", function (event) {
+    var chip = event.target.closest(".chip");
+    if (chip && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      chip.click();
+    }
+  });
+  document.addEventListener("click", function () {
+    if (pinnedChip) { unpinTooltip(); }
   });
 
   // A horizontal swipe steps to the previous or next set of events. The
@@ -1270,6 +1406,7 @@ button:focus-visible, .cell:focus-visible, .chip:focus-visible {
     syncViewButtons();
     refresh();
   });
+  window.addEventListener("resize", scheduleMonthCollapse);
 
   fetch("/api/me")
     .then(function (response) {

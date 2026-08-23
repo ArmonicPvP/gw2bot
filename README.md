@@ -1163,9 +1163,13 @@ parameters to `--user 99:100`.
 An optional website shows the guild event calendar in day, week, and month
 views. Events appear as one-line entries on their day, and hovering over an
 entry shows the full details: category, description, times, duration, leader,
-status, and roster counts. Future occurrences of repeating events that the
-scheduler has not posted yet appear with dashed borders as projections, and
-finished events stay visible dimmed on past days.
+status, and roster counts. Clicking an event pins those details until the next
+click; clicking a different event switches the pinned details to it. Day
+headings in week view and every date in month view open that date's day view.
+When a month cell cannot fit all of its events, it shows a clickable `+N`
+beside the date instead of a scrollbar. Future occurrences of repeating events
+that the scheduler has not posted yet appear with dashed borders as
+projections, and finished events stay visible dimmed on past days.
 
 Access requires signing in with Discord. The site only requests the `identify`
 OAuth scope and then checks with the bot that the signed-in user is a member
