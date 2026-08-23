@@ -379,6 +379,8 @@ main {
   padding: 0;
   cursor: pointer;
 }
+.day-link:hover, .more:hover { background: transparent; }
+.day-link:hover .daynum { color: var(--accent); }
 .daynum {
   font-size: 0.75rem;
   color: var(--muted);

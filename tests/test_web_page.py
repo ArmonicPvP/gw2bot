@@ -371,6 +371,14 @@ class TestCalendarInteraction:
             CALENDAR_PAGE
         )
 
+    def test_month_date_hover_highlights_only_the_number(self) -> None:
+        assert ".day-link:hover, .more:hover { background: transparent; }" in (
+            CALENDAR_PAGE
+        )
+        assert ".day-link:hover .daynum { color: var(--accent); }" in (
+            CALENDAR_PAGE
+        )
+
     def test_event_details_can_be_pinned_and_replaced(self) -> None:
         assert "var pinnedChip = null;" in CALENDAR_PAGE
         assert "function pinTooltip(chip)" in CALENDAR_PAGE
