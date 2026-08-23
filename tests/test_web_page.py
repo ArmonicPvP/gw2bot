@@ -358,6 +358,10 @@ class TestCalendarInteraction:
         )
         assert 'more.textContent = "+" + hiddenCount;' in CALENDAR_PAGE
         assert "scheduleMonthCollapse();" in CALENDAR_PAGE
+        # .chip's display:flex would otherwise keep hidden chips in layout,
+        # making the measuring loop count every event rather than only those
+        # that do not fit.
+        assert ".chip[hidden] { display: none; }" in CALENDAR_PAGE
 
     def test_month_dates_and_week_headers_open_day_view(self) -> None:
         assert 'var cellHead = el("div", "cell-head");' in CALENDAR_PAGE
