@@ -345,9 +345,12 @@ class TestCalendarBrowserTime:
 
 class TestCalendarInteraction:
     def test_month_overflow_becomes_a_count_without_a_scrollbar(self) -> None:
-        assert ".cell-events { flex: 1 1 auto; min-height: 0; overflow: hidden; }" in (
+        assert ".cell-events { min-height: 0; overflow: hidden; }" in (
             CALENDAR_PAGE
         )
+        # The event area has a content-independent grid height. Hiding one chip
+        # must not shrink the area and make the loop hide every remaining chip.
+        assert "grid-template-rows: auto minmax(0, 1fr);" in CALENDAR_PAGE
         assert "function collapseMonthCell(cell)" in CALENDAR_PAGE
         assert (
             "eventList.scrollHeight > eventList.clientHeight + 1"
@@ -357,10 +360,12 @@ class TestCalendarInteraction:
         assert "scheduleMonthCollapse();" in CALENDAR_PAGE
 
     def test_month_dates_and_week_headers_open_day_view(self) -> None:
+        assert 'var cellHead = el("div", "cell-head");' in CALENDAR_PAGE
         assert 'var dayLink = el("button", "day-link");' in CALENDAR_PAGE
-        assert 'if (event.target.closest(".chip")) { return; }' in (
-            CALENDAR_PAGE
-        )
+        assert 'var more = el("button", "more");' in CALENDAR_PAGE
+        assert 'dayLink.addEventListener("click", function () {' in CALENDAR_PAGE
+        assert 'more.addEventListener("click", function () {' in CALENDAR_PAGE
+        assert 'cell.addEventListener("click"' not in CALENDAR_PAGE
         assert "dayHeader(date, days === 1, days > 1)" in CALENDAR_PAGE
         assert 'head.addEventListener("click", function () { openDay(date); });' in (
             CALENDAR_PAGE

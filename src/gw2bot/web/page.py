@@ -356,22 +356,21 @@ main {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.25rem;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   min-height: 0;
-  cursor: pointer;
 }
 .cell.outside { opacity: 0.45; }
 .cell.today { border-color: var(--accent); }
-.day-link {
+.cell-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.25rem;
-  flex: 0 0 auto;
-  width: 100%;
   min-width: 0;
+}
+.day-link {
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -386,6 +385,9 @@ main {
   padding: 0 0.2rem 0.15rem;
 }
 .more {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--accent);
   font-size: 0.7rem;
   font-weight: 600;
@@ -393,7 +395,7 @@ main {
   white-space: nowrap;
 }
 .cell.today .daynum { color: var(--accent); font-weight: 700; }
-.cell-events { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.cell-events { min-height: 0; overflow: hidden; }
 .chip {
   display: flex;
   align-items: center;
@@ -854,23 +856,28 @@ button:focus-visible, .chip:focus-visible {
       return start >= date && start < next;
     });
     var target = date;
+    var cellHead = el("div", "cell-head");
     var dayLink = el("button", "day-link");
     dayLink.type = "button";
     dayLink.setAttribute("aria-label", "Open " + monthCellLabel(
       date, dayEntries));
     dayLink.appendChild(el("span", "daynum", String(date.getDate())));
-    var more = el("span", "more");
+    dayLink.addEventListener("click", function () { openDay(target); });
+    cellHead.appendChild(dayLink);
+    var more = el("button", "more");
+    more.type = "button";
     more.hidden = true;
-    dayLink.appendChild(more);
-    cell.appendChild(dayLink);
+    more.addEventListener("click", function () { openDay(target); });
+    cellHead.appendChild(more);
+    cell.appendChild(cellHead);
     var eventList = el("div", "cell-events");
     entries.forEach(function (entry, index) {
       var start = new Date(entry.start_epoch * 1000);
       if (start >= date && start < next) {
         var chip = chipFor(entry, index, mobile);
-        // The cell handles the tap on mobile and its aria-label already names
-        // these events, so on mobile the chip is neither a focus stop nor a
-        // separate node exposed to assistive tech.
+        // The date button's label already names these events on mobile, so the
+        // chip is neither a focus stop nor a separate node exposed to
+        // assistive tech there.
         if (mobile) {
           chip.removeAttribute("tabindex");
           chip.setAttribute("aria-hidden", "true");
@@ -879,12 +886,6 @@ button:focus-visible, .chip:focus-visible {
       }
     });
     cell.appendChild(eventList);
-    // A chip click controls its details popover. Every other point in the
-    // cell, including the day number and +N overflow marker, opens the day.
-    cell.addEventListener("click", function (event) {
-      if (event.target.closest(".chip")) { return; }
-      openDay(target);
-    });
     return cell;
   }
 
@@ -911,6 +912,7 @@ button:focus-visible, .chip:focus-visible {
       more.title = hiddenCount + (hiddenCount === 1
         ? " more event"
         : " more events");
+      more.setAttribute("aria-label", more.title + "; open day view");
       more.hidden = false;
     }
   }
