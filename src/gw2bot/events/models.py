@@ -13,6 +13,7 @@ EMOJI_RAID = "<:raid:1525431773498970172>"
 EMOJI_STRIKE = "<:strike:1525431254340866171>"
 EMOJI_WVW = "<:wvw:1525431137982353428>"
 EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
+EMOJI_DUNGEON = "🏰"
 EMOJI_OPEN_WORLD = "🌍"
 EMOJI_GENERAL = "📋"
 
@@ -21,6 +22,7 @@ class EventCategory(StrEnum):
     RAID = "Raid"
     STRIKE = "Strike"
     FRACTAL = "Fractal"
+    DUNGEON = "Dungeon"
     WVW = "World vs. World"
     OPEN_WORLD = "Open World"
     GENERAL = "General"
@@ -30,6 +32,7 @@ CATEGORY_EMOJI: dict[EventCategory, str] = {
     EventCategory.RAID: EMOJI_RAID,
     EventCategory.STRIKE: EMOJI_STRIKE,
     EventCategory.FRACTAL: EMOJI_FRACTAL,
+    EventCategory.DUNGEON: EMOJI_DUNGEON,
     EventCategory.WVW: EMOJI_WVW,
     EventCategory.OPEN_WORLD: EMOJI_OPEN_WORLD,
     EventCategory.GENERAL: EMOJI_GENERAL,
@@ -169,6 +172,15 @@ CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
         alacrity=1,
         required_boon_healers=1,
         required_boon_dps=1,
+    ),
+    EventCategory.DUNGEON: CategoryCapacity(
+        total=5,
+        healers=0,
+        dps=5,
+        quickness=1,
+        alacrity=1,
+        required_boon_healers=0,
+        required_boon_dps=2,
     ),
     EventCategory.WVW: CategoryCapacity(50, None, None, None, None),
     # Open world squads are the same shape as WvW: a plain 50-seat headcount

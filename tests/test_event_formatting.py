@@ -130,6 +130,17 @@ class TestEventCategories:
         assert not capacity.has_roles
         assert capacity.total is None
 
+    def test_dungeon_has_five_dps_with_boon_dps_slots(self) -> None:
+        capacity = CATEGORY_CAPACITIES[EventCategory.DUNGEON]
+
+        assert capacity.total == 5
+        assert capacity.healers == 0
+        assert capacity.dps == 5
+        assert capacity.quickness == 1
+        assert capacity.alacrity == 1
+        assert capacity.required_boon_healers == 0
+        assert capacity.required_boon_dps == 2
+
 
 class TestParseEventDatetime:
     def test_interprets_input_in_the_configured_timezone(self) -> None:
