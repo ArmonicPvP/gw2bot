@@ -265,6 +265,18 @@ class TestCalendarTimeGrid:
             in CALENDAR_PAGE
         )
 
+    def test_short_events_keep_the_time_and_title_on_one_line(self) -> None:
+        assert (
+            ".chip.tg-ev {\n"
+            "  position: absolute;\n"
+            "  /* A short event has room for only one line. Keep the title "
+            in CALENDAR_PAGE
+        )
+        assert "  flex-direction: row;" in CALENDAR_PAGE
+        assert ".chip.tg-ev .name { min-width: 0; max-width: 100%; }" in (
+            CALENDAR_PAGE
+        )
+
     def test_late_events_are_clipped_to_the_day_boundary(self) -> None:
         # The minimum-height floor in layoutEnd can exceed MINUTES_PER_DAY for
         # an event that starts in the last few minutes of the day. The rendered
@@ -331,6 +343,42 @@ class TestCalendarBrowserTime:
         assert 'id="tz"' not in CALENDAR_PAGE
 
 
+class TestCalendarInteraction:
+    def test_month_overflow_becomes_a_count_without_a_scrollbar(self) -> None:
+        assert ".cell-events { flex: 1 1 auto; min-height: 0; overflow: hidden; }" in (
+            CALENDAR_PAGE
+        )
+        assert "function collapseMonthCell(cell)" in CALENDAR_PAGE
+        assert (
+            "eventList.scrollHeight > eventList.clientHeight + 1"
+            in CALENDAR_PAGE
+        )
+        assert 'more.textContent = "+" + hiddenCount;' in CALENDAR_PAGE
+        assert "scheduleMonthCollapse();" in CALENDAR_PAGE
+
+    def test_month_dates_and_week_headers_open_day_view(self) -> None:
+        assert 'var dayLink = el("button", "day-link");' in CALENDAR_PAGE
+        assert 'if (event.target.closest(".chip")) { return; }' in (
+            CALENDAR_PAGE
+        )
+        assert "dayHeader(date, days === 1, days > 1)" in CALENDAR_PAGE
+        assert 'head.addEventListener("click", function () { openDay(date); });' in (
+            CALENDAR_PAGE
+        )
+
+    def test_event_details_can_be_pinned_and_replaced(self) -> None:
+        assert "var pinnedChip = null;" in CALENDAR_PAGE
+        assert "function pinTooltip(chip)" in CALENDAR_PAGE
+        assert "if (pinnedChip === chip)" in CALENDAR_PAGE
+        assert "pinTooltip(chip);" in CALENDAR_PAGE
+        assert 'document.addEventListener("click", function () {' in (
+            CALENDAR_PAGE
+        )
+        assert "if (chip && !pinnedChip) { showTooltip(chip); }" in (
+            CALENDAR_PAGE
+        )
+
+
 class TestCalendarMobile:
     def test_a_single_breakpoint_drives_mobile_behaviour(self) -> None:
         assert 'window.matchMedia("(max-width: 640px)")' in CALENDAR_PAGE
@@ -364,12 +412,12 @@ class TestCalendarMobile:
         )
 
     def test_month_hides_times_and_opens_the_day_on_tap(self) -> None:
-        # chipFor drops the time span on mobile month cells, and tapping a cell
+        # chipFor drops the time span on mobile month cells, and the date button
         # opens that day.
         assert "chipFor(entry, index, mobile)" in CALENDAR_PAGE
         assert "if (!hideTime) {" in CALENDAR_PAGE
         assert "function openDay(date)" in CALENDAR_PAGE
-        assert 'cell.setAttribute("role", "button");' in CALENDAR_PAGE
+        assert 'var dayLink = el("button", "day-link");' in CALENDAR_PAGE
 
     def test_horizontal_swipes_step_the_period(self) -> None:
         assert 'scroller.addEventListener("touchstart"' in CALENDAR_PAGE
