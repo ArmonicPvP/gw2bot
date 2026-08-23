@@ -46,6 +46,7 @@ from gw2bot.events.models import (
     CATEGORY_EMOJI,
     MAX_PING_ROLES,
     PING_ROLE_PREFIX,
+    CategoryCapacity,
     Event,
     EventCategory,
     EventOccurrence,
@@ -2375,6 +2376,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
     def __init__(self, event: Event, signups: list[EventSignup]):
         # The same labelling as the member-facing role picker, so a commander
         # can see which roles are already full before choosing.
+        supported = _supported_roles(event.capacity)
         available = set(fitting_roles(event.capacity, signups))
         waitlist_only = not available
         options = [
@@ -2386,6 +2388,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
                 emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
+            if role in supported
         ]
         super().__init__(
             placeholder="Pick the role to add them as",
@@ -5357,9 +5360,15 @@ def _role_pick_label(
     return role.value
 
 
+def _supported_roles(capacity: CategoryCapacity) -> frozenset[EventRole]:
+    """Return roles that can ever fit this category's composition."""
+    return frozenset(fitting_roles(capacity, []))
+
+
 class RolePickSelect(discord.ui.Select["RolePickView"]):
     def __init__(self, flow: SignupFlow):
         signups = flow.roster_for_labels()
+        supported = _supported_roles(flow.event.capacity)
         available = set(fitting_roles(flow.event.capacity, signups))
         waitlist_only = not available
         options = [
@@ -5371,6 +5380,7 @@ class RolePickSelect(discord.ui.Select["RolePickView"]):
                 emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
+            if role in supported
         ]
         super().__init__(placeholder="Pick your role", options=options)
 
@@ -5406,6 +5416,7 @@ class RolePickView(discord.ui.View):
 
 class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
     def __init__(self, flow: SignupFlow):
+        supported = _supported_roles(flow.event.capacity)
         options = [
             discord.SelectOption(
                 label=role.value,
@@ -5413,7 +5424,7 @@ class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
                 emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
-            if role != flow.role
+            if role != flow.role and role in supported
         ]
         super().__init__(
             placeholder="Pick any flex roles",

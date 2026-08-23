@@ -60,6 +60,7 @@ from gw2bot.events.views import (
     EventScheduleModal,
     EventSignOutButton,
     EventSignUpButton,
+    FlexRolesSelect,
     ADD_SELECT_MAX_MEMBERS,
     AddSignupsRoleSelect,
     AddSignupsRoleView,
@@ -1530,6 +1531,45 @@ class TestRolePickSelect:
         assert labels[EventRole.QUICKNESS_DPS.value] == "Quickness DPS (full)"
         assert labels[EventRole.ALACRITY_HEAL.value] == "Alacrity Heal"
         assert labels[EventRole.DPS.value] == "Just DPS"
+
+    def test_dungeon_pickers_exclude_healer_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.DUNGEON,
+            title="Dungeon",
+            description="Bring damage.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        dps_roles = {
+            EventRole.DPS.value,
+            EventRole.QUICKNESS_DPS.value,
+            EventRole.ALACRITY_DPS.value,
+        }
+
+        role_values = {option.value for option in RolePickSelect(flow).options}
+        assert role_values == dps_roles
+
+        flow.role = EventRole.DPS
+        flex_values = {
+            option.value for option in FlexRolesSelect(flow).options
+        }
+        assert flex_values == dps_roles - {EventRole.DPS.value}
+
+        add_values = {
+            option.value
+            for option in AddSignupsRoleSelect(event, []).options
+        }
+        assert add_values == dps_roles
 
     def test_boon_seat_held_by_a_flexer_is_not_labelled_full(
         self,
