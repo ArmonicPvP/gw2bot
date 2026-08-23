@@ -416,6 +416,10 @@ main {
   text-overflow: ellipsis;
   cursor: pointer;
 }
+/* The month overflow pass toggles the hidden attribute while measuring. This
+   explicit rule must outrank .chip's display:flex or every chip stays in the
+   layout and the +N counter incorrectly reaches the day's total. */
+.chip[hidden] { display: none; }
 .chip .time { color: var(--muted); flex-shrink: 0; }
 .chip .name { overflow: hidden; text-overflow: ellipsis; }
 /* The stripe mirrors the Discord embed color for the event's status. */
