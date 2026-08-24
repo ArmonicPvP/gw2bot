@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,6 +35,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
 )
 from gw2bot.events.store import EventStore
+from gw2bot.logging_setup import SecretRegistry, configure_logging
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
     PING_ROLE_OPTION_LIMIT,
@@ -2060,6 +2062,57 @@ class TestAutoSignupPrompt:
 
         assert "automatically" in kwargs["content"]
         assert isinstance(kwargs["view"], AutoSignupChoiceView)
+
+    async def test_finalize_normalizes_a_role_against_a_changed_category(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        flow.role = EventRole.QUICKNESS_HEAL
+        event = flow.event
+        store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        secret = "Normalized signup roles after"
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret,)))
+
+            await self.finalize_and_get_kwargs(flow)
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        signup = store.get_signup(flow.occurrence.occurrence_id, 21)
+        assert signup is not None
+        assert not signup.waitlisted
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        assert flow.event.category is EventCategory.DUNGEON
+        assert "[REDACTED]" in console
+        assert secret not in console
 
     async def test_prompts_again_after_a_plain_no(
         self,

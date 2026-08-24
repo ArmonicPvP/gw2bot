@@ -5071,11 +5071,49 @@ class SignupFlow:
         else:
             await interaction.response.defer(ephemeral=True, thinking=True)
             edit = interaction.edit_original_response
+        # A picker can remain open while a commander edits the event. Re-read
+        # both records immediately before seating so the role is validated
+        # against the current category rather than the stale picker snapshot.
+        event = self.bot.event_store.get_event(self.event.event_id)
+        occurrence = self.bot.event_store.get_occurrence(
+            self.occurrence.occurrence_id
+        )
+        if event is None or occurrence is None:
+            await edit(content="This event no longer exists.", view=None)
+            return
+        self.event = event
+        self.occurrence = occurrence
+        previous_role = self.role
+        previous_flex_roles = self.flex_roles
+        if event.capacity.has_roles and self.role is not None:
+            self.role, self.flex_roles = normalize_stored_roles(
+                event.capacity,
+                self.role,
+                self.flex_roles,
+            )
+        elif not event.capacity.has_roles:
+            self.role = None
+            self.flex_roles = ()
+        if (
+            self.role is not previous_role
+            or self.flex_roles != previous_flex_roles
+        ):
+            LOGGER.debug(
+                "Normalized signup roles after an event changed category; "
+                "event_id=%s occurrence_id=%s user_id=%s category=%s "
+                "normalized_role=%s normalized_flex_count=%s",
+                event.event_id,
+                occurrence.occurrence_id,
+                self.discord_user_id,
+                event.category.value,
+                self.role.value if self.role is not None else None,
+                len(self.flex_roles),
+            )
         try:
             signup = await complete_signup(
                 self.bot,
-                self.event,
-                self.occurrence,
+                event,
+                occurrence,
                 self.discord_user_id,
                 self.role,
                 self.flex_roles,
