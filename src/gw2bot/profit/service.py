@@ -13,6 +13,7 @@ from gw2bot.profit.api import (
     ProfitApiError,
 )
 from gw2bot.profit.models import (
+    MIN_FLIP_QUANTITY,
     ProfitReport,
     Transaction,
     calculate_realized_profit,
@@ -92,6 +93,7 @@ class ProfitService:
             calculate_realized_profit,
             buys,
             sells,
+            minimum_flip_quantity=MIN_FLIP_QUANTITY,
         )
         unrealized = await asyncio.to_thread(
             calculate_unrealized_profit,

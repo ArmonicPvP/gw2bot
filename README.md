@@ -1236,8 +1236,11 @@ projected profit for unmatched buys currently listed for sale, and the coins
 currently awaiting pickup from the Trading Post. Coin amounts account for the
 Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
-the original profit bot. Click any column heading in the three detail tables to
-sort it; click the same heading again to reverse the order. The totals remain
+the original profit bot. An item counts as a flip only after at least five units
+have been bought and then sold; items with fewer than five matched units and
+sales made before a purchase are excluded. Click any column heading in the
+three detail tables to sort it; click the same heading again to reverse the
+order. The totals remain
 pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
 unit-weighted median time from purchase to sale and its signed percentage of

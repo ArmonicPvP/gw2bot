@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 
 LOGGER = logging.getLogger(__name__)
 
+MIN_FLIP_QUANTITY = 5
+
 
 @dataclass(frozen=True, slots=True)
 class Transaction:
@@ -189,8 +191,12 @@ def allocated_net_revenue(
 def calculate_realized_profit(
     buys: list[Transaction],
     sells: list[Transaction],
+    *,
+    minimum_flip_quantity: int = 1,
 ) -> RealizedProfit:
     """Match sales to earlier purchases FIFO, mirroring the original bot."""
+    if minimum_flip_quantity <= 0:
+        raise ValueError("minimum_flip_quantity must be positive")
     events_by_item: dict[int, list[_Event]] = defaultdict(list)
     for transaction in buys:
         events_by_item[transaction.item_id].append(
@@ -218,6 +224,7 @@ def calculate_realized_profit(
     total_net_revenue = 0
     total_profit = 0
     total_matched_quantity = 0
+    excluded_items = 0
 
     for item_id, events in events_by_item.items():
         events.sort(
@@ -228,6 +235,7 @@ def calculate_realized_profit(
         )
         buy_lots: deque[_MutableLot] = deque()
         item = _Totals()
+        item_days: dict[str, _Totals] = defaultdict(_Totals)
         holding_durations: list[tuple[float, int]] = []
 
         for event in events:
@@ -243,7 +251,11 @@ def calculate_realized_profit(
 
             sell_remaining = event.quantity
             sell_matched = 0
-            while sell_remaining > 0 and buy_lots:
+            while (
+                sell_remaining > 0
+                and buy_lots
+                and buy_lots[0].occurred_at < event.occurred_at
+            ):
                 buy_lot = buy_lots[0]
                 matched = min(sell_remaining, buy_lot.remaining)
                 cost = buy_lot.unit_price * matched
@@ -269,7 +281,7 @@ def calculate_realized_profit(
                 item.profit += profit
 
                 sold_day = event.occurred_at.date().isoformat()
-                day = day_totals[sold_day]
+                day = item_days[sold_day]
                 day.matched_quantity += matched
                 day.cost += cost
                 day.net_revenue += net_revenue
@@ -286,10 +298,14 @@ def calculate_realized_profit(
             for lot in buy_lots
             if lot.remaining > 0
         )
+        # A flip needs at least five units bought and subsequently sold. FIFO
+        # matching supplies both sides of that condition and necessarily
+        # rejects sales which happened before the first available purchase.
+        if item.matched_quantity < minimum_flip_quantity:
+            excluded_items += 1
+            continue
         if remaining_lots:
             unmatched[item_id] = remaining_lots
-        if item.matched_quantity == 0:
-            continue
         item_totals[item_id] = ItemProfit(
             item.matched_quantity,
             item.cost,
@@ -301,6 +317,12 @@ def calculate_realized_profit(
         total_cost += item.cost
         total_net_revenue += item.net_revenue
         total_profit += item.profit
+        for sold_day, item_day in item_days.items():
+            day = day_totals[sold_day]
+            day.matched_quantity += item_day.matched_quantity
+            day.cost += item_day.cost
+            day.net_revenue += item_day.net_revenue
+            day.profit += item_day.profit
 
     result = RealizedProfit(
         items=item_totals,
@@ -321,12 +343,13 @@ def calculate_realized_profit(
     )
     LOGGER.debug(
         "Calculated realized Trading Post profit; buys=%s sells=%s "
-        "items=%s days=%s matched=%s",
+        "items=%s days=%s matched=%s excluded_items=%s",
         len(buys),
         len(sells),
         len(result.items),
         len(result.days),
         result.total_matched_quantity,
+        excluded_items,
     )
     return result
 
