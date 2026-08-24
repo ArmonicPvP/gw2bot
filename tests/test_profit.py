@@ -117,6 +117,61 @@ class TestProfitCalculation:
         assert result.unmatched_buys[1][0].remaining == 3
         assert result.unmatched_buys[1][1].remaining == 2
 
+    @pytest.mark.parametrize(
+        ("buy_quantity", "sell_quantity"),
+        [(250, 4), (4, 250)],
+    )
+    def test_excludes_items_when_either_side_matches_fewer_than_five_units(
+        self,
+        buy_quantity: int,
+        sell_quantity: int,
+    ) -> None:
+        result = calculate_realized_profit(
+            [transaction("buy", quantity=buy_quantity)],
+            [
+                transaction(
+                    "sell",
+                    quantity=sell_quantity,
+                    occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+                )
+            ],
+            minimum_flip_quantity=5,
+        )
+
+        assert result.items == {}
+        assert result.days == {}
+        assert result.unmatched_buys == {}
+        assert result.total_matched_quantity == 0
+
+    def test_excludes_sales_that_happened_before_any_purchase(self) -> None:
+        result = calculate_realized_profit(
+            [
+                transaction(
+                    "buy",
+                    quantity=5,
+                    occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+                )
+            ],
+            [transaction("sell", quantity=5)],
+            minimum_flip_quantity=5,
+        )
+
+        assert result.items == {}
+        assert result.days == {}
+        assert result.total_matched_quantity == 0
+
+    def test_excludes_sales_with_the_same_timestamp_as_a_purchase(self) -> None:
+        occurred_at = datetime(2026, 8, 1, tzinfo=UTC)
+
+        result = calculate_realized_profit(
+            [transaction("buy", quantity=5, occurred_at=occurred_at)],
+            [transaction("sell", quantity=5, occurred_at=occurred_at)],
+            minimum_flip_quantity=5,
+        )
+
+        assert result.items == {}
+        assert result.days == {}
+
     def test_median_holding_time_is_weighted_by_matched_units(self) -> None:
         buys = [
             transaction(
@@ -552,7 +607,7 @@ class TestProfitService:
             transaction(
                 "buy",
                 price=100,
-                quantity=2,
+                quantity=10,
                 occurred_at=now - timedelta(days=2),
             )
         ]
@@ -560,7 +615,7 @@ class TestProfitService:
             transaction(
                 "sell",
                 price=200,
-                quantity=1,
+                quantity=5,
                 occurred_at=now - timedelta(days=1),
             )
         ]
@@ -568,7 +623,7 @@ class TestProfitService:
             transaction(
                 "current",
                 price=300,
-                quantity=1,
+                quantity=5,
                 occurred_at=now,
             )
         ]
@@ -601,8 +656,8 @@ class TestProfitService:
         assert first.window_start == datetime(2026, 7, 23, tzinfo=UTC)
         assert first.window_end == now
         assert first.item_names == {1: "Test Item"}
-        assert first.realized.total_profit == 70
-        assert first.unrealized.total_projected_profit == 155
+        assert first.realized.total_profit == 350
+        assert first.unrealized.total_projected_profit == 775
         assert first.unclaimed_coins == 12_345
         assert first.unclaimed_items == 7
         payload = cast(dict[str, Any], serialize_profit_report(first))
@@ -725,6 +780,7 @@ class TestProfitService:
                     transaction(
                         f"{prefix}-buy",
                         price=100,
+                        quantity=5,
                         occurred_at=now - timedelta(days=2),
                     )
                 ]
@@ -733,6 +789,7 @@ class TestProfitService:
                     transaction(
                         f"{prefix}-sell",
                         price=200,
+                        quantity=5,
                         occurred_at=now - timedelta(days=1),
                     )
                 ]
@@ -754,7 +811,7 @@ class TestProfitService:
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             report = await service.load_report(101, 30, now=now)
 
-        assert report.realized.total_profit == 70
+        assert report.realized.total_profit == 350
         assert api.fetch_transactions.await_count == 6
         api.fetch_delivery.assert_awaited_once_with(replacement_key)
         assert [
@@ -799,7 +856,7 @@ class TestProfitService:
         store.store_transactions(
             101,
             "history_buys",
-            [transaction("buy", quantity=1)],
+            [transaction("buy", quantity=5)],
             now=now,
         )
         store.store_transactions(
@@ -809,7 +866,7 @@ class TestProfitService:
                 transaction(
                     "sell",
                     price=200,
-                    quantity=1,
+                    quantity=5,
                     occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
                 )
             ],
