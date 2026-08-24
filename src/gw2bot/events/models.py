@@ -412,6 +412,9 @@ class RosterAssignment:
     role: EventRole | None
     assigned_role: EventRole | None
     waitlisted: bool
+    # None leaves the stored flex roles unchanged; category rebalancing passes
+    # a tuple because it also normalizes preferences for the new capacity.
+    flex_roles: tuple[EventRole, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,17 +689,28 @@ def rebalance_signups(
     admitted_prefs: list[tuple[EventRole, ...]] = []
     result_by_user: dict[int, EventSignup] = {}
     for signup in ordered:
-        role = signup.role if signup.role is not None else EventRole.DPS
-        preferences = preferred_role_order(role, signup.flex_roles)
+        if signup.role is None:
+            role, flex_roles = EventRole.DPS, ()
+        else:
+            role, flex_roles = normalize_stored_roles(
+                capacity,
+                signup.role,
+                signup.flex_roles,
+            )
+        preferences = preferred_role_order(role, flex_roles)
         if EventRole.DPS not in preferences:
             preferences = (*preferences, EventRole.DPS)
+            flex_roles = (*flex_roles, EventRole.DPS)
         if roster_feasible(capacity, [*admitted_prefs, preferences]):
-            admitted.append(replace(signup, role=role))
+            admitted.append(
+                replace(signup, role=role, flex_roles=flex_roles)
+            )
             admitted_prefs.append(preferences)
         else:
             result_by_user[signup.discord_user_id] = replace(
                 signup,
                 role=role,
+                flex_roles=flex_roles,
                 assigned_role=None,
                 waitlisted=True,
             )

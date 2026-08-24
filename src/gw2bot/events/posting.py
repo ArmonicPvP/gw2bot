@@ -1563,6 +1563,7 @@ def rebalance_occurrence_roster(
     for before, after in zip(signups, reseated, strict=True):
         if (
             before.role is after.role
+            and before.flex_roles == after.flex_roles
             and before.assigned_role is after.assigned_role
             and before.waitlisted == after.waitlisted
         ):
@@ -1573,6 +1574,7 @@ def rebalance_occurrence_roster(
                 role=after.role,
                 assigned_role=after.assigned_role,
                 waitlisted=after.waitlisted,
+                flex_roles=after.flex_roles,
             )
         )
         if before.waitlisted and not after.waitlisted:

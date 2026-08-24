@@ -3618,6 +3618,48 @@ class TestRebalanceOccurrenceRoster:
         # A further DPS no longer fits, so the overfill is closed.
         assert EventRole.DPS not in fitting_roles(fractal.capacity, signups)
 
+    def test_dungeon_rebalance_persists_normalized_signup_roles(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.FRACTAL)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        self.seat(
+            store,
+            occurrence.occurrence_id,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            EventRole.QUICKNESS_HEAL,
+        )
+        dungeon = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        changed, _ = rebalance_occurrence_roster(bot, dungeon, occurrence)
+
+        assert changed == 1
+        signup = store.get_signup(occurrence.occurrence_id, 1)
+        assert signup is not None
+        assert signup.role is EventRole.DPS
+        assert signup.flex_roles == ()
+        assert signup.assigned_role is EventRole.DPS
+        assert not signup.waitlisted
+        assert set(fitting_roles(dungeon.capacity, [signup])) == {
+            EventRole.DPS,
+            EventRole.QUICKNESS_DPS,
+            EventRole.ALACRITY_DPS,
+        }
+
     def test_moving_to_general_seats_the_whole_waitlist(
         self,
         bot: Any,

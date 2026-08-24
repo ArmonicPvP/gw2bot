@@ -2620,6 +2620,41 @@ class TestEditSignupFlow:
         assert not updated.waitlisted
         assert updated.signed_up_at == original.signed_up_at
 
+    async def test_edit_normalizes_a_stale_role_after_category_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_HEAL
+        store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        updated = store.get_signup(occurrence.occurrence_id, 42)
+        assert updated is not None
+        assert updated.role is EventRole.DPS
+        assert updated.assigned_role is EventRole.DPS
+        assert not updated.waitlisted
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "waitlist" not in kwargs["content"]
+
     async def test_edit_that_would_waitlist_confirms_then_applies(
         self,
         fake_bot: Any,
@@ -6805,6 +6840,31 @@ class TestAddSignups:
         assert "Added <@11> to the roster." not in content
         # They are still told, because they are on the event either way.
         fake_bot.users[11].send.assert_awaited_once()
+
+    async def test_stale_commander_role_is_normalized_after_category_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.FRACTAL)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            [],
+            [11],
+        )
+        self.change_event(store, event, category=EventCategory.DUNGEON)
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_HEAL)
+
+        added = store.get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert added.role is EventRole.DPS
+        assert added.assigned_role is EventRole.DPS
+        assert not added.waitlisted
 
     async def test_several_additions_send_one_merged_thread_ping(
         self,

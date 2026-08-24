@@ -2655,6 +2655,23 @@ async def apply_roster_addition(
             view=None,
         )
         return
+    if event.capacity.has_roles and role is not None:
+        normalized_role, _ = normalize_stored_roles(
+            event.capacity,
+            role,
+            (),
+        )
+        if normalized_role is not role:
+            LOGGER.debug(
+                "Normalized a roster-addition role after an event changed "
+                "category; event_id=%s user_id=%s category=%s "
+                "normalized_role=%s",
+                event.event_id,
+                interaction.user.id,
+                event.category.value,
+                normalized_role.value,
+            )
+            role = normalized_role
     await interaction.response.edit_message(
         content="Adding the selected members…",
         embeds=[],
@@ -5232,6 +5249,30 @@ class EditSignupFlow(SignupFlow):
             return
         self.event = event
         self.occurrence = occurrence
+        if event.capacity.has_roles:
+            normalized_role, normalized_flex_roles = normalize_stored_roles(
+                event.capacity,
+                self.role,
+                self.flex_roles,
+            )
+            if (
+                normalized_role is not self.role
+                or normalized_flex_roles != self.flex_roles
+            ):
+                LOGGER.debug(
+                    "Normalized signup-edit roles after an event changed "
+                    "category; event_id=%s occurrence_id=%s user_id=%s "
+                    "category=%s normalized_role=%s "
+                    "normalized_flex_count=%s",
+                    event.event_id,
+                    occurrence.occurrence_id,
+                    self.discord_user_id,
+                    event.category.value,
+                    normalized_role.value,
+                    len(normalized_flex_roles),
+                )
+                self.role = normalized_role
+                self.flex_roles = normalized_flex_roles
         try:
             result = await apply_signup_edit(
                 self.bot,
