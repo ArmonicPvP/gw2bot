@@ -565,12 +565,19 @@ def event_embed(
         waitlisted_dps = [
             signup for signup in waitlisted if signup.role not in HEAL_ROLES
         ]
-        _add_chunked_field(
-            embed,
-            f"💚 Healer ({len(healers)}/{capacity.healers})",
-            [_member_line(signup) for signup in healers]
-            + [_waitlisted_member_line(signup) for signup in waitlisted_healers],
-        )
+        # Dungeon rosters are role-based for boon and DPS composition but
+        # deliberately have no healer seats. Do not advertise an unusable
+        # "Healer (0/0)" section for that zero-capacity role.
+        if capacity.healers:
+            _add_chunked_field(
+                embed,
+                f"💚 Healer ({len(healers)}/{capacity.healers})",
+                [_member_line(signup) for signup in healers]
+                + [
+                    _waitlisted_member_line(signup)
+                    for signup in waitlisted_healers
+                ],
+            )
         _add_chunked_field(
             embed,
             f"⚔️ DPS ({len(dps)}/{capacity.dps})",

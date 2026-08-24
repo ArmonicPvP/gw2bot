@@ -570,6 +570,20 @@ class TestEventEmbed:
                 f"{EMOJI_ALACRITY} 0/2 | {EMOJI_QUICKNESS} 0/2"
             )
 
+    def test_dungeon_embed_omits_zero_capacity_healer_section(self) -> None:
+        embed = event_embed(
+            make_event(EventCategory.DUNGEON), [], EventStatus.OPEN
+        )
+
+        names = [field.name or "" for field in embed.fields]
+        assert "👥 Participants (0/5)" in names
+        assert not any("Healer" in name for name in names)
+        assert "⚔️ DPS (0/5)" in names
+        values = {field.name: field.value for field in embed.fields}
+        assert values["Boons"] == (
+            f"{EMOJI_ALACRITY} 0/1 | {EMOJI_QUICKNESS} 0/1"
+        )
+
     def test_wvw_embed_lists_participants_without_roles(self) -> None:
         event = make_event(EventCategory.WVW)
         signups = [make_signup(user_id) for user_id in range(1, 4)]
