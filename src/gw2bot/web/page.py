@@ -4035,6 +4035,10 @@ button:focus-visible {
     withdraw: { color: "#D55E00", label: "Withdrew" }
   };
   var OPERATION_ORDER = ["deposit", "withdraw"];
+  var NET_CHANGES = [
+    { color: OPERATIONS.deposit.color, label: "Net non-decrease" },
+    { color: OPERATIONS.withdraw.color, label: "Net decrease" }
+  ];
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 10;
   // Copper is what the guild log, the API and the ledger all deal in. The
@@ -4303,13 +4307,6 @@ button:focus-visible {
       var py = scaleY(minute.after);
       var color = operationOf(
         minute.after >= previousCoins ? "deposit" : "withdraw").color;
-      canvas.appendChild(svg("circle", {
-        "class": "event-dot",
-        cx: px.toFixed(1),
-        cy: py.toFixed(1),
-        r: 4,
-        fill: color
-      }));
       plotted.push({
         x: px, y: py, t: minute.t, after: minute.after,
         movements: minute.movements, color: color
@@ -4343,6 +4340,18 @@ button:focus-visible {
         stroke: operationOf(
           point.coins >= previous.coins ? "deposit" : "withdraw").color,
         points: coords.join(" ")
+      }));
+    });
+
+    // SVG paints later elements on top. Add the combined event dots only
+    // after every segment so a following segment cannot cover a dot's fill.
+    plotted.forEach(function (point) {
+      canvas.appendChild(svg("circle", {
+        "class": "event-dot",
+        cx: point.x.toFixed(1),
+        cy: point.y.toFixed(1),
+        r: 4,
+        fill: point.color
       }));
     });
 
@@ -4671,13 +4680,13 @@ button:focus-visible {
 
   function renderLegend() {
     legend.replaceChildren();
-    OPERATION_ORDER.forEach(function (operation) {
+    NET_CHANGES.forEach(function (change) {
       var item = el("span", "item");
       item.setAttribute("role", "listitem");
       var swatch = el("span", "swatch");
-      swatch.style.background = OPERATIONS[operation].color;
+      swatch.style.background = change.color;
       item.appendChild(swatch);
-      item.appendChild(el("span", "legend-name", OPERATIONS[operation].label));
+      item.appendChild(el("span", "legend-name", change.label));
       legend.appendChild(item);
     });
   }

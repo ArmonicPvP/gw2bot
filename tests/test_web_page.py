@@ -1062,7 +1062,7 @@ class TestGoldPage:
         assert 'minute.after >= previousCoins ? "deposit" : "withdraw"' in (
             GOLD_PAGE
         )
-        assert "fill: color" in GOLD_PAGE
+        assert "fill: point.color" in GOLD_PAGE
         assert "stroke: point.color" in GOLD_PAGE
         assert "finalMovement" not in GOLD_PAGE
 
@@ -1073,6 +1073,24 @@ class TestGoldPage:
         assert 'point.coins >= previous.coins ? "deposit" : "withdraw"' in (
             GOLD_PAGE
         )
+
+    def test_balance_segments_are_painted_before_combined_dots(self) -> None:
+        segment_loop = GOLD_PAGE.index(
+            "linePoints.slice(1).forEach(function (point, index)"
+        )
+        dot_loop = GOLD_PAGE.index('plotted.forEach(function (point) {', segment_loop)
+        assert segment_loop < dot_loop
+        assert '"class": "balance-line"' in GOLD_PAGE[segment_loop:dot_loop]
+        assert '"class": "event-dot"' in GOLD_PAGE[dot_loop:]
+
+    def test_legend_describes_net_balance_changes(self) -> None:
+        assert 'label: "Net non-decrease"' in GOLD_PAGE
+        assert 'label: "Net decrease"' in GOLD_PAGE
+        legend = GOLD_PAGE.split("function renderLegend()", 1)[1].split(
+            "function renderTotals()", 1
+        )[0]
+        assert "NET_CHANGES.forEach" in legend
+        assert "OPERATION_ORDER.forEach" not in legend
 
     def test_minute_grouping_restores_tied_api_order(self) -> None:
         assert "movements().slice().reverse().forEach(function (movement)" in (
