@@ -1249,7 +1249,9 @@ fill dates without matched sales with zero: realized profit with its whole-windo
 daily average, the trailing seven-day average once seven date buckets are
 available, and cumulative realized profit. Hover anywhere in a chart's plot to
 snap to the nearest date and see its exact value (and the daily average where
-applicable).
+applicable). On a touch screen, tap a bar or dot to pin the same reading; it
+stays open until another reading is tapped, the page is tapped elsewhere, the
+page scrolls, the window loses focus, or Escape is pressed.
 
 History, current listings, and item names are cached for five minutes in rows
 keyed by Discord user ID; unclaimed coins are read when each report is built.
@@ -1280,6 +1282,10 @@ from the chart until it is switched back on. The choice survives a change of
 range, and the tabbed removals list below is unaffected. On a phone, where the
 legend is a compact row of colours, a switched-off feast shows its name.
 
+The chart starts with straight lines between samples. The icon at the far
+right of its heading switches between that regular `╱` line and a staircase
+`⎿` line; the same control is available on the roster and gold charts.
+
 **Custom** opens a pair of date fields beside the preset buttons. The window
 they describe covers whole local days, from midnight on the first through the
 last second of the second, and it is drawn once **Apply** is pressed — the
@@ -1300,9 +1306,8 @@ minutes. The page is not linked from the calendar; browse to `/food` directly.
 The same site serves a **Guild Roster** page at `/roster`, built from the
 membership history described under
 [Guild Roster History](#guild-roster-history). It charts the guild's member
-count over the last 24 hours, 7 days, or 30 days as a step — membership holds
-until somebody joins or leaves, then jumps — with one dot per change, green for
-a join, amber for a departure and red for a kick. Hovering a dot, or tapping it
+count over the last 24 hours, 7 days, or 30 days, with one dot per change,
+green for a join, amber for a departure and red for a kick. Hovering a dot, or tapping it
 on a phone, names the account and shows the count it left the roster at. Below
 the chart every change in the window is listed newest first, with who did the
 kicking where the guild log named them.
@@ -1338,11 +1343,11 @@ settings in place.
 
 The same site serves a **Guild Bank** page at `/gold`, built from the ledger
 described under [Guild Bank Gold History](#guild-bank-gold-history). It charts
-the bank's balance over the last 24 hours, 7 days, or 30 days as a step — a
-balance holds until somebody deposits or withdraws, then jumps — with one dot
-per movement, green for a deposit and red for a withdrawal. Hovering a dot, or
-tapping it on a phone, names the account, shows the amount with its sign, and
-says what the bank held afterwards. Below the chart every movement in the
+the bank's balance over the last 24 hours, 7 days, or 30 days. Movements in the
+same minute share one dot at their cumulative ending balance, green or red for
+that minute's final movement. Hovering the dot, or tapping it on a phone, lists
+every transaction from the minute and says what the bank held afterwards.
+Below the chart every movement in the
 window is listed newest first, like a bank statement, with the running balance
 beside each one. Above it are the window's totals: deposited, withdrawn, and
 the net between them.
@@ -1354,13 +1359,14 @@ observed, so its right-hand edge reads the bank as it stood then rather than as
 it stands now; the figure beside the heading says "at the end" instead of "now"
 to match.
 
-Amounts use the game's compact gold, silver, and copper notation (for example,
-`1g`, `1g1s`, `1g0s1c`, or `10c`) without trailing zero denominations. Table
-movements are a bare `+` deposit or `-` withdrawal followed by that amount.
+Amounts use the same spaced gold, silver, and copper notation as `/profit`
+(for example, `1g 1s 0c`, `1g 0s 1c`, or `10c`). Table movements are a bare
+`+` deposit or `-` withdrawal followed by that amount.
 The y axis covers the balances the window actually
 reached rather than starting at zero, and its gridlines round to 1, 2 or 5
 times a power of ten, so a week of small movements is visible rather than a
-flat line at the top of an axis scaled to the whole treasury.
+flat line at the top of an axis scaled to the whole treasury. Axis labels use
+compact denominations so large balances remain visible inside the chart.
 
 A long account name wraps inside its column rather than widening the table, and
 on a phone the running balance column gives way — the amount and its sign are

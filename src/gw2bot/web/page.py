@@ -1501,7 +1501,20 @@ main {
   border-radius: 12px;
   padding: 1rem;
 }
-.card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+.card h2 { font-size: 0.95rem; }
+.chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.chart-mode {
+  min-width: 2rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
 /* The legend sits under the chart as a row of colour swatches. Each swatch is
    a button so a tap can reveal the feast it stands for. */
 .legend {
@@ -1652,7 +1665,11 @@ button:focus-visible {
 </header>
 <main>
   <section class="card">
-    <h2>Stock on hand over time</h2>
+    <div class="chart-heading">
+      <h2>Stock on hand over time</h2>
+      <button type="button" id="chart-mode" class="chart-mode"
+        aria-label="Switch to staircase graph" title="Regular line graph">╱</button>
+    </div>
     <div id="chart"></div>
     <div id="legend" class="legend" role="list" aria-label="Feast colours"></div>
     <div id="chart-status" role="status" aria-live="polite"></div>
@@ -1698,7 +1715,8 @@ button:focus-visible {
   // by guild storage id so the choice outlives a range change and the redraw
   // it brings.
   var state = {
-    range: "24h", data: null, activeFeast: 0, tablePage: 0, hidden: {}
+    range: "24h", data: null, activeFeast: 0, tablePage: 0, hidden: {},
+    staircase: false
   };
 
   // A pinned touch selection listens on the whole page, so the chart it
@@ -1708,6 +1726,7 @@ button:focus-visible {
   var legend = document.getElementById("legend");
   var chart = document.getElementById("chart");
   var chartStatus = document.getElementById("chart-status");
+  var chartMode = document.getElementById("chart-mode");
   var tabs = document.getElementById("tabs");
   var tableBox = document.getElementById("table");
   var pager = document.getElementById("pager");
@@ -1739,6 +1758,10 @@ button:focus-visible {
   }
   function visibleFeasts() {
     return feasts().filter(function (feast) { return !isHidden(feast); });
+  }
+
+  function traceMode(mode, count) {
+    console.debug("feast chart mode:", mode, count);
   }
 
   function scaleX(t) {
@@ -1839,12 +1862,18 @@ button:focus-visible {
       var color = COLORS[index % COLORS.length];
       var points = feast.points || [];
       if (points.length > 1) {
-        var coords = points.map(function (point) {
-          return scaleX(point.t).toFixed(1) + "," +
-            scaleY(point.count).toFixed(1);
-        }).join(" ");
+        var coords = [];
+        points.forEach(function (point, pointIndex) {
+          var px = scaleX(point.t);
+          if (state.staircase && pointIndex > 0) {
+            coords.push(px.toFixed(1) + "," +
+              scaleY(points[pointIndex - 1].count).toFixed(1));
+          }
+          coords.push(px.toFixed(1) + "," +
+            scaleY(point.count).toFixed(1));
+        });
         canvas.appendChild(svg("polyline", {
-          "class": "series-line", stroke: color, points: coords
+          "class": "series-line", stroke: color, points: coords.join(" ")
         }));
       }
       points.forEach(function (point) {
@@ -1874,6 +1903,16 @@ button:focus-visible {
 
     chartStatus.textContent = chartStatusText(plotted.length);
   }
+
+  chartMode.addEventListener("click", function () {
+    state.staircase = !state.staircase;
+    chartMode.textContent = state.staircase ? "⎿" : "╱";
+    chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
+    chartMode.setAttribute("aria-label", state.staircase
+      ? "Switch to regular line graph" : "Switch to staircase graph");
+    traceMode(state.staircase ? "staircase" : "regular", feasts().length);
+    if (state.data) { renderChart(); }
+  });
 
   // What the chart says about itself when it has drawn nothing: an empty
   // window and a legend switched all the way off are different states, and
@@ -2591,7 +2630,20 @@ main {
   border-radius: 12px;
   padding: 1rem;
 }
-.card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+.card h2 { font-size: 0.95rem; }
+.chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.chart-mode {
+  min-width: 2rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
 .card h2 .now {
   color: var(--muted);
   font-weight: 400;
@@ -2792,7 +2844,11 @@ button:focus-visible {
 </header>
 <main>
   <section class="card">
-    <h2>Guild members over time<span id="now-count" class="now"></span></h2>
+    <div class="chart-heading">
+      <h2>Guild members over time<span id="now-count" class="now"></span></h2>
+      <button type="button" id="chart-mode" class="chart-mode"
+        aria-label="Switch to staircase graph" title="Regular line graph">╱</button>
+    </div>
     <div id="chart"></div>
     <div id="legend" class="legend" role="list" aria-label="Change kinds"></div>
     <div id="chart-status" role="status" aria-live="polite"></div>
@@ -2843,7 +2899,9 @@ button:focus-visible {
   function plotW() { return M.w - M.left - M.right; }
   function plotH() { return M.h - M.top - M.bottom; }
 
-  var state = { range: "24h", data: null, tablePage: 0, scale: null };
+  var state = {
+    range: "24h", data: null, tablePage: 0, scale: null, staircase: false
+  };
 
   // A pinned touch selection listens on the whole page, so the chart it
   // belongs to is torn down before another one is drawn.
@@ -2852,6 +2910,7 @@ button:focus-visible {
   var legend = document.getElementById("legend");
   var chart = document.getElementById("chart");
   var chartStatus = document.getElementById("chart-status");
+  var chartMode = document.getElementById("chart-mode");
   var nowCount = document.getElementById("now-count");
   var totals = document.getElementById("totals");
   var tableBox = document.getElementById("table");
@@ -2875,6 +2934,10 @@ button:focus-visible {
 
   function points() { return (state.data && state.data.points) || []; }
   function events() { return (state.data && state.data.events) || []; }
+
+  function traceMode(mode, count) {
+    console.debug("roster chart mode:", mode, count);
+  }
   function kindOf(kind) { return KINDS[kind] || KINDS.leave; }
 
   // The axis covers the counts actually reached in the window, padded out to
@@ -3004,15 +3067,13 @@ button:focus-visible {
       canvas.appendChild(xLabel);
     }
 
-    // Membership is a step: the count holds until somebody joins or leaves,
-    // then jumps. Each pair of vertices is therefore drawn as a horizontal
-    // run followed by a vertical jump, never as a diagonal, which would claim
-    // members trickled in over the hours between two changes.
+    // Regular mode connects recorded counts directly. Staircase mode inserts
+    // the previous count at each new timestamp before drawing the jump.
     var coords = [];
     points().forEach(function (point, index) {
       var px = scaleX(point.t);
       var py = scaleY(point.count);
-      if (index > 0) {
+      if (state.staircase && index > 0) {
         coords.push(px.toFixed(1) + "," +
           scaleY(points()[index - 1].count).toFixed(1));
       }
@@ -3048,6 +3109,16 @@ button:focus-visible {
       ? ""
       : "No members joined or left in this period.";
   }
+
+  chartMode.addEventListener("click", function () {
+    state.staircase = !state.staircase;
+    chartMode.textContent = state.staircase ? "⎿" : "╱";
+    chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
+    chartMode.setAttribute("aria-label", state.staircase
+      ? "Switch to regular line graph" : "Switch to staircase graph");
+    traceMode(state.staircase ? "staircase" : "regular", points().length);
+    renderChart();
+  });
 
   // Changes that share a moment form a single column, so the crosshair snaps
   // to one x and the tooltip lists everything recorded there.
@@ -3748,7 +3819,20 @@ main {
   border-radius: 12px;
   padding: 1rem;
 }
-.card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
+.card h2 { font-size: 0.95rem; }
+.chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.chart-mode {
+  min-width: 2rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
 .card h2 .now {
   color: var(--muted);
   font-weight: 400;
@@ -3925,7 +4009,11 @@ button:focus-visible {
 </header>
 <main>
   <section class="card">
-    <h2>Gold in the guild bank<span id="now-balance" class="now"></span></h2>
+    <div class="chart-heading">
+      <h2>Gold in the guild bank<span id="now-balance" class="now"></span></h2>
+      <button type="button" id="chart-mode" class="chart-mode"
+        aria-label="Switch to staircase graph" title="Regular line graph">╱</button>
+    </div>
     <div id="chart"></div>
     <div id="legend" class="legend" role="list" aria-label="Movement kinds">
     </div>
@@ -3982,7 +4070,9 @@ button:focus-visible {
   function plotW() { return M.w - M.left - M.right; }
   function plotH() { return M.h - M.top - M.bottom; }
 
-  var state = { range: "24h", data: null, tablePage: 0, scale: null };
+  var state = {
+    range: "24h", data: null, tablePage: 0, scale: null, staircase: false
+  };
 
   // A pinned touch selection listens on the whole page, so the chart it
   // belongs to is torn down before another one is drawn.
@@ -3991,6 +4081,7 @@ button:focus-visible {
   var legend = document.getElementById("legend");
   var chart = document.getElementById("chart");
   var chartStatus = document.getElementById("chart-status");
+  var chartMode = document.getElementById("chart-mode");
   var nowBalance = document.getElementById("now-balance");
   var totals = document.getElementById("totals");
   var tableBox = document.getElementById("table");
@@ -4014,15 +4105,31 @@ button:focus-visible {
 
   function points() { return (state.data && state.data.points) || []; }
   function movements() { return (state.data && state.data.movements) || []; }
+
+  function traceMode(mode, count) {
+    console.debug("gold chart mode:", mode, count);
+  }
   function operationOf(operation) {
     return OPERATIONS[operation] || OPERATIONS.withdraw;
   }
 
   function gold(copper) { return copper / COPPER_PER_GOLD; }
 
-  // Spell an exact copper value in GW2's denominations, omitting only trailing
-  // zero denominations: 1g, 1g1s, 1g0s1c and 10c all remain unambiguous.
+  // Match the profit dashboard's spaced denomination format. Copper is always
+  // present, and silver is retained whenever gold is present: 1g 0s 0c.
   function formatCoins(copper) {
+    var remaining = Math.max(0, Math.round(copper));
+    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
+    remaining %= COPPER_PER_GOLD;
+    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
+    var copperCoins = remaining % COPPER_PER_SILVER;
+    var parts = [];
+    if (goldCoins) { parts.push(goldCoins.toLocaleString() + "g"); }
+    if (silverCoins || goldCoins) { parts.push(silverCoins + "s"); }
+    parts.push(copperCoins + "c");
+    return parts.join(" ");
+  }
+  function formatAxisCoins(copper) {
     var remaining = Math.max(0, Math.round(copper));
     var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
     remaining %= COPPER_PER_GOLD;
@@ -4142,7 +4249,7 @@ button:focus-visible {
       viewBox: "0 0 " + M.w + " " + M.h,
       role: "img",
       "aria-label":
-        "Gold in the guild bank over time, with one dot per movement"
+        "Gold in the guild bank over time, with one dot per active minute"
     });
 
     // Horizontal gridlines and y labels at every step of the computed scale.
@@ -4161,7 +4268,7 @@ button:focus-visible {
       var yLabel = svg("text", {
         "class": "y-label", x: M.left - 6, y: y + 4
       });
-      yLabel.textContent = formatCoins(value * COPPER_PER_GOLD);
+      yLabel.textContent = formatAxisCoins(value * COPPER_PER_GOLD);
       canvas.appendChild(yLabel);
     }
 
@@ -4188,15 +4295,13 @@ button:focus-visible {
       canvas.appendChild(xLabel);
     }
 
-    // A balance is a step: it holds until somebody deposits or withdraws,
-    // then jumps. Each pair of vertices is therefore drawn as a horizontal
-    // run followed by a vertical jump, never as a diagonal, which would
-    // claim the gold trickled in over the hours between two movements.
+    // Regular mode connects recorded balances directly. Staircase mode
+    // inserts the previous balance at each new timestamp before the jump.
     var coords = [];
     points().forEach(function (point, index) {
       var px = scaleX(point.t);
       var py = scaleY(point.coins);
-      if (index > 0) {
+      if (state.staircase && index > 0) {
         coords.push(px.toFixed(1) + "," +
           scaleY(points()[index - 1].coins).toFixed(1));
       }
@@ -4208,22 +4313,26 @@ button:focus-visible {
       }));
     }
 
-    // One dot per movement, in its direction's colour. Every movement is
-    // drawn; the series is never downsampled. Each dot is collected so the
-    // hover can snap to it.
+    // Movements in the same clock minute collapse into one cumulative dot at
+    // the balance after that minute's final transaction. The dot retains the
+    // complete group so its tooltip can still itemize everything that moved.
     var plotted = [];
-    movements().forEach(function (movement) {
-      if (movement.after === null) { return; }
-      var px = scaleX(movement.t);
-      var py = scaleY(movement.after);
+    movementMinutes().forEach(function (minute) {
+      var px = scaleX(minute.t);
+      var py = scaleY(minute.after);
       canvas.appendChild(svg("circle", {
         "class": "event-dot",
         cx: px.toFixed(1),
         cy: py.toFixed(1),
         r: 4,
-        fill: operationOf(movement.operation).color
+        fill: operationOf(minute.movements[minute.movements.length - 1]
+          .operation).color
       }));
-      plotted.push({ x: px, y: py, movement: movement });
+      plotted.push({
+        x: px, y: py, t: minute.t, after: minute.after,
+        movements: minute.movements,
+        finalMovement: minute.movements[minute.movements.length - 1]
+      });
     });
 
     detachHover = attachHover(canvas, plotted);
@@ -4233,22 +4342,44 @@ button:focus-visible {
       : "No gold moved in or out of the bank in this period.";
   }
 
-  // Movements that share a moment form a single column, so the crosshair
-  // snaps to one x and the tooltip lists everything recorded there.
-  function groupColumns(plotted) {
-    var byTime = {};
-    var columns = [];
-    plotted.forEach(function (point) {
-      var key = String(point.movement.t);
-      var column = byTime[key];
-      if (!column) {
-        column = { t: point.movement.t, x: point.x, points: [] };
-        byTime[key] = column;
-        columns.push(column);
+  chartMode.addEventListener("click", function () {
+    state.staircase = !state.staircase;
+    chartMode.textContent = state.staircase ? "⎿" : "╱";
+    chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
+    chartMode.setAttribute("aria-label", state.staircase
+      ? "Switch to regular line graph" : "Switch to staircase graph");
+    traceMode(state.staircase ? "staircase" : "regular", points().length);
+    renderChart();
+  });
+
+  function movementMinutes() {
+    var byMinute = {};
+    var minutes = [];
+    // The API serializes newest-first. Reversing, rather than sorting only by
+    // timestamp, restores its exact chronological order including tied times.
+    movements().slice().reverse().forEach(function (movement) {
+      if (movement.after === null) { return; }
+      var minuteAt = Math.floor(movement.t / 60) * 60;
+      var key = String(minuteAt);
+      var minute = byMinute[key];
+      if (!minute) {
+        minute = { t: movement.t, after: movement.after, movements: [] };
+        byMinute[key] = minute;
+        minutes.push(minute);
       }
-      column.points.push(point);
+      minute.t = movement.t;
+      minute.after = movement.after;
+      minute.movements.push(movement);
     });
-    return columns;
+    return minutes;
+  }
+
+  // Each plotted minute is already a single column. Keeping the column shape
+  // shared with the other charts makes pointer and touch selection identical.
+  function groupColumns(plotted) {
+    return plotted.map(function (point) {
+      return { t: point.t, x: point.x, points: [point] };
+    });
   }
 
   // Tells a hovering pointer from a finger or a pen. A touch has no hover
@@ -4347,10 +4478,8 @@ button:focus-visible {
     function showTooltip(column, emphasized) {
       tooltip.replaceChildren();
       tooltip.appendChild(el("div", "tip-time", formatMoment(column.t)));
-      column.points.forEach(function (point) {
-        var movement = point.movement;
-        var row = el("div",
-          "tip-row" + (point === emphasized ? " em" : ""));
+      emphasized.movements.forEach(function (movement) {
+        var row = el("div", "tip-row");
         var swatch = el("span", "swatch");
         swatch.style.background = operationOf(movement.operation).color;
         row.appendChild(swatch);
@@ -4360,7 +4489,7 @@ button:focus-visible {
         tooltip.appendChild(row);
       });
       tooltip.appendChild(el("div", "tip-note",
-        "Bank held " + formatCoins(emphasized.movement.after) + "."));
+        "Bank held " + formatCoins(emphasized.after) + "."));
       // Anchor to the point nearest the cursor and flip below the axis top
       // when there is no room to sit above it.
       var leftPct = Math.max(10, Math.min(90, emphasized.x / m.w * 100));
@@ -4386,7 +4515,7 @@ button:focus-visible {
           cx: point.x,
           cy: point.y,
           r: 7,
-          stroke: operationOf(point.movement.operation).color
+          stroke: operationOf(point.finalMovement.operation).color
         }));
         var dy = Math.abs(point.y - vbY);
         if (dy < bestDy) { bestDy = dy; emphasized = point; }
