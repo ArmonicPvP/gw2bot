@@ -122,19 +122,32 @@ class ProfitApiClient:
         )
         return transactions
 
-    async def fetch_delivery_coins(self, api_key: str) -> int:
-        """Return copper waiting for the member in Trading Post delivery."""
+    async def fetch_delivery(self, api_key: str) -> tuple[int, int]:
+        """Return the copper and item quantity waiting in TP delivery."""
         payload, _ = await self._get(DELIVERY_PATH, api_key=api_key)
         if not isinstance(payload, dict):
             raise ProfitApiError("GW2 delivery response was not an object")
         coins = payload.get("coins")
         if not isinstance(coins, int) or isinstance(coins, bool) or coins < 0:
             raise ProfitApiError("GW2 delivery response had invalid coins")
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ProfitApiError("GW2 delivery response had invalid items")
+        quantity = 0
+        for item in items:
+            if not isinstance(item, dict):
+                raise ProfitApiError("GW2 delivery response had invalid items")
+            count = item.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ProfitApiError("GW2 delivery response had invalid items")
+            quantity += count
         LOGGER.debug(
-            "Fetched GW2 Trading Post delivery; coins_available=%s",
+            "Fetched GW2 Trading Post delivery; coins_available=%s "
+            "item_quantity=%s",
             coins > 0,
+            quantity,
         )
-        return coins
+        return coins, quantity
 
     async def fetch_item_names(self, item_ids: set[int]) -> dict[int, str]:
         names: dict[int, str] = {}

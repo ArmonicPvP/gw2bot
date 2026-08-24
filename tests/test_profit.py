@@ -174,6 +174,7 @@ class TestProfitCalculation:
             realized=realized,
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
             unclaimed_coins=0,
+            unclaimed_items=0,
             item_names={1: "Winner", 2: "Loser"},
         )
 
@@ -587,7 +588,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_delivery_coins=AsyncMock(return_value=12_345),
+            fetch_delivery=AsyncMock(return_value=(12_345, 7)),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
             fetch_market_prices=AsyncMock(return_value={1: MarketPrice(100, 200)}),
         )
@@ -603,6 +604,7 @@ class TestProfitService:
         assert first.realized.total_profit == 70
         assert first.unrealized.total_projected_profit == 155
         assert first.unclaimed_coins == 12_345
+        assert first.unclaimed_items == 7
         payload = cast(dict[str, Any], serialize_profit_report(first))
         assert payload["summary"]["roi_percent"] == 70
         assert payload["items"][0]["roi_percent"] == 70
@@ -622,9 +624,10 @@ class TestProfitService:
         assert payload["unrealized"]["roi_percent"] == 155
         assert payload["unrealized"]["items"][0]["roi_percent"] == 155
         assert payload["delivery"]["coins"] == 12_345
+        assert payload["delivery"]["items"] == 7
         assert api.fetch_transactions.await_count == 3
-        assert api.fetch_delivery_coins.await_count == 2
-        api.fetch_delivery_coins.assert_awaited_with("member-secret")
+        assert api.fetch_delivery.await_count == 2
+        api.fetch_delivery.assert_awaited_with("member-secret")
         api.fetch_item_names.assert_awaited_once_with({1})
         assert api.fetch_market_prices.await_count == 2
 
@@ -646,7 +649,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
-            fetch_delivery_coins=AsyncMock(
+            fetch_delivery=AsyncMock(
                 side_effect=ProfitApiAuthorizationError(
                     "GW2 API request returned HTTP 403"
                 )
@@ -661,11 +664,11 @@ class TestProfitService:
 
         assert report.unclaimed_coins is None
         payload = cast(dict[str, Any], serialize_profit_report(report))
-        assert payload["delivery"] == {"coins": None}
+        assert payload["delivery"] == {"coins": None, "items": None}
         api.fetch_transactions.assert_not_awaited()
-        api.fetch_delivery_coins.assert_awaited_once_with(secret)
+        api.fetch_delivery.assert_awaited_once_with(secret)
         assert "reason=unauthorized" in caplog.text
-        assert "unclaimed_gold=unavailable" in caplog.text
+        assert "unclaimed_delivery=unavailable" in caplog.text
         assert secret not in caplog.text
 
     async def test_non_authorization_delivery_failure_still_fails_report(
@@ -684,7 +687,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
-            fetch_delivery_coins=AsyncMock(
+            fetch_delivery=AsyncMock(
                 side_effect=ProfitApiError("GW2 API request returned HTTP 500")
             ),
             fetch_item_names=AsyncMock(),
@@ -742,7 +745,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_delivery_coins=AsyncMock(return_value=0),
+            fetch_delivery=AsyncMock(return_value=(0, 0)),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
@@ -753,7 +756,7 @@ class TestProfitService:
 
         assert report.realized.total_profit == 70
         assert api.fetch_transactions.await_count == 6
-        api.fetch_delivery_coins.assert_awaited_once_with(replacement_key)
+        api.fetch_delivery.assert_awaited_once_with(replacement_key)
         assert [
             row.transaction_id
             for row in store.get_transactions(101, "history_buys")
@@ -826,7 +829,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
-            fetch_delivery_coins=AsyncMock(return_value=0),
+            fetch_delivery=AsyncMock(return_value=(0, 0)),
             fetch_item_names=AsyncMock(return_value={1: "New Name"}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
@@ -988,7 +991,7 @@ class TestProfitApiLogging:
             "https://api.example",
         )
 
-        assert await client.fetch_delivery_coins("member-key") == 12_345
+        assert await client.fetch_delivery("member-key") == (12_345, 2)
         request = http.get.call_args
         assert request.args[0] == "https://api.example/v2/commerce/delivery"
         assert request.kwargs["headers"] == {
@@ -1018,7 +1021,7 @@ class TestProfitApiLogging:
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             with pytest.raises(ProfitApiAuthorizationError):
-                await client.fetch_delivery_coins(secret)
+                await client.fetch_delivery(secret)
 
         assert secret not in caplog.text
         assert response_secret not in caplog.text
@@ -1041,7 +1044,7 @@ class TestProfitApiLogging:
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             with pytest.raises(ProfitApiError):
-                await client.fetch_delivery_coins(secret)
+                await client.fetch_delivery(secret)
 
         assert secret not in caplog.text
         assert payload_secret not in caplog.text

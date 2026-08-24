@@ -1233,7 +1233,10 @@ The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
 summary, realized profit grouped by item, realized profit grouped by sale date,
 projected profit for unmatched buys currently listed for sale, and the coins
-currently awaiting pickup from the Trading Post. Coin amounts account for the
+and total item quantity currently awaiting pickup from the Trading Post. The
+daily realized-profit table is paginated with 10 rows by default; its bottom-left
+control accepts page sizes from 1 through 90, and page links appear above and
+below the table. Coin amounts account for the
 Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
 the original profit bot. Click any column heading in the three detail tables to
@@ -1257,7 +1260,7 @@ stays open until another reading is tapped, the page is tapped elsewhere, the
 page scrolls, the window loses focus, or Escape is pressed.
 
 History, current listings, and item names are cached for five minutes in rows
-keyed by Discord user ID; unclaimed coins are read when each report is built.
+keyed by Discord user ID; unclaimed coins and items are read when each report is built.
 Keys saved before delivery reporting was added can still load their existing
 reports if a route restriction blocks that new endpoint: the unclaimed amount
 is marked unavailable and the page directs the member to run `/profit setkey`
