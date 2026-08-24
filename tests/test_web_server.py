@@ -27,6 +27,7 @@ from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
 from gw2bot.profit import (
     DayProfit,
     ItemProfit,
+    MarketPrice,
     ProfitReport,
     RealizedProfit,
     UnrealizedItemProfit,
@@ -73,6 +74,7 @@ def profit_report(days: int = 30) -> ProfitReport:
         ),
         unclaimed_coins=12_345,
         item_names={1: "Realized Item", 2: "Listed Item"},
+        market_prices={1: MarketPrice(100, 200)},
     )
 
 
@@ -909,6 +911,8 @@ class TestProfitPage:
         page = await response.text()
         assert "Trading Post Profit" in page
         assert "Summary" in page
+        assert "Your Picks" in page
+        assert "Unrealized projected profit" not in page
         assert "Realized Profit by Item" in page
         assert "Realized Profit by Day" in page
         assert "Unrealized Profit" in page
@@ -942,6 +946,8 @@ class TestProfitPage:
         assert payload["items"][0]["name"] == "Realized Item"
         assert payload["items"][0]["median_hold_seconds"] == 86_400
         assert payload["items"][0]["profit_share_percent"] == 100
+        assert payload["picks"][0]["name"] == "Realized Item"
+        assert payload["picks"][0]["profit"] == 70
         assert payload["days_table"][0]["date"] == "2026-08-20"
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
         assert payload["unrealized"]["roi_percent"] == 155

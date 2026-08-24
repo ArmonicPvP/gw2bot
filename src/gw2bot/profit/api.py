@@ -7,7 +7,7 @@ from collections.abc import Mapping
 
 import aiohttp
 
-from gw2bot.profit.models import Transaction, parse_gw2_time
+from gw2bot.profit.models import MarketPrice, Transaction, parse_gw2_time
 
 LOGGER = logging.getLogger(__name__)
 
@@ -178,6 +178,32 @@ class ProfitApiClient:
                 )
         return names
 
+    async def fetch_market_prices(
+        self,
+        item_ids: set[int],
+    ) -> dict[int, MarketPrice]:
+        """Return usable current buy-order and sell-listing prices."""
+        prices: dict[int, MarketPrice] = {}
+        ordered_ids = sorted(item_ids)
+        for offset in range(0, len(ordered_ids), ITEM_CHUNK_SIZE):
+            chunk = ordered_ids[offset : offset + ITEM_CHUNK_SIZE]
+            payload, _ = await self._get(
+                "/v2/commerce/prices",
+                params={"ids": ",".join(str(item_id) for item_id in chunk)},
+            )
+            if not isinstance(payload, list):
+                raise ProfitApiError("GW2 price response was not a collection")
+            for item in payload:
+                price = _market_price_from_payload(item)
+                if price is not None:
+                    prices[price[0]] = price[1]
+            LOGGER.debug(
+                "Fetched GW2 market prices; requested=%s usable=%s",
+                len(chunk),
+                sum(1 for item_id in chunk if item_id in prices),
+            )
+        return prices
+
     async def _get(
         self,
         path: str,
@@ -253,6 +279,35 @@ def _transaction_from_payload(payload: object) -> Transaction:
         quantity=quantity,
         occurred_at=occurred_at,
     )
+
+
+def _market_price_from_payload(
+    payload: object,
+) -> tuple[int, MarketPrice] | None:
+    if not isinstance(payload, dict):
+        return None
+    item_id = payload.get("id")
+    buys = payload.get("buys")
+    sells = payload.get("sells")
+    if (
+        not isinstance(item_id, int)
+        or isinstance(item_id, bool)
+        or not isinstance(buys, dict)
+        or not isinstance(sells, dict)
+    ):
+        return None
+    buy_price = buys.get("unit_price")
+    sell_price = sells.get("unit_price")
+    if (
+        not isinstance(buy_price, int)
+        or isinstance(buy_price, bool)
+        or buy_price <= 0
+        or not isinstance(sell_price, int)
+        or isinstance(sell_price, bool)
+        or sell_price <= 0
+    ):
+        return None
+    return item_id, MarketPrice(buy_price, sell_price)
 
 
 def _positive_int(payload: dict[object, object], key: str) -> int:
