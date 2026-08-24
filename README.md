@@ -1245,6 +1245,9 @@ pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
 unit-weighted median time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
+The **Your Picks** table revisits items flipped in the selected window using
+their current highest buy order and lowest sell listing. It shows the ten best
+opportunities after fees and can rank them by either ROI or profit per unit.
 
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
@@ -1347,9 +1350,10 @@ settings in place.
 The same site serves a **Guild Bank** page at `/gold`, built from the ledger
 described under [Guild Bank Gold History](#guild-bank-gold-history). It charts
 the bank's balance over the last 24 hours, 7 days, or 30 days. Movements in the
-same minute share one dot at their cumulative ending balance, green or red for
-that minute's final movement. Hovering the dot, or tapping it on a phone, lists
-every transaction from the minute and says what the bank held afterwards.
+same minute share one dot and one line segment at their cumulative ending
+balance. Both are green when that balance is unchanged or higher than the
+previous dot, and red when it is lower. Hovering the dot, or tapping it on a
+phone, lists every transaction from the minute and says what the bank held afterwards.
 Below the chart every movement in the
 window is listed newest first, like a bank statement, with the running balance
 beside each one. Above it are the window's totals: deposited, withdrawn, and

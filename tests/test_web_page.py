@@ -957,8 +957,9 @@ class TestDashboardChartModes:
             assert "justify-content: space-between;" in page
 
     def test_staircase_vertices_are_only_added_in_staircase_mode(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in (FOOD_PAGE, ROSTER_PAGE):
             assert "state.staircase &&" in page
+        assert "if (state.staircase) {" in GOLD_PAGE
 
     def test_mode_changes_are_traced_without_chart_values(self) -> None:
         expectations = (
@@ -1067,10 +1068,39 @@ class TestGoldPage:
         assert "movementMinutes().forEach(function (minute)" in GOLD_PAGE
         assert "emphasized.movements.forEach(function (movement)" in GOLD_PAGE
 
-    def test_grouped_hover_ring_uses_the_final_movement(self) -> None:
-        assert "finalMovement: minute.movements[" in GOLD_PAGE
-        assert "operationOf(point.finalMovement.operation).color" in GOLD_PAGE
-        assert "point.movement.operation" not in GOLD_PAGE
+    def test_grouped_dot_and_hover_use_the_combined_balance_change(self) -> None:
+        assert 'minute.after >= previousCoins ? "deposit" : "withdraw"' in (
+            GOLD_PAGE
+        )
+        assert "fill: point.color" in GOLD_PAGE
+        assert "stroke: point.color" in GOLD_PAGE
+        assert "finalMovement" not in GOLD_PAGE
+
+    def test_balance_line_uses_only_combined_minute_points(self) -> None:
+        assert "var linePoints = [{ t: points()[0].t" in GOLD_PAGE
+        assert "plotted.forEach(function (point)" in GOLD_PAGE
+        assert "linePoints.slice(1).forEach(function (point, index)" in GOLD_PAGE
+        assert 'point.coins >= previous.coins ? "deposit" : "withdraw"' in (
+            GOLD_PAGE
+        )
+
+    def test_balance_segments_are_painted_before_combined_dots(self) -> None:
+        segment_loop = GOLD_PAGE.index(
+            "linePoints.slice(1).forEach(function (point, index)"
+        )
+        dot_loop = GOLD_PAGE.index('plotted.forEach(function (point) {', segment_loop)
+        assert segment_loop < dot_loop
+        assert '"class": "balance-line"' in GOLD_PAGE[segment_loop:dot_loop]
+        assert '"class": "event-dot"' in GOLD_PAGE[dot_loop:]
+
+    def test_legend_describes_net_balance_changes(self) -> None:
+        assert 'label: "Net non-decrease"' in GOLD_PAGE
+        assert 'label: "Net decrease"' in GOLD_PAGE
+        legend = GOLD_PAGE.split("function renderLegend()", 1)[1].split(
+            "function renderTotals()", 1
+        )[0]
+        assert "NET_CHANGES.forEach" in legend
+        assert "OPERATION_ORDER.forEach" not in legend
 
     def test_minute_grouping_restores_tied_api_order(self) -> None:
         assert "movements().slice().reverse().forEach(function (movement)" in (

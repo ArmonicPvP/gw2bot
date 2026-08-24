@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 LOGGER = logging.getLogger(__name__)
@@ -71,6 +71,14 @@ class UnrealizedProfit:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketPrice:
+    """Current highest buy order and lowest sell listing for one item."""
+
+    buy_unit_price: int
+    sell_unit_price: int
+
+
+@dataclass(frozen=True, slots=True)
 class ProfitReport:
     days: int
     window_start: datetime
@@ -82,6 +90,7 @@ class ProfitReport:
     unclaimed_coins: int | None
     unclaimed_items: int | None
     item_names: dict[int, str]
+    market_prices: dict[int, MarketPrice] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

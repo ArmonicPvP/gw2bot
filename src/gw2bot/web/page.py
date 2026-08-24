@@ -4029,14 +4029,16 @@ button:focus-visible {
 <script>
 "use strict";
 (function () {
-  // Okabe-Ito colourblind-safe palette: one hue per direction the gold went,
-  // and a third for the balance line itself.
+  // Okabe-Ito colourblind-safe palette: one hue per direction the gold went.
   var OPERATIONS = {
     deposit: { color: "#009E73", label: "Deposited" },
     withdraw: { color: "#D55E00", label: "Withdrew" }
   };
   var OPERATION_ORDER = ["deposit", "withdraw"];
-  var LINE_COLOR = "#56B4E9";
+  var NET_CHANGES = [
+    { color: OPERATIONS.deposit.color, label: "Net non-decrease" },
+    { color: OPERATIONS.withdraw.color, label: "Net decrease" }
+  ];
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 10;
   // Copper is what the guild log, the API and the ledger all deal in. The
@@ -4295,44 +4297,62 @@ button:focus-visible {
       canvas.appendChild(xLabel);
     }
 
-    // Regular mode connects recorded balances directly. Staircase mode
-    // inserts the previous balance at each new timestamp before the jump.
-    var coords = [];
-    points().forEach(function (point, index) {
-      var px = scaleX(point.t);
-      var py = scaleY(point.coins);
-      if (state.staircase && index > 0) {
-        coords.push(px.toFixed(1) + "," +
-          scaleY(points()[index - 1].coins).toFixed(1));
-      }
-      coords.push(px.toFixed(1) + "," + py.toFixed(1));
-    });
-    if (coords.length > 1) {
-      canvas.appendChild(svg("polyline", {
-        "class": "balance-line", stroke: LINE_COLOR, points: coords.join(" ")
-      }));
-    }
-
     // Movements in the same clock minute collapse into one cumulative dot at
     // the balance after that minute's final transaction. The dot retains the
     // complete group so its tooltip can still itemize everything that moved.
     var plotted = [];
+    var previousCoins = points()[0].coins;
     movementMinutes().forEach(function (minute) {
       var px = scaleX(minute.t);
       var py = scaleY(minute.after);
-      canvas.appendChild(svg("circle", {
-        "class": "event-dot",
-        cx: px.toFixed(1),
-        cy: py.toFixed(1),
-        r: 4,
-        fill: operationOf(minute.movements[minute.movements.length - 1]
-          .operation).color
-      }));
+      var color = operationOf(
+        minute.after >= previousCoins ? "deposit" : "withdraw").color;
       plotted.push({
         x: px, y: py, t: minute.t, after: minute.after,
-        movements: minute.movements,
-        finalMovement: minute.movements[minute.movements.length - 1]
+        movements: minute.movements, color: color
       });
+      previousCoins = minute.after;
+    });
+
+    // Draw from the window boundary through only the cumulative minute dots
+    // and back to the other boundary. A separate segment gives each combined
+    // interval the deposit/withdrawal colour of its net balance change.
+    var linePoints = [{ t: points()[0].t, coins: points()[0].coins }];
+    plotted.forEach(function (point) {
+      linePoints.push({ t: point.t, coins: point.after });
+    });
+    var finalPoint = points()[points().length - 1];
+    linePoints.push({ t: finalPoint.t, coins: finalPoint.coins });
+    linePoints.slice(1).forEach(function (point, index) {
+      var previous = linePoints[index];
+      var coords = [
+        scaleX(previous.t).toFixed(1) + "," +
+          scaleY(previous.coins).toFixed(1)
+      ];
+      if (state.staircase) {
+        coords.push(scaleX(point.t).toFixed(1) + "," +
+          scaleY(previous.coins).toFixed(1));
+      }
+      coords.push(scaleX(point.t).toFixed(1) + "," +
+        scaleY(point.coins).toFixed(1));
+      canvas.appendChild(svg("polyline", {
+        "class": "balance-line",
+        stroke: operationOf(
+          point.coins >= previous.coins ? "deposit" : "withdraw").color,
+        points: coords.join(" ")
+      }));
+    });
+
+    // SVG paints later elements on top. Add the combined event dots only
+    // after every segment so a following segment cannot cover a dot's fill.
+    plotted.forEach(function (point) {
+      canvas.appendChild(svg("circle", {
+        "class": "event-dot",
+        cx: point.x.toFixed(1),
+        cy: point.y.toFixed(1),
+        r: 4,
+        fill: point.color
+      }));
     });
 
     detachHover = attachHover(canvas, plotted);
@@ -4515,7 +4535,7 @@ button:focus-visible {
           cx: point.x,
           cy: point.y,
           r: 7,
-          stroke: operationOf(point.finalMovement.operation).color
+          stroke: point.color
         }));
         var dy = Math.abs(point.y - vbY);
         if (dy < bestDy) { bestDy = dy; emphasized = point; }
@@ -4660,13 +4680,13 @@ button:focus-visible {
 
   function renderLegend() {
     legend.replaceChildren();
-    OPERATION_ORDER.forEach(function (operation) {
+    NET_CHANGES.forEach(function (change) {
       var item = el("span", "item");
       item.setAttribute("role", "listitem");
       var swatch = el("span", "swatch");
-      swatch.style.background = OPERATIONS[operation].color;
+      swatch.style.background = change.color;
       item.appendChild(swatch);
-      item.appendChild(el("span", "legend-name", OPERATIONS[operation].label));
+      item.appendChild(el("span", "legend-name", change.label));
       legend.appendChild(item);
     });
   }
