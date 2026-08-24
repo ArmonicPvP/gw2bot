@@ -1059,9 +1059,7 @@ class TestGoldPage:
         assert "emphasized.movements.forEach(function (movement)" in GOLD_PAGE
 
     def test_grouped_dot_and_hover_use_the_combined_balance_change(self) -> None:
-        assert 'minute.after >= previousCoins ? "deposit" : "withdraw"' in (
-            GOLD_PAGE
-        )
+        assert "netChangeColor(previousCoins, minute.after)" in GOLD_PAGE
         assert "fill: point.color" in GOLD_PAGE
         assert "stroke: point.color" in GOLD_PAGE
         assert "finalMovement" not in GOLD_PAGE
@@ -1070,9 +1068,7 @@ class TestGoldPage:
         assert "var linePoints = [{ t: points()[0].t" in GOLD_PAGE
         assert "plotted.forEach(function (point)" in GOLD_PAGE
         assert "linePoints.slice(1).forEach(function (point, index)" in GOLD_PAGE
-        assert 'point.coins >= previous.coins ? "deposit" : "withdraw"' in (
-            GOLD_PAGE
-        )
+        assert "netChangeColor(previous.coins, point.coins)" in GOLD_PAGE
 
     def test_balance_segments_are_painted_before_combined_dots(self) -> None:
         segment_loop = GOLD_PAGE.index(
@@ -1084,13 +1080,22 @@ class TestGoldPage:
         assert '"class": "event-dot"' in GOLD_PAGE[dot_loop:]
 
     def test_legend_describes_net_balance_changes(self) -> None:
-        assert 'label: "Net non-decrease"' in GOLD_PAGE
-        assert 'label: "Net decrease"' in GOLD_PAGE
+        assert 'label: "Increase"' in GOLD_PAGE
+        assert 'label: "Decrease"' in GOLD_PAGE
+        assert '{ color: "#D9D9D9", label: "Net Zero" }' in GOLD_PAGE
         legend = GOLD_PAGE.split("function renderLegend()", 1)[1].split(
             "function renderTotals()", 1
         )[0]
         assert "NET_CHANGES.forEach" in legend
         assert "OPERATION_ORDER.forEach" not in legend
+
+    def test_net_zero_lines_and_dots_use_the_neutral_legend_colour(self) -> None:
+        colour_picker = GOLD_PAGE.split(
+            "function netChangeColor(before, after)", 1
+        )[1].split("function movements()", 1)[0]
+        assert "if (after === before) { return NET_CHANGES[2].color; }" in (
+            colour_picker
+        )
 
     def test_minute_grouping_restores_tied_api_order(self) -> None:
         assert "movements().slice().reverse().forEach(function (movement)" in (

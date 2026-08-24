@@ -1348,8 +1348,8 @@ The same site serves a **Guild Bank** page at `/gold`, built from the ledger
 described under [Guild Bank Gold History](#guild-bank-gold-history). It charts
 the bank's balance over the last 24 hours, 7 days, or 30 days. Movements in the
 same minute share one dot and one line segment at their cumulative ending
-balance. Both are green when that balance is unchanged or higher than the
-previous dot, and red when it is lower. Hovering the dot, or tapping it on a
+balance. Both are green when that balance increases, red when it decreases,
+and gray-white when its net change is zero. Hovering the dot, or tapping it on a
 phone, lists every transaction from the minute and says what the bank held afterwards.
 Below the chart every movement in the
 window is listed newest first, like a bank statement, with the running balance
