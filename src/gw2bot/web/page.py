@@ -4036,8 +4036,9 @@ button:focus-visible {
   };
   var OPERATION_ORDER = ["deposit", "withdraw"];
   var NET_CHANGES = [
-    { color: OPERATIONS.deposit.color, label: "Net non-decrease" },
-    { color: OPERATIONS.withdraw.color, label: "Net decrease" }
+    { color: OPERATIONS.deposit.color, label: "Increase" },
+    { color: OPERATIONS.withdraw.color, label: "Decrease" },
+    { color: "#D9D9D9", label: "Net Zero" }
   ];
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 10;
@@ -4113,6 +4114,10 @@ button:focus-visible {
   }
   function operationOf(operation) {
     return OPERATIONS[operation] || OPERATIONS.withdraw;
+  }
+  function netChangeColor(before, after) {
+    if (after === before) { return NET_CHANGES[2].color; }
+    return operationOf(after > before ? "deposit" : "withdraw").color;
   }
 
   function gold(copper) { return copper / COPPER_PER_GOLD; }
@@ -4305,8 +4310,7 @@ button:focus-visible {
     movementMinutes().forEach(function (minute) {
       var px = scaleX(minute.t);
       var py = scaleY(minute.after);
-      var color = operationOf(
-        minute.after >= previousCoins ? "deposit" : "withdraw").color;
+      var color = netChangeColor(previousCoins, minute.after);
       plotted.push({
         x: px, y: py, t: minute.t, after: minute.after,
         movements: minute.movements, color: color
@@ -4337,8 +4341,7 @@ button:focus-visible {
         scaleY(point.coins).toFixed(1));
       canvas.appendChild(svg("polyline", {
         "class": "balance-line",
-        stroke: operationOf(
-          point.coins >= previous.coins ? "deposit" : "withdraw").color,
+        stroke: netChangeColor(previous.coins, point.coins),
         points: coords.join(" ")
       }));
     });
