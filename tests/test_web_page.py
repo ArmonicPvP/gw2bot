@@ -57,20 +57,30 @@ class TestCalendarMarkdown:
 
 
 class TestProfitPage:
-    def test_contains_all_profit_reports_and_unclaimed_gold(self) -> None:
+    def test_contains_all_profit_reports_and_unclaimed_delivery(self) -> None:
         assert "Summary" in PROFIT_PAGE
         assert "Realized Profit by Item" in PROFIT_PAGE
         assert "Realized Profit by Day" in PROFIT_PAGE
         assert "Unrealized Profit" in PROFIT_PAGE
-        assert "Unclaimed Trading Post Gold" in PROFIT_PAGE
+        assert "Unclaimed Trading Post" in PROFIT_PAGE
+        assert "Unclaimed Trading Post Gold" not in PROFIT_PAGE
         assert 'id="unclaimed-coins"' in PROFIT_PAGE
+        assert 'id="unclaimed-items"' in PROFIT_PAGE
         assert 'id="delivery-key-help" hidden' in PROFIT_PAGE
         assert "coin(data.delivery.coins)" in PROFIT_PAGE
+        assert "String(data.delivery.items)" in PROFIT_PAGE
         assert "data.delivery.coins === null" in PROFIT_PAGE
         assert 'node.textContent = "Unavailable";' in PROFIT_PAGE
         assert "help.hidden = false;" in PROFIT_PAGE
         assert "renderDelivery(data);" in PROFIT_PAGE
         assert 'fetch("/api/profit?days=" +' in PROFIT_PAGE
+
+    def test_daily_profit_has_adjustable_pagination(self) -> None:
+        assert 'id="days-page-size" type="number" min="1" max="90" value="10"' in PROFIT_PAGE
+        assert 'id="days-pages-top"' in PROFIT_PAGE
+        assert 'id="days-pages-bottom"' in PROFIT_PAGE
+        assert "function paginateDays()" in PROFIT_PAGE
+        assert 'button.setAttribute("aria-current", "page")' in PROFIT_PAGE
 
     def test_dynamic_trading_post_values_never_become_markup(self) -> None:
         assert "innerHTML" not in PROFIT_PAGE

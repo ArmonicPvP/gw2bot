@@ -72,6 +72,7 @@ def profit_report(days: int = 30) -> ProfitReport:
             total_projected_profit=155,
         ),
         unclaimed_coins=12_345,
+        unclaimed_items=7,
         item_names={1: "Realized Item", 2: "Listed Item"},
     )
 
@@ -912,7 +913,7 @@ class TestProfitPage:
         assert "Realized Profit by Item" in page
         assert "Realized Profit by Day" in page
         assert "Unrealized Profit" in page
-        assert "Unclaimed Trading Post Gold" in page
+        assert "Unclaimed Trading Post" in page
 
     async def test_api_loads_only_the_signed_in_members_report(
         self,
@@ -946,6 +947,7 @@ class TestProfitPage:
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
         assert payload["unrealized"]["roi_percent"] == 155
         assert payload["delivery"]["coins"] == 12_345
+        assert payload["delivery"]["items"] == 7
         bot.profit_service.load_report.assert_awaited_once_with(
             other_user_id,
             60,

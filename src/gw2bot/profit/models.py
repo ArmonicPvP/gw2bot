@@ -80,6 +80,7 @@ class ProfitReport:
     realized: RealizedProfit
     unrealized: UnrealizedProfit
     unclaimed_coins: int | None
+    unclaimed_items: int | None
     item_names: dict[int, str]
 
 

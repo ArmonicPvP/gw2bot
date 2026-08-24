@@ -55,6 +55,19 @@ main { width: 100%; margin: 0; padding: 1rem; }
 }
 .card h2 { font-size: 1rem; padding: 0.85rem 1rem 0.25rem; }
 .card p.note { color: var(--muted); font-size: 0.82rem; padding: 0 1rem 0.8rem; }
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.65rem 0.8rem;
+}
+.pagination-pages { display: flex; gap: 0.25rem; margin-left: auto; }
+.pagination button { min-width: 2rem; padding: 0.3rem 0.5rem; }
+.pagination button[aria-current="page"] {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.page-size { display: flex; align-items: center; gap: 0.4rem; }
+.page-size input { width: 4rem; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {
@@ -248,6 +261,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </section>
     <section class="card">
       <h2>Realized Profit by Day</h2>
+      <nav class="pagination" aria-label="Daily profit pages">
+        <span class="pagination-pages" id="days-pages-top"></span>
+      </nav>
       <div class="table-scroll"><table id="days-table" data-sort-table="days">
         <thead><tr>
           <th aria-sort="ascending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
@@ -259,6 +275,12 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="days-body"></tbody>
         <tfoot id="days-foot"></tfoot>
       </table></div>
+      <nav class="pagination" aria-label="Daily profit pages and page size">
+        <label class="page-size" for="days-page-size">Rows per page
+          <input id="days-page-size" type="number" min="1" max="90" value="10">
+        </label>
+        <span class="pagination-pages" id="days-pages-bottom"></span>
+      </nav>
     </section>
     <section class="card">
       <h2>Unrealized Profit</h2>
@@ -277,12 +299,15 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       </table></div>
     </section>
     <section class="card">
-      <h2>Unclaimed Trading Post Gold</h2>
-      <p class="note">Coins waiting for pickup in your Trading Post delivery box.</p>
+      <h2>Unclaimed Trading Post</h2>
+      <p class="note">Coins and items waiting for pickup in your Trading Post delivery box.</p>
       <p class="note" id="delivery-key-help" hidden>Delivery access is unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows the Trading Post delivery endpoint.</p>
       <div class="table-scroll"><table>
         <thead><tr><th>Measure</th><th>Value</th></tr></thead>
-        <tbody><tr><td>Available to collect</td><td id="unclaimed-coins">0c</td></tr></tbody>
+        <tbody>
+          <tr><td>Gold available to collect</td><td id="unclaimed-coins">0c</td></tr>
+          <tr><td>Items available to collect</td><td id="unclaimed-items">0</td></tr>
+        </tbody>
       </table></div>
     </section>
   </div>
@@ -296,6 +321,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var reports = document.getElementById("reports");
   var keyHelp = document.getElementById("key-help");
   var sortStates = {};
+  var daysPage = 1;
+  var daysPageSize = 10;
 
   function trace(action, rows) {
     console.debug("Profit dashboard", action, "rows=" + rows);
@@ -431,7 +458,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
               direction: direction,
               kind: button.dataset.sortKind
             };
+            if (key === "days") { daysPage = 1; }
             var rows = sortTable(table, sortStates[key]);
+            if (key === "days") { paginateDays(); }
             traceSort(key, button.dataset.sortKey, direction, rows);
           });
         });
@@ -1049,7 +1078,41 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       "Total", data.summary.matched_units, coin(data.summary.cost),
       coin(data.summary.net_revenue), data.summary.profit
     ], 4);
+    daysPage = 1;
     applySort("days-table");
+    paginateDays();
+  }
+
+  function pageButton(page) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.textContent = String(page);
+    button.setAttribute("aria-label", "Page " + page);
+    if (page === daysPage) { button.setAttribute("aria-current", "page"); }
+    button.addEventListener("click", function () {
+      daysPage = page;
+      paginateDays();
+      trace("days-page", page);
+    });
+    return button;
+  }
+
+  function paginateDays() {
+    var rows = Array.prototype.slice.call(
+      document.querySelectorAll("#days-body tr[data-sort-row]"));
+    var pageCount = Math.max(1, Math.ceil(rows.length / daysPageSize));
+    daysPage = Math.min(daysPage, pageCount);
+    rows.forEach(function (row, index) {
+      row.hidden = index < (daysPage - 1) * daysPageSize
+        || index >= daysPage * daysPageSize;
+    });
+    ["days-pages-top", "days-pages-bottom"].forEach(function (id) {
+      var pages = document.getElementById(id);
+      pages.replaceChildren();
+      for (var page = 1; page <= pageCount; page += 1) {
+        pages.appendChild(pageButton(page));
+      }
+    });
   }
 
   function renderUnrealized(data) {
@@ -1081,15 +1144,20 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   function renderDelivery(data) {
     var node = document.getElementById("unclaimed-coins");
+    var items = document.getElementById("unclaimed-items");
     var help = document.getElementById("delivery-key-help");
     if (data.delivery.coins === null) {
       node.textContent = "Unavailable";
       node.className = "";
+      items.textContent = "Unavailable";
+      items.className = "";
       help.hidden = false;
       return;
     }
     node.textContent = coin(data.delivery.coins);
     node.className = data.delivery.coins > 0 ? "positive" : "";
+    items.textContent = String(data.delivery.items);
+    items.className = data.delivery.items > 0 ? "positive" : "";
     help.hidden = true;
   }
 
@@ -1157,6 +1225,19 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     event.preventDefault();
     load();
   });
+  document.getElementById("days-page-size").addEventListener(
+    "change", function (event) {
+      var value = Number(event.target.value);
+      if (!Number.isInteger(value) || value < 1 || value > 90) {
+        event.target.value = String(daysPageSize);
+        trace("refuse-page-size", 0);
+        return;
+      }
+      daysPageSize = value;
+      daysPage = 1;
+      paginateDays();
+      trace("days-page-size", value);
+    });
   initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
   if (Number.isInteger(initial) && initial >= 1 && initial <= 90) {

@@ -69,12 +69,15 @@ class ProfitService:
         )
         api_key = await self._refresh_transactions(discord_user_id, loaded_at)
         try:
-            unclaimed_coins = await self._api.fetch_delivery_coins(api_key)
+            unclaimed_coins, unclaimed_items = await self._api.fetch_delivery(
+                api_key
+            )
         except ProfitApiAuthorizationError:
             # Keys accepted before delivery reporting existed may be subtokens
             # restricted to the original three transaction routes. Preserve
             # that member's established report and degrade only the new field.
             unclaimed_coins = None
+            unclaimed_items = None
             LOGGER.warning(
                 "Could not load Trading Post delivery; user_id=%s "
                 "reason=unauthorized",
@@ -126,11 +129,12 @@ class ProfitService:
             realized=realized,
             unrealized=unrealized,
             unclaimed_coins=unclaimed_coins,
+            unclaimed_items=unclaimed_items,
             item_names=item_names,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s unclaimed_gold=%s",
+            "unrealized_items=%s unclaimed_delivery=%s",
             discord_user_id,
             days,
             len(realized.items),
@@ -327,5 +331,8 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
                 unrealized.total_cost,
             ),
         },
-        "delivery": {"coins": report.unclaimed_coins},
+        "delivery": {
+            "coins": report.unclaimed_coins,
+            "items": report.unclaimed_items,
+        },
     }
