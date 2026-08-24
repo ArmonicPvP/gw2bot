@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -54,6 +55,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
+from gw2bot.logging_setup import SecretRegistry, configure_logging
 
 from factories import default_config, forbidden_error, not_found_error
 
@@ -2964,6 +2966,50 @@ class TestApplyAutoSignups:
         assert stored is not None
         assert stored.role is EventRole.DPS
         assert stored.flex_roles == ()
+
+    async def test_role_normalization_console_log_redacts_registered_secrets(
+        self,
+        bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        event = replace(event, category=EventCategory.DUNGEON)
+        secret = EventRole.QUICKNESS_HEAL.value
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret,)))
+
+            assert apply_auto_signups(bot, event, occurrence) == 1
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        assert "Normalized automatic signup roles" in console
+        assert "[REDACTED]" in console
+        assert secret not in console
 
 
 class TestDisableAutoSignup:
