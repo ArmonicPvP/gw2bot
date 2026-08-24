@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +55,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
+from gw2bot.logging_setup import SecretRegistry, configure_logging
 
 from factories import default_config, forbidden_error, not_found_error
 
@@ -2933,6 +2936,81 @@ class TestApplyAutoSignups:
         assert by_user[12].waitlisted
         assert by_user[12].assigned_role is None
 
+    async def test_invalid_auto_signup_role_is_normalized_after_category_change(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        event = replace(event, category=EventCategory.DUNGEON)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+
+        assert apply_auto_signups(bot, event, occurrence) == 1
+
+        signup = store.get_signup(occurrence.occurrence_id, 11)
+        assert signup is not None
+        assert not signup.waitlisted
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        stored = store.get_auto_signup(event.event_id, 11)
+        assert stored is not None
+        assert stored.role is EventRole.DPS
+        assert stored.flex_roles == ()
+
+    async def test_role_normalization_console_log_redacts_registered_secrets(
+        self,
+        bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        event = replace(event, category=EventCategory.DUNGEON)
+        secret = EventRole.QUICKNESS_HEAL.value
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret,)))
+
+            assert apply_auto_signups(bot, event, occurrence) == 1
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        assert "Normalized automatic signup roles" in console
+        assert "[REDACTED]" in console
+        assert secret not in console
+
 
 class TestDisableAutoSignup:
     async def _seed_next(
@@ -3539,6 +3617,48 @@ class TestRebalanceOccurrenceRoster:
         assert not is_roster_full(fractal.capacity, signups)
         # A further DPS no longer fits, so the overfill is closed.
         assert EventRole.DPS not in fitting_roles(fractal.capacity, signups)
+
+    def test_dungeon_rebalance_persists_normalized_signup_roles(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.FRACTAL)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        self.seat(
+            store,
+            occurrence.occurrence_id,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            EventRole.QUICKNESS_HEAL,
+        )
+        dungeon = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        changed, _ = rebalance_occurrence_roster(bot, dungeon, occurrence)
+
+        assert changed == 1
+        signup = store.get_signup(occurrence.occurrence_id, 1)
+        assert signup is not None
+        assert signup.role is EventRole.DPS
+        assert signup.flex_roles == ()
+        assert signup.assigned_role is EventRole.DPS
+        assert not signup.waitlisted
+        assert set(fitting_roles(dungeon.capacity, [signup])) == {
+            EventRole.DPS,
+            EventRole.QUICKNESS_DPS,
+            EventRole.ALACRITY_DPS,
+        }
 
     def test_moving_to_general_seats_the_whole_waitlist(
         self,

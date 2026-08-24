@@ -365,14 +365,17 @@ The category fixes the squad, and the bot enforces it:
 | Raid | 10 | 2 | 8 | 2 | 2 |
 | Strike | 10 | 2 | 8 | 2 | 2 |
 | Fractal | 5 | 1 | 4 | 1 | 1 |
+| Dungeon | 5 | 0 | 5 | 1 | 1 |
 | World vs. World | 50 | — | — | — | — |
 | Open World | 50 | — | — | — | — |
 | General | No limit | — | — | — | — |
 
-Raid, Strike, and Fractal events are role-based: members pick one of Just DPS,
-Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and the healer,
-DPS, quickness, and alacrity caps are all honoured at once. World vs. World,
-Open World, and General events are a plain headcount with no roles to pick.
+Raid, Strike, Fractal, and Dungeon events are role-based: members pick one of
+Just DPS, Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and
+the healer, DPS, quickness, and alacrity caps are all honoured at once. Dungeon
+groups have no healer slot: they require one Quickness DPS, one Alacrity DPS,
+and three Just DPS. World vs. World, Open World, and General events are a plain
+headcount with no roles to pick.
 General has no squad size at all: everyone who signs up is seated, so it never
 fills and never waitlists anyone, and its embed shows the participant count on
 its own rather than as a share of a total.

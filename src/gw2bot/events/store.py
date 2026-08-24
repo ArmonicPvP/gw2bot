@@ -835,6 +835,10 @@ class EventStore:
                     else None
                 )
                 record.waitlisted = assignment.waitlisted
+                if assignment.flex_roles is not None:
+                    record.flex_roles = _serialize_roles(
+                        assignment.flex_roles
+                    )
             session.commit()
         LOGGER.debug(
             "Applied roster assignments; occurrence_id=%s changed=%s",

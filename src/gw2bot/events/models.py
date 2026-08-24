@@ -13,6 +13,7 @@ EMOJI_RAID = "<:raid:1525431773498970172>"
 EMOJI_STRIKE = "<:strike:1525431254340866171>"
 EMOJI_WVW = "<:wvw:1525431137982353428>"
 EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
+EMOJI_DUNGEON = "🏰"
 EMOJI_OPEN_WORLD = "🌍"
 EMOJI_GENERAL = "📋"
 
@@ -21,6 +22,7 @@ class EventCategory(StrEnum):
     RAID = "Raid"
     STRIKE = "Strike"
     FRACTAL = "Fractal"
+    DUNGEON = "Dungeon"
     WVW = "World vs. World"
     OPEN_WORLD = "Open World"
     GENERAL = "General"
@@ -30,6 +32,7 @@ CATEGORY_EMOJI: dict[EventCategory, str] = {
     EventCategory.RAID: EMOJI_RAID,
     EventCategory.STRIKE: EMOJI_STRIKE,
     EventCategory.FRACTAL: EMOJI_FRACTAL,
+    EventCategory.DUNGEON: EMOJI_DUNGEON,
     EventCategory.WVW: EMOJI_WVW,
     EventCategory.OPEN_WORLD: EMOJI_OPEN_WORLD,
     EventCategory.GENERAL: EMOJI_GENERAL,
@@ -169,6 +172,15 @@ CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
         alacrity=1,
         required_boon_healers=1,
         required_boon_dps=1,
+    ),
+    EventCategory.DUNGEON: CategoryCapacity(
+        total=5,
+        healers=0,
+        dps=5,
+        quickness=1,
+        alacrity=1,
+        required_boon_healers=0,
+        required_boon_dps=2,
     ),
     EventCategory.WVW: CategoryCapacity(50, None, None, None, None),
     # Open world squads are the same shape as WvW: a plain 50-seat headcount
@@ -400,6 +412,9 @@ class RosterAssignment:
     role: EventRole | None
     assigned_role: EventRole | None
     waitlisted: bool
+    # None leaves the stored flex roles unchanged; category rebalancing passes
+    # a tuple because it also normalizes preferences for the new capacity.
+    flex_roles: tuple[EventRole, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -576,6 +591,33 @@ def fitting_roles(
     ]
 
 
+def supported_roles(capacity: CategoryCapacity) -> frozenset[EventRole]:
+    """Return roles that can ever fit this category's composition."""
+    return frozenset(fitting_roles(capacity, []))
+
+
+def normalize_stored_roles(
+    capacity: CategoryCapacity,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+) -> tuple[EventRole, tuple[EventRole, ...]]:
+    """Adapt stored preferences after an event category changes."""
+    supported = supported_roles(capacity)
+    preferences = tuple(
+        preference
+        for preference in preferred_role_order(role, flex_roles)
+        if preference in supported
+    )
+    if not preferences:
+        fallback = (
+            EventRole.DPS
+            if EventRole.DPS in supported
+            else next(iter(supported))
+        )
+        return fallback, ()
+    return preferences[0], preferences[1:]
+
+
 def is_roster_full(
     capacity: CategoryCapacity,
     signups: list[EventSignup],
@@ -647,17 +689,28 @@ def rebalance_signups(
     admitted_prefs: list[tuple[EventRole, ...]] = []
     result_by_user: dict[int, EventSignup] = {}
     for signup in ordered:
-        role = signup.role if signup.role is not None else EventRole.DPS
-        preferences = preferred_role_order(role, signup.flex_roles)
+        if signup.role is None:
+            role, flex_roles = EventRole.DPS, ()
+        else:
+            role, flex_roles = normalize_stored_roles(
+                capacity,
+                signup.role,
+                signup.flex_roles,
+            )
+        preferences = preferred_role_order(role, flex_roles)
         if EventRole.DPS not in preferences:
             preferences = (*preferences, EventRole.DPS)
+            flex_roles = (*flex_roles, EventRole.DPS)
         if roster_feasible(capacity, [*admitted_prefs, preferences]):
-            admitted.append(replace(signup, role=role))
+            admitted.append(
+                replace(signup, role=role, flex_roles=flex_roles)
+            )
             admitted_prefs.append(preferences)
         else:
             result_by_user[signup.discord_user_id] = replace(
                 signup,
                 role=role,
+                flex_roles=flex_roles,
                 assigned_role=None,
                 waitlisted=True,
             )

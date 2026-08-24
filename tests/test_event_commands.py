@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,6 +35,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
 )
 from gw2bot.events.store import EventStore
+from gw2bot.logging_setup import SecretRegistry, configure_logging
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
     PING_ROLE_OPTION_LIMIT,
@@ -60,6 +62,7 @@ from gw2bot.events.views import (
     EventScheduleModal,
     EventSignOutButton,
     EventSignUpButton,
+    FlexRolesSelect,
     ADD_SELECT_MAX_MEMBERS,
     AddSignupsRoleSelect,
     AddSignupsRoleView,
@@ -1531,6 +1534,45 @@ class TestRolePickSelect:
         assert labels[EventRole.ALACRITY_HEAL.value] == "Alacrity Heal"
         assert labels[EventRole.DPS.value] == "Just DPS"
 
+    def test_dungeon_pickers_exclude_healer_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.DUNGEON,
+            title="Dungeon",
+            description="Bring damage.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        dps_roles = {
+            EventRole.DPS.value,
+            EventRole.QUICKNESS_DPS.value,
+            EventRole.ALACRITY_DPS.value,
+        }
+
+        role_values = {option.value for option in RolePickSelect(flow).options}
+        assert role_values == dps_roles
+
+        flow.role = EventRole.DPS
+        flex_values = {
+            option.value for option in FlexRolesSelect(flow).options
+        }
+        assert flex_values == dps_roles - {EventRole.DPS.value}
+
+        add_values = {
+            option.value
+            for option in AddSignupsRoleSelect(event, []).options
+        }
+        assert add_values == dps_roles
+
     def test_boon_seat_held_by_a_flexer_is_not_labelled_full(
         self,
         fake_bot: Any,
@@ -2021,6 +2063,57 @@ class TestAutoSignupPrompt:
         assert "automatically" in kwargs["content"]
         assert isinstance(kwargs["view"], AutoSignupChoiceView)
 
+    async def test_finalize_normalizes_a_role_against_a_changed_category(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        flow.role = EventRole.QUICKNESS_HEAL
+        event = flow.event
+        store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        secret = "Normalized signup roles after"
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret,)))
+
+            await self.finalize_and_get_kwargs(flow)
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        signup = store.get_signup(flow.occurrence.occurrence_id, 21)
+        assert signup is not None
+        assert not signup.waitlisted
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        assert flow.event.category is EventCategory.DUNGEON
+        assert "[REDACTED]" in console
+        assert secret not in console
+
     async def test_prompts_again_after_a_plain_no(
         self,
         fake_bot: Any,
@@ -2168,6 +2261,45 @@ class TestRememberedRolesPerEvent:
         assert signup is not None
         assert signup.role is EventRole.ALACRITY_HEAL
         assert signup.flex_roles == (EventRole.DPS,)
+
+    async def test_invalid_remembered_role_is_normalized_after_category_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(store, "Changed category")
+        event = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.ALACRITY_HEAL,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        interaction = self.make_flow_interaction()
+
+        await start_signup_flow(fake_bot, interaction, occurrence.occurrence_id)
+
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert not signup.waitlisted
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        preference = store.get_signup_preference(event.event_id, 42)
+        assert preference is not None
+        assert preference.role is EventRole.DPS
+        assert preference.flex_roles == ()
 
     async def test_remembering_stores_the_choice_against_one_event(
         self,
@@ -2487,6 +2619,41 @@ class TestEditSignupFlow:
         assert updated.assigned_role is EventRole.ALACRITY_DPS
         assert not updated.waitlisted
         assert updated.signed_up_at == original.signed_up_at
+
+    async def test_edit_normalizes_a_stale_role_after_category_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_HEAL
+        store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        updated = store.get_signup(occurrence.occurrence_id, 42)
+        assert updated is not None
+        assert updated.role is EventRole.DPS
+        assert updated.assigned_role is EventRole.DPS
+        assert not updated.waitlisted
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "waitlist" not in kwargs["content"]
 
     async def test_edit_that_would_waitlist_confirms_then_applies(
         self,
@@ -6673,6 +6840,31 @@ class TestAddSignups:
         assert "Added <@11> to the roster." not in content
         # They are still told, because they are on the event either way.
         fake_bot.users[11].send.assert_awaited_once()
+
+    async def test_stale_commander_role_is_normalized_after_category_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.FRACTAL)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            [],
+            [11],
+        )
+        self.change_event(store, event, category=EventCategory.DUNGEON)
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_HEAL)
+
+        added = store.get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert added.role is EventRole.DPS
+        assert added.assigned_role is EventRole.DPS
+        assert not added.waitlisted
 
     async def test_several_additions_send_one_merged_thread_ping(
         self,

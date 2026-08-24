@@ -60,6 +60,8 @@ from gw2bot.events.models import (
     fitting_roles,
     is_pingable_role_name,
     is_roster_full,
+    normalize_stored_roles,
+    supported_roles,
 )
 
 if TYPE_CHECKING:
@@ -2375,6 +2377,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
     def __init__(self, event: Event, signups: list[EventSignup]):
         # The same labelling as the member-facing role picker, so a commander
         # can see which roles are already full before choosing.
+        supported = supported_roles(event.capacity)
         available = set(fitting_roles(event.capacity, signups))
         waitlist_only = not available
         options = [
@@ -2386,6 +2389,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
                 emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
+            if role in supported
         ]
         super().__init__(
             placeholder="Pick the role to add them as",
@@ -2651,6 +2655,23 @@ async def apply_roster_addition(
             view=None,
         )
         return
+    if event.capacity.has_roles and role is not None:
+        normalized_role, _ = normalize_stored_roles(
+            event.capacity,
+            role,
+            (),
+        )
+        if normalized_role is not role:
+            LOGGER.debug(
+                "Normalized a roster-addition role after an event changed "
+                "category; event_id=%s user_id=%s category=%s "
+                "normalized_role=%s",
+                event.event_id,
+                interaction.user.id,
+                event.category.value,
+                normalized_role.value,
+            )
+            role = normalized_role
     await interaction.response.edit_message(
         content="Adding the selected members…",
         embeds=[],
@@ -4977,10 +4998,32 @@ async def start_signup_flow(
         and preference.mode is PreferenceMode.REMEMBER
         and preference.role is not None
     ):
-        flow.role = preference.role
-        flow.flex_roles = tuple(
-            role for role in preference.flex_roles if role != preference.role
+        flow.role, flow.flex_roles = normalize_stored_roles(
+            event.capacity,
+            preference.role,
+            preference.flex_roles,
         )
+        if (
+            flow.role is not preference.role
+            or flow.flex_roles != preference.flex_roles
+        ):
+            bot.event_store.set_signup_preference(
+                event.event_id,
+                interaction.user.id,
+                flow.role,
+                flow.flex_roles,
+                PreferenceMode.REMEMBER,
+            )
+            LOGGER.debug(
+                "Normalized remembered roles for the current category; "
+                "event_id=%s user_id=%s stored_role=%s normalized_role=%s "
+                "normalized_flex_count=%s",
+                event.event_id,
+                interaction.user.id,
+                preference.role.value,
+                flow.role.value,
+                len(flow.flex_roles),
+            )
         flow.skip_remember_prompt = True
         await flow.finalize(interaction)
         return
@@ -5045,11 +5088,49 @@ class SignupFlow:
         else:
             await interaction.response.defer(ephemeral=True, thinking=True)
             edit = interaction.edit_original_response
+        # A picker can remain open while a commander edits the event. Re-read
+        # both records immediately before seating so the role is validated
+        # against the current category rather than the stale picker snapshot.
+        event = self.bot.event_store.get_event(self.event.event_id)
+        occurrence = self.bot.event_store.get_occurrence(
+            self.occurrence.occurrence_id
+        )
+        if event is None or occurrence is None:
+            await edit(content="This event no longer exists.", view=None)
+            return
+        self.event = event
+        self.occurrence = occurrence
+        previous_role = self.role
+        previous_flex_roles = self.flex_roles
+        if event.capacity.has_roles and self.role is not None:
+            self.role, self.flex_roles = normalize_stored_roles(
+                event.capacity,
+                self.role,
+                self.flex_roles,
+            )
+        elif not event.capacity.has_roles:
+            self.role = None
+            self.flex_roles = ()
+        if (
+            self.role is not previous_role
+            or self.flex_roles != previous_flex_roles
+        ):
+            LOGGER.debug(
+                "Normalized signup roles after an event changed category; "
+                "event_id=%s occurrence_id=%s user_id=%s category=%s "
+                "normalized_role=%s normalized_flex_count=%s",
+                event.event_id,
+                occurrence.occurrence_id,
+                self.discord_user_id,
+                event.category.value,
+                self.role.value if self.role is not None else None,
+                len(self.flex_roles),
+            )
         try:
             signup = await complete_signup(
                 self.bot,
-                self.event,
-                self.occurrence,
+                event,
+                occurrence,
                 self.discord_user_id,
                 self.role,
                 self.flex_roles,
@@ -5168,6 +5249,30 @@ class EditSignupFlow(SignupFlow):
             return
         self.event = event
         self.occurrence = occurrence
+        if event.capacity.has_roles:
+            normalized_role, normalized_flex_roles = normalize_stored_roles(
+                event.capacity,
+                self.role,
+                self.flex_roles,
+            )
+            if (
+                normalized_role is not self.role
+                or normalized_flex_roles != self.flex_roles
+            ):
+                LOGGER.debug(
+                    "Normalized signup-edit roles after an event changed "
+                    "category; event_id=%s occurrence_id=%s user_id=%s "
+                    "category=%s normalized_role=%s "
+                    "normalized_flex_count=%s",
+                    event.event_id,
+                    occurrence.occurrence_id,
+                    self.discord_user_id,
+                    event.category.value,
+                    normalized_role.value,
+                    len(normalized_flex_roles),
+                )
+                self.role = normalized_role
+                self.flex_roles = normalized_flex_roles
         try:
             result = await apply_signup_edit(
                 self.bot,
@@ -5360,6 +5465,7 @@ def _role_pick_label(
 class RolePickSelect(discord.ui.Select["RolePickView"]):
     def __init__(self, flow: SignupFlow):
         signups = flow.roster_for_labels()
+        supported = supported_roles(flow.event.capacity)
         available = set(fitting_roles(flow.event.capacity, signups))
         waitlist_only = not available
         options = [
@@ -5371,6 +5477,7 @@ class RolePickSelect(discord.ui.Select["RolePickView"]):
                 emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
+            if role in supported
         ]
         super().__init__(placeholder="Pick your role", options=options)
 
@@ -5406,6 +5513,7 @@ class RolePickView(discord.ui.View):
 
 class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
     def __init__(self, flow: SignupFlow):
+        supported = supported_roles(flow.event.capacity)
         options = [
             discord.SelectOption(
                 label=role.value,
@@ -5413,7 +5521,7 @@ class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
                 emoji=ROLE_EMOJI[role],
             )
             for role in EventRole
-            if role != flow.role
+            if role != flow.role and role in supported
         ]
         super().__init__(
             placeholder="Pick any flex roles",
