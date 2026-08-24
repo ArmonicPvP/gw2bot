@@ -4101,18 +4101,19 @@ button:focus-visible {
 
   function gold(copper) { return copper / COPPER_PER_GOLD; }
 
-  // Spell an exact copper value in GW2's denominations, omitting only trailing
-  // zero denominations: 1g, 1g1s, 1g0s1c and 10c all remain unambiguous.
+  // Match the profit dashboard's spaced denomination format. Copper is always
+  // present, and silver is retained whenever gold is present: 1g 0s 0c.
   function formatCoins(copper) {
     var remaining = Math.max(0, Math.round(copper));
     var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
     remaining %= COPPER_PER_GOLD;
     var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
     var copperCoins = remaining % COPPER_PER_SILVER;
-    var text = goldCoins ? goldCoins.toLocaleString() + "g" : "";
-    if (silverCoins || (goldCoins && copperCoins)) { text += silverCoins + "s"; }
-    if (copperCoins || !text) { text += copperCoins + "c"; }
-    return text;
+    var parts = [];
+    if (goldCoins) { parts.push(goldCoins.toLocaleString() + "g"); }
+    if (silverCoins || goldCoins) { parts.push(silverCoins + "s"); }
+    parts.push(copperCoins + "c");
+    return parts.join(" ");
   }
   function formatSigned(copper, operation) {
     var sign = operation === "withdraw" ? "-" : "+";

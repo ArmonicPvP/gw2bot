@@ -1355,9 +1355,9 @@ observed, so its right-hand edge reads the bank as it stood then rather than as
 it stands now; the figure beside the heading says "at the end" instead of "now"
 to match.
 
-Amounts use the game's compact gold, silver, and copper notation (for example,
-`1g`, `1g1s`, `1g0s1c`, or `10c`) without trailing zero denominations. Table
-movements are a bare `+` deposit or `-` withdrawal followed by that amount.
+Amounts use the same spaced gold, silver, and copper notation as `/profit`
+(for example, `1g 1s 0c`, `1g 0s 1c`, or `10c`). Table movements are a bare
+`+` deposit or `-` withdrawal followed by that amount.
 The y axis covers the balances the window actually
 reached rather than starting at zero, and its gridlines round to 1, 2 or 5
 times a power of ten, so a week of small movements is visible rather than a

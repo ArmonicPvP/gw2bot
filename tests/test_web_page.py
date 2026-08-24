@@ -998,11 +998,12 @@ class TestRosterTable:
 
 
 class TestGoldPage:
-    def test_coin_values_use_compact_exact_denominations(self) -> None:
+    def test_coin_values_match_the_profit_pages_spaced_denominations(self) -> None:
         assert "function formatCoins(copper)" in GOLD_PAGE
-        assert 'goldCoins.toLocaleString() + "g"' in GOLD_PAGE
-        assert 'text += silverCoins + "s"' in GOLD_PAGE
-        assert 'text += copperCoins + "c"' in GOLD_PAGE
+        assert 'parts.push(goldCoins.toLocaleString() + "g")' in GOLD_PAGE
+        assert 'parts.push(silverCoins + "s")' in GOLD_PAGE
+        assert 'parts.push(copperCoins + "c")' in GOLD_PAGE
+        assert 'return parts.join(" ");' in GOLD_PAGE
         assert "formatGold" not in GOLD_PAGE
 
     def test_table_amount_is_only_an_ascii_sign_and_value(self) -> None:
