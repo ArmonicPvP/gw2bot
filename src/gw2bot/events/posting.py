@@ -41,6 +41,7 @@ from gw2bot.events.models import (
     can_admit,
     is_pingable_role_name,
     is_roster_full,
+    normalize_stored_roles,
     preferred_role_order,
     rebalance_signups,
     roster_feasible,
@@ -2074,6 +2075,8 @@ def apply_auto_signups(
         ):
             continue
         assigned_role: EventRole | None = None
+        signup_role = entry.role
+        signup_flex_roles = entry.flex_roles
         if event.capacity.has_roles:
             if entry.role is None:
                 LOGGER.debug(
@@ -2083,6 +2086,32 @@ def apply_auto_signups(
                     entry.discord_user_id,
                 )
                 continue
+            signup_role, signup_flex_roles = normalize_stored_roles(
+                event.capacity,
+                entry.role,
+                entry.flex_roles,
+            )
+            if (
+                signup_role is not entry.role
+                or signup_flex_roles != entry.flex_roles
+            ):
+                bot.event_store.set_auto_signup(
+                    event.event_id,
+                    entry.discord_user_id,
+                    entry.choice,
+                    signup_role,
+                    signup_flex_roles,
+                )
+                LOGGER.debug(
+                    "Normalized automatic signup roles for the current "
+                    "category; event_id=%s user_id=%s stored_role=%s "
+                    "normalized_role=%s normalized_flex_count=%s",
+                    event.event_id,
+                    entry.discord_user_id,
+                    entry.role.value,
+                    signup_role.value,
+                    len(signup_flex_roles),
+                )
             # Same admission as a live signup: earlier entries may be flexed
             # aside to fit this one, but are never unseated. The roster is
             # freshly seeded and unseen, so the reshuffle happens silently.
@@ -2091,8 +2120,8 @@ def apply_auto_signups(
                 RosterCandidate(
                     discord_user_id=entry.discord_user_id,
                     preferences=preferred_role_order(
-                        entry.role,
-                        entry.flex_roles,
+                        signup_role,
+                        signup_flex_roles,
                     ),
                 )
             )
@@ -2110,9 +2139,9 @@ def apply_auto_signups(
         bot.event_store.add_signup(
             occurrence_id=occurrence.occurrence_id,
             discord_user_id=entry.discord_user_id,
-            role=entry.role,
+            role=signup_role,
             assigned_role=assigned_role,
-            flex_roles=entry.flex_roles,
+            flex_roles=signup_flex_roles,
             waitlisted=waitlisted,
         )
         applied += 1

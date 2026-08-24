@@ -2209,6 +2209,45 @@ class TestRememberedRolesPerEvent:
         assert signup.role is EventRole.ALACRITY_HEAL
         assert signup.flex_roles == (EventRole.DPS,)
 
+    async def test_invalid_remembered_role_is_normalized_after_category_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_role_event(store, "Changed category")
+        event = store.update_event(
+            event_id=event.event_id,
+            category=EventCategory.DUNGEON,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.ALACRITY_HEAL,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        interaction = self.make_flow_interaction()
+
+        await start_signup_flow(fake_bot, interaction, occurrence.occurrence_id)
+
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert not signup.waitlisted
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        preference = store.get_signup_preference(event.event_id, 42)
+        assert preference is not None
+        assert preference.role is EventRole.DPS
+        assert preference.flex_roles == ()
+
     async def test_remembering_stores_the_choice_against_one_event(
         self,
         fake_bot: Any,

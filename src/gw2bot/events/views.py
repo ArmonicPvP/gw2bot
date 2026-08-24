@@ -46,7 +46,6 @@ from gw2bot.events.models import (
     CATEGORY_EMOJI,
     MAX_PING_ROLES,
     PING_ROLE_PREFIX,
-    CategoryCapacity,
     Event,
     EventCategory,
     EventOccurrence,
@@ -61,6 +60,8 @@ from gw2bot.events.models import (
     fitting_roles,
     is_pingable_role_name,
     is_roster_full,
+    normalize_stored_roles,
+    supported_roles,
 )
 
 if TYPE_CHECKING:
@@ -2376,7 +2377,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
     def __init__(self, event: Event, signups: list[EventSignup]):
         # The same labelling as the member-facing role picker, so a commander
         # can see which roles are already full before choosing.
-        supported = _supported_roles(event.capacity)
+        supported = supported_roles(event.capacity)
         available = set(fitting_roles(event.capacity, signups))
         waitlist_only = not available
         options = [
@@ -4980,10 +4981,32 @@ async def start_signup_flow(
         and preference.mode is PreferenceMode.REMEMBER
         and preference.role is not None
     ):
-        flow.role = preference.role
-        flow.flex_roles = tuple(
-            role for role in preference.flex_roles if role != preference.role
+        flow.role, flow.flex_roles = normalize_stored_roles(
+            event.capacity,
+            preference.role,
+            preference.flex_roles,
         )
+        if (
+            flow.role is not preference.role
+            or flow.flex_roles != preference.flex_roles
+        ):
+            bot.event_store.set_signup_preference(
+                event.event_id,
+                interaction.user.id,
+                flow.role,
+                flow.flex_roles,
+                PreferenceMode.REMEMBER,
+            )
+            LOGGER.debug(
+                "Normalized remembered roles for the current category; "
+                "event_id=%s user_id=%s stored_role=%s normalized_role=%s "
+                "normalized_flex_count=%s",
+                event.event_id,
+                interaction.user.id,
+                preference.role.value,
+                flow.role.value,
+                len(flow.flex_roles),
+            )
         flow.skip_remember_prompt = True
         await flow.finalize(interaction)
         return
@@ -5360,15 +5383,10 @@ def _role_pick_label(
     return role.value
 
 
-def _supported_roles(capacity: CategoryCapacity) -> frozenset[EventRole]:
-    """Return roles that can ever fit this category's composition."""
-    return frozenset(fitting_roles(capacity, []))
-
-
 class RolePickSelect(discord.ui.Select["RolePickView"]):
     def __init__(self, flow: SignupFlow):
         signups = flow.roster_for_labels()
-        supported = _supported_roles(flow.event.capacity)
+        supported = supported_roles(flow.event.capacity)
         available = set(fitting_roles(flow.event.capacity, signups))
         waitlist_only = not available
         options = [
@@ -5416,7 +5434,7 @@ class RolePickView(discord.ui.View):
 
 class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
     def __init__(self, flow: SignupFlow):
-        supported = _supported_roles(flow.event.capacity)
+        supported = supported_roles(flow.event.capacity)
         options = [
             discord.SelectOption(
                 label=role.value,

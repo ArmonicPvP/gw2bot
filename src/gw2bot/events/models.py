@@ -588,6 +588,33 @@ def fitting_roles(
     ]
 
 
+def supported_roles(capacity: CategoryCapacity) -> frozenset[EventRole]:
+    """Return roles that can ever fit this category's composition."""
+    return frozenset(fitting_roles(capacity, []))
+
+
+def normalize_stored_roles(
+    capacity: CategoryCapacity,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+) -> tuple[EventRole, tuple[EventRole, ...]]:
+    """Adapt stored preferences after an event category changes."""
+    supported = supported_roles(capacity)
+    preferences = tuple(
+        preference
+        for preference in preferred_role_order(role, flex_roles)
+        if preference in supported
+    )
+    if not preferences:
+        fallback = (
+            EventRole.DPS
+            if EventRole.DPS in supported
+            else next(iter(supported))
+        )
+        return fallback, ()
+    return preferences[0], preferences[1:]
+
+
 def is_roster_full(
     capacity: CategoryCapacity,
     signups: list[EventSignup],

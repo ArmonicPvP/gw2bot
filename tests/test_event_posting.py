@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -2932,6 +2933,37 @@ class TestApplyAutoSignups:
         assert not by_user[11].waitlisted
         assert by_user[12].waitlisted
         assert by_user[12].assigned_role is None
+
+    async def test_invalid_auto_signup_role_is_normalized_after_category_change(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        event = replace(event, category=EventCategory.DUNGEON)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+
+        assert apply_auto_signups(bot, event, occurrence) == 1
+
+        signup = store.get_signup(occurrence.occurrence_id, 11)
+        assert signup is not None
+        assert not signup.waitlisted
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        stored = store.get_auto_signup(event.event_id, 11)
+        assert stored is not None
+        assert stored.role is EventRole.DPS
+        assert stored.flex_roles == ()
 
 
 class TestDisableAutoSignup:
