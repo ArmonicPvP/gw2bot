@@ -1361,7 +1361,8 @@ Amounts use the same spaced gold, silver, and copper notation as `/profit`
 The y axis covers the balances the window actually
 reached rather than starting at zero, and its gridlines round to 1, 2 or 5
 times a power of ten, so a week of small movements is visible rather than a
-flat line at the top of an axis scaled to the whole treasury.
+flat line at the top of an axis scaled to the whole treasury. Axis labels use
+compact denominations so large balances remain visible inside the chart.
 
 A long account name wraps inside its column rather than widening the table, and
 on a phone the running balance column gives way — the amount and its sign are

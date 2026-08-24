@@ -1760,6 +1760,10 @@ button:focus-visible {
     return feasts().filter(function (feast) { return !isHidden(feast); });
   }
 
+  function traceMode(mode, count) {
+    console.debug("feast chart mode:", mode, count);
+  }
+
   function scaleX(t) {
     var since = state.data.since;
     var now = state.data.now;
@@ -1906,7 +1910,8 @@ button:focus-visible {
     chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
     chartMode.setAttribute("aria-label", state.staircase
       ? "Switch to regular line graph" : "Switch to staircase graph");
-    renderChart();
+    traceMode(state.staircase ? "staircase" : "regular", feasts().length);
+    if (state.data) { renderChart(); }
   });
 
   // What the chart says about itself when it has drawn nothing: an empty
@@ -2929,6 +2934,10 @@ button:focus-visible {
 
   function points() { return (state.data && state.data.points) || []; }
   function events() { return (state.data && state.data.events) || []; }
+
+  function traceMode(mode, count) {
+    console.debug("roster chart mode:", mode, count);
+  }
   function kindOf(kind) { return KINDS[kind] || KINDS.leave; }
 
   // The axis covers the counts actually reached in the window, padded out to
@@ -3107,6 +3116,7 @@ button:focus-visible {
     chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
     chartMode.setAttribute("aria-label", state.staircase
       ? "Switch to regular line graph" : "Switch to staircase graph");
+    traceMode(state.staircase ? "staircase" : "regular", points().length);
     renderChart();
   });
 
@@ -4095,6 +4105,10 @@ button:focus-visible {
 
   function points() { return (state.data && state.data.points) || []; }
   function movements() { return (state.data && state.data.movements) || []; }
+
+  function traceMode(mode, count) {
+    console.debug("gold chart mode:", mode, count);
+  }
   function operationOf(operation) {
     return OPERATIONS[operation] || OPERATIONS.withdraw;
   }
@@ -4114,6 +4128,17 @@ button:focus-visible {
     if (silverCoins || goldCoins) { parts.push(silverCoins + "s"); }
     parts.push(copperCoins + "c");
     return parts.join(" ");
+  }
+  function formatAxisCoins(copper) {
+    var remaining = Math.max(0, Math.round(copper));
+    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
+    remaining %= COPPER_PER_GOLD;
+    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
+    var copperCoins = remaining % COPPER_PER_SILVER;
+    var text = goldCoins ? goldCoins.toLocaleString() + "g" : "";
+    if (silverCoins || (goldCoins && copperCoins)) { text += silverCoins + "s"; }
+    if (copperCoins || !text) { text += copperCoins + "c"; }
+    return text;
   }
   function formatSigned(copper, operation) {
     var sign = operation === "withdraw" ? "-" : "+";
@@ -4243,7 +4268,7 @@ button:focus-visible {
       var yLabel = svg("text", {
         "class": "y-label", x: M.left - 6, y: y + 4
       });
-      yLabel.textContent = formatCoins(value * COPPER_PER_GOLD);
+      yLabel.textContent = formatAxisCoins(value * COPPER_PER_GOLD);
       canvas.appendChild(yLabel);
     }
 
@@ -4305,7 +4330,8 @@ button:focus-visible {
       }));
       plotted.push({
         x: px, y: py, t: minute.t, after: minute.after,
-        movements: minute.movements
+        movements: minute.movements,
+        finalMovement: minute.movements[minute.movements.length - 1]
       });
     });
 
@@ -4322,15 +4348,16 @@ button:focus-visible {
     chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
     chartMode.setAttribute("aria-label", state.staircase
       ? "Switch to regular line graph" : "Switch to staircase graph");
+    traceMode(state.staircase ? "staircase" : "regular", points().length);
     renderChart();
   });
 
   function movementMinutes() {
     var byMinute = {};
     var minutes = [];
-    movements().slice().sort(function (left, right) {
-      return left.t - right.t;
-    }).forEach(function (movement) {
+    // The API serializes newest-first. Reversing, rather than sorting only by
+    // timestamp, restores its exact chronological order including tied times.
+    movements().slice().reverse().forEach(function (movement) {
       if (movement.after === null) { return; }
       var minuteAt = Math.floor(movement.t / 60) * 60;
       var key = String(minuteAt);
@@ -4488,7 +4515,7 @@ button:focus-visible {
           cx: point.x,
           cy: point.y,
           r: 7,
-          stroke: operationOf(point.movement.operation).color
+          stroke: operationOf(point.finalMovement.operation).color
         }));
         var dy = Math.abs(point.y - vbY);
         if (dy < bestDy) { bestDy = dy; emphasized = point; }

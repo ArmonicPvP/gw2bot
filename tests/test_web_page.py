@@ -192,8 +192,10 @@ class TestProfitPage:
         assert "pinned = true;\n      showHover(column, point.y);" in PROFIT_PAGE
         assert 'dismissPinned("outside")' in PROFIT_PAGE
         assert 'dismissPinned("wheel")' in PROFIT_PAGE
+        assert 'dismissPinned("scroll")' in PROFIT_PAGE
         assert 'dismissPinned("escape")' in PROFIT_PAGE
         assert 'dismissPinned("blur")' in PROFIT_PAGE
+        assert 'dismissPinned("cancelled")' in PROFIT_PAGE
 
     def test_profit_chart_tap_listeners_are_released_on_redraw(self) -> None:
         assert "var chartHoverCleanups = [];" in PROFIT_PAGE
@@ -754,17 +756,17 @@ class TestFoodPage:
         assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
-        # Four console calls exist on this page and no others: the sanitized
-        # selection, legend and range traces, and the load failure that logs
-        # an error's type and message. Anything else would be an unreviewed
-        # path to the console.
+        # Every console call is a sanitized workflow trace or the load failure
+        # that logs an error's type and message.
         assert re.findall(r"console\.\w+", FOOD_PAGE) == [
+            "console.debug",
             "console.debug",
             "console.debug",
             "console.debug",
             "console.error",
         ]
         assert _call_arguments(FOOD_PAGE, "console.debug") == [
+            ['"feast chart mode:"', "mode", "count"],
             ['"feast chart selection:"', "action", "reason", "count"],
             ['"feast chart legend:"', "action", "count"],
             ['"feast chart range:"', "action", "reason", "days"],
@@ -948,6 +950,29 @@ class TestDashboardChartModes:
         for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "state.staircase &&" in page
 
+    def test_mode_changes_are_traced_without_chart_values(self) -> None:
+        expectations = (
+            (FOOD_PAGE, '"feast chart mode:"', "feasts().length"),
+            (ROSTER_PAGE, '"roster chart mode:"', "points().length"),
+            (GOLD_PAGE, '"gold chart mode:"', "points().length"),
+        )
+        for page, message, count in expectations:
+            assert "function traceMode(mode, count) {" in page
+            assert f"console.debug({message}, mode, count);" in page
+            assert (
+                'traceMode(state.staircase ? "staircase" : "regular", '
+                + count + ");"
+            ) in page
+
+    def test_feast_mode_can_change_before_data_loads(self) -> None:
+        handler = FOOD_PAGE.split(
+            'chartMode.addEventListener("click", function () {', 1
+        )[1].split("\n  });", 1)[0]
+        assert "if (state.data) { renderChart(); }" in handler
+        assert "renderChart();\n" not in handler.replace(
+            "if (state.data) { renderChart(); }", ""
+        )
+
 
 class TestRosterTable:
     def test_a_long_account_name_wraps_instead_of_widening_the_table(
@@ -1006,6 +1031,11 @@ class TestGoldPage:
         assert 'return parts.join(" ");' in GOLD_PAGE
         assert "formatGold" not in GOLD_PAGE
 
+    def test_axis_keeps_compact_coin_labels_inside_its_margin(self) -> None:
+        assert "function formatAxisCoins(copper)" in GOLD_PAGE
+        assert "yLabel.textContent = formatAxisCoins(" in GOLD_PAGE
+        assert "yLabel.textContent = formatCoins(" not in GOLD_PAGE
+
     def test_table_amount_is_only_an_ascii_sign_and_value(self) -> None:
         assert 'operation === "withdraw" ? "-" : "+"' in GOLD_PAGE
         assert 'el("span", "amount-label"' not in GOLD_PAGE
@@ -1026,3 +1056,14 @@ class TestGoldPage:
         assert "minute.movements.push(movement);" in GOLD_PAGE
         assert "movementMinutes().forEach(function (minute)" in GOLD_PAGE
         assert "emphasized.movements.forEach(function (movement)" in GOLD_PAGE
+
+    def test_grouped_hover_ring_uses_the_final_movement(self) -> None:
+        assert "finalMovement: minute.movements[" in GOLD_PAGE
+        assert "operationOf(point.finalMovement.operation).color" in GOLD_PAGE
+        assert "point.movement.operation" not in GOLD_PAGE
+
+    def test_minute_grouping_restores_tied_api_order(self) -> None:
+        assert "movements().slice().reverse().forEach(function (movement)" in (
+            GOLD_PAGE
+        )
+        assert "left.t - right.t" not in GOLD_PAGE

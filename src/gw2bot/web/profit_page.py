@@ -757,7 +757,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     });
     overlay.addEventListener("pointercancel", function () {
       tapOrigin = null;
-      traceChartSelection("skip", "cancelled");
+      if (pinned) { dismissPinned("cancelled"); }
+      else { traceChartSelection("skip", "cancelled"); }
     });
 
     function dismissFromPage(event) {
@@ -765,18 +766,21 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       dismissPinned("outside");
     }
     function dismissFromWheel() { dismissPinned("wheel"); }
+    function dismissFromScroll() { dismissPinned("scroll"); }
     function dismissFromKey(event) {
       if (event.key === "Escape") { dismissPinned("escape"); }
     }
     function dismissFromBlur() { dismissPinned("blur"); }
     document.addEventListener("pointerdown", dismissFromPage);
     document.addEventListener("wheel", dismissFromWheel, { passive: true });
+    document.addEventListener("scroll", dismissFromScroll, { passive: true });
     document.addEventListener("keydown", dismissFromKey);
     window.addEventListener("blur", dismissFromBlur);
 
     return function () {
       document.removeEventListener("pointerdown", dismissFromPage);
       document.removeEventListener("wheel", dismissFromWheel);
+      document.removeEventListener("scroll", dismissFromScroll);
       document.removeEventListener("keydown", dismissFromKey);
       window.removeEventListener("blur", dismissFromBlur);
     };
