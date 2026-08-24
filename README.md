@@ -1242,6 +1242,9 @@ pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
 unit-weighted median time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
+The **Your Picks** table revisits items flipped in the selected window using
+their current highest buy order and lowest sell listing. It shows the ten best
+opportunities after fees and can rank them by either ROI or profit per unit.
 
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts

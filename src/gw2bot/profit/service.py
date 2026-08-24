@@ -17,6 +17,7 @@ from gw2bot.profit.models import (
     Transaction,
     calculate_realized_profit,
     calculate_unrealized_profit,
+    sale_fee_total,
 )
 from gw2bot.profit.store import ProfitStore
 
@@ -97,6 +98,7 @@ class ProfitService:
             realized.unmatched_buys,
             current_sells,
         )
+        market_prices = await self._api.fetch_market_prices(set(realized.items))
         item_ids = set(realized.items) | set(unrealized.items)
         item_names = await asyncio.to_thread(
             self._store.get_item_names,
@@ -127,14 +129,16 @@ class ProfitService:
             unrealized=unrealized,
             unclaimed_coins=unclaimed_coins,
             item_names=item_names,
+            market_prices=market_prices,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s unclaimed_gold=%s",
+            "unrealized_items=%s market_prices=%s unclaimed_gold=%s",
             discord_user_id,
             days,
             len(realized.items),
             len(unrealized.items),
+            len(market_prices),
             (
                 "unavailable"
                 if unclaimed_coins is None
@@ -296,6 +300,23 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             reverse=True,
         )
     ]
+    picks = []
+    for item_id, price in report.market_prices.items():
+        net_revenue = price.sell_unit_price - sale_fee_total(
+            price.sell_unit_price, 1
+        )
+        profit = net_revenue - price.buy_unit_price
+        picks.append(
+            {
+                "item_id": item_id,
+                "name": report.item_names[item_id],
+                "buy_price": price.buy_unit_price,
+                "sell_price": price.sell_unit_price,
+                "net_revenue": net_revenue,
+                "profit": profit,
+                "roi_percent": percentage(profit, price.buy_unit_price),
+            }
+        )
     return {
         "days": report.days,
         "window": {
@@ -315,6 +336,7 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             ),
         },
         "items": items,
+        "picks": picks,
         "days_table": day_rows,
         "unrealized": {
             "items": unrealized_items,

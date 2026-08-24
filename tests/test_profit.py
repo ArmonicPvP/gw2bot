@@ -24,6 +24,7 @@ from gw2bot.profit.api import (
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.models import (
     BuyLot,
+    MarketPrice,
     ProfitReport,
     Transaction,
     UnrealizedProfit,
@@ -588,6 +589,7 @@ class TestProfitService:
             fetch_transactions=AsyncMock(side_effect=fetched),
             fetch_delivery_coins=AsyncMock(return_value=12_345),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(return_value={1: MarketPrice(100, 200)}),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -606,6 +608,17 @@ class TestProfitService:
         assert payload["items"][0]["roi_percent"] == 70
         assert payload["items"][0]["median_hold_seconds"] == 86_400
         assert payload["items"][0]["profit_share_percent"] == 100
+        assert payload["picks"] == [
+            {
+                "item_id": 1,
+                "name": "Test Item",
+                "buy_price": 100,
+                "sell_price": 200,
+                "net_revenue": 170,
+                "profit": 70,
+                "roi_percent": 70,
+            }
+        ]
         assert payload["unrealized"]["roi_percent"] == 155
         assert payload["unrealized"]["items"][0]["roi_percent"] == 155
         assert payload["delivery"]["coins"] == 12_345
@@ -613,6 +626,7 @@ class TestProfitService:
         assert api.fetch_delivery_coins.await_count == 2
         api.fetch_delivery_coins.assert_awaited_with("member-secret")
         api.fetch_item_names.assert_awaited_once_with({1})
+        assert api.fetch_market_prices.await_count == 2
 
     async def test_legacy_restricted_key_keeps_its_cached_report(
         self,
@@ -638,6 +652,7 @@ class TestProfitService:
                 )
             ),
             fetch_item_names=AsyncMock(),
+            fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -673,6 +688,7 @@ class TestProfitService:
                 side_effect=ProfitApiError("GW2 API request returned HTTP 500")
             ),
             fetch_item_names=AsyncMock(),
+            fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -728,6 +744,7 @@ class TestProfitService:
             fetch_transactions=AsyncMock(side_effect=fetched),
             fetch_delivery_coins=AsyncMock(return_value=0),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -811,6 +828,7 @@ class TestProfitService:
             fetch_transactions=AsyncMock(),
             fetch_delivery_coins=AsyncMock(return_value=0),
             fetch_item_names=AsyncMock(return_value={1: "New Name"}),
+            fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -844,6 +862,45 @@ class _FakeResponse:
 
 
 class TestProfitApiLogging:
+    async def test_fetches_current_market_prices_without_logging_payload(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        payload_secret = "market-payload-secret"
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    200,
+                    [
+                        {
+                            "id": 1,
+                            "note": payload_secret,
+                            "buys": {"unit_price": 100},
+                            "sells": {"unit_price": 200},
+                        },
+                        {
+                            "id": 2,
+                            "buys": {"unit_price": 0},
+                            "sells": {"unit_price": 300},
+                        },
+                    ],
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            prices = await client.fetch_market_prices({2, 1})
+
+        assert prices == {1: MarketPrice(100, 200)}
+        assert payload_secret not in caplog.text
+        request = http.get.call_args
+        assert request.args[0] == "https://api.example/v2/commerce/prices"
+        assert request.kwargs["params"] == {"ids": "1,2"}
+
     @pytest.mark.parametrize(
         "restricted_urls",
         [None, [*TRANSACTION_PATHS.values(), DELIVERY_PATH]],

@@ -55,6 +55,13 @@ main { width: 100%; margin: 0; padding: 1rem; }
 }
 .card h2 { font-size: 1rem; padding: 0.85rem 1rem 0.25rem; }
 .card p.note { color: var(--muted); font-size: 0.82rem; padding: 0 1rem 0.8rem; }
+.card-heading { display: flex; align-items: center; gap: 0.75rem; padding-right: 1rem; }
+.card-heading h2 { flex: 1; }
+.pick-toggle { display: inline-flex; margin-top: 0.6rem; }
+.pick-toggle button { border-radius: 0; }
+.pick-toggle button:first-child { border-radius: 6px 0 0 6px; }
+.pick-toggle button:last-child { border-radius: 0 6px 6px 0; }
+.pick-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {
@@ -226,6 +233,20 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <div class="profit-chart"><svg id="cumulative-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Cumulative realized profit"></svg></div>
         </figure>
       </div>
+    </section>
+    <section class="card">
+      <div class="card-heading">
+        <h2>Your Picks</h2>
+        <div class="pick-toggle" aria-label="Rank picks by">
+          <button id="picks-roi" type="button" aria-pressed="true">ROI</button>
+          <button id="picks-profit" type="button" aria-pressed="false">Profit</button>
+        </div>
+      </div>
+      <p class="note">Current buy-order and sell-listing returns for items you flipped in the selected window. Prices include Trading Post fees.</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Item</th><th>Buy Order</th><th>Sell Price</th><th>Profit / Unit</th><th>ROI</th></tr></thead>
+        <tbody id="picks-body"></tbody>
+      </table></div>
     </section>
     <section class="card">
       <h2>Realized Profit by Item</h2>
@@ -903,7 +924,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       ["Realized ROI", percent(summary.roi_percent), summary.roi_percent],
       ["Profit / unit", average(summary.profit, summary.matched_units), summary.profit],
       ["Average daily profit", coin(Math.round(summary.profit / data.days)), summary.profit],
-      ["Unrealized projected profit", coin(unrealized.projected_profit), unrealized.projected_profit],
+      ["Unrealized profit", coin(unrealized.projected_profit), unrealized.projected_profit],
       ["Unrealized ROI", percent(unrealized.roi_percent), unrealized.roi_percent],
       ["Best item", highlight(bestItem, "name"), bestItem && bestItem.profit],
       ["Worst item", highlight(worstItem, "name"), worstItem && worstItem.profit],
@@ -952,6 +973,32 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       data.summary.profit === 0 ? "\u2014" : "100.0%"
     ], 4);
     applySort("items-table");
+  }
+
+  var picksData = [];
+  var picksMetric = "roi_percent";
+
+  function renderPicks() {
+    var body = document.getElementById("picks-body");
+    body.replaceChildren();
+    picksData.slice().sort(function (left, right) {
+      var difference = right[picksMetric] - left[picksMetric];
+      return difference || right.profit - left.profit
+        || left.name.localeCompare(right.name);
+    }).slice(0, 10).forEach(function (item) {
+      var row = document.createElement("tr");
+      cell(row, item.name, "name");
+      cell(row, coin(item.buy_price));
+      cell(row, coin(item.sell_price));
+      profitCell(row, item.profit);
+      percentCell(row, item.roi_percent);
+      body.appendChild(row);
+    });
+    if (!picksData.length) {
+      emptyRow(body, 5, "No current prices were found for your previous flips.");
+    }
+    trace("picks-" + (picksMetric === "roi_percent" ? "roi" : "profit"),
+      Math.min(10, picksData.length));
   }
 
   function renderDays(data) {
@@ -1020,6 +1067,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   function render(data) {
     renderSummary(data);
     renderCharts(data);
+    picksData = data.picks;
+    renderPicks();
     renderItems(data);
     renderDays(data);
     renderUnrealized(data);
@@ -1080,6 +1129,18 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   rangeForm.addEventListener("submit", function (event) {
     event.preventDefault();
     load();
+  });
+  document.getElementById("picks-roi").addEventListener("click", function () {
+    picksMetric = "roi_percent";
+    this.setAttribute("aria-pressed", "true");
+    document.getElementById("picks-profit").setAttribute("aria-pressed", "false");
+    renderPicks();
+  });
+  document.getElementById("picks-profit").addEventListener("click", function () {
+    picksMetric = "profit";
+    this.setAttribute("aria-pressed", "true");
+    document.getElementById("picks-roi").setAttribute("aria-pressed", "false");
+    renderPicks();
   });
   initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
