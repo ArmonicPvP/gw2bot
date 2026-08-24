@@ -439,6 +439,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   }
 
   var SVG_NS = "http://www.w3.org/2000/svg";
+  var chartHoverCleanups = [];
 
   function svgNode(name, attributes, textValue) {
     var node = document.createElementNS(SVG_NS, name);
@@ -619,6 +620,14 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     var tooltip = tooltipNode("chart-tooltip");
     tooltip.style.visibility = "hidden";
     container.appendChild(tooltip);
+    var pinned = false;
+    var tapOrigin = null;
+    var tapSlop = 12;
+
+    function traceChartSelection(action, reason) {
+      console.debug(
+        "profit chart selection:", action, reason, columns.length);
+    }
 
     function nearestColumn(vbX) {
       var nearest = null;
@@ -691,6 +700,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       tooltip.style.visibility = "hidden";
     }
 
+    function dismissPinned(reason) {
+      if (!pinned) { return; }
+      pinned = false;
+      hideHover();
+      traceChartSelection("dismiss", reason);
+    }
+
     function pointFromEvent(event) {
       var bounds = svg.getBoundingClientRect();
       if (!bounds.width || !bounds.height) { return null; }
@@ -710,6 +726,60 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     overlay.addEventListener("pointerleave", function (event) {
       if (!event.pointerType || event.pointerType === "mouse") { hideHover(); }
     });
+    overlay.addEventListener("pointerdown", function (event) {
+      if (!event.pointerType || event.pointerType === "mouse") { return; }
+      tapOrigin = {
+        id: event.pointerId, x: event.clientX, y: event.clientY
+      };
+    });
+    overlay.addEventListener("pointerup", function (event) {
+      if (!tapOrigin || tapOrigin.id !== event.pointerId) { return; }
+      var moved = Math.hypot(
+        event.clientX - tapOrigin.x, event.clientY - tapOrigin.y);
+      tapOrigin = null;
+      if (moved > tapSlop) {
+        traceChartSelection("skip", "moved");
+        return;
+      }
+      var point = pointFromEvent(event);
+      if (!point) {
+        traceChartSelection("skip", "unmeasurable");
+        return;
+      }
+      var column = nearestColumn(point.x);
+      if (!column) {
+        traceChartSelection("skip", "empty");
+        return;
+      }
+      pinned = true;
+      showHover(column, point.y);
+      traceChartSelection("pin", "tap");
+    });
+    overlay.addEventListener("pointercancel", function () {
+      tapOrigin = null;
+      traceChartSelection("skip", "cancelled");
+    });
+
+    function dismissFromPage(event) {
+      if (overlay.contains(event.target)) { return; }
+      dismissPinned("outside");
+    }
+    function dismissFromWheel() { dismissPinned("wheel"); }
+    function dismissFromKey(event) {
+      if (event.key === "Escape") { dismissPinned("escape"); }
+    }
+    function dismissFromBlur() { dismissPinned("blur"); }
+    document.addEventListener("pointerdown", dismissFromPage);
+    document.addEventListener("wheel", dismissFromWheel, { passive: true });
+    document.addEventListener("keydown", dismissFromKey);
+    window.addEventListener("blur", dismissFromBlur);
+
+    return function () {
+      document.removeEventListener("pointerdown", dismissFromPage);
+      document.removeEventListener("wheel", dismissFromWheel);
+      document.removeEventListener("keydown", dismissFromKey);
+      window.removeEventListener("blur", dismissFromBlur);
+    };
   }
 
   function renderDailyProfitChart(points, dailyAverage) {
@@ -746,7 +816,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     averageLine.appendChild(svgNode(
       "title", {}, "Daily average: " + coin(Math.round(dailyAverage))));
     svg.appendChild(averageLine);
-    attachChartHover(svg, points.map(function (point, index) {
+    chartHoverCleanups.push(attachChartHover(svg, points.map(function (point, index) {
       return {
         date: point.date,
         x: frame.x(index),
@@ -765,7 +835,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           }
         ]
       };
-    }), frame);
+    }), frame));
   }
 
   function renderLineChart(
@@ -805,7 +875,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         + coin(Math.round(entry.value))));
       svg.appendChild(point);
     });
-    attachChartHover(svg, plotted.map(function (entry) {
+    chartHoverCleanups.push(attachChartHover(svg, plotted.map(function (entry) {
       return {
         date: entry.point.date,
         x: frame.x(entry.index),
@@ -816,10 +886,12 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           y: frame.y(entry.value)
         }]
       };
-    }), frame);
+    }), frame));
   }
 
   function renderCharts(data) {
+    chartHoverCleanups.forEach(function (cleanup) { cleanup(); });
+    chartHoverCleanups = [];
     var points = buildDailySeries(data);
     if (!points.length || !data.days_table.length) {
       emptyChart(

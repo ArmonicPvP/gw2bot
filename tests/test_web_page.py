@@ -183,6 +183,28 @@ class TestProfitPage:
         assert '"7-day average", "#58a6ff"' in PROFIT_PAGE
         assert '"Cumulative profit", "#74dc9a"' in PROFIT_PAGE
 
+    def test_profit_chart_taps_pin_values_and_can_be_dismissed(self) -> None:
+        assert 'overlay.addEventListener("pointerdown"' in PROFIT_PAGE
+        assert 'overlay.addEventListener("pointerup"' in PROFIT_PAGE
+        assert 'overlay.addEventListener("pointercancel"' in PROFIT_PAGE
+        assert 'event.pointerType === "mouse"' in PROFIT_PAGE
+        assert "if (moved > tapSlop)" in PROFIT_PAGE
+        assert "pinned = true;\n      showHover(column, point.y);" in PROFIT_PAGE
+        assert 'dismissPinned("outside")' in PROFIT_PAGE
+        assert 'dismissPinned("wheel")' in PROFIT_PAGE
+        assert 'dismissPinned("escape")' in PROFIT_PAGE
+        assert 'dismissPinned("blur")' in PROFIT_PAGE
+
+    def test_profit_chart_tap_listeners_are_released_on_redraw(self) -> None:
+        assert "var chartHoverCleanups = [];" in PROFIT_PAGE
+        assert "return function () {" in PROFIT_PAGE
+        assert "chartHoverCleanups.push(attachChartHover" in PROFIT_PAGE
+        assert "chartHoverCleanups.forEach(function (cleanup)" in PROFIT_PAGE
+
+    def test_profit_chart_tap_diagnostics_do_not_log_values(self) -> None:
+        assert '"profit chart selection:"' in PROFIT_PAGE
+        assert "action, reason, columns.length" in PROFIT_PAGE
+
     def test_profit_chart_tooltips_stay_inside_their_panel(self) -> None:
         assert "width: max-content;" in PROFIT_PAGE
         assert "min-width: min(9rem, calc(100% - 1rem));" in PROFIT_PAGE
@@ -910,6 +932,23 @@ class TestCustomRangePicker:
             assert 'if (state.range === "24h") {' not in page
 
 
+class TestDashboardChartModes:
+    def test_regular_lines_are_the_default_and_the_header_toggle_is_shared(
+        self,
+    ) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+            assert 'id="chart-mode" class="chart-mode"' in page
+            assert 'title="Regular line graph">╱</button>' in page
+            assert "staircase: false" in page
+            assert "state.staircase = !state.staircase;" in page
+            assert 'state.staircase ? "⎿" : "╱"' in page
+            assert "justify-content: space-between;" in page
+
+    def test_staircase_vertices_are_only_added_in_staircase_mode(self) -> None:
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+            assert "state.staircase &&" in page
+
+
 class TestRosterTable:
     def test_a_long_account_name_wraps_instead_of_widening_the_table(
         self,
@@ -976,3 +1015,13 @@ class TestGoldPage:
         assert "var dx = point.x - vbX;" in GOLD_PAGE
         assert "var dy = point.y - vbY;" in GOLD_PAGE
         assert "nearestColumn(at.x, at.y)" in GOLD_PAGE
+
+    def test_movements_in_a_minute_share_one_cumulative_dot_and_tooltip(
+        self,
+    ) -> None:
+        assert "function movementMinutes()" in GOLD_PAGE
+        assert "Math.floor(movement.t / 60) * 60" in GOLD_PAGE
+        assert "minute.after = movement.after;" in GOLD_PAGE
+        assert "minute.movements.push(movement);" in GOLD_PAGE
+        assert "movementMinutes().forEach(function (minute)" in GOLD_PAGE
+        assert "emphasized.movements.forEach(function (movement)" in GOLD_PAGE
