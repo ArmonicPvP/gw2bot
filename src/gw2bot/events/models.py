@@ -236,6 +236,13 @@ class EventOccurrence:
     # Set when the public message failed to refresh so the scheduler retries
     # even if the computed status still matches the stored one.
     needs_refresh: bool = False
+    # The announcement that pinged this occurrence's roles from outside the
+    # forum post it was sent into. Held so deleting, moving or cancelling the
+    # occurrence takes the announcement with it rather than leaving one that
+    # links to a message that is gone. None for an occurrence posted to a
+    # channel, and for one whose announcement was refused.
+    ping_channel_id: int | None = None
+    ping_message_id: int | None = None
 
 
 # "Edit my signup" rate limit: a token bucket per signup row. A member can

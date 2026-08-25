@@ -272,16 +272,21 @@ async def announce_occurrence_ping(
     occurrence: EventOccurrence,
     link: str,
     role_ids: Sequence[int],
-) -> bool:
+) -> Any | None:
     """Ping an event's roles outside the forum post it was posted into.
 
     Sent once the occurrence is persisted, so the link can never point at a
     message the failed-write recovery has already deleted. A failed
     announcement costs the occurrence its ping and nothing else: the post is
     up and its buttons work, and raising here would only re-post it.
+
+    Returns the announcement, so the caller can record it against the
+    occurrence and None says plainly that nothing was pinged - which is what
+    the posting log reports rather than the weaker fact that a channel
+    resolved.
     """
     try:
-        await channel.send(
+        message = await channel.send(
             content=ping_announcement_content(
                 event.title,
                 occurrence.start_time,
@@ -299,13 +304,81 @@ async def announce_occurrence_ping(
             discord_failure_reason(exc),
             len(role_ids),
         )
-        return False
+        return None
     LOGGER.debug(
         "Announced an event's role pings outside its forum post; "
         "event_id=%s occurrence_id=%s pinged_roles=%s",
         event.event_id,
         occurrence.occurrence_id,
         len(role_ids),
+    )
+    return message
+
+
+def record_occurrence_announcement(
+    bot: Gw2Bot,
+    occurrence_id: int,
+    channel_id: int,
+    message_id: int,
+) -> bool:
+    """Remember an announcement so the occurrence's cleanup can remove it.
+
+    A write that fails leaves the announcement standing and untracked, which
+    is the lesser harm: the members it pinged have been told about a live
+    event, and deleting it to keep the row tidy would take that back. The
+    announcement is then one the later delete cannot reach, so the failure is
+    logged as the reason it will be left behind.
+    """
+    try:
+        bot.event_store.set_occurrence_ping_message(
+            occurrence_id,
+            channel_id,
+            message_id,
+        )
+    except (SQLAlchemyError, ValueError) as exc:
+        LOGGER.error(
+            "Could not record an event's ping announcement; it will not be "
+            "cleaned up with the event; occurrence_id=%s error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+async def delete_occurrence_announcement(
+    channel: Any,
+    message_id: int,
+    occurrence_id: int,
+) -> bool:
+    """Remove the announcement that pinged an occurrence's roles.
+
+    An announcement is only ever a pointer at the event's message, so once
+    that message goes the announcement is a link to nothing. Best-effort like
+    every other cleanup here: one that cannot be removed is logged and the
+    rest of the removal carries on.
+    """
+    try:
+        await channel.get_partial_message(message_id).delete()
+    except discord.NotFound:
+        LOGGER.debug(
+            "Event ping announcement already gone; skipping delete; "
+            "occurrence_id=%s",
+            occurrence_id,
+        )
+        return False
+    except discord.HTTPException as exc:
+        log_discord_failure(
+            "Could not delete an event's ping announcement; reason=%s "
+            "occurrence_id=%s",
+            exc,
+            discord_failure_reason(exc),
+            occurrence_id,
+        )
+        return False
+    LOGGER.debug(
+        "Deleted an event's ping announcement; occurrence_id=%s",
+        occurrence_id,
     )
     return True
 
@@ -421,8 +494,9 @@ async def post_occurrence(
             occurrence.occurrence_id,
         )
         raise
+    announced = None
     if announcement is not None:
-        await announce_occurrence_ping(
+        announced = await announce_occurrence_ping(
             announcement.channel,
             event,
             occurrence,
@@ -433,6 +507,13 @@ async def post_occurrence(
             ),
             ping_role_ids,
         )
+        if announced is not None:
+            record_occurrence_announcement(
+                bot,
+                occurrence.occurrence_id,
+                announcement.channel.id,
+                announced.id,
+            )
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
         "in_existing_thread=%s thread_created=%s signups=%s "
@@ -447,7 +528,9 @@ async def post_occurrence(
         # How many of the stored roles survived the check, so a ping that
         # silently stopped going out is visible in the log.
         len(ping_role_ids),
-        announcement is not None,
+        # Whether the announcement was actually delivered, not merely whether
+        # a channel was configured for it: a refused send pings nobody.
+        announced is not None,
     )
     updated = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if updated is None:
@@ -775,7 +858,30 @@ async def repost_occurrence(
     old_message_id = occurrence.message_id
     old_thread_id = occurrence.thread_id
     old_channel_id = occurrence_channel_id(event, occurrence)
+    # Read before the re-post, which claims these columns for the new post's
+    # announcement: the old announcement links to the message deleted below,
+    # so leaving it would point members at nothing and stand beside the new
+    # one.
+    old_ping_channel_id = occurrence.ping_channel_id
+    old_ping_message_id = occurrence.ping_message_id
     reposted = await post_occurrence(bot, event, occurrence)
+    if old_ping_channel_id is not None and old_ping_message_id is not None:
+        try:
+            ping_channel = await resolve_channel(bot, old_ping_channel_id)
+        except discord.DiscordException as exc:
+            log_discord_failure(
+                "Could not read the channel holding an event's ping "
+                "announcement; reason=%s occurrence_id=%s",
+                exc,
+                discord_failure_reason(exc),
+                occurrence.occurrence_id,
+            )
+        else:
+            await delete_occurrence_announcement(
+                ping_channel,
+                old_ping_message_id,
+                occurrence.occurrence_id,
+            )
     if old_message_id is not None:
         try:
             old_channel = await resolve_channel(bot, old_channel_id)
@@ -812,6 +918,40 @@ async def repost_occurrence(
     return reposted
 
 
+async def _resolve_cached_channel(
+    bot: Gw2Bot,
+    channels: dict[int, Any],
+    unresolvable: set[int],
+    channel_id: int,
+    event_id: int,
+) -> Any | None:
+    """Resolve a channel once for a removal that spans several of them.
+
+    A deleted series can hold posts and announcements across a handful of
+    channels, so each is resolved once and a dead one is remembered: without
+    that, one channel that has gone would be re-fetched for every occurrence
+    and could strand the posts in the others.
+    """
+    if channel_id in unresolvable:
+        return None
+    channel = channels.get(channel_id)
+    if channel is not None:
+        return channel
+    try:
+        channel = await resolve_channel(bot, channel_id)
+    except discord.HTTPException as exc:
+        unresolvable.add(channel_id)
+        LOGGER.error(
+            "Could not resolve channel to delete event posts; "
+            "event_id=%s error_type=%s",
+            event_id,
+            type(exc).__name__,
+        )
+        return None
+    channels[channel_id] = channel
+    return channel
+
+
 async def delete_event_posts(
     bot: Gw2Bot,
     event: Event,
@@ -832,27 +972,41 @@ async def delete_event_posts(
     channels: dict[int, Any] = {}
     unresolvable: set[int] = set()
     deleted = 0
+    announcements = 0
     for occurrence in occurrences:
+        # Done before the message below, and independently of it: an
+        # announcement lives in its own channel, so a post whose channel has
+        # gone must not also strand the announcement pointing at it.
+        if (
+            occurrence.ping_channel_id is not None
+            and occurrence.ping_message_id is not None
+        ):
+            ping_channel = await _resolve_cached_channel(
+                bot,
+                channels,
+                unresolvable,
+                occurrence.ping_channel_id,
+                event.event_id,
+            )
+            if ping_channel is not None:
+                removed = await delete_occurrence_announcement(
+                    ping_channel,
+                    occurrence.ping_message_id,
+                    occurrence.occurrence_id,
+                )
+                announcements += int(removed)
         if occurrence.message_id is None:
             continue
         channel_id = occurrence_channel_id(event, occurrence)
-        if channel_id in unresolvable:
-            continue
-        channel = channels.get(channel_id)
+        channel = await _resolve_cached_channel(
+            bot,
+            channels,
+            unresolvable,
+            channel_id,
+            event.event_id,
+        )
         if channel is None:
-            try:
-                channel = await resolve_channel(bot, channel_id)
-            except discord.HTTPException as exc:
-                # One dead channel must not strand the posts in the others.
-                unresolvable.add(channel_id)
-                LOGGER.error(
-                    "Could not resolve channel to delete event posts; "
-                    "event_id=%s error_type=%s",
-                    event.event_id,
-                    type(exc).__name__,
-                )
-                continue
-            channels[channel_id] = channel
+            continue
         try:
             await channel.get_partial_message(occurrence.message_id).delete()
             deleted += 1
@@ -870,9 +1024,11 @@ async def delete_event_posts(
             bot, channel_id, occurrence.thread_id, occurrence.occurrence_id
         )
     LOGGER.debug(
-        "Deleted event posts; event_id=%s messages_deleted=%s",
+        "Deleted event posts; event_id=%s messages_deleted=%s "
+        "announcements_deleted=%s",
         event.event_id,
         deleted,
+        announcements,
     )
     return deleted
 

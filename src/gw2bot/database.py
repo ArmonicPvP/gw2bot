@@ -456,6 +456,15 @@ class EventOccurrenceRecord(Base):
     channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The announcement that pinged this occurrence's roles from outside the
+    # forum post it was sent into, so the same lifecycle that removes the
+    # event's message removes the announcement pointing at it. Both are NULL
+    # for an occurrence posted to a channel, and for one whose announcement
+    # was never delivered. The channel is stored alongside the message
+    # because the ping channel setting can move between two occurrences of
+    # one series.
+    ping_channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ping_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
     needs_refresh: Mapped[bool] = mapped_column(
         Boolean,
@@ -659,6 +668,18 @@ def initialize_database(engine: Engine) -> set[str]:
                 ") WHERE message_id IS NOT NULL"
             )
             added_columns.add("channel_id")
+
+        for column_name in ("ping_channel_id", "ping_message_id"):
+            if column_name in occurrence_columns:
+                continue
+            # Nothing to backfill: no release before this one sent an
+            # announcement, so every legacy row correctly reads as having
+            # none to clean up.
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(column_name, Integer, nullable=True),
+            )
+            added_columns.add(column_name)
 
         event_columns = {
             column["name"]

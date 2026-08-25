@@ -582,6 +582,16 @@ The bot needs `Send Messages` and `Mention @everyone, @here and All Roles` in
 the ping channel; an announcement Discord refuses is logged and costs that
 occurrence its ping alone — the event stays posted and its buttons keep working.
 
+An announcement is only ever a pointer at the event's message, so it is stored
+with the occurrence and removed by the same cleanup: deleting the event,
+cancelling one of its runs, moving it to another channel, or a repeating event
+pruning the run it superseded all take the announcement with the post. A move
+into another forum post removes the old announcement and sends a new one, so
+the ping channel never accumulates links to messages that are gone. Because the
+channel is stored alongside the message, changing the setting later does not
+strand the announcements already sent — each one is still removed from wherever
+it went.
+
 ## Event Reminders
 
 Members who hold a seat on an event are pinged where the event was posted — its

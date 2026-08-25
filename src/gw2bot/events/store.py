@@ -113,6 +113,8 @@ def _occurrence_from_record(
         status=EventStatus(record.status),
         channel_id=record.channel_id,
         needs_refresh=record.needs_refresh,
+        ping_channel_id=record.ping_channel_id,
+        ping_message_id=record.ping_message_id,
     )
 
 
@@ -275,11 +277,41 @@ class EventStore:
             record.channel_id = channel_id
             record.message_id = message_id
             record.thread_id = thread_id
+            # This is the write that says the occurrence has a fresh post, so
+            # any announcement recorded against the previous one no longer
+            # describes it. A channel move clears the pair here and the new
+            # announcement, if there is one, is recorded after it is sent.
+            record.ping_channel_id = None
+            record.ping_message_id = None
             session.commit()
         LOGGER.debug(
             "Stored occurrence message; occurrence_id=%s has_thread=%s",
             occurrence_id,
             thread_id is not None,
+        )
+
+    def set_occurrence_ping_message(
+        self,
+        occurrence_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        """Record the announcement that pinged an occurrence's roles.
+
+        Stored so the occurrence's own lifecycle removes it: an announcement
+        links to the event's message, so one left behind by a delete, a move
+        or a cancellation points at nothing.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.ping_channel_id = channel_id
+            record.ping_message_id = message_id
+            session.commit()
+        LOGGER.debug(
+            "Stored occurrence ping announcement; occurrence_id=%s",
+            occurrence_id,
         )
 
     def set_occurrence_start_time(
