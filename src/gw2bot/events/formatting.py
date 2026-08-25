@@ -788,11 +788,18 @@ def ping_announcement_content(
     a Discord message: an event carries at most three roles, and its title is
     capped at the length the creation modal accepts.
     """
-    return (
-        f"{format_role_mentions(role_ids)}\n"
+    lines = [
         f"{PING_ANNOUNCEMENT_HEADER} {title} starts "
-        f"<t:{int(start_time.timestamp())}:R>\n{link}"
-    )
+        f"<t:{int(start_time.timestamp())}:R>",
+        link,
+    ]
+    if role_ids:
+        # An announcement is only ever sent because there are roles to ping, so
+        # this is empty only when a later edit dropped every one of them. The
+        # line is left out rather than sent blank, because the announcement
+        # still has to carry the title and the time it was edited to correct.
+        lines.insert(0, format_role_mentions(role_ids))
+    return "\n".join(lines)
 
 
 def describe_ping_roles(role_ids: Sequence[int]) -> str:

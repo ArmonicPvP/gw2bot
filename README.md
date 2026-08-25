@@ -582,15 +582,25 @@ The bot needs `Send Messages` and `Mention @everyone, @here and All Roles` in
 the ping channel; an announcement Discord refuses is logged and costs that
 occurrence its ping alone — the event stays posted and its buttons keep working.
 
+The announcement repeats the event's title and its start, so an edit to either
+corrects it in place: it is refreshed on the same trigger as the thread name,
+which carries the date and time for the same reason. Editing a message notifies
+nobody, so a correction never re-pings the roles. One somebody deleted by hand
+is forgotten rather than retried, and an edit Discord refuses is logged without
+holding back the event — the post is the record, and the announcement is a
+notice that has already been delivered.
+
 An announcement is only ever a pointer at the event's message, so it is stored
 with the occurrence and removed by the same cleanup: deleting the event,
 cancelling one of its runs, moving it to another channel, or a repeating event
 pruning the run it superseded all take the announcement with the post. A move
 into another forum post removes the old announcement and sends a new one, so
-the ping channel never accumulates links to messages that are gone. Because the
-channel is stored alongside the message, changing the setting later does not
-strand the announcements already sent — each one is still removed from wherever
-it went.
+the ping channel never accumulates links to messages that are gone. Deleting
+the event's message (or its forum post) in Discord by hand retires the
+occurrence, and that takes the announcement too, so a one-off event that leaves
+maintenance does not leave a dead link behind. Because the channel is stored
+alongside the message, changing the setting later does not strand the
+announcements already sent — each one is still removed from wherever it went.
 
 ## Event Reminders
 

@@ -383,6 +383,151 @@ async def delete_occurrence_announcement(
     return True
 
 
+async def retire_occurrence_announcement(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> None:
+    """Remove the announcement of an occurrence whose message has gone.
+
+    The retirement path answers a message deleted in Discord by hand. Nothing
+    else will come back for it: a one-off occurrence is persisted OVER and
+    drops out of maintenance, so without this the ping channel keeps a link to
+    a message that is not there until somebody deletes the whole event. The
+    stored pair is cleared only once the announcement is actually gone, so a
+    removal Discord refused is still retried when the event is deleted.
+    """
+    if occurrence.ping_channel_id is None or occurrence.ping_message_id is None:
+        return
+    try:
+        channel = await resolve_channel(bot, occurrence.ping_channel_id)
+    except discord.DiscordException as exc:
+        log_discord_failure(
+            "Could not read the channel holding an event's ping "
+            "announcement; reason=%s occurrence_id=%s",
+            exc,
+            discord_failure_reason(exc),
+            occurrence.occurrence_id,
+        )
+        return
+    if not await delete_occurrence_announcement(
+        channel,
+        occurrence.ping_message_id,
+        occurrence.occurrence_id,
+    ):
+        return
+    try:
+        bot.event_store.clear_occurrence_ping_message(
+            occurrence.occurrence_id
+        )
+    except (SQLAlchemyError, ValueError) as exc:
+        # Harmless on its own: the pair now names a message that is gone, and
+        # a later delete reads that as already removed.
+        LOGGER.error(
+            "Could not clear a removed ping announcement; occurrence_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+
+
+async def refresh_occurrence_announcement(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> bool:
+    """Bring an occurrence's announcement back in line with its event.
+
+    The announcement repeats the title and the start time, and a commander can
+    change both after it was sent - its link then opens an event that no longer
+    matches what the members it pinged were told. It is refreshed on the same
+    trigger as the thread name, which carries the date and time for the same
+    reason, so an edit corrects every surface the occurrence has.
+
+    An announcement deleted in Discord is forgotten rather than retried, and any
+    other failure is logged and left: the event's own message is the record, and
+    holding the occurrence dirty for a channel the bot may have lost access to
+    would retry forever.
+    """
+    if occurrence.ping_channel_id is None or occurrence.ping_message_id is None:
+        return True
+    if occurrence.message_id is None:
+        return True
+    try:
+        channel = await resolve_channel(bot, occurrence.ping_channel_id)
+    except discord.DiscordException as exc:
+        log_discord_failure(
+            "Could not read the channel holding an event's ping "
+            "announcement; reason=%s occurrence_id=%s",
+            exc,
+            discord_failure_reason(exc),
+            occurrence.occurrence_id,
+        )
+        return False
+    guild = getattr(channel, "guild", None)
+    guild_id = getattr(guild, "id", None)
+    if guild_id is None:
+        LOGGER.warning(
+            "Cannot rebuild an event's ping announcement without a server; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return False
+    # Re-checked rather than remembered, so a role that has since been deleted
+    # or renamed off the marker stops being named here too. Editing a message
+    # does not notify anybody, so nothing is re-pinged by this.
+    role_ids = verified_ping_role_ids(guild, event)
+    content = ping_announcement_content(
+        event.title,
+        occurrence.start_time,
+        role_ids,
+        message_link(
+            guild_id,
+            occurrence_channel_id(event, occurrence),
+            occurrence.message_id,
+        ),
+    )
+    try:
+        await channel.get_partial_message(occurrence.ping_message_id).edit(
+            content=content,
+            allowed_mentions=role_ping_mentions(role_ids),
+        )
+    except discord.NotFound:
+        LOGGER.debug(
+            "Event ping announcement is gone; forgetting it; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        try:
+            bot.event_store.clear_occurrence_ping_message(
+                occurrence.occurrence_id
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not clear a missing ping announcement; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+        return False
+    except discord.HTTPException as exc:
+        log_discord_failure(
+            "Could not refresh an event's ping announcement; reason=%s "
+            "occurrence_id=%s",
+            exc,
+            discord_failure_reason(exc),
+            occurrence.occurrence_id,
+        )
+        return False
+    LOGGER.debug(
+        "Refreshed an event's ping announcement; occurrence_id=%s "
+        "pinged_roles=%s",
+        occurrence.occurrence_id,
+        len(role_ids),
+    )
+    return True
+
+
 def occurrence_embed(
     event: Event,
     occurrence: EventOccurrence,
@@ -657,6 +802,10 @@ async def refresh_occurrence_message(
                     occurrence.occurrence_id,
                     False,
                 )
+            # The announcement points at the message that has just gone, and a
+            # retired occurrence leaves maintenance, so this is the last pass
+            # that will look at it.
+            await retire_occurrence_announcement(bot, event, occurrence)
             return EventStatus.OVER
         except discord.HTTPException as exc:
             LOGGER.error(
@@ -685,6 +834,11 @@ async def refresh_occurrence_message(
             occurrence,
             status,
         )
+        # The announcement repeats the title and the start, so it goes stale on
+        # exactly the edits the thread name does. A failure here is logged and
+        # does not hold back the status: the event's own message is the record,
+        # and the announcement is a notice that has already been delivered.
+        await refresh_occurrence_announcement(bot, event, occurrence)
         if thread_renamed and status_changed:
             if status is EventStatus.OVER:
                 # The status is recomputed inside this call, after the awaited

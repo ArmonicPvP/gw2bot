@@ -314,6 +314,24 @@ class EventStore:
             occurrence_id,
         )
 
+    def clear_occurrence_ping_message(self, occurrence_id: int) -> None:
+        """Forget an announcement that is no longer standing.
+
+        Called once the announcement has actually been removed, so a later
+        delete does not chase a message that has already gone.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.ping_channel_id = None
+            record.ping_message_id = None
+            session.commit()
+        LOGGER.debug(
+            "Cleared occurrence ping announcement; occurrence_id=%s",
+            occurrence_id,
+        )
+
     def set_occurrence_start_time(
         self,
         occurrence_id: int,
