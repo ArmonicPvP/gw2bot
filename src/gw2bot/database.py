@@ -465,6 +465,28 @@ class EventOccurrenceRecord(Base):
     # one series.
     ping_channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ping_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The roles that announcement actually mentioned. Editing a message does
+    # not notify a mention added to it, so a later correction has to keep the
+    # ones that were delivered rather than re-render the event's current pick
+    # - which would both claim roles that were never alerted and lose the
+    # record of who was.
+    ping_role_ids: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="",
+    )
+    # An announcement from an earlier post of this occurrence that still has to
+    # be removed, kept because a channel move overwrites the pair above with
+    # the replacement's ids. Without it a deletion Discord refused once would
+    # be forgotten, and the announcement would outlive the message it links to.
+    stale_ping_channel_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    stale_ping_message_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
     needs_refresh: Mapped[bool] = mapped_column(
         Boolean,
@@ -669,7 +691,12 @@ def initialize_database(engine: Engine) -> set[str]:
             )
             added_columns.add("channel_id")
 
-        for column_name in ("ping_channel_id", "ping_message_id"):
+        for column_name in (
+            "ping_channel_id",
+            "ping_message_id",
+            "stale_ping_channel_id",
+            "stale_ping_message_id",
+        ):
             if column_name in occurrence_columns:
                 continue
             # Nothing to backfill: no release before this one sent an
@@ -680,6 +707,18 @@ def initialize_database(engine: Engine) -> set[str]:
                 Column(column_name, Integer, nullable=True),
             )
             added_columns.add(column_name)
+
+        if "ping_role_ids" not in occurrence_columns:
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(
+                    "ping_role_ids",
+                    String,
+                    nullable=False,
+                    server_default="",
+                ),
+            )
+            added_columns.add("occurrence_ping_role_ids")
 
         event_columns = {
             column["name"]

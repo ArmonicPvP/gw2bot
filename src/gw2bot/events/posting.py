@@ -285,6 +285,14 @@ async def announce_occurrence_ping(
     the posting log reports rather than the weaker fact that a channel
     resolved.
     """
+    # Logged before the await, not only after it: a send that hangs, is
+    # cancelled, or is cut off by a restart reaches neither the success nor the
+    # failure line below, and the delivery would then leave no trace at all.
+    LOGGER.debug(
+        "Announcing an event's role pings; occurrence_id=%s pinged_roles=%s",
+        occurrence.occurrence_id,
+        len(role_ids),
+    )
     try:
         message = await channel.send(
             content=ping_announcement_content(
@@ -320,6 +328,7 @@ def record_occurrence_announcement(
     occurrence_id: int,
     channel_id: int,
     message_id: int,
+    role_ids: Sequence[int],
 ) -> bool:
     """Remember an announcement so the occurrence's cleanup can remove it.
 
@@ -334,6 +343,7 @@ def record_occurrence_announcement(
             occurrence_id,
             channel_id,
             message_id,
+            tuple(role_ids),
         )
     except (SQLAlchemyError, ValueError) as exc:
         LOGGER.error(
@@ -357,7 +367,15 @@ async def delete_occurrence_announcement(
     that message goes the announcement is a link to nothing. Best-effort like
     every other cleanup here: one that cannot be removed is logged and the
     rest of the removal carries on.
+
+    True means the announcement is no longer there, whether this call removed
+    it or found it already gone. Both answers let a caller stop tracking it;
+    only a refusal is worth keeping for another try.
     """
+    LOGGER.debug(
+        "Removing an event's ping announcement; occurrence_id=%s",
+        occurrence_id,
+    )
     try:
         await channel.get_partial_message(message_id).delete()
     except discord.NotFound:
@@ -366,7 +384,7 @@ async def delete_occurrence_announcement(
             "occurrence_id=%s",
             occurrence_id,
         )
-        return False
+        return True
     except discord.HTTPException as exc:
         log_discord_failure(
             "Could not delete an event's ping announcement; reason=%s "
@@ -383,6 +401,72 @@ async def delete_occurrence_announcement(
     return True
 
 
+async def drop_announcement(
+    bot: Gw2Bot,
+    channel_id: int,
+    message_id: int,
+    occurrence_id: int,
+) -> bool:
+    """Resolve an announcement's channel and take the announcement out of it.
+
+    A channel that cannot be read is the same answer as a refused delete: the
+    announcement is still there, so whoever tracked it keeps tracking it.
+    """
+    try:
+        channel = await resolve_channel(bot, channel_id)
+    except discord.DiscordException as exc:
+        log_discord_failure(
+            "Could not read the channel holding an event's ping "
+            "announcement; reason=%s occurrence_id=%s",
+            exc,
+            discord_failure_reason(exc),
+            occurrence_id,
+        )
+        return False
+    return await delete_occurrence_announcement(
+        channel,
+        message_id,
+        occurrence_id,
+    )
+
+
+async def sweep_stale_announcement(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+) -> None:
+    """Retry an announcement removal an earlier pass could not finish.
+
+    A channel move sends the replacement before removing what it replaced, and
+    the occurrence has one pair of columns for the announcement it is carrying
+    now - so a removal Discord refuses is parked here instead of being lost,
+    and every later pass over this occurrence tries it again until it is gone.
+    """
+    channel_id = occurrence.stale_ping_channel_id
+    message_id = occurrence.stale_ping_message_id
+    if channel_id is None or message_id is None:
+        return
+    if not await drop_announcement(
+        bot,
+        channel_id,
+        message_id,
+        occurrence.occurrence_id,
+    ):
+        return
+    try:
+        bot.event_store.clear_occurrence_stale_ping_message(
+            occurrence.occurrence_id
+        )
+    except (SQLAlchemyError, ValueError) as exc:
+        # The announcement is gone; only the note saying so failed to clear,
+        # so the next pass reads it as already removed and clears it then.
+        LOGGER.error(
+            "Could not clear a removed leftover ping announcement; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+
+
 async def retire_occurrence_announcement(
     bot: Gw2Bot,
     event: Event,
@@ -397,21 +481,12 @@ async def retire_occurrence_announcement(
     stored pair is cleared only once the announcement is actually gone, so a
     removal Discord refused is still retried when the event is deleted.
     """
+    await sweep_stale_announcement(bot, occurrence)
     if occurrence.ping_channel_id is None or occurrence.ping_message_id is None:
         return
-    try:
-        channel = await resolve_channel(bot, occurrence.ping_channel_id)
-    except discord.DiscordException as exc:
-        log_discord_failure(
-            "Could not read the channel holding an event's ping "
-            "announcement; reason=%s occurrence_id=%s",
-            exc,
-            discord_failure_reason(exc),
-            occurrence.occurrence_id,
-        )
-        return
-    if not await delete_occurrence_announcement(
-        channel,
+    if not await drop_announcement(
+        bot,
+        occurrence.ping_channel_id,
         occurrence.ping_message_id,
         occurrence.occurrence_id,
     ):
@@ -444,6 +519,11 @@ async def refresh_occurrence_announcement(
     trigger as the thread name, which carries the date and time for the same
     reason, so an edit corrects every surface the occurrence has.
 
+    The mentions are left exactly as they were delivered. Editing a message
+    does not notify a mention added to it, so re-rendering from the event's
+    current pick would claim roles that were never alerted and lose the record
+    of who actually was.
+
     An announcement deleted in Discord is forgotten rather than retried, and any
     other failure is logged and left: the event's own message is the record, and
     holding the occurrence dirty for a channel the bot may have lost access to
@@ -473,10 +553,11 @@ async def refresh_occurrence_announcement(
             occurrence.occurrence_id,
         )
         return False
-    # Re-checked rather than remembered, so a role that has since been deleted
-    # or renamed off the marker stops being named here too. Editing a message
-    # does not notify anybody, so nothing is re-pinged by this.
-    role_ids = verified_ping_role_ids(guild, event)
+    # What the announcement said when it went out. An occurrence whose
+    # announcement predates that being recorded has nothing better to offer
+    # than the event's own roles, which is what the announcement was rendered
+    # from at the time.
+    role_ids = occurrence.ping_role_ids or verified_ping_role_ids(guild, event)
     content = ping_announcement_content(
         event.title,
         occurrence.start_time,
@@ -486,6 +567,13 @@ async def refresh_occurrence_announcement(
             occurrence_channel_id(event, occurrence),
             occurrence.message_id,
         ),
+    )
+    LOGGER.debug(
+        "Correcting an event's ping announcement; occurrence_id=%s "
+        "pinged_roles=%s characters=%s",
+        occurrence.occurrence_id,
+        len(role_ids),
+        len(content),
     )
     try:
         await channel.get_partial_message(occurrence.ping_message_id).edit(
@@ -658,6 +746,7 @@ async def post_occurrence(
                 occurrence.occurrence_id,
                 announcement.channel.id,
                 announced.id,
+                ping_role_ids,
             )
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
@@ -760,6 +849,10 @@ async def refresh_occurrence_message(
 ) -> EventStatus:
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
+    # Owed from an earlier move and cheap to skip: the columns are almost
+    # always empty, and when they are not this is the pass that finishes the
+    # removal.
+    await sweep_stale_announcement(bot, occurrence)
     message_refreshed = True
     if occurrence.message_id is not None:
         # Discord rejects edits inside an archived thread, so an event posted
@@ -987,6 +1080,30 @@ async def _rename_occurrence_thread(
     return True
 
 
+def _keep_stale_announcement(
+    bot: Gw2Bot,
+    occurrence_id: int,
+    channel_id: int,
+    message_id: int,
+) -> None:
+    try:
+        bot.event_store.set_occurrence_stale_ping_message(
+            occurrence_id,
+            channel_id,
+            message_id,
+        )
+    except (SQLAlchemyError, ValueError) as exc:
+        # Nothing is left holding the announcement, so it stays where it is.
+        # Logged as the reason it will not be cleaned up rather than retried
+        # here: the row is what a retry would have to read.
+        LOGGER.error(
+            "Could not keep an event's ping announcement for removal; it "
+            "will be left behind; occurrence_id=%s error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+
+
 async def repost_occurrence(
     bot: Gw2Bot,
     event: Event,
@@ -1020,21 +1137,22 @@ async def repost_occurrence(
     old_ping_message_id = occurrence.ping_message_id
     reposted = await post_occurrence(bot, event, occurrence)
     if old_ping_channel_id is not None and old_ping_message_id is not None:
-        try:
-            ping_channel = await resolve_channel(bot, old_ping_channel_id)
-        except discord.DiscordException as exc:
-            log_discord_failure(
-                "Could not read the channel holding an event's ping "
-                "announcement; reason=%s occurrence_id=%s",
-                exc,
-                discord_failure_reason(exc),
+        removed = await drop_announcement(
+            bot,
+            old_ping_channel_id,
+            old_ping_message_id,
+            occurrence.occurrence_id,
+        )
+        if not removed:
+            # The columns that held this pair now describe the replacement, so
+            # a refusal has to be parked somewhere or the announcement outlives
+            # the message it links to with nothing left to find it. The
+            # maintenance pass retries it until it is gone.
+            _keep_stale_announcement(
+                bot,
                 occurrence.occurrence_id,
-            )
-        else:
-            await delete_occurrence_announcement(
-                ping_channel,
+                old_ping_channel_id,
                 old_ping_message_id,
-                occurrence.occurrence_id,
             )
     if old_message_id is not None:
         try:
@@ -1149,6 +1267,27 @@ async def delete_event_posts(
                     occurrence.occurrence_id,
                 )
                 announcements += int(removed)
+        if (
+            occurrence.stale_ping_channel_id is not None
+            and occurrence.stale_ping_message_id is not None
+        ):
+            # The last chance to clear a removal an earlier move could not
+            # finish: the row is about to go, taking the note with it.
+            stale_channel = await _resolve_cached_channel(
+                bot,
+                channels,
+                unresolvable,
+                occurrence.stale_ping_channel_id,
+                event.event_id,
+            )
+            if stale_channel is not None:
+                announcements += int(
+                    await delete_occurrence_announcement(
+                        stale_channel,
+                        occurrence.stale_ping_message_id,
+                        occurrence.occurrence_id,
+                    )
+                )
         if occurrence.message_id is None:
             continue
         channel_id = occurrence_channel_id(event, occurrence)

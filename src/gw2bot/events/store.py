@@ -115,6 +115,9 @@ def _occurrence_from_record(
         needs_refresh=record.needs_refresh,
         ping_channel_id=record.ping_channel_id,
         ping_message_id=record.ping_message_id,
+        ping_role_ids=_parse_ids(record.ping_role_ids),
+        stale_ping_channel_id=record.stale_ping_channel_id,
+        stale_ping_message_id=record.stale_ping_message_id,
     )
 
 
@@ -280,9 +283,12 @@ class EventStore:
             # This is the write that says the occurrence has a fresh post, so
             # any announcement recorded against the previous one no longer
             # describes it. A channel move clears the pair here and the new
-            # announcement, if there is one, is recorded after it is sent.
+            # announcement, if there is one, is recorded after it is sent. The
+            # leftover pair is deliberately untouched: it holds a removal that
+            # is still owed and has nothing to do with the post going up.
             record.ping_channel_id = None
             record.ping_message_id = None
+            record.ping_role_ids = ""
             session.commit()
         LOGGER.debug(
             "Stored occurrence message; occurrence_id=%s has_thread=%s",
@@ -295,12 +301,15 @@ class EventStore:
         occurrence_id: int,
         channel_id: int,
         message_id: int,
+        role_ids: tuple[int, ...],
     ) -> None:
         """Record the announcement that pinged an occurrence's roles.
 
         Stored so the occurrence's own lifecycle removes it: an announcement
         links to the event's message, so one left behind by a delete, a move
-        or a cancellation points at nothing.
+        or a cancellation points at nothing. The roles come with it because
+        they are what was actually delivered, which a later correction has to
+        keep.
         """
         with self._sessions() as session:
             record = session.get(EventOccurrenceRecord, occurrence_id)
@@ -308,10 +317,13 @@ class EventStore:
                 raise ValueError(f"Unknown event occurrence {occurrence_id}")
             record.ping_channel_id = channel_id
             record.ping_message_id = message_id
+            record.ping_role_ids = _serialize_ids(role_ids)
             session.commit()
         LOGGER.debug(
-            "Stored occurrence ping announcement; occurrence_id=%s",
+            "Stored occurrence ping announcement; occurrence_id=%s "
+            "pinged_roles=%s",
             occurrence_id,
+            len(role_ids),
         )
 
     def clear_occurrence_ping_message(self, occurrence_id: int) -> None:
@@ -326,9 +338,48 @@ class EventStore:
                 raise ValueError(f"Unknown event occurrence {occurrence_id}")
             record.ping_channel_id = None
             record.ping_message_id = None
+            record.ping_role_ids = ""
             session.commit()
         LOGGER.debug(
             "Cleared occurrence ping announcement; occurrence_id=%s",
+            occurrence_id,
+        )
+
+    def set_occurrence_stale_ping_message(
+        self,
+        occurrence_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        """Keep an announcement whose removal was refused, for a later try.
+
+        A channel move claims the announcement columns for the replacement it
+        just sent, so a deletion that failed has nowhere else to be
+        remembered - and the announcement would outlive the message it points
+        at with nothing left to find it.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.stale_ping_channel_id = channel_id
+            record.stale_ping_message_id = message_id
+            session.commit()
+        LOGGER.debug(
+            "Kept an event ping announcement for removal; occurrence_id=%s",
+            occurrence_id,
+        )
+
+    def clear_occurrence_stale_ping_message(self, occurrence_id: int) -> None:
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.stale_ping_channel_id = None
+            record.stale_ping_message_id = None
+            session.commit()
+        LOGGER.debug(
+            "Removed the leftover event ping announcement; occurrence_id=%s",
             occurrence_id,
         )
 

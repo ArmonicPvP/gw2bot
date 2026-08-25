@@ -243,6 +243,16 @@ class EventOccurrence:
     # channel, and for one whose announcement was refused.
     ping_channel_id: int | None = None
     ping_message_id: int | None = None
+    # The roles that announcement mentioned when it was delivered. A later
+    # correction reuses these rather than the event's current pick: a message
+    # edit notifies nobody, so re-rendering would claim roles that were never
+    # alerted.
+    ping_role_ids: tuple[int, ...] = ()
+    # An announcement from an earlier post of this occurrence whose removal
+    # Discord refused. Retried by the maintenance pass until it is gone,
+    # because a channel move has already claimed the pair above.
+    stale_ping_channel_id: int | None = None
+    stale_ping_message_id: int | None = None
 
 
 # "Edit my signup" rate limit: a token bucket per signup row. A member can

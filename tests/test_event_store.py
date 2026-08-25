@@ -174,15 +174,17 @@ def test_migration_backfills_occurrence_channel_id(tmp_path: Path) -> None:
         connection.execute(
             text(
                 "INSERT INTO gw2_event_occurrences (event_id, start_time, "
-                "message_id, thread_id, status, needs_refresh) VALUES "
-                "(1, '2027-01-30T20:00:00+00:00', 555, 777, 'over', 0)"
+                "message_id, thread_id, status, needs_refresh, "
+                "ping_role_ids) VALUES "
+                "(1, '2027-01-30T20:00:00+00:00', 555, 777, 'over', 0, '')"
             )
         )
         connection.execute(
             text(
                 "INSERT INTO gw2_event_occurrences (event_id, start_time, "
-                "message_id, thread_id, status, needs_refresh) VALUES "
-                "(1, '2027-01-31T20:00:00+00:00', NULL, NULL, 'open', 0)"
+                "message_id, thread_id, status, needs_refresh, "
+                "ping_role_ids) VALUES "
+                "(1, '2027-01-31T20:00:00+00:00', NULL, NULL, 'open', 0, '')"
             )
         )
 
@@ -198,6 +200,66 @@ def test_migration_backfills_occurrence_channel_id(tmp_path: Path) -> None:
         assert posted.channel_id == 4321
         # An unposted row has no message, so it has no channel either.
         assert unposted.channel_id is None
+    finally:
+        store.close()
+
+
+def test_migration_adds_the_announcement_columns(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before an
+    # event could ping its roles from a channel of its own.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        for column in (
+            "ping_channel_id",
+            "ping_message_id",
+            "ping_role_ids",
+            "stale_ping_channel_id",
+            "stale_ping_message_id",
+        ):
+            connection.execute(
+                text(
+                    "ALTER TABLE gw2_event_occurrences DROP COLUMN "
+                    f"{column}"
+                )
+            )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat, ping_role_ids) VALUES "
+                "('Fractal', 't', 'd', 4321, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0, '11')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_event_occurrences (event_id, start_time, "
+                "channel_id, message_id, thread_id, status, needs_refresh) "
+                "VALUES (1, '2027-01-30T20:00:00+00:00', 4321, 555, 777, "
+                "'open', 0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "ping_channel_id" in added
+    assert "stale_ping_message_id" in added
+    store = EventStore(db_path)
+    try:
+        (occurrence,) = store.get_event_occurrences(1)
+        # Nothing to backfill: no release before this one sent an
+        # announcement, so a legacy row correctly reads as having none - and
+        # none left over to remove either.
+        assert occurrence.ping_channel_id is None
+        assert occurrence.ping_message_id is None
+        assert occurrence.ping_role_ids == ()
+        assert occurrence.stale_ping_channel_id is None
+        assert occurrence.stale_ping_message_id is None
     finally:
         store.close()
 
@@ -240,8 +302,8 @@ def test_migration_scopes_legacy_signup_preferences_to_events(
                 text(
                     "INSERT INTO gw2_event_occurrences (event_id, start_time, "
                     "channel_id, message_id, thread_id, status, "
-                    "needs_refresh) VALUES "
-                    f"(1, '{start}', 1, NULL, NULL, 'open', 0)"
+                    "needs_refresh, ping_role_ids) VALUES "
+                    f"(1, '{start}', 1, NULL, NULL, 'open', 0, '')"
                 )
             )
         for occurrence_id in (1, 2):

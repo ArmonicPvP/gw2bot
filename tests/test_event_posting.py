@@ -113,7 +113,9 @@ class FakeChannel:
             delete=AsyncMock(),
         )
         self.create_thread_error: Exception | None = None
-        self.send_error: Exception | None = None
+        # BaseException so a test can cut a send off the way a cancelled
+        # task or a shutdown does, not only the way Discord refuses one.
+        self.send_error: BaseException | None = None
 
     async def send(
         self,
@@ -165,7 +167,9 @@ class FakeForumPost(FakeThread):
         self.guild = guild if guild is not None else FakePingGuild()
         self.archived = archived
         self.sent: list[dict[str, Any]] = []
-        self.send_error: Exception | None = None
+        # BaseException so a test can cut a send off the way a cancelled
+        # task or a shutdown does, not only the way Discord refuses one.
+        self.send_error: BaseException | None = None
         self.partial_message = SimpleNamespace(
             edit=AsyncMock(),
             delete=AsyncMock(),
@@ -1370,6 +1374,204 @@ class TestPingingAForumPostEventFromAnotherChannel:
         assert len(ping_channel.sent) == 2
         assert reposted.ping_channel_id == ping_channel.id
         assert reposted.ping_message_id == 555
+
+    async def test_a_cut_off_send_still_records_the_attempt(
+        self,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A send that hangs, is cancelled, or is cut off by a restart reaches
+        # neither the success nor the failure line, so the attempt has to be
+        # logged before the await or the delivery leaves no trace at all.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        ping_channel.send_error = asyncio.CancelledError()
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            with pytest.raises(asyncio.CancelledError):
+                await self.post_event_in_post(bot, store, post)
+
+        assert "Announcing an event's role pings" in caplog.text
+        # Counts and ids only: nothing of the announcement's own text.
+        assert "pinged_roles=2" in caplog.text
+        assert "Kitty Cleanup" not in caplog.text
+
+    async def test_the_delivered_roles_are_recorded(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        _, posted = await self.post_event_in_post(bot, store, post)
+
+        # What the announcement actually said, which a later correction has to
+        # keep rather than re-derive.
+        assert posted.ping_role_ids == (11, 22)
+
+    async def test_a_correction_keeps_the_roles_that_were_pinged(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The regression: a message edit does not notify a mention added to
+        # it, so re-rendering from the event's new pick would claim roles that
+        # were never alerted and lose the record of who was.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        _, posted = await self.post_event_in_post(bot, store, post)
+        repicked = store.update_event(
+            event_id=posted.event_id,
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup Deluxe",
+            description="Bring food.",
+            channel_id=post.id,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+            ping_role_ids=(33,),
+        )
+
+        await refresh_occurrence_message(
+            bot,
+            repicked,
+            posted,
+            BEFORE_START,
+            force_thread_rename=True,
+        )
+
+        edit = ping_channel.partial_message.edit.await_args
+        assert edit is not None
+        content = edit.kwargs["content"]
+        assert content.startswith("<@&11> <@&22>")
+        assert "<@&33>" not in content
+        assert [
+            role.id for role in edit.kwargs["allowed_mentions"].roles
+        ] == [11, 22]
+        # The title still gets corrected; only the mentions are held.
+        assert "Kitty Cleanup Deluxe" in content
+
+    async def test_a_refused_removal_on_a_move_is_kept_for_another_try(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The move claims the announcement columns for the replacement it just
+        # sent, so a refusal has to be parked or nothing is left to find the
+        # old announcement.
+        destination = FakeForumPost(thread_id=902)
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        bot._channels[destination.id] = destination
+        event = create_event(store, channel_id=post.id, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        stale_message_id = posted.ping_message_id
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=destination.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            ping_role_ids=event.ping_role_ids,
+        )
+
+        reposted = await repost_occurrence(bot, moved, posted)
+
+        # Read from the row, which is what the retry reads.
+        stored = store.get_occurrence(reposted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_channel_id == ping_channel.id
+        assert stored.stale_ping_message_id == stale_message_id
+        # The replacement is tracked as this occurrence's announcement, so the
+        # two are held apart rather than one overwriting the other.
+        assert stored.ping_message_id == 555
+
+    async def test_the_kept_removal_is_retried_and_then_forgotten(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        store.set_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+
+        await refresh_occurrence_message(bot, event, current, BEFORE_START)
+
+        ping_channel.partial_message.delete.assert_awaited_once()
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_channel_id is None
+        assert stored.stale_ping_message_id is None
+        # The occurrence's own announcement is untouched by the sweep.
+        assert stored.ping_message_id == 555
+
+    async def test_a_kept_removal_survives_a_refusal_on_retry(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        store.set_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+
+        await refresh_occurrence_message(bot, event, current, BEFORE_START)
+
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_message_id == 9090
+
+    async def test_deleting_the_event_makes_a_last_try_at_the_leftover(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The row is about to go, taking the note with it, so this is the last
+        # pass that can reach the announcement.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        store.set_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+
+        await delete_event_posts(bot, event, [current])
+
+        # Both the leftover and the occurrence's own announcement.
+        assert ping_channel.partial_message.delete.await_count == 2
 
     async def test_an_edit_brings_the_announcement_back_in_line(
         self,

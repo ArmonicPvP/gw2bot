@@ -584,11 +584,14 @@ occurrence its ping alone — the event stays posted and its buttons keep workin
 
 The announcement repeats the event's title and its start, so an edit to either
 corrects it in place: it is refreshed on the same trigger as the thread name,
-which carries the date and time for the same reason. Editing a message notifies
-nobody, so a correction never re-pings the roles. One somebody deleted by hand
-is forgotten rather than retried, and an edit Discord refuses is logged without
-holding back the event — the post is the record, and the announcement is a
-notice that has already been delivered.
+which carries the date and time for the same reason. Its mentions are left
+exactly as they were sent. Editing a message notifies nobody, so re-rendering
+them from a changed role pick would claim roles that were never alerted — the
+announcement keeps naming who actually heard about the event, and changing the
+roles only takes effect on the next occurrence posted. One somebody deleted by
+hand is forgotten rather than retried, and an edit Discord refuses is logged
+without holding back the event — the post is the record, and the announcement
+is a notice that has already been delivered.
 
 An announcement is only ever a pointer at the event's message, so it is stored
 with the occurrence and removed by the same cleanup: deleting the event,
@@ -601,6 +604,12 @@ occurrence, and that takes the announcement too, so a one-off event that leaves
 maintenance does not leave a dead link behind. Because the channel is stored
 alongside the message, changing the setting later does not strand the
 announcements already sent — each one is still removed from wherever it went.
+
+A move sends the replacement before removing what it replaced, so a removal
+Discord refuses would otherwise be forgotten the moment the occurrence starts
+tracking the new announcement. It is kept against the occurrence instead, and
+every later maintenance pass tries it again until it is gone; deleting the
+event makes one final attempt before the record goes with it.
 
 ## Event Reminders
 
