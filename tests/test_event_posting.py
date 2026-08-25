@@ -83,6 +83,9 @@ class FakePingGuild:
 
     def __init__(self, roles: dict[int, str] | None = None):
         self._roles = roles
+        # Carried because a ping announcement links back to the post, and a
+        # jump link is addressed by (server, channel, message).
+        self.id = 5678
 
     def get_role(self, role_id: int) -> Any:
         if self._roles is None:
@@ -194,6 +197,7 @@ def forum_post_bot(
     store: EventStore,
     post: FakeForumPost,
     channel: FakeChannel | None = None,
+    ping_channel: FakeChannel | None = None,
 ) -> Any:
     # The text channel comes along so a move between a channel and a post can be
     # exercised; the post is resolvable on its own, as its own channel.
@@ -202,6 +206,9 @@ def forum_post_bot(
         FakeBot(store, channel if channel is not None else FakeChannel()),
     )
     bot._channels[post.id] = post
+    if ping_channel is not None:
+        bot._channels[ping_channel.id] = ping_channel
+        bot._config = default_config(event_ping_channel_id=ping_channel.id)
     return bot
 
 
@@ -1054,6 +1061,218 @@ class TestPostingIntoAnExistingForumPost:
         assert reposted.thread_id == channel.thread.id
         post.partial_message.delete.assert_awaited_once()
         post.delete.assert_not_awaited()
+
+
+class TestPingingAForumPostEventFromAnotherChannel:
+    """An event in a forum post pings its roles where they will see them.
+
+    A forum post only notifies the members already following it, so the
+    mentions go to the configured channel with a link back to the post.
+    """
+
+    async def post_event_in_post(
+        self,
+        bot: Any,
+        store: EventStore,
+        post: FakeForumPost,
+        ping_role_ids: tuple[int, ...] = (11, 22),
+    ) -> Any:
+        event = create_event(
+            store,
+            channel_id=post.id,
+            ping_role_ids=ping_role_ids,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        return event, posted
+
+    async def test_the_mentions_go_to_the_channel_and_not_the_post(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        await self.post_event_in_post(bot, store, post)
+
+        # The post carries the event and nothing above it, so nobody is pinged
+        # twice for one event.
+        assert post.sent[0]["content"] is None
+        assert post.sent[0].get("allowed_mentions") is None
+        assert len(ping_channel.sent) == 1
+        announcement = ping_channel.sent[0]["content"]
+        assert announcement is not None
+        assert announcement.startswith("<@&11> <@&22>")
+        # Only the event's own roles may be notified from there either.
+        mentions = ping_channel.sent[0]["allowed_mentions"]
+        assert [role.id for role in mentions.roles] == [11, 22]
+        assert mentions.everyone is False
+        assert mentions.users is False
+
+    async def test_the_announcement_links_to_the_event_message_in_the_post(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        event, posted = await self.post_event_in_post(bot, store, post)
+
+        # The link is what carries the roles back to a post they are not in,
+        # so it addresses the event's own message rather than the post.
+        assert (
+            f"https://discord.com/channels/5678/{post.id}/{posted.message_id}"
+            in ping_channel.sent[0]["content"]
+        )
+        assert event.title in ping_channel.sent[0]["content"]
+
+    async def test_the_announcement_dates_the_run_it_links_to(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        _, posted = await self.post_event_in_post(bot, store, post)
+
+        # A relative Discord timestamp, so every member reads the start in
+        # their own locale rather than the bot's.
+        assert (
+            f"<t:{int(posted.start_time.timestamp())}:R>"
+            in ping_channel.sent[0]["content"]
+        )
+
+    async def test_an_event_with_no_roles_left_announces_nothing(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Nothing to ping means nothing to announce, so the channel does not
+        # collect a mentionless announcement per event posted in a post.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        await self.post_event_in_post(bot, store, post, ping_role_ids=())
+
+        assert len(post.sent) == 1
+        assert ping_channel.sent == []
+
+    async def test_an_unconfigured_channel_pings_in_the_post(
+        self,
+        store: EventStore,
+    ) -> None:
+        # What every event in a post did before the setting existed.
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+
+        await self.post_event_in_post(bot, store, post)
+
+        assert post.sent[0]["content"] == "<@&11> <@&22>"
+
+    async def test_an_unreadable_channel_falls_back_to_pinging_in_the_post(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A channel deleted or hidden since it was set costs the event its
+        # audience, not its ping.
+        post = FakeForumPost()
+        bot = forum_post_bot(store, post)
+        bot._config = default_config(event_ping_channel_id=9999)
+
+        await self.post_event_in_post(bot, store, post)
+
+        assert post.sent[0]["content"] == "<@&11> <@&22>"
+        mentions = post.sent[0]["allowed_mentions"]
+        assert [role.id for role in mentions.roles] == [11, 22]
+
+    async def test_a_refused_announcement_leaves_the_event_posted(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The post is up and its buttons work; raising here would only post it
+        # a second time on the next pass.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        ping_channel.send_error = forbidden_error(50013)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        _, posted = await self.post_event_in_post(bot, store, post)
+
+        assert posted.message_id == 606
+        assert posted.status is EventStatus.OPEN
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.message_id == 606
+
+    async def test_a_failed_write_announces_nothing(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The recovery deletes the message the announcement would link to, so
+        # the announcement must not have gone out ahead of it.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        store.set_occurrence_message = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("database is locked")
+        )
+        event = create_event(store, channel_id=post.id, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        with pytest.raises(SQLAlchemyError):
+            await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert ping_channel.sent == []
+
+    async def test_an_event_in_a_channel_still_pings_in_the_channel(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The setting answers only for a forum post: a channel post already
+        # reaches everyone who can read the channel.
+        channel = FakeChannel()
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, channel, ping_channel=ping_channel)
+        event = create_event(store, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert channel.sent[0]["content"] == "<@&11>"
+        assert ping_channel.sent == []
+
+    async def test_each_repeat_occurrence_announces_itself(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event = create_event(
+            store,
+            channel_id=post.id,
+            repeat_frequency=RepeatFrequency.DAILY,
+            ping_role_ids=(11,),
+        )
+        first = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, first, BEFORE_START)
+        second = store.create_occurrence(
+            event.event_id,
+            event.start_time + timedelta(days=1),
+        )
+
+        await post_occurrence(bot, event, second, BEFORE_START)
+
+        # Every occurrence is its own announcement, so the roles hear about
+        # the run that is actually being posted.
+        assert len(ping_channel.sent) == 2
+        assert all(
+            sent["content"].startswith("<@&11>") for sent in ping_channel.sent
+        )
 
 
 class TestCompleteSignup:

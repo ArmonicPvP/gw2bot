@@ -265,6 +265,8 @@ def format_role_groups(roles: tuple[EventRole, ...]) -> str:
 
 ROSTER_UPDATE_HEADER = "🔀 **Roster update**"
 
+PING_ANNOUNCEMENT_HEADER = "📣 **Event posted**"
+
 
 def roster_update_messages(update: RosterUpdate) -> list[str]:
     """Announce a roster mutation, split to stay inside Discord's limit.
@@ -761,6 +763,36 @@ def format_role_mentions(role_ids: Sequence[int]) -> str:
     Discord never notifies for a mention inside an embed.
     """
     return " ".join(f"<@&{role_id}>" for role_id in role_ids)
+
+
+def message_link(guild_id: int, channel_id: int, message_id: int) -> str:
+    """The jump link Discord resolves to one message."""
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+def ping_announcement_content(
+    title: str,
+    start_time: datetime,
+    role_ids: Sequence[int],
+    link: str,
+) -> str:
+    """Announce an event that was posted somewhere its roles will not see it.
+
+    A forum post only notifies the members already following it, so an event
+    sent into one pings its roles from a channel of its own instead, and the
+    announcement has to carry them back: the link is left bare rather than
+    wrapped in angle brackets so Discord renders its preview of the post.
+
+    The start is a relative timestamp for the same reason the reminders use
+    one - every member reads it in their own locale. Nothing here can outgrow
+    a Discord message: an event carries at most three roles, and its title is
+    capped at the length the creation modal accepts.
+    """
+    return (
+        f"{format_role_mentions(role_ids)}\n"
+        f"{PING_ANNOUNCEMENT_HEADER} {title} starts "
+        f"<t:{int(start_time.timestamp())}:R>\n{link}"
+    )
 
 
 def describe_ping_roles(role_ids: Sequence[int]) -> str:

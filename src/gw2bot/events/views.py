@@ -35,6 +35,7 @@ from gw2bot.events.formatting import (
     format_duration_input,
     format_event_datetime,
     format_repeat_days,
+    message_link,
     parse_event_datetime,
     parse_event_duration,
     parse_repeat_days,
@@ -2465,10 +2466,10 @@ def _event_message_link(
 
     if guild_id is None or occurrence.message_id is None:
         return None
-    return (
-        "https://discord.com/channels/"
-        f"{guild_id}/{occurrence_channel_id(event, occurrence)}/"
-        f"{occurrence.message_id}"
+    return message_link(
+        guild_id,
+        occurrence_channel_id(event, occurrence),
+        occurrence.message_id,
     )
 
 

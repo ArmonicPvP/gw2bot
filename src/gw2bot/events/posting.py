@@ -21,7 +21,9 @@ from gw2bot.events.formatting import (
     event_embed,
     event_thread_name,
     format_role_mentions,
+    message_link,
     next_occurrence_start,
+    ping_announcement_content,
     roster_update_messages,
     signup_edit_limit_message,
 )
@@ -172,25 +174,140 @@ def verified_ping_role_ids(
     return tuple(verified)
 
 
+def role_ping_mentions(role_ids: Sequence[int]) -> discord.AllowedMentions:
+    """Permission to mention exactly these roles and nothing else.
+
+    A role id that reaches here can never widen into an @everyone or a member
+    ping, whatever a title or description happens to contain, and a role that
+    members may not mention themselves still pings when the bot may mention
+    roles.
+    """
+    return discord.AllowedMentions(
+        everyone=False,
+        users=False,
+        roles=[discord.Object(id=role_id) for role_id in role_ids],
+    )
+
+
 def ping_send_kwargs(role_ids: Sequence[int]) -> dict[str, Any]:
     """Send arguments that mention the given roles above the embed.
 
     Empty when there is nothing to ping, so the send stays exactly what it was
-    before role pinging existed. The allowed mentions name these roles and
-    nothing else, so a role id that ends up here can never widen into an
-    @everyone or a member ping, and a role that is not mentionable by members
-    still pings when the bot may mention roles.
+    before role pinging existed.
     """
     if not role_ids:
         return {}
     return {
         "content": format_role_mentions(role_ids),
-        "allowed_mentions": discord.AllowedMentions(
-            everyone=False,
-            users=False,
-            roles=[discord.Object(id=role_id) for role_id in role_ids],
-        ),
+        "allowed_mentions": role_ping_mentions(role_ids),
     }
+
+
+@dataclass(frozen=True, slots=True)
+class PingAnnouncement:
+    """Where an event in a forum post pings its roles, and in which server.
+
+    The server is carried alongside the channel because the announcement's
+    only job is to link back to the post, and a jump link is addressed by
+    (server, channel, message).
+    """
+
+    channel: Any
+    guild_id: int
+
+
+async def resolve_ping_announcement(
+    bot: Gw2Bot,
+    guild: Any,
+    occurrence_id: int,
+) -> PingAnnouncement | None:
+    """Where an event in a forum post should ping its roles, if anywhere else.
+
+    A forum post only notifies the members already following it, so mentioning
+    a role inside one reaches almost nobody it was meant for. When a channel is
+    configured the mentions are sent there instead, with a link back to the
+    post.
+
+    Resolved before the event message goes out, because that is what decides
+    whether the message carries the pings itself: a channel that has been
+    deleted or hidden since it was set falls back to pinging in the post, which
+    is what an unset setting does and what every event did before this existed.
+    """
+    channel_id = bot._config.event_ping_channel_id
+    if channel_id is None:
+        LOGGER.debug(
+            "No event ping channel is configured; pinging in the forum post; "
+            "occurrence_id=%s",
+            occurrence_id,
+        )
+        return None
+    guild_id = getattr(guild, "id", None)
+    if guild_id is None:
+        # The roles were checked against a server, so this cannot happen for an
+        # event with roles left to ping. It is still the value a link needs, so
+        # it is checked here rather than assumed at the send.
+        LOGGER.warning(
+            "Cannot link back to an event's post without a server; pinging "
+            "in the forum post; occurrence_id=%s",
+            occurrence_id,
+        )
+        return None
+    try:
+        channel = await resolve_channel(bot, channel_id)
+    except discord.DiscordException as exc:
+        log_discord_failure(
+            "Could not read the event ping channel; pinging in the forum "
+            "post instead; occurrence_id=%s reason=%s",
+            exc,
+            occurrence_id,
+            discord_failure_reason(exc),
+        )
+        return None
+    return PingAnnouncement(channel, guild_id)
+
+
+async def announce_occurrence_ping(
+    channel: Any,
+    event: Event,
+    occurrence: EventOccurrence,
+    link: str,
+    role_ids: Sequence[int],
+) -> bool:
+    """Ping an event's roles outside the forum post it was posted into.
+
+    Sent once the occurrence is persisted, so the link can never point at a
+    message the failed-write recovery has already deleted. A failed
+    announcement costs the occurrence its ping and nothing else: the post is
+    up and its buttons work, and raising here would only re-post it.
+    """
+    try:
+        await channel.send(
+            content=ping_announcement_content(
+                event.title,
+                occurrence.start_time,
+                role_ids,
+                link,
+            ),
+            allowed_mentions=role_ping_mentions(role_ids),
+        )
+    except discord.DiscordException as exc:
+        log_discord_failure(
+            "Could not announce an event's role pings; occurrence_id=%s "
+            "reason=%s pinged_roles=%s",
+            exc,
+            occurrence.occurrence_id,
+            discord_failure_reason(exc),
+            len(role_ids),
+        )
+        return False
+    LOGGER.debug(
+        "Announced an event's role pings outside its forum post; "
+        "event_id=%s occurrence_id=%s pinged_roles=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        len(role_ids),
+    )
+    return True
 
 
 def occurrence_embed(
@@ -231,11 +348,19 @@ async def post_occurrence(
     # the embed. Only the post pings them: reminders address the roster. The
     # roles are checked against the server the event is going to, which is the
     # one whose roles the mentions would notify.
-    ping_role_ids = verified_ping_role_ids(
-        getattr(channel, "guild", None),
-        event,
+    guild = getattr(channel, "guild", None)
+    ping_role_ids = verified_ping_role_ids(guild, event)
+    # An event sent into a forum post announces itself somewhere the roles will
+    # actually see it, when a channel is configured for that. The post then
+    # carries no mentions of its own, so nobody is pinged twice for one event.
+    announcement = (
+        await resolve_ping_announcement(bot, guild, occurrence.occurrence_id)
+        if in_thread and ping_role_ids
+        else None
     )
-    ping_kwargs = ping_send_kwargs(ping_role_ids)
+    ping_kwargs = (
+        {} if announcement is not None else ping_send_kwargs(ping_role_ids)
+    )
     message = await channel.send(embed=embed, view=view, **ping_kwargs)
     if in_thread:
         # The event went into a forum post that already exists. Nothing is
@@ -296,10 +421,22 @@ async def post_occurrence(
             occurrence.occurrence_id,
         )
         raise
+    if announcement is not None:
+        await announce_occurrence_ping(
+            announcement.channel,
+            event,
+            occurrence,
+            message_link(
+                announcement.guild_id,
+                message_channel_id,
+                message.id,
+            ),
+            ping_role_ids,
+        )
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
         "in_existing_thread=%s thread_created=%s signups=%s "
-        "stored_ping_roles=%s pinged_roles=%s",
+        "stored_ping_roles=%s pinged_roles=%s pinged_from_channel=%s",
         event.event_id,
         occurrence.occurrence_id,
         status.value,
@@ -310,6 +447,7 @@ async def post_occurrence(
         # How many of the stored roles survived the check, so a ping that
         # silently stopped going out is visible in the log.
         len(ping_role_ids),
+        announcement is not None,
     )
     updated = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if updated is None:

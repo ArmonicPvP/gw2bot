@@ -122,9 +122,12 @@ want the exclusion to outlast their membership.
 
 ### Role, Channel And Forum Settings
 
-These were fixed IDs in the source until they became settings. They keep those
-values as defaults, so nothing changes until you change one, and clearing one
-restores its default rather than switching the feature off.
+Most of these were fixed IDs in the source until they became settings. They keep
+those values as defaults, so nothing changes until you change one, and clearing
+one restores its default rather than switching the feature off.
+`/settings channels event_ping` is the exception: it is new rather than
+inherited, so it starts unset and clearing it returns events to pinging inside
+their forum post.
 
 Each subcommand suggests the server's roles, matching channels, or the Trial
 forum's tags as you type, and refuses an ID that does not resolve — storing one
@@ -142,6 +145,7 @@ that nothing answers to is how a guild silently loses a feature.
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
 | `/settings roles roster_page` | `1317124663847157880` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
 | `/settings roles gold_page` | `1317124663847157880` | The guild bank gold history page. Set it to a wider role to open the history to the whole guild. |
+| `/settings channels event_ping` | unset | Where an event posted inside a forum post pings its roles. While it is unset those events ping inside the post. |
 | `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
 | `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
 | `/settings channels trial_accepted_tag` | `1317349209619562587` | Tag marking an accepted application; only tagged posts are indexed. |
@@ -540,7 +544,9 @@ skipped, not forgotten: its id stays on the event, so renaming it back resumes
 its pings.
 
 The mentions are sent as the message text carrying the event, so they appear
-above the embed and actually notify. Each occurrence is its own announcement: a
+above the embed and actually notify — unless the event went into a forum post
+and [a ping channel](#pinging-from-another-channel) is configured, which sends
+them there instead. Each occurrence is its own announcement: a
 repeating event pings the roles again when the next occurrence is posted, and a
 channel move pings them at the new destination, because that is where the post
 now is. Refreshing an embed — a sign-up, a status change, a rename — never
@@ -553,6 +559,28 @@ description can widen an event post into an `@everyone`.
 
 Role pings belong to the post alone. Reminders ping the members who signed up,
 never these roles.
+
+### Pinging From Another Channel
+
+A forum post only notifies the members already following it, so mentioning a
+role inside one reaches almost nobody it was meant for. Set
+`/settings channels event_ping` to a text channel and an event posted into a
+forum post announces itself there instead: the mentions go to that channel with
+the event's title, its start as a relative timestamp, and a link straight to the
+event's message in the post. The post itself then carries no mentions, so nobody
+is pinged twice for one event.
+
+The setting is global — one channel for every event — and answers only for an
+event posted into a forum post. An event posted to a channel keeps pinging its
+roles there, because everyone who can read the channel already sees it.
+
+While the setting is unset, an event in a forum post pings its roles inside the
+post, which is what every event did before this existed. So does an event whose
+configured channel has since been deleted or hidden from the bot: losing the
+channel costs the event its audience, not its ping, and the fallback is logged.
+The bot needs `Send Messages` and `Mention @everyone, @here and All Roles` in
+the ping channel; an announcement Discord refuses is logged and costs that
+occurrence its ping alone — the event stays posted and its buttons keep working.
 
 ## Event Reminders
 
