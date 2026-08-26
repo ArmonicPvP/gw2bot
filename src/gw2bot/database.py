@@ -456,6 +456,38 @@ class EventOccurrenceRecord(Base):
     channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The announcement that pinged this occurrence's roles from outside the
+    # forum post it was sent into, so the same lifecycle that removes the
+    # event's message removes the announcement pointing at it. Both are NULL
+    # for an occurrence posted to a channel, and for one whose announcement
+    # was never delivered. The channel is stored alongside the message
+    # because the ping channel setting can move between two occurrences of
+    # one series.
+    ping_channel_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ping_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The roles that announcement actually mentioned. Editing a message does
+    # not notify a mention added to it, so a later correction has to keep the
+    # ones that were delivered rather than re-render the event's current pick
+    # - which would both claim roles that were never alerted and lose the
+    # record of who was.
+    ping_role_ids: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="",
+    )
+    # Announcements from earlier posts of this occurrence that still have to be
+    # removed, kept because a channel move overwrites the pair above with the
+    # replacement's ids. Without them a deletion Discord refused once would be
+    # forgotten, and the announcement would outlive the message it links to.
+    # A list rather than one pair: an occurrence moved again before an earlier
+    # removal succeeds owes both, and a single slot would drop the older one.
+    # Stored as "channel:message" entries for the same reason ping_role_ids is
+    # a string - the row holds a handful of ids, not a table of its own.
+    stale_ping_messages: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="",
+    )
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
     needs_refresh: Mapped[bool] = mapped_column(
         Boolean,
@@ -659,6 +691,47 @@ def initialize_database(engine: Engine) -> set[str]:
                 ") WHERE message_id IS NOT NULL"
             )
             added_columns.add("channel_id")
+
+        for column_name in (
+            "ping_channel_id",
+            "ping_message_id",
+        ):
+            if column_name in occurrence_columns:
+                continue
+            # Nothing to backfill: no release before this one sent an
+            # announcement, so every legacy row correctly reads as having
+            # none to clean up.
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(column_name, Integer, nullable=True),
+            )
+            added_columns.add(column_name)
+
+        if "ping_role_ids" not in occurrence_columns:
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(
+                    "ping_role_ids",
+                    String,
+                    nullable=False,
+                    server_default="",
+                ),
+            )
+            added_columns.add("occurrence_ping_role_ids")
+
+        if "stale_ping_messages" not in occurrence_columns:
+            # Nothing to backfill, as above: no release before this one sent an
+            # announcement, so no legacy row owes a removal.
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(
+                    "stale_ping_messages",
+                    String,
+                    nullable=False,
+                    server_default="",
+                ),
+            )
+            added_columns.add("stale_ping_messages")
 
         event_columns = {
             column["name"]

@@ -141,6 +141,11 @@ class Config:
     roster_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     gold_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     raffle_contribution_channel_id: int = DEFAULT_RAFFLE_CONTRIBUTION_CHANNEL_ID
+    # Where an event posted inside a forum post pings its roles. It has no
+    # default because there is no channel every server would want announced
+    # in: while it is unset a forum post keeps pinging its own roles, which
+    # is what every event did before this setting existed.
+    event_ping_channel_id: int | None = None
     trial_forum_channel_id: int = DEFAULT_TRIAL_FORUM_CHANNEL_ID
     trial_accepted_tag_id: int = DEFAULT_TRIAL_ACCEPTED_TAG_ID
     trial_in_review_tag_id: int = DEFAULT_TRIAL_IN_REVIEW_TAG_ID

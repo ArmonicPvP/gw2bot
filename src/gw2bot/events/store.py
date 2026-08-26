@@ -65,6 +65,33 @@ def _serialize_ids(ids: tuple[int, ...]) -> str:
     return ",".join(str(value) for value in ids)
 
 
+def _serialize_message_refs(refs: tuple[tuple[int, int], ...]) -> str:
+    return ",".join(
+        f"{channel_id}:{message_id}" for channel_id, message_id in refs
+    )
+
+
+def _parse_message_refs(value: str) -> tuple[tuple[int, int], ...]:
+    # Skipped rather than raised on for the same reason as _parse_ids below:
+    # one unreadable entry must not make the occurrence unreadable and take
+    # the maintenance pass down with it.
+    refs: list[tuple[int, int]] = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        channel_text, separator, message_text = entry.partition(":")
+        if not separator:
+            LOGGER.warning("Skipping an unreadable stored announcement")
+            continue
+        try:
+            refs.append((int(channel_text), int(message_text)))
+        except ValueError:
+            LOGGER.warning("Skipping an unreadable stored announcement")
+            continue
+    return tuple(refs)
+
+
 def _parse_ids(value: str) -> tuple[int, ...]:
     # A stored id that is not a number can only come from a hand-edited row.
     # Skip it rather than raising: one bad entry must not make the whole event
@@ -113,6 +140,10 @@ def _occurrence_from_record(
         status=EventStatus(record.status),
         channel_id=record.channel_id,
         needs_refresh=record.needs_refresh,
+        ping_channel_id=record.ping_channel_id,
+        ping_message_id=record.ping_message_id,
+        ping_role_ids=_parse_ids(record.ping_role_ids),
+        stale_ping_messages=_parse_message_refs(record.stale_ping_messages),
     )
 
 
@@ -275,11 +306,135 @@ class EventStore:
             record.channel_id = channel_id
             record.message_id = message_id
             record.thread_id = thread_id
+            # This is the write that says the occurrence has a fresh post, so
+            # any announcement recorded against the previous one no longer
+            # describes it. A channel move clears the pair here and the new
+            # announcement, if there is one, is recorded after it is sent. The
+            # leftover pair is deliberately untouched: it holds a removal that
+            # is still owed and has nothing to do with the post going up.
+            record.ping_channel_id = None
+            record.ping_message_id = None
+            record.ping_role_ids = ""
             session.commit()
         LOGGER.debug(
             "Stored occurrence message; occurrence_id=%s has_thread=%s",
             occurrence_id,
             thread_id is not None,
+        )
+
+    def set_occurrence_ping_message(
+        self,
+        occurrence_id: int,
+        channel_id: int,
+        message_id: int,
+        role_ids: tuple[int, ...],
+    ) -> None:
+        """Record the announcement that pinged an occurrence's roles.
+
+        Stored so the occurrence's own lifecycle removes it: an announcement
+        links to the event's message, so one left behind by a delete, a move
+        or a cancellation points at nothing. The roles come with it because
+        they are what was actually delivered, which a later correction has to
+        keep.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.ping_channel_id = channel_id
+            record.ping_message_id = message_id
+            record.ping_role_ids = _serialize_ids(role_ids)
+            session.commit()
+        LOGGER.debug(
+            "Stored occurrence ping announcement; occurrence_id=%s "
+            "pinged_roles=%s",
+            occurrence_id,
+            len(role_ids),
+        )
+
+    def clear_occurrence_ping_message(self, occurrence_id: int) -> None:
+        """Forget an announcement that is no longer standing.
+
+        Called once the announcement has actually been removed, so a later
+        delete does not chase a message that has already gone.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            record.ping_channel_id = None
+            record.ping_message_id = None
+            record.ping_role_ids = ""
+            session.commit()
+        LOGGER.debug(
+            "Cleared occurrence ping announcement; occurrence_id=%s",
+            occurrence_id,
+        )
+
+    def add_occurrence_stale_ping_message(
+        self,
+        occurrence_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        """Keep an announcement whose removal was refused, for a later try.
+
+        A channel move claims the announcement columns for the replacement it
+        just sent, so a deletion that failed has nowhere else to be
+        remembered - and the announcement would outlive the message it points
+        at with nothing left to find it.
+
+        Added to what is already owed rather than replacing it. A move that
+        fails because the bot has lost a permission in the ping channel fails
+        again on the next move, and keeping only the newest would leave the
+        earlier announcement standing with nothing left to find it. The same
+        message is never kept twice.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            kept = _parse_message_refs(record.stale_ping_messages)
+            if (channel_id, message_id) not in kept:
+                kept = (*kept, (channel_id, message_id))
+                record.stale_ping_messages = _serialize_message_refs(kept)
+                session.commit()
+            outstanding = len(kept)
+        LOGGER.debug(
+            "Kept an event ping announcement for removal; occurrence_id=%s "
+            "outstanding=%s",
+            occurrence_id,
+            outstanding,
+        )
+
+    def remove_occurrence_stale_ping_message(
+        self,
+        occurrence_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        """Forget one leftover announcement that has now been removed.
+
+        Only the pair named is dropped, so a removal that succeeded does not
+        take the ones still owed beside it with it.
+        """
+        with self._sessions() as session:
+            record = session.get(EventOccurrenceRecord, occurrence_id)
+            if record is None:
+                raise ValueError(f"Unknown event occurrence {occurrence_id}")
+            kept = tuple(
+                ref
+                for ref in _parse_message_refs(record.stale_ping_messages)
+                if ref != (channel_id, message_id)
+            )
+            record.stale_ping_messages = _serialize_message_refs(kept)
+            session.commit()
+            outstanding = len(kept)
+        LOGGER.debug(
+            "Removed a leftover event ping announcement; occurrence_id=%s "
+            "outstanding=%s",
+            occurrence_id,
+            outstanding,
         )
 
     def set_occurrence_start_time(
@@ -353,6 +508,25 @@ class EventStore:
                 select(EventOccurrenceRecord)
                 .where(EventOccurrenceRecord.status != EventStatus.OVER.value)
                 .where(EventOccurrenceRecord.message_id.is_not(None))
+                .order_by(EventOccurrenceRecord.occurrence_id)
+            ).all()
+            return [_occurrence_from_record(record) for record in records]
+
+    def get_occurrences_with_stale_announcements(
+        self,
+    ) -> list[EventOccurrence]:
+        """Every occurrence that still owes an announcement removal.
+
+        Deliberately not filtered by status: an occurrence that reached OVER
+        leaves get_posted_unfinished_occurrences(), so a removal Discord was
+        still refusing on the pass that ended the event would never be tried
+        again. The work outlives the occurrence's own lifecycle, so the query
+        that finds it has to as well.
+        """
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.stale_ping_messages != "")
                 .order_by(EventOccurrenceRecord.occurrence_id)
             ).all()
             return [_occurrence_from_record(record) for record in records]

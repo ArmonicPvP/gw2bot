@@ -538,6 +538,21 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         validates=ValidationTarget.ROLE,
     ),
     SettingDefinition(
+        name="event_ping",
+        field="event_ping_channel_id",
+        group=CHANNELS_GROUP,
+        description=(
+            "Channel that carries an event's role pings when the event is "
+            "posted inside a forum post. The mentions go there with a link "
+            "back to the event's message in the post, so the roles hear "
+            "about it without the post itself pinging them. It must belong "
+            "to the command server. Unset it and an event in a forum post "
+            "pings its roles in the post."
+        ),
+        parse=_parse_discord_id("event_ping"),
+        validates=ValidationTarget.TEXT_CHANNEL,
+    ),
+    SettingDefinition(
         name="raffle_contribution",
         field="raffle_contribution_channel_id",
         group=CHANNELS_GROUP,

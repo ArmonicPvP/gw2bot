@@ -236,6 +236,26 @@ class EventOccurrence:
     # Set when the public message failed to refresh so the scheduler retries
     # even if the computed status still matches the stored one.
     needs_refresh: bool = False
+    # The announcement that pinged this occurrence's roles from outside the
+    # forum post it was sent into. Held so deleting, moving or cancelling the
+    # occurrence takes the announcement with it rather than leaving one that
+    # links to a message that is gone. None for an occurrence posted to a
+    # channel, and for one whose announcement was refused.
+    ping_channel_id: int | None = None
+    ping_message_id: int | None = None
+    # The roles that announcement mentioned when it was delivered. A later
+    # correction reuses these rather than the event's current pick: a message
+    # edit notifies nobody, so re-rendering would claim roles that were never
+    # alerted.
+    ping_role_ids: tuple[int, ...] = ()
+    # Announcements from earlier posts of this occurrence whose removal Discord
+    # refused, as (channel_id, message_id) pairs. Retried by every maintenance
+    # pass until they are gone, because a channel move has already claimed the
+    # pair above. More than one is owed when an occurrence is moved again
+    # before an earlier removal succeeds - a permission the bot has lost in the
+    # ping channel refuses every attempt, so keeping only the newest would
+    # strand the rest for good.
+    stale_ping_messages: tuple[tuple[int, int], ...] = ()
 
 
 # "Edit my signup" rate limit: a token bucket per signup row. A member can

@@ -12,6 +12,7 @@ from gw2bot.events.posting import (
     post_pending_occurrence,
     prune_superseded_occurrences,
     refresh_occurrence_message,
+    sweep_stale_announcement,
 )
 from gw2bot.events.reminders import deliver_due_reminders
 
@@ -44,6 +45,7 @@ async def run_event_maintenance(
     now: datetime | None = None,
 ) -> None:
     current_time = now if now is not None else datetime.now(UTC)
+    swept: set[int] = set()
     occurrences = bot.event_store.get_posted_unfinished_occurrences()
     LOGGER.debug(
         "Starting event maintenance pass; live_occurrences=%s",
@@ -99,7 +101,58 @@ async def run_event_maintenance(
         # the opt-in. The prune is idempotent, so the common case is a no-op.
         if refreshed is EventStatus.OVER:
             await prune_superseded_occurrences(bot, event)
+        # Refreshing an occurrence sweeps what it owes, so this pass has
+        # already tried these and the sweep below must not try them twice.
+        swept.add(occurrence.occurrence_id)
+    await _sweep_outstanding_announcements(bot, swept)
     await _post_pending_occurrences(bot, current_time)
+
+
+async def _sweep_outstanding_announcements(
+    bot: Gw2Bot,
+    already_swept: set[int],
+) -> None:
+    """Retry every announcement removal still owed, whatever owes it.
+
+    The removals outlive the occurrences that owe them, so the loop above
+    cannot be what drives them. It reaches an occurrence only while the
+    occurrence is live and something about it has moved: one that is clean and
+    unchanged is skipped, one that reached OVER has left the unfinished set
+    entirely, and one the loop passes over for want of an active event never
+    reaches a sweep either. A removal Discord was refusing on the pass that
+    ended the event would never be tried again, and for a one-off event the
+    dead link would stand in the ping channel until somebody deleted the
+    whole event.
+
+    Driven off the outstanding list instead, which is exactly the set of
+    removals still owed and says nothing about status. One occurrence's
+    failure is contained so it cannot stop the rest.
+    """
+    outstanding = [
+        occurrence
+        for occurrence in (
+            bot.event_store.get_occurrences_with_stale_announcements()
+        )
+        if occurrence.occurrence_id not in already_swept
+    ]
+    if not outstanding:
+        return
+    LOGGER.debug(
+        "Retrying announcement removals outside the live set; occurrences=%s",
+        len(outstanding),
+    )
+    for occurrence in outstanding:
+        try:
+            await sweep_stale_announcement(bot, occurrence)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.error(
+                "Could not retry an announcement removal; occurrence_id=%s "
+                "error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
 
 
 async def _post_pending_occurrences(bot: Gw2Bot, now: datetime) -> None:
