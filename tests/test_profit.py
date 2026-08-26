@@ -366,6 +366,9 @@ class TestProfitCalculation:
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
+        kept_name = "kept-pick-secret"
+        skipped_name = "skipped-pick-secret"
+        undefined_name = "undefined-roi-pick-secret"
         report = ProfitReport(
             days=30,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
@@ -376,7 +379,11 @@ class TestProfitCalculation:
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
             unclaimed_coins=0,
             unclaimed_items=0,
-            item_names={1: "Profitable", 2: "Losing", 3: "Free"},
+            item_names={
+                1: kept_name,
+                2: skipped_name,
+                3: undefined_name,
+            },
             market_prices={
                 1: MarketPrice(100, 200),
                 2: MarketPrice(200, 200),
@@ -384,7 +391,7 @@ class TestProfitCalculation:
             },
         )
 
-        with caplog.at_level(logging.DEBUG, logger="gw2bot.profit.service"):
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             payload = cast(dict[str, Any], serialize_profit_report(report))
 
         picks = {row["item_id"]: row for row in payload["picks"]}
@@ -393,6 +400,9 @@ class TestProfitCalculation:
         assert picks[1]["roi_percent"] == 70
         assert picks[3]["roi_percent"] is None
         assert "kept=2 skipped_negative_roi=1" in caplog.text
+        assert kept_name not in caplog.text
+        assert skipped_name not in caplog.text
+        assert undefined_name not in caplog.text
 
 
 class TestProfitStore:
