@@ -1324,6 +1324,7 @@ total realized profit; the percentage is unavailable when total profit is zero.
 The **Your Picks** table revisits items flipped in the selected window using
 their current highest buy order and lowest sell listing. It shows the ten best
 opportunities after fees and can rank them by either ROI or profit per unit.
+Items whose current return after fees is a negative ROI are left out entirely.
 
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts

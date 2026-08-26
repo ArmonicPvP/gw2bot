@@ -362,6 +362,48 @@ class TestProfitCalculation:
         assert older_id not in caplog.text
         assert newer_id not in caplog.text
 
+    def test_picks_leave_out_items_whose_current_roi_is_negative(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        kept_name = "kept-pick-secret"
+        skipped_name = "skipped-pick-secret"
+        undefined_name = "undefined-roi-pick-secret"
+        report = ProfitReport(
+            days=30,
+            window_start=datetime(2026, 8, 1, tzinfo=UTC),
+            window_end=datetime(2026, 8, 31, tzinfo=UTC),
+            buy_transaction_count=0,
+            sell_transaction_count=0,
+            realized=calculate_realized_profit([], []),
+            unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
+            unclaimed_coins=0,
+            unclaimed_items=0,
+            item_names={
+                1: kept_name,
+                2: skipped_name,
+                3: undefined_name,
+            },
+            market_prices={
+                1: MarketPrice(100, 200),
+                2: MarketPrice(200, 200),
+                3: MarketPrice(0, 200),
+            },
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            payload = cast(dict[str, Any], serialize_profit_report(report))
+
+        picks = {row["item_id"]: row for row in payload["picks"]}
+
+        assert set(picks) == {1, 3}
+        assert picks[1]["roi_percent"] == 70
+        assert picks[3]["roi_percent"] is None
+        assert "kept=2 skipped_negative_roi=1" in caplog.text
+        assert kept_name not in caplog.text
+        assert skipped_name not in caplog.text
+        assert undefined_name not in caplog.text
+
 
 class TestProfitStore:
     def test_encrypts_and_isolates_each_members_api_key(
