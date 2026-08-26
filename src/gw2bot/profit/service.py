@@ -307,11 +307,16 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
         )
     ]
     picks = []
+    skipped_picks = 0
     for item_id, price in report.market_prices.items():
         net_revenue = price.sell_unit_price - sale_fee_total(
             price.sell_unit_price, 1
         )
         profit = net_revenue - price.buy_unit_price
+        roi_percent = percentage(profit, price.buy_unit_price)
+        if roi_percent is not None and roi_percent < 0:
+            skipped_picks += 1
+            continue
         picks.append(
             {
                 "item_id": item_id,
@@ -320,9 +325,14 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
                 "sell_price": price.sell_unit_price,
                 "net_revenue": net_revenue,
                 "profit": profit,
-                "roi_percent": percentage(profit, price.buy_unit_price),
+                "roi_percent": roi_percent,
             }
         )
+    LOGGER.debug(
+        "Built profit picks; kept=%s skipped_negative_roi=%s",
+        len(picks),
+        skipped_picks,
+    )
     return {
         "days": report.days,
         "window": {

@@ -255,7 +255,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <button id="picks-profit" type="button" aria-pressed="false">Profit</button>
         </div>
       </div>
-      <p class="note">Current buy-order and sell-listing returns for items you flipped in the selected window. Prices include Trading Post fees.</p>
+      <p class="note">Current buy-order and sell-listing returns for items you flipped in the selected window. Prices include Trading Post fees, and items whose current return is negative are left out.</p>
       <div class="table-scroll"><table>
         <thead><tr><th>Item</th><th>Buy Order</th><th>Sell Price</th><th>Profit / Unit</th><th>ROI</th></tr></thead>
         <tbody id="picks-body"></tbody>
@@ -1100,7 +1100,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       body.appendChild(row);
     });
     if (!picksData.length) {
-      emptyRow(body, 5, "No current prices were found for your previous flips.");
+      emptyRow(body, 5,
+        "No current prices showed a positive return for your previous flips.");
     }
     trace("picks-" + (picksMetric === "roi_percent" ? "roi" : "profit"),
       Math.min(10, picksData.length));
