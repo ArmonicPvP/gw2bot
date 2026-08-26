@@ -512,6 +512,25 @@ class EventStore:
             ).all()
             return [_occurrence_from_record(record) for record in records]
 
+    def get_occurrences_with_stale_announcements(
+        self,
+    ) -> list[EventOccurrence]:
+        """Every occurrence that still owes an announcement removal.
+
+        Deliberately not filtered by status: an occurrence that reached OVER
+        leaves get_posted_unfinished_occurrences(), so a removal Discord was
+        still refusing on the pass that ended the event would never be tried
+        again. The work outlives the occurrence's own lifecycle, so the query
+        that finds it has to as well.
+        """
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.stale_ping_messages != "")
+                .order_by(EventOccurrenceRecord.occurrence_id)
+            ).all()
+            return [_occurrence_from_record(record) for record in records]
+
     def get_unposted_occurrences(self) -> list[EventOccurrence]:
         with self._sessions() as session:
             records = session.scalars(

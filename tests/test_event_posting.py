@@ -1807,11 +1807,18 @@ class TestPingingAForumPostEventFromAnotherChannel:
         assert stored.ping_channel_id is None
         assert stored.ping_message_id is None
 
-    async def test_a_refused_retirement_keeps_the_announcement_tracked(
+    async def test_a_refused_retirement_keeps_the_removal_owed(
         self,
         store: EventStore,
     ) -> None:
-        # Left recorded so deleting the event still tries to remove it.
+        # Retiring persists OVER, which takes the occurrence out of the live
+        # set, so a refusal left in the pair would never be retried. It moves
+        # to the outstanding list instead, which maintenance reads whatever
+        # the status - and which deleting the event still works through.
+        #
+        # The pair cannot carry it: on its own it says nothing about whether
+        # the announcement should still be standing, and an occurrence that
+        # simply ended keeps its own.
         post = FakeForumPost()
         ping_channel = FakeChannel(channel_id=4321)
         bot = forum_post_bot(store, post, ping_channel=ping_channel)
@@ -1825,8 +1832,10 @@ class TestPingingAForumPostEventFromAnotherChannel:
 
         stored = store.get_occurrence(posted.occurrence_id)
         assert stored is not None
-        assert stored.ping_channel_id == ping_channel.id
-        assert stored.ping_message_id == 555
+        assert stored.status is EventStatus.OVER
+        assert stored.stale_ping_messages == ((ping_channel.id, 555),)
+        assert stored.ping_channel_id is None
+        assert stored.ping_message_id is None
 
     async def test_a_refused_announcement_console_log_redacts_secrets(
         self,

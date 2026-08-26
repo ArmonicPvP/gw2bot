@@ -620,7 +620,9 @@ tracking the new announcement. It is kept against the occurrence instead, and
 every maintenance pass tries it again until it is gone — including passes over
 an occurrence that has not otherwise changed, so an event weeks away still has
 its dead links cleared within the minute rather than waiting on a roster or
-status change. Moving an event again before an earlier removal succeeds keeps
+status change, and including ones whose event has already finished — a removal
+Discord was still refusing on the pass that ended the event is retried until
+permissions recover, rather than being stranded by the finish. Moving an event again before an earlier removal succeeds keeps
 both: a permission the bot has lost in the ping channel refuses every attempt,
 and each announcement is retried and forgotten on its own. Deleting the event
 makes one final attempt at every one of them before the record goes with it.

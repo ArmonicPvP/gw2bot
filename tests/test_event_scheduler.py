@@ -97,6 +97,84 @@ class TestRunEventMaintenance:
         channel.thread.edit.assert_not_awaited()
         channel.partial_message.edit.assert_not_awaited()
 
+    async def post_forum_event_owing_a_removal(
+        self,
+        store: EventStore,
+        ping_channel: FakeChannel,
+        post: FakeForumPost,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+    ):
+        bot = cast(Any, forum_post_bot(store, post, ping_channel=ping_channel))
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=post.id,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=repeat_frequency,
+            repeat_days=(),
+            ping_role_ids=(11,),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+        return bot, event, posted
+
+    async def test_a_finished_occurrence_still_retries_its_leftovers(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The regression: an occurrence that reaches OVER leaves
+        # get_posted_unfinished_occurrences(), so a removal Discord was still
+        # refusing on the pass that ended the event was never tried again. For
+        # a one-off event the dead link stood in the ping channel until
+        # somebody deleted the whole event, even after permissions recovered.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot, _, posted = await self.post_forum_event_owing_a_removal(
+            store, ping_channel, post
+        )
+        store.set_occurrence_status(posted.occurrence_id, EventStatus.OVER)
+        assert store.get_posted_unfinished_occurrences() == []
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        ping_channel.partial_message.delete.assert_awaited_once()
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_messages == ()
+
+    async def test_a_refreshed_occurrence_is_not_swept_twice_in_one_pass(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The refresh sweeps what the occurrence owes, so the pass-wide sweep
+        # must not come back for the same one: a refusal would otherwise cost
+        # two Discord calls a minute for as long as it lasted.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot, _, posted = await self.post_forum_event_owing_a_removal(
+            store, ping_channel, post
+        )
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+
+        # A status move puts the occurrence through refresh_occurrence_message.
+        await run_event_maintenance(bot, START + timedelta(minutes=5))
+
+        ping_channel.partial_message.delete.assert_awaited_once()
+        # Still owed, so the next pass tries it again.
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_messages == ((ping_channel.id, 9090),)
+
     async def test_an_unchanged_occurrence_still_retries_its_leftovers(
         self,
         store: EventStore,

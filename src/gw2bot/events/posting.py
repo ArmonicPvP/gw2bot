@@ -490,9 +490,14 @@ async def retire_occurrence_announcement(
     The retirement path answers a message deleted in Discord by hand. Nothing
     else will come back for it: a one-off occurrence is persisted OVER and
     drops out of maintenance, so without this the ping channel keeps a link to
-    a message that is not there until somebody deletes the whole event. The
-    stored pair is cleared only once the announcement is actually gone, so a
-    removal Discord refused is still retried when the event is deleted.
+    a message that is not there until somebody deletes the whole event.
+
+    A removal Discord refuses is moved to the outstanding list rather than
+    left in the pair, because the pair alone says nothing about whether the
+    announcement should still be standing - an occurrence that simply ended
+    keeps its announcement, and this one must not. The outstanding list is
+    read by maintenance whatever the occurrence's status, so the retry
+    survives the OVER this retirement is about to persist.
     """
     await sweep_stale_announcement(bot, occurrence)
     if occurrence.ping_channel_id is None or occurrence.ping_message_id is None:
@@ -503,14 +508,22 @@ async def retire_occurrence_announcement(
         occurrence.ping_message_id,
         occurrence.occurrence_id,
     ):
-        return
+        _keep_stale_announcement(
+            bot,
+            occurrence.occurrence_id,
+            occurrence.ping_channel_id,
+            occurrence.ping_message_id,
+        )
     try:
+        # Cleared whether the removal landed or was parked above: either way
+        # the pair no longer describes an announcement this occurrence should
+        # be carrying.
         bot.event_store.clear_occurrence_ping_message(
             occurrence.occurrence_id
         )
     except (SQLAlchemyError, ValueError) as exc:
-        # Harmless on its own: the pair now names a message that is gone, and
-        # a later delete reads that as already removed.
+        # Harmless on its own: the pair names a message that is gone or one
+        # already on the outstanding list, and both read as already removed.
         LOGGER.error(
             "Could not clear a removed ping announcement; occurrence_id=%s "
             "error_type=%s",
