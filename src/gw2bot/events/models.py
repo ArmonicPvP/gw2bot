@@ -248,11 +248,14 @@ class EventOccurrence:
     # edit notifies nobody, so re-rendering would claim roles that were never
     # alerted.
     ping_role_ids: tuple[int, ...] = ()
-    # An announcement from an earlier post of this occurrence whose removal
-    # Discord refused. Retried by the maintenance pass until it is gone,
-    # because a channel move has already claimed the pair above.
-    stale_ping_channel_id: int | None = None
-    stale_ping_message_id: int | None = None
+    # Announcements from earlier posts of this occurrence whose removal Discord
+    # refused, as (channel_id, message_id) pairs. Retried by every maintenance
+    # pass until they are gone, because a channel move has already claimed the
+    # pair above. More than one is owed when an occurrence is moved again
+    # before an earlier removal succeeds - a permission the bot has lost in the
+    # ping channel refuses every attempt, so keeping only the newest would
+    # strand the rest for good.
+    stale_ping_messages: tuple[tuple[int, int], ...] = ()
 
 
 # "Edit my signup" rate limit: a token bucket per signup row. A member can

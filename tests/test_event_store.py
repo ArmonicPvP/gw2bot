@@ -175,16 +175,17 @@ def test_migration_backfills_occurrence_channel_id(tmp_path: Path) -> None:
             text(
                 "INSERT INTO gw2_event_occurrences (event_id, start_time, "
                 "message_id, thread_id, status, needs_refresh, "
-                "ping_role_ids) VALUES "
-                "(1, '2027-01-30T20:00:00+00:00', 555, 777, 'over', 0, '')"
+                "ping_role_ids, stale_ping_messages) VALUES "
+                "(1, '2027-01-30T20:00:00+00:00', 555, 777, 'over', 0, '', '')"
             )
         )
         connection.execute(
             text(
                 "INSERT INTO gw2_event_occurrences (event_id, start_time, "
                 "message_id, thread_id, status, needs_refresh, "
-                "ping_role_ids) VALUES "
-                "(1, '2027-01-31T20:00:00+00:00', NULL, NULL, 'open', 0, '')"
+                "ping_role_ids, stale_ping_messages) VALUES "
+                "(1, '2027-01-31T20:00:00+00:00', NULL, NULL, 'open', 0, '', "
+                "'')"
             )
         )
 
@@ -215,8 +216,7 @@ def test_migration_adds_the_announcement_columns(tmp_path: Path) -> None:
             "ping_channel_id",
             "ping_message_id",
             "ping_role_ids",
-            "stale_ping_channel_id",
-            "stale_ping_message_id",
+            "stale_ping_messages",
         ):
             connection.execute(
                 text(
@@ -248,7 +248,7 @@ def test_migration_adds_the_announcement_columns(tmp_path: Path) -> None:
     engine.dispose()
 
     assert "ping_channel_id" in added
-    assert "stale_ping_message_id" in added
+    assert "stale_ping_messages" in added
     store = EventStore(db_path)
     try:
         (occurrence,) = store.get_event_occurrences(1)
@@ -258,8 +258,7 @@ def test_migration_adds_the_announcement_columns(tmp_path: Path) -> None:
         assert occurrence.ping_channel_id is None
         assert occurrence.ping_message_id is None
         assert occurrence.ping_role_ids == ()
-        assert occurrence.stale_ping_channel_id is None
-        assert occurrence.stale_ping_message_id is None
+        assert occurrence.stale_ping_messages == ()
     finally:
         store.close()
 
@@ -302,8 +301,8 @@ def test_migration_scopes_legacy_signup_preferences_to_events(
                 text(
                     "INSERT INTO gw2_event_occurrences (event_id, start_time, "
                     "channel_id, message_id, thread_id, status, "
-                    "needs_refresh, ping_role_ids) VALUES "
-                    f"(1, '{start}', 1, NULL, NULL, 'open', 0, '')"
+                    "needs_refresh, ping_role_ids, stale_ping_messages) VALUES "
+                    f"(1, '{start}', 1, NULL, NULL, 'open', 0, '', '')"
                 )
             )
         for occurrence_id in (1, 2):
@@ -565,6 +564,55 @@ class TestEventStoreOccurrences:
         assert loaded.message_id == 555
         assert loaded.thread_id == 777
         assert loaded.status is EventStatus.FULL
+
+    def test_leftover_announcements_accumulate_and_clear_one_by_one(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+
+        store.add_occurrence_stale_ping_message(
+            occurrence.occurrence_id, 4321, 9090
+        )
+        store.add_occurrence_stale_ping_message(
+            occurrence.occurrence_id, 4321, 9091
+        )
+        # A move that keeps the same announcement twice is not owed it twice.
+        store.add_occurrence_stale_ping_message(
+            occurrence.occurrence_id, 4321, 9090
+        )
+
+        loaded = store.get_occurrence(occurrence.occurrence_id)
+        assert loaded is not None
+        assert loaded.stale_ping_messages == ((4321, 9090), (4321, 9091))
+
+        store.remove_occurrence_stale_ping_message(
+            occurrence.occurrence_id, 4321, 9090
+        )
+
+        # Only the one removed is forgotten; the other is still owed.
+        remaining = store.get_occurrence(occurrence.occurrence_id)
+        assert remaining is not None
+        assert remaining.stale_ping_messages == ((4321, 9091),)
+
+    def test_posting_a_replacement_leaves_the_leftovers_alone(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The message write claims the announcement pair for the new post; a
+        # removal still owed has nothing to do with the post going up.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.add_occurrence_stale_ping_message(
+            occurrence.occurrence_id, 4321, 9090
+        )
+
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, None)
+
+        loaded = store.get_occurrence(occurrence.occurrence_id)
+        assert loaded is not None
+        assert loaded.stale_ping_messages == ((4321, 9090),)
 
     def test_posted_unfinished_occurrences_excludes_unposted_and_over(
         self,

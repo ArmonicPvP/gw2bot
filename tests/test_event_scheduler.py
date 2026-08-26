@@ -17,7 +17,12 @@ from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.store import EventStore
 
 from factories import forbidden_error
-from test_event_posting import FakeBot, FakeChannel
+from test_event_posting import (
+    FakeBot,
+    FakeChannel,
+    FakeForumPost,
+    forum_post_bot,
+)
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 BEFORE_START = START - timedelta(hours=2)
@@ -91,6 +96,48 @@ class TestRunEventMaintenance:
 
         channel.thread.edit.assert_not_awaited()
         channel.partial_message.edit.assert_not_awaited()
+
+    async def test_an_unchanged_occurrence_still_retries_its_leftovers(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The regression: an announcement a channel move could not remove was
+        # only retried by a refresh, which an unchanged occurrence never
+        # reaches - so for an event weeks out the dead link stood in the ping
+        # channel until some unrelated roster or status change happened to
+        # bring the occurrence back through one.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = cast(Any, forum_post_bot(store, post, ping_channel=ping_channel))
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=post.id,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+            ping_role_ids=(11,),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+
+        # Nothing about the occurrence has moved: same status, not dirty.
+        await run_event_maintenance(bot, BEFORE_START)
+
+        ping_channel.partial_message.delete.assert_awaited_once()
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_messages == ()
+        # The pass still leaves the unchanged occurrence's own post alone.
+        post.partial_message.edit.assert_not_awaited()
 
     async def test_finished_non_repeating_event_posts_nothing_new(
         self,

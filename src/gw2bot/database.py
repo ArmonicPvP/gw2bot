@@ -475,17 +475,18 @@ class EventOccurrenceRecord(Base):
         nullable=False,
         default="",
     )
-    # An announcement from an earlier post of this occurrence that still has to
-    # be removed, kept because a channel move overwrites the pair above with
-    # the replacement's ids. Without it a deletion Discord refused once would
-    # be forgotten, and the announcement would outlive the message it links to.
-    stale_ping_channel_id: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-    stale_ping_message_id: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
+    # Announcements from earlier posts of this occurrence that still have to be
+    # removed, kept because a channel move overwrites the pair above with the
+    # replacement's ids. Without them a deletion Discord refused once would be
+    # forgotten, and the announcement would outlive the message it links to.
+    # A list rather than one pair: an occurrence moved again before an earlier
+    # removal succeeds owes both, and a single slot would drop the older one.
+    # Stored as "channel:message" entries for the same reason ping_role_ids is
+    # a string - the row holds a handful of ids, not a table of its own.
+    stale_ping_messages: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="",
     )
     status: Mapped[str] = mapped_column(String, nullable=False, default="open")
     needs_refresh: Mapped[bool] = mapped_column(
@@ -694,8 +695,6 @@ def initialize_database(engine: Engine) -> set[str]:
         for column_name in (
             "ping_channel_id",
             "ping_message_id",
-            "stale_ping_channel_id",
-            "stale_ping_message_id",
         ):
             if column_name in occurrence_columns:
                 continue
@@ -719,6 +718,20 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("occurrence_ping_role_ids")
+
+        if "stale_ping_messages" not in occurrence_columns:
+            # Nothing to backfill, as above: no release before this one sent an
+            # announcement, so no legacy row owes a removal.
+            operations.add_column(
+                EventOccurrenceRecord.__tablename__,
+                Column(
+                    "stale_ping_messages",
+                    String,
+                    nullable=False,
+                    server_default="",
+                ),
+            )
+            added_columns.add("stale_ping_messages")
 
         event_columns = {
             column["name"]

@@ -52,6 +52,7 @@ from gw2bot.events.posting import (
     remove_signup,
     repost_occurrence,
     seat_signup,
+    sweep_stale_announcement,
 )
 from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
@@ -1493,11 +1494,112 @@ class TestPingingAForumPostEventFromAnotherChannel:
         # Read from the row, which is what the retry reads.
         stored = store.get_occurrence(reposted.occurrence_id)
         assert stored is not None
-        assert stored.stale_ping_channel_id == ping_channel.id
-        assert stored.stale_ping_message_id == stale_message_id
+        assert stored.stale_ping_messages == (
+            (ping_channel.id, stale_message_id),
+        )
         # The replacement is tracked as this occurrence's announcement, so the
         # two are held apart rather than one overwriting the other.
         assert stored.ping_message_id == 555
+
+    async def test_a_second_failed_move_keeps_the_first_leftover_too(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The regression: one slot for the removal still owed meant a second
+        # refused move overwrote the first, and the announcement it named was
+        # left standing with nothing able to find it again. A permission lost
+        # in the ping channel refuses every move, so this is the ordinary
+        # shape of a second move rather than a rare one.
+        destination = FakeForumPost(thread_id=902)
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        bot._channels[destination.id] = destination
+        event, posted = await self.post_event_in_post(bot, store, post)
+        store.add_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=destination.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            ping_role_ids=event.ping_role_ids,
+        )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+
+        reposted = await repost_occurrence(bot, moved, current)
+
+        stored = store.get_occurrence(reposted.occurrence_id)
+        assert stored is not None
+        # Both are owed: the one this move could not remove, and the one an
+        # earlier move already could not.
+        assert stored.stale_ping_messages == (
+            (ping_channel.id, 9090),
+            (ping_channel.id, 555),
+        )
+
+    async def test_one_removal_landing_does_not_forget_the_others(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        for message_id in (9090, 9091):
+            store.add_occurrence_stale_ping_message(
+                posted.occurrence_id,
+                ping_channel.id,
+                message_id,
+            )
+        # The first removal lands and the second is refused, so a sweep that
+        # cleared the whole note on any success would lose the second.
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=[None, forbidden_error(50013)]
+        )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+
+        await refresh_occurrence_message(bot, event, current, BEFORE_START)
+
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_messages == ((ping_channel.id, 9091),)
+
+    async def test_deleting_the_event_tries_every_leftover(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        for message_id in (9090, 9091):
+            store.add_occurrence_stale_ping_message(
+                posted.occurrence_id,
+                ping_channel.id,
+                message_id,
+            )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+
+        await delete_event_posts(bot, event, [current])
+
+        # Both leftovers and the occurrence's own announcement.
+        assert ping_channel.partial_message.delete.await_count == 3
 
     async def test_the_kept_removal_is_retried_and_then_forgotten(
         self,
@@ -1507,7 +1609,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         ping_channel = FakeChannel(channel_id=4321)
         bot = forum_post_bot(store, post, ping_channel=ping_channel)
         event, posted = await self.post_event_in_post(bot, store, post)
-        store.set_occurrence_stale_ping_message(
+        store.add_occurrence_stale_ping_message(
             posted.occurrence_id,
             ping_channel.id,
             9090,
@@ -1520,8 +1622,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         ping_channel.partial_message.delete.assert_awaited_once()
         stored = store.get_occurrence(posted.occurrence_id)
         assert stored is not None
-        assert stored.stale_ping_channel_id is None
-        assert stored.stale_ping_message_id is None
+        assert stored.stale_ping_messages == ()
         # The occurrence's own announcement is untouched by the sweep.
         assert stored.ping_message_id == 555
 
@@ -1533,7 +1634,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         ping_channel = FakeChannel(channel_id=4321)
         bot = forum_post_bot(store, post, ping_channel=ping_channel)
         event, posted = await self.post_event_in_post(bot, store, post)
-        store.set_occurrence_stale_ping_message(
+        store.add_occurrence_stale_ping_message(
             posted.occurrence_id,
             ping_channel.id,
             9090,
@@ -1548,7 +1649,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
 
         stored = store.get_occurrence(posted.occurrence_id)
         assert stored is not None
-        assert stored.stale_ping_message_id == 9090
+        assert stored.stale_ping_messages == ((ping_channel.id, 9090),)
 
     async def test_deleting_the_event_makes_a_last_try_at_the_leftover(
         self,
@@ -1560,7 +1661,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         ping_channel = FakeChannel(channel_id=4321)
         bot = forum_post_bot(store, post, ping_channel=ping_channel)
         event, posted = await self.post_event_in_post(bot, store, post)
-        store.set_occurrence_stale_ping_message(
+        store.add_occurrence_stale_ping_message(
             posted.occurrence_id,
             ping_channel.id,
             9090,
@@ -1777,6 +1878,71 @@ class TestPingingAForumPostEventFromAnotherChannel:
         assert "Kitty Cleanup" not in console
         # What it does say is the sanitized failure.
         assert "reason=missing_permissions" in console
+
+    async def test_a_refused_sweep_console_log_redacts_secrets(
+        self,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The sweep is its own path through the logs - it names how many
+        # removals are still owed and reports each refusal - so it gets its
+        # own proof that the refusal's Discord response text cannot reach the
+        # console. The error code is registered as well to pin the assertion
+        # to this failure rather than some other line in the run.
+        secret = "sk-live-not-a-real-token"
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(bot, store, post)
+        store.add_occurrence_stale_ping_message(
+            posted.occurrence_id,
+            ping_channel.id,
+            9090,
+        )
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=discord.Forbidden(
+                cast(Any, SimpleNamespace(status=403, reason="Forbidden")),
+                {"code": 50013, "message": f"Missing Access for {secret}"},
+            )
+        )
+        current = store.get_occurrence(posted.occurrence_id)
+        assert current is not None
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret, "50013")))
+
+            await sweep_stale_announcement(bot, current)
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        # The retry is traceable: how many are owed, and what the refusal was.
+        assert "Retrying leftover event ping announcements" in console
+        assert "outstanding=1" in console
+        assert "Could not delete an event's ping announcement" in console
+        assert "reason=missing_permissions" in console
+        # The formatter is in this log call's path.
+        assert "code=[REDACTED]" in console
+        # Nothing of the refusal's own text reaches the console.
+        assert secret not in console
+        assert "Missing Access" not in console
+        # Nor does the event content the sweep had in hand.
+        assert "Kitty Cleanup" not in console
+        # The removal is still owed, so it is tried again.
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.stale_ping_messages == ((ping_channel.id, 9090),)
 
     async def test_a_failed_write_announces_nothing(
         self,

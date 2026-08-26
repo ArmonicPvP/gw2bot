@@ -608,8 +608,13 @@ announcements already sent — each one is still removed from wherever it went.
 A move sends the replacement before removing what it replaced, so a removal
 Discord refuses would otherwise be forgotten the moment the occurrence starts
 tracking the new announcement. It is kept against the occurrence instead, and
-every later maintenance pass tries it again until it is gone; deleting the
-event makes one final attempt before the record goes with it.
+every maintenance pass tries it again until it is gone — including passes over
+an occurrence that has not otherwise changed, so an event weeks away still has
+its dead links cleared within the minute rather than waiting on a roster or
+status change. Moving an event again before an earlier removal succeeds keeps
+both: a permission the bot has lost in the ping channel refuses every attempt,
+and each announcement is retried and forgotten on its own. Deleting the event
+makes one final attempt at every one of them before the record goes with it.
 
 ## Event Reminders
 

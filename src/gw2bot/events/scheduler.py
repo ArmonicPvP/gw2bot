@@ -12,6 +12,7 @@ from gw2bot.events.posting import (
     post_pending_occurrence,
     prune_superseded_occurrences,
     refresh_occurrence_message,
+    sweep_stale_announcement,
 )
 from gw2bot.events.reminders import deliver_due_reminders
 
@@ -79,6 +80,14 @@ async def run_event_maintenance(
         # A dirty occurrence still needs its message re-rendered even when the
         # status is unchanged, because an earlier roster-change refresh failed.
         if status == occurrence.status and not occurrence.needs_refresh:
+            # An announcement removal a channel move could not finish is the
+            # one piece of work a clean, unchanged occurrence still owes.
+            # Retried here rather than left to refresh_occurrence_message,
+            # which this return never reaches: an event weeks out sits clean
+            # for weeks, and the dead link would stand in the ping channel
+            # until some unrelated roster or status change happened to bring
+            # the occurrence back through a refresh.
+            await sweep_stale_announcement(bot, occurrence)
             continue
         # The next occurrence row is secured before the OVER status is
         # persisted, so a failure here leaves the transition unfinished

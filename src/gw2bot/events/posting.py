@@ -434,37 +434,49 @@ async def sweep_stale_announcement(
     bot: Gw2Bot,
     occurrence: EventOccurrence,
 ) -> None:
-    """Retry an announcement removal an earlier pass could not finish.
+    """Retry the announcement removals an earlier pass could not finish.
 
     A channel move sends the replacement before removing what it replaced, and
     the occurrence has one pair of columns for the announcement it is carrying
     now - so a removal Discord refuses is parked here instead of being lost,
     and every later pass over this occurrence tries it again until it is gone.
+
+    Each one is attempted and forgotten on its own: a refusal that persists for
+    one announcement must not hold back the others owed beside it, and a
+    removal that lands must not clear their notes with it.
     """
-    channel_id = occurrence.stale_ping_channel_id
-    message_id = occurrence.stale_ping_message_id
-    if channel_id is None or message_id is None:
+    if not occurrence.stale_ping_messages:
         return
-    if not await drop_announcement(
-        bot,
-        channel_id,
-        message_id,
+    LOGGER.debug(
+        "Retrying leftover event ping announcements; occurrence_id=%s "
+        "outstanding=%s",
         occurrence.occurrence_id,
-    ):
-        return
-    try:
-        bot.event_store.clear_occurrence_stale_ping_message(
-            occurrence.occurrence_id
-        )
-    except (SQLAlchemyError, ValueError) as exc:
-        # The announcement is gone; only the note saying so failed to clear,
-        # so the next pass reads it as already removed and clears it then.
-        LOGGER.error(
-            "Could not clear a removed leftover ping announcement; "
-            "occurrence_id=%s error_type=%s",
+        len(occurrence.stale_ping_messages),
+    )
+    for channel_id, message_id in occurrence.stale_ping_messages:
+        if not await drop_announcement(
+            bot,
+            channel_id,
+            message_id,
             occurrence.occurrence_id,
-            type(exc).__name__,
-        )
+        ):
+            continue
+        try:
+            bot.event_store.remove_occurrence_stale_ping_message(
+                occurrence.occurrence_id,
+                channel_id,
+                message_id,
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            # The announcement is gone; only the note saying so failed to
+            # clear, so the next pass reads it as already removed and clears
+            # it then.
+            LOGGER.error(
+                "Could not clear a removed leftover ping announcement; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
 
 
 async def retire_occurrence_announcement(
@@ -1087,7 +1099,7 @@ def _keep_stale_announcement(
     message_id: int,
 ) -> None:
     try:
-        bot.event_store.set_occurrence_stale_ping_message(
+        bot.event_store.add_occurrence_stale_ping_message(
             occurrence_id,
             channel_id,
             message_id,
@@ -1267,24 +1279,23 @@ async def delete_event_posts(
                     occurrence.occurrence_id,
                 )
                 announcements += int(removed)
-        if (
-            occurrence.stale_ping_channel_id is not None
-            and occurrence.stale_ping_message_id is not None
+        for stale_channel_id, stale_message_id in (
+            occurrence.stale_ping_messages
         ):
-            # The last chance to clear a removal an earlier move could not
-            # finish: the row is about to go, taking the note with it.
+            # The last chance to clear the removals an earlier move could not
+            # finish: the row is about to go, taking the notes with it.
             stale_channel = await _resolve_cached_channel(
                 bot,
                 channels,
                 unresolvable,
-                occurrence.stale_ping_channel_id,
+                stale_channel_id,
                 event.event_id,
             )
             if stale_channel is not None:
                 announcements += int(
                     await delete_occurrence_announcement(
                         stale_channel,
-                        occurrence.stale_ping_message_id,
+                        stale_message_id,
                         occurrence.occurrence_id,
                     )
                 )
