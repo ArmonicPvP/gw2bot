@@ -1964,6 +1964,101 @@ class TestPingingAForumPostEventFromAnotherChannel:
 
         assert ping_channel.sent == []
 
+    async def test_an_unrecordable_announcement_is_taken_back(
+        self,
+        store: EventStore,
+    ) -> None:
+        # An announcement the row cannot hold is one no later move,
+        # cancellation or delete can reach: it would sit in the ping channel
+        # linking to a message those paths remove, with nothing left to find
+        # it. This is the only moment it is still in hand.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        store.set_occurrence_ping_message = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("database is locked")
+        )
+        event = create_event(store, channel_id=post.id, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        # The announcement did go out - the ping cannot be taken back - and it
+        # is the message that is removed again.
+        assert len(ping_channel.sent) == 1
+        ping_channel.partial_message.delete.assert_awaited_once()
+        # The event itself is unaffected: the post is up and the occurrence is
+        # posted, because a ping is never worth failing the event over.
+        assert posted.message_id == 606
+        stored = store.get_occurrence(posted.occurrence_id)
+        assert stored is not None
+        assert stored.ping_channel_id is None
+        assert stored.ping_message_id is None
+
+    async def test_a_withdrawal_discord_refuses_leaves_the_announcement(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Nothing more can be done: the row would not take the note and
+        # Discord will not take the message, so the announcement stands. The
+        # posting still succeeds rather than costing the event its post.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        store.set_occurrence_ping_message = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("database is locked")
+        )
+        ping_channel.partial_message.delete = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+        event = create_event(store, channel_id=post.id, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert posted.message_id == 606
+        ping_channel.partial_message.delete.assert_awaited_once()
+
+    async def test_the_withdrawal_is_traceable_without_event_content(
+        self,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        store.set_occurrence_ping_message = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("database is locked")
+        )
+        title = "SECRET EVENT TITLE"
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description="SECRET EVENT DESCRIPTION",
+            channel_id=post.id,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+            ping_role_ids=(11,),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+
+        with caplog.at_level("DEBUG", logger="gw2bot.events.posting"):
+            await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        # The reason the announcement went and came back is on the record,
+        # with the error's type rather than its text.
+        assert "Could not record an event's ping announcement" in caplog.text
+        assert "error_type=SQLAlchemyError" in caplog.text
+        # The two facts stay apart: the roles were pinged, and the link was
+        # then taken back.
+        assert "pinged_from_channel=True" in caplog.text
+        assert "announcement_withdrawn=True" in caplog.text
+        assert title not in caplog.text
+        assert "database is locked" not in caplog.text
+
     async def test_an_event_in_a_channel_still_pings_in_the_channel(
         self,
         store: EventStore,

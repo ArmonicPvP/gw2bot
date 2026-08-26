@@ -605,6 +605,15 @@ maintenance does not leave a dead link behind. Because the channel is stored
 alongside the message, changing the setting later does not strand the
 announcements already sent — each one is still removed from wherever it went.
 
+Because every one of those paths reaches the announcement through the
+occurrence, one the row could not record is one none of them can find. If that
+write fails — a database locked for the moment, or the run cancelled while the
+announcement was in flight — the announcement is taken back straight away,
+while it is still in hand. The ping itself cannot be taken back, so the members
+it named keep the notification and lose only the link; that is the smaller cost
+than a link left pointing at a message that is gone for good. The event is
+never affected either way: its post is up and its buttons keep working.
+
 A move sends the replacement before removing what it replaced, so a removal
 Discord refuses would otherwise be forgotten the moment the occurrence starts
 tracking the new announcement. It is kept against the occurrence instead, and

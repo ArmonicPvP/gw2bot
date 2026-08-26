@@ -332,11 +332,12 @@ def record_occurrence_announcement(
 ) -> bool:
     """Remember an announcement so the occurrence's cleanup can remove it.
 
-    A write that fails leaves the announcement standing and untracked, which
-    is the lesser harm: the members it pinged have been told about a live
-    event, and deleting it to keep the row tidy would take that back. The
-    announcement is then one the later delete cannot reach, so the failure is
-    logged as the reason it will be left behind.
+    False says the announcement is untracked, which the caller has to answer
+    while it is still in hand. Nothing else can: a move, a cancellation or a
+    delete all reach the announcement through this row, so one missing from it
+    outlives the message it links to with nothing left to find it. The write
+    that failed is the same row and session any retry would need, so the note
+    cannot be parked elsewhere either.
     """
     try:
         bot.event_store.set_occurrence_ping_message(
@@ -740,6 +741,7 @@ async def post_occurrence(
         )
         raise
     announced = None
+    withdrawn = False
     if announcement is not None:
         announced = await announce_occurrence_ping(
             announcement.channel,
@@ -752,18 +754,34 @@ async def post_occurrence(
             ),
             ping_role_ids,
         )
-        if announced is not None:
-            record_occurrence_announcement(
-                bot,
-                occurrence.occurrence_id,
-                announcement.channel.id,
+        if announced is not None and not record_occurrence_announcement(
+            bot,
+            occurrence.occurrence_id,
+            announcement.channel.id,
+            announced.id,
+            ping_role_ids,
+        ):
+            # An announcement the row does not hold is one no later move,
+            # cancellation or delete can reach, and it would sit in the ping
+            # channel linking to a message those paths remove. This is the
+            # only moment it is still in hand, so it is taken back here.
+            #
+            # The ping itself cannot be taken back - the members it named have
+            # already been notified - so this costs them a link to an event
+            # that is up and working. That is the smaller harm than a link
+            # left pointing at nothing for good, and the event's own post
+            # carries no mentions to fall back on either way. Both facts are
+            # logged below rather than collapsed into one flag.
+            withdrawn = await delete_occurrence_announcement(
+                announcement.channel,
                 announced.id,
-                ping_role_ids,
+                occurrence.occurrence_id,
             )
     LOGGER.debug(
         "Posted event occurrence; event_id=%s occurrence_id=%s status=%s "
         "in_existing_thread=%s thread_created=%s signups=%s "
-        "stored_ping_roles=%s pinged_roles=%s pinged_from_channel=%s",
+        "stored_ping_roles=%s pinged_roles=%s pinged_from_channel=%s "
+        "announcement_withdrawn=%s",
         event.event_id,
         occurrence.occurrence_id,
         status.value,
@@ -777,6 +795,10 @@ async def post_occurrence(
         # Whether the announcement was actually delivered, not merely whether
         # a channel was configured for it: a refused send pings nobody.
         announced is not None,
+        # And whether it was taken back again because the row could not hold
+        # it. Kept apart from the line above so the log still says the roles
+        # were pinged, which is what the members saw.
+        withdrawn,
     )
     updated = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if updated is None:
