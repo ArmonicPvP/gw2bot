@@ -454,7 +454,9 @@ class TestTrialMemberReportMessages:
             "Promoted Warned.1234",
         ]
 
-    async def test_tracked_member_in_grace_window_shows_kick_countdown(self) -> None:
+    async def test_tracked_member_in_grace_window_is_left_off_every_report(
+        self,
+    ) -> None:
         now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         api = SimpleNamespace(
             get_guild_members=AsyncMock(
@@ -483,17 +485,9 @@ class TestTrialMemberReportMessages:
 
         messages = await Gw2Bot._build_trial_report_messages(cast(Gw2Bot, bot), now)
 
-        # Removed from the 14-day report when tracked, kept off the 7-day
-        # warning report, and shown with a Discord timestamp counting down to
-        # the end of the warning window.
-        assert len(messages) == 1
-        assert "Trial members within the 7-day warning window" in messages[0]
-        deadline = int((now + timedelta(days=5)).timestamp())
-        assert f"* Tracked.5678 - <@100> - Trial - kick <t:{deadline}:R>" in (
-            messages[0]
-        )
-        assert "to be kicked" not in messages[0]
-        assert "past the 14-day mark" not in messages[0]
+        # Removed from the 14-day report when tracked and not yet due for
+        # kicking, so the grace window is reported nowhere.
+        assert messages == []
         untrack.assert_not_called()
 
 

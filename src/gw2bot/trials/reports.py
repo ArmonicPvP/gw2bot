@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -14,7 +13,6 @@ from gw2bot.discord_utils import log_discord_failure
 from gw2bot.guild_members import (
     SUNBORNE_DISCORD_STATUS,
     TRIAL_WARNING_MARK_HEADER,
-    TRIAL_WARNING_PENDING_HEADER,
     TrialMemberReportEntry,
     filter_sunborne_discord_entries,
     format_before_mark_trial_report,
@@ -23,7 +21,6 @@ from gw2bot.guild_members import (
     get_recent_trial_members,
     partition_tracked_overdue_members,
     seconds_until_trial_report,
-    select_pending_warning_members,
     select_warned_overdue_members,
 )
 
@@ -127,19 +124,13 @@ async def build_trial_report_messages(
         tracked_times,
         now,
     )
-    pending_deadlines = select_pending_warning_members(
-        still_tracked,
-        tracked_times,
-        now,
-    )
     LOGGER.debug(
         "Found %s overdue (%s tracked, %s untracked after Discord rank-up, "
-        "%s inside warning window, %s past 7-day warning) and %s recent "
-        "Trial members from %s guild members; auto_untracked=%s",
+        "%s past 7-day warning) and %s recent Trial members from %s guild "
+        "members; auto_untracked=%s",
         len(overdue),
         len(tracked_overdue),
         len(promoted_entries),
-        len(pending_deadlines),
         len(warned_overdue),
         len(recent),
         len(members),
@@ -154,10 +145,6 @@ async def build_trial_report_messages(
     entries_by_username = {
         entry.username: entry for entry in still_tracked_entries
     }
-    pending_entries = [
-        replace(entries_by_username[username], warning_deadline=deadline)
-        for username, deadline in pending_deadlines.items()
-    ]
     warning_entries = [
         entries_by_username[username] for username in warned_overdue
     ]
@@ -166,10 +153,6 @@ async def build_trial_report_messages(
         # Only this report groups by resolved Discord status; the warning and
         # kick lists below stay alphabetical.
         + format_overdue_trial_report(overdue_entries, group_by_status=True)
-        + format_overdue_trial_report(
-            pending_entries,
-            header=TRIAL_WARNING_PENDING_HEADER,
-        )
         + format_overdue_trial_report(
             warning_entries,
             header=TRIAL_WARNING_MARK_HEADER,
