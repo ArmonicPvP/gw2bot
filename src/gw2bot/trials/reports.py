@@ -124,13 +124,19 @@ async def build_trial_report_messages(
         tracked_times,
         now,
     )
+    # Every still-tracked member the warning mark has not caught up with is
+    # inside the grace window, and so is reported nowhere. Counting the
+    # omission keeps that outcome traceable now that no report shows it.
+    inside_warning_window = len(still_tracked) - len(warned_overdue)
     LOGGER.debug(
         "Found %s overdue (%s tracked, %s untracked after Discord rank-up, "
-        "%s past 7-day warning) and %s recent Trial members from %s guild "
-        "members; auto_untracked=%s",
+        "%s inside warning window and reported nowhere, %s past 7-day "
+        "warning) and %s recent Trial members from %s guild members; "
+        "auto_untracked=%s",
         len(overdue),
         len(tracked_overdue),
         len(promoted_entries),
+        inside_warning_window,
         len(warned_overdue),
         len(recent),
         len(members),
