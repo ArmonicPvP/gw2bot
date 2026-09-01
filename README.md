@@ -1057,6 +1057,28 @@ polling-status messages are posted in the channel named by
 Every minute, the bot updates that channel's description to the current GW2
 guild member count as `x/500 (y pending)`, excluding `invited` records from
 `x` and reporting them in `y`.
+The `y` in that description is a count and nothing more, so `/pending` names
+the accounts behind it.
+
+- `/pending`: privately lists every account that holds the in-game `invited`
+  rank — invited to the guild but not yet accepted — and returns the list only
+  to the invoker as ephemeral replies, without posting to the notification
+  channel. Each account is matched to a Discord account through the same
+  `Accepted` application forum index the
+  [Trial reports](#overdue-trial-member-report) use, so an invitee who applied
+  is named by their mention; one nobody matched is listed by their account name
+  alone. It requires GW2 Leadership role `1317638909735342201`, and replies
+  "No pending invites to report." when nobody is waiting.
+
+  ```text
+  Pending invites
+  These users have been invited in-game but haven't accepted yet:
+  * Applied.1234 - @DiscordUser
+  * Unmatched.5678
+  ```
+
+  The same list is on the [Guild Roster page](#guild-roster-history-page) under
+  **Pending invites**.
 Raffle-deposit notifications are also posted in the raffle contribution
 channel. Join, leave, and deposit delivery state is persisted so each message
 is posted once per destination, including across restarts. Startup status and
@@ -1412,6 +1434,17 @@ to match.
 The y axis covers the counts the window actually reached rather than the whole
 500-member ceiling, so a handful of departures is visible rather than a flat
 line near the top.
+
+Below the changes, a **Pending invites** section lists the accounts that have
+been invited in-game and have not accepted yet — the `y` of the `x/500 (y
+pending)` channel description, named rather than counted. Each row carries the
+account name and the display name of the Discord account whose `Accepted`
+application post matched it, or "No application matched" when none did. The
+list is the guild as it stands now rather than a window of history, so it is
+loaded once with the page and the range buttons do not change it. It is built
+from the GW2 API and the application forum index, which is why one build is
+served to every reader for five minutes rather than rebuilt per page load, and
+the section says so plainly when the GW2 API settings are unset.
 
 A long account name wraps inside its column rather than widening the table, and
 on a phone each row's change is the coloured dot alone — the word beside it says

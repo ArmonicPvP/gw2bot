@@ -2810,6 +2810,15 @@ table.changes .dot {
   margin-right: 0.4rem;
 }
 .empty { color: var(--muted); padding: 0.6rem; }
+.note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
+/* An invited account that no application post matched has no Discord name to
+   show, and the reason reads as an absence rather than as a name. */
+table.changes td.unmatched { color: var(--muted); }
+#pending-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .pager {
   display: flex;
   align-items: center;
@@ -2902,6 +2911,14 @@ button:focus-visible {
     <div id="table"></div>
     <div id="pager" class="pager"></div>
   </section>
+  <section class="card">
+    <h2>Pending invites<span id="pending-count" class="now"></span></h2>
+    <p class="note">These accounts have been invited in-game but have not
+      accepted yet, so they hold a place against the guild's 500 without
+      being members.</p>
+    <div id="pending"></div>
+    <div id="pending-status" role="status" aria-live="polite"></div>
+  </section>
 </main>
 <script>
 "use strict";
@@ -2955,6 +2972,9 @@ button:focus-visible {
   var chartStatus = document.getElementById("chart-status");
   var chartMode = document.getElementById("chart-mode");
   var nowCount = document.getElementById("now-count");
+  var pendingBox = document.getElementById("pending");
+  var pendingStatus = document.getElementById("pending-status");
+  var pendingCount = document.getElementById("pending-count");
   var totals = document.getElementById("totals");
   var tableBox = document.getElementById("table");
   var pager = document.getElementById("pager");
@@ -3698,6 +3718,81 @@ button:focus-visible {
     refresh();
   }
 
+  // Sanitized tracing for the pending invite section: a fixed action name and
+  // a count of rows. No account name, Discord name or payload is ever passed.
+  function tracePending(action, count) {
+    console.debug("roster pending invites:", action, count);
+  }
+
+  function renderPending(invites) {
+    pendingBox.replaceChildren();
+    pendingCount.textContent = invites.length
+      ? "\\u2014 " + invites.length + " waiting"
+      : "";
+    if (!invites.length) {
+      pendingBox.appendChild(el("div", "empty",
+        "No invites are waiting to be accepted."));
+      return;
+    }
+    var table = el("table", "changes");
+    var head = el("tr");
+    head.appendChild(el("th", null, "Account"));
+    head.appendChild(el("th", null, "Discord"));
+    table.appendChild(head);
+    invites.forEach(function (invite) {
+      var row = el("tr");
+      row.appendChild(el("td", "name", invite.name));
+      // An account nobody matched to an application post is named as
+      // unmatched rather than left blank, so the empty cell cannot read as a
+      // Discord account with no name.
+      row.appendChild(invite.discord_name
+        ? el("td", "by", invite.discord_name)
+        : el("td", "by unmatched", "No application matched"));
+      table.appendChild(row);
+    });
+    pendingBox.appendChild(table);
+  }
+
+  // The pending invites are the guild's state right now rather than a window
+  // of history, so they are loaded once with the page and are not reloaded
+  // when the range changes.
+  function loadPending() {
+    pendingStatus.textContent = "Loading\\u2026";
+    fetch("/api/pending")
+      .then(function (response) {
+        if (response.status === 401) {
+          location.href = "/login";
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) { throw new Error("failed"); }
+        return response.json();
+      })
+      .then(function (payload) {
+        if (!payload.available) {
+          pendingBox.replaceChildren();
+          pendingCount.textContent = "";
+          pendingStatus.textContent =
+            "The pending invites need the GW2 API settings, which are not " +
+            "configured.";
+          tracePending("unavailable", 0);
+          return;
+        }
+        var invites = payload.invites || [];
+        renderPending(invites);
+        pendingStatus.textContent = "";
+        tracePending("render", invites.length);
+      })
+      .catch(function (error) {
+        // renderPending() runs inside this chain, so a drawing fault lands
+        // here too. Only the error's type and message are logged; no request,
+        // response or payload is ever passed through.
+        console.error(
+          "pending invite load failed:",
+          error && error.name, error && error.message);
+        pendingStatus.textContent = "Could not load the pending invites.";
+      });
+  }
+
   // The query the current selection asks for: a preset window by name, or the
   // applied pair of epoch seconds.
   function rangeQuery() {
@@ -3793,6 +3888,7 @@ button:focus-visible {
 
   syncRangeButtons();
   refresh();
+  loadPending();
 })();
 </script>
 </body>

@@ -79,6 +79,13 @@ MEMBERSHIP_FAILURE_BACKOFF_SECONDS = 60
 
 UNKNOWN_NAME = "Unknown"
 
+# How long one build of the pending-invite list is served to the roster page.
+# Building it costs a GW2 API call and a refresh of the Trial application forum
+# index, and an invite that has not been accepted yet changes far more slowly
+# than a page is reloaded, so the list is cached rather than rebuilt per
+# request.
+PENDING_INVITE_CACHE_TTL_SECONDS = 300
+
 # The feast usage dashboard is gated behind the role /settings roles food_page
 # names, which follows /raffle removetickets' role until it is set apart, the
 # roster history behind /settings roles roster_page, and the guild bank's gold
@@ -157,6 +164,11 @@ class WebServer:
         # as well as the user because three pages are gated by three settings,
         # and an operator may point them at different roles.
         self._role_members: dict[tuple[int, int], tuple[bool, float]] = {}
+        # The last built pending-invite payload and the monotonic time it
+        # stops being served, or None while none has been built.
+        self._pending_invites: tuple[list[dict[str, object]], float] | None = (
+            None
+        )
         self.app = web.Application(
             middlewares=[self._log_middleware, self._auth_middleware]
         )
@@ -176,6 +188,7 @@ class WebServer:
                 web.get("/api/food", self._food_data),
                 web.get("/roster", self._roster),
                 web.get("/api/roster", self._roster_data),
+                web.get("/api/pending", self._pending_data),
                 web.get("/gold", self._gold),
                 web.get("/api/gold", self._gold_data),
                 web.get("/profit", self._profit),
@@ -940,6 +953,72 @@ class WebServer:
                 "kicks": series.kicks,
             }
         )
+
+    async def _pending_data(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_roster_access(request)
+        if denied is not None:
+            return denied
+        if not self._bot.gw2_api_enabled:
+            # The startup warning already named the settings this needs, so
+            # the page is told the section is off rather than shown an error.
+            LOGGER.debug(
+                "Served pending invites; available=false reason=gw2-api-unset"
+            )
+            return self._json({"available": False, "invites": []})
+
+        cached = self._pending_invites
+        if cached is not None and time.monotonic() < cached[1]:
+            LOGGER.debug(
+                "Served pending invites; available=true cached=true "
+                "invites=%s",
+                len(cached[0]),
+            )
+            return self._json({"available": True, "invites": cached[0]})
+
+        try:
+            entries = await self._bot.build_pending_invite_entries()
+        except (aiohttp.ClientError, TimeoutError, RuntimeError) as exc:
+            LOGGER.warning(
+                "Could not serve pending invites; error_type=%s",
+                type(exc).__name__,
+            )
+            return self._json({"error": "unavailable"}, status=503)
+
+        names = await self._display_names(
+            {
+                entry.discord_user_id
+                for entry in entries
+                if entry.discord_user_id is not None
+            }
+        )
+        invites: list[dict[str, object]] = [
+            {
+                "name": entry.username,
+                # The mention a Discord message carries is unreadable on a web
+                # page, so the matched account is named instead. An account
+                # with no matching application post has no Discord name to
+                # show, and the page says so in its own words.
+                "discord_name": (
+                    None
+                    if entry.discord_user_id is None
+                    else names.get(entry.discord_user_id, UNKNOWN_NAME)
+                ),
+            }
+            for entry in sorted(
+                entries, key=lambda entry: (entry.username.casefold(), entry.username)
+            )
+        ]
+        self._pending_invites = (
+            invites,
+            time.monotonic() + PENDING_INVITE_CACHE_TTL_SECONDS,
+        )
+        LOGGER.debug(
+            "Served pending invites; available=true cached=false invites=%s "
+            "matched=%s",
+            len(invites),
+            sum(1 for invite in invites if invite["discord_name"] is not None),
+        )
+        return self._json({"available": True, "invites": invites})
 
     @staticmethod
     def _serialize_roster_event(event: RosterEvent) -> dict[str, object]:

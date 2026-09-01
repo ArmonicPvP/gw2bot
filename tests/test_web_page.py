@@ -1072,6 +1072,58 @@ class TestRosterTable:
         assert "change-label" not in desktop
 
 
+class TestRosterPendingInvites:
+    def test_the_section_is_on_the_page_with_its_own_heading(self) -> None:
+        assert "<h2>Pending invites" in ROSTER_PAGE
+        assert (
+            "These accounts have been invited in-game but have not" in
+            ROSTER_PAGE
+        )
+        assert 'id="pending"' in ROSTER_PAGE
+        assert 'id="pending-status"' in ROSTER_PAGE
+
+    def test_the_list_is_loaded_once_rather_than_per_range(self) -> None:
+        # The invites are the guild's state now, not a window of history, so
+        # the range buttons do not reload them.
+        assert 'fetch("/api/pending")' in ROSTER_PAGE
+        assert "function loadPending()" in ROSTER_PAGE
+        assert "  loadPending();\n})();" in ROSTER_PAGE
+        assert "loadPending" not in ROSTER_PAGE[
+            ROSTER_PAGE.index("function refresh()"):
+            ROSTER_PAGE.index("document.querySelectorAll(\"[data-range]\")")
+        ]
+
+    def test_an_unmatched_invite_says_so_instead_of_showing_a_blank(
+        self,
+    ) -> None:
+        assert (
+            'el("td", "by unmatched", "No application matched")' in ROSTER_PAGE
+        )
+        assert "table.changes td.unmatched { color: var(--muted); }" in (
+            ROSTER_PAGE
+        )
+
+    def test_an_empty_list_and_a_disabled_section_read_differently(
+        self,
+    ) -> None:
+        # Nobody waiting is a fact about the guild; an unconfigured GW2 API is
+        # a fact about the bot, and the reader is told which they are seeing.
+        assert "No invites are waiting to be accepted." in ROSTER_PAGE
+        assert (
+            "The pending invites need the GW2 API settings, which are not "
+            in ROSTER_PAGE
+        )
+        assert "Could not load the pending invites." in ROSTER_PAGE
+
+    def test_tracing_carries_no_account_or_discord_name(self) -> None:
+        # Only a fixed action name and a row count reach the console.
+        assert 'console.debug("roster pending invites:", action, count)' in (
+            ROSTER_PAGE
+        )
+        assert 'tracePending("render", invites.length)' in ROSTER_PAGE
+        assert 'tracePending("unavailable", 0)' in ROSTER_PAGE
+
+
 class TestGoldPage:
     def test_coin_values_match_the_profit_pages_spaced_denominations(self) -> None:
         assert "function formatCoins(copper)" in GOLD_PAGE

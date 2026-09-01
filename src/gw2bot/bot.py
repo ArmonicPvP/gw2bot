@@ -59,6 +59,12 @@ from gw2bot.raffle.views import (
     RaffleLeaderboardButton,
     RaffleTicketsListButton,
 )
+from gw2bot.pending_invites import (
+    build_pending_invite_entries,
+    build_pending_invite_messages,
+    create_pending_command,
+    handle_pending_command,
+)
 from gw2bot.settings.commands import SettingsCommands
 from gw2bot.settings.composition import compose_from_store
 from gw2bot.settings.crypto import SettingsCipher
@@ -185,6 +191,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(ProfitCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
+        self.tree.add_command(self._create_pending_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
         # audit messages keep paging after view timeouts and restarts.
         self.add_dynamic_items(RaffleAuditRangesButton)
@@ -950,6 +957,28 @@ class Gw2Bot(discord.Client):
         username: str,
     ) -> None:
         await handle_track_command(self, interaction, username)
+
+    def _create_pending_command(self) -> app_commands.Command[Any, ..., None]:
+        return create_pending_command(self)
+
+    async def _handle_pending_command(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await handle_pending_command(self, interaction)
+
+    async def _build_pending_invite_messages(self) -> list[str]:
+        return await build_pending_invite_messages(self)
+
+    async def build_pending_invite_entries(
+        self,
+    ) -> list[TrialMemberReportEntry]:
+        """The pending in-game invites, matched to Discord where possible.
+
+        Public because the roster page's "Pending invites" section is built
+        from the same list the /pending command reports.
+        """
+        return await build_pending_invite_entries(self)
     @property
     def event_store(self) -> EventStore:
         return self._event_store

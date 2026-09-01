@@ -11,6 +11,10 @@ from typing import Any, Protocol
 LOGGER = logging.getLogger(__name__)
 
 TRIAL_RANK = "Trial"
+# The in-game rank the GW2 API gives an account that has been invited to the
+# guild but has not accepted yet. It is lowercase in the API's own answer, and
+# every comparison against it is case-folded.
+INVITED_RANK = "invited"
 TRIAL_PERIOD = timedelta(days=14)
 TRIAL_WARNING_PERIOD = timedelta(days=7)
 TRIAL_REPORT_HOUR_UTC = 17
@@ -38,6 +42,10 @@ TRIAL_WARNING_PENDING_HEADER = (
     "**Trial members within the 7-day warning window**\n"
     "These users were warned and have this much time left before "
     "they can be kicked:\n"
+)
+PENDING_INVITE_HEADER = (
+    "**Pending invites**\n"
+    "These users have been invited in-game but haven't accepted yet:\n"
 )
 
 
@@ -251,6 +259,31 @@ def get_recent_trial_members(
     result = sorted(recent)
     LOGGER.debug(
         "Evaluated %s guild members; recent_trials=%s",
+        len(members),
+        len(result),
+    )
+    return result
+
+
+def get_pending_invite_members(
+    members: list[dict[str, Any]],
+) -> list[str]:
+    """Account names that hold the in-game invited rank.
+
+    An invited account is on the guild's member list and counts against its
+    500-account ceiling, but has not accepted yet, which is what the member
+    count topic reports as "pending".
+    """
+    pending = [
+        name
+        for member in members
+        if str(member.get("rank", "")).strip().casefold() == INVITED_RANK
+        and (name := str(member.get("name", "")).strip())
+    ]
+    # Case-sensitive sort: uppercase sorts before lowercase ("Z" before "a").
+    result = sorted(pending)
+    LOGGER.debug(
+        "Evaluated %s guild members; pending_invites=%s",
         len(members),
         len(result),
     )
@@ -537,6 +570,34 @@ def format_before_mark_trial_report(
         messages = list_messages + congrats_messages
     LOGGER.debug(
         "Formatted before-mark Trial report for %s members into %s messages",
+        len(sorted_entries),
+        len(messages),
+    )
+    return messages
+
+
+def format_pending_invite_report(
+    entries: Sequence[TrialMemberReportEntry],
+) -> list[str]:
+    """Format the pending-invite report.
+
+    Shaped like the before-14-day report: one line per account, with the
+    Discord mention of whoever wrote the matching application post. The
+    per-line status label is dropped, because an account that has not accepted
+    the invite holds no in-game rank the label could name, and no
+    copy-and-paste block is attached - there is nothing to announce until the
+    invite is accepted.
+    """
+    if not entries:
+        return []
+    sorted_entries = sorted(entries, key=_trial_username_sort_key)
+    lines = [
+        _format_trial_report_line(entry, show_status=False) + "\n"
+        for entry in sorted_entries
+    ]
+    messages = _pack_trial_report_messages(PENDING_INVITE_HEADER, lines)
+    LOGGER.debug(
+        "Formatted %s pending invites into %s Discord messages",
         len(sorted_entries),
         len(messages),
     )
