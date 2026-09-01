@@ -517,10 +517,49 @@ class TestFoodPage:
         assert 'data-range="7d"' in FOOD_PAGE
         assert 'data-range="30d"' in FOOD_PAGE
 
-    def test_chart_y_axis_is_fixed_zero_to_fifty(self) -> None:
-        assert "var Y_MAX = 50;" in FOOD_PAGE
-        # Gridlines and labels step through the whole 0..Y_MAX axis.
-        assert "for (var value = 0; value <= Y_MAX; value += 10)" in FOOD_PAGE
+    def test_chart_y_axis_grows_with_the_counts_it_draws(self) -> None:
+        # The axis is no longer capped: it is computed from the samples that
+        # are actually drawn, so a stock above fifty is not flattened against
+        # a fixed ceiling.
+        assert "var Y_MAX" not in FOOD_PAGE
+        assert "function computeScale()" in FOOD_PAGE
+        assert "if (point.count > high) { high = point.count; }" in FOOD_PAGE
+        assert "state.scale = computeScale();" in FOOD_PAGE
+
+    def test_chart_y_axis_only_measures_the_visible_feasts(self) -> None:
+        # A feast switched off in the legend is left out of the drawing, so it
+        # must not hold the axis up either.
+        assert (
+            "  function computeScale() {\n"
+            "    var high = MIN_TOP;\n"
+            "    visibleFeasts().forEach(function (feast) {" in FOOD_PAGE
+        )
+
+    def test_chart_y_axis_keeps_a_zero_baseline_and_a_floor(self) -> None:
+        # Several feasts share the axis and running out is what the page is
+        # read for, so zero stays on the floor of the chart, and a quiet window
+        # still spans at least MIN_TOP rather than a count or two.
+        assert "var MIN_TOP = 10;" in FOOD_PAGE
+        assert "if (value < 0) { value = 0; }" in FOOD_PAGE
+        assert "return M.top + (1 - value / high) * plotH();" in FOOD_PAGE
+
+    def test_chart_y_axis_lands_on_round_counts(self) -> None:
+        # Gridlines step through the computed scale on a 1, 2 or 5 times a
+        # power of ten step, so the labels read as round counts.
+        assert "function niceStep(span, target)" in FOOD_PAGE
+        assert "var step = niceStep(span, 6);" in FOOD_PAGE
+        assert (
+            "var lines = Math.round(state.scale.high / state.scale.step);"
+            in FOOD_PAGE
+        )
+        assert "for (var line = 0; line <= lines; line += 1)" in FOOD_PAGE
+
+    def test_chart_axis_margin_fits_a_wider_count(self) -> None:
+        # An uncapped axis can label counts of three or four digits, which do
+        # not fit the margin a two-digit ceiling allowed.
+        assert "left: 34" not in FOOD_PAGE
+        assert "top: 16, right: 14, bottom: 36, left: 40, ticks: 4" in FOOD_PAGE
+        assert "top: 16, right: 16, bottom: 32, left: 40, ticks: 6" in FOOD_PAGE
 
     def test_chart_times_come_from_the_browser_clock(self) -> None:
         # Every timestamp is an absolute instant rendered through the browser's

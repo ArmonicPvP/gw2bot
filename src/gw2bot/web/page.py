@@ -1686,9 +1686,12 @@ button:focus-visible {
 (function () {
   // Okabe-Ito colourblind-safe categorical palette, one hue per tracked feast.
   var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
-  var Y_MAX = 50;
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 5;
+  // Smallest count the y axis ever reaches, so a window that never rose above
+  // a couple of feasts still gets readable gridlines rather than a scale
+  // squeezed onto one or two of them.
+  var MIN_TOP = 10;
 
   var mobileQuery = window.matchMedia("(max-width: 640px)");
   function isMobile() { return mobileQuery.matches; }
@@ -1696,15 +1699,17 @@ button:focus-visible {
   // The chart uses a wide viewBox on desktop and a taller one on mobile, where
   // it scales to the narrow screen width; the extra height makes the graph
   // read large on a phone. Coordinates are computed against whichever set is
-  // active, so M is refreshed at the start of every chart render.
+  // active, so M is refreshed at the start of every chart render. The left
+  // margin matches the roster page's, because the axis is no longer capped at
+  // two digits and a four-figure stock has to fit beside it.
   function metrics() {
     if (isMobile()) {
       return {
-        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 34, ticks: 4
+        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 40, ticks: 4
       };
     }
     return {
-      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 34, ticks: 6
+      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 40, ticks: 6
     };
   }
   var M = metrics();
@@ -1716,7 +1721,7 @@ button:focus-visible {
   // it brings.
   var state = {
     range: "24h", data: null, activeFeast: 0, tablePage: 0, hidden: {},
-    staircase: false
+    staircase: false, scale: null
   };
 
   // A pinned touch selection listens on the whole page, so the chart it
@@ -1773,11 +1778,46 @@ button:focus-visible {
     if (frac > 1) { frac = 1; }
     return M.left + frac * plotW();
   }
+  // A gridline step of 1, 2 or 5 times a power of ten, which is what makes
+  // the axis read as round counts rather than as arbitrary divisions.
+  function niceStep(span, target) {
+    var raw = span / target;
+    if (!(raw > 0)) { return 1; }
+    var magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+    var normalized = raw / magnitude;
+    var step = 10;
+    if (normalized <= 1) { step = 1; }
+    else if (normalized <= 2) { step = 2; }
+    else if (normalized <= 5) { step = 5; }
+    return step * magnitude;
+  }
+
+  // The axis covers the counts actually reached in the window, padded out to
+  // MIN_TOP and rounded up to a readable step, so a stock the guild has grown
+  // past fifty is drawn in full instead of flattened against a fixed ceiling.
+  // The baseline stays at zero: several feasts share the axis, and running out
+  // is the thing the page is read for, so an empty shelf has to sit on the
+  // floor of the chart rather than somewhere up its side.
+  function computeScale() {
+    var high = MIN_TOP;
+    visibleFeasts().forEach(function (feast) {
+      (feast.points || []).forEach(function (point) {
+        if (point.count > high) { high = point.count; }
+      });
+    });
+    // Headroom above the highest sample, so the peak of a line is not drawn
+    // on the topmost gridline.
+    var span = high * 1.1;
+    var step = niceStep(span, 6);
+    return { high: step * Math.ceil(span / step), step: step };
+  }
+
   function scaleY(count) {
+    var high = state.scale.high;
     var value = count;
     if (value < 0) { value = 0; }
-    if (value > Y_MAX) { value = Y_MAX; }
-    return M.top + (1 - value / Y_MAX) * plotH();
+    if (value > high) { value = high; }
+    return M.top + (1 - value / high) * plotH();
   }
 
   // How wide the drawn window is, in seconds.
@@ -1810,6 +1850,7 @@ button:focus-visible {
 
   function renderChart() {
     M = metrics();
+    state.scale = computeScale();
     if (detachHover) { detachHover(); detachHover = null; }
     chart.replaceChildren();
     var canvas = svg("svg", {
@@ -1819,11 +1860,13 @@ button:focus-visible {
       "aria-label": "Stock on hand over time, one line per feast"
     });
 
-    // Horizontal gridlines and y labels every ten counts, 0 through Y_MAX.
-    for (var value = 0; value <= Y_MAX; value += 10) {
+    // Horizontal gridlines and y labels at every step of the computed scale.
+    var lines = Math.round(state.scale.high / state.scale.step);
+    for (var line = 0; line <= lines; line += 1) {
+      var value = state.scale.step * line;
       var y = scaleY(value);
       canvas.appendChild(svg("line", {
-        "class": value === 0 ? "axis" : "grid",
+        "class": line === 0 ? "axis" : "grid",
         x1: M.left, y1: y, x2: M.left + plotW(), y2: y
       }));
       var yLabel = svg("text", {

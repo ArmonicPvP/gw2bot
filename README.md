@@ -1369,6 +1369,13 @@ The chart starts with straight lines between samples. The icon at the far
 right of its heading switches between that regular `╱` line and a staircase
 `⎿` line; the same control is available on the roster and gold charts.
 
+The y axis covers the counts the window actually reached rather than a fixed
+ceiling, so a stock held well above fifty is drawn in full instead of flattened
+along the top of the chart. It always starts at zero, so a feast that has run
+out sits on the floor of the graph, and it never spans fewer than ten counts,
+so a quiet week is not blown up into a cliff. Switching a feast off in the
+legend rescales the axis to the feasts still drawn.
+
 **Custom** opens a pair of date fields beside the preset buttons. The window
 they describe covers whole local days, from midnight on the first through the
 last second of the second, and it is drawn once **Apply** is pressed — the
