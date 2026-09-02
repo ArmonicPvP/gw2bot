@@ -125,6 +125,7 @@ Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 | `database.py` | SQLite engine, schema, and in-place migrations (Alembic operations). |
 | `gw2_api.py` | GW2 API client. Endpoint notes are in `docs/gw2-api.md`. |
 | `guild_log.py`, `guild_storage.py`, `guild_stash.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
+| `pending_invites.py` | The accounts invited in-game that have not accepted: the report behind `/pending` and the roster page's section. |
 | `anchored_series.py` | Deriving a running total from an observed value and the changes around it, shared by the roster and gold histories. |
 | `notifications.py`, `poll_status.py` | Delivery to the notification channel, plus the `diag` previews. |
 | `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |

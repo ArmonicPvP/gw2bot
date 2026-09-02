@@ -13,7 +13,9 @@ from gw2bot.guild_members import (
     filter_sunborne_discord_entries,
     format_before_mark_trial_report,
     format_overdue_trial_report,
+    format_pending_invite_report,
     get_overdue_trial_members,
+    get_pending_invite_members,
     get_recent_trial_members,
     partition_tracked_overdue_members,
     seconds_until_trial_report,
@@ -477,6 +479,54 @@ class TestTrialMemberReport:
             "**Trial members past the 7-day warning mark (to be kicked)**"
         )
         assert "* Tracked.1234" in message
+
+    def test_finds_the_accounts_still_holding_an_invite(self) -> None:
+        members = [
+            {"name": "Invited.1234", "rank": "invited"},
+            # The API's own spelling is lowercase, but the comparison is
+            # case-folded like every other rank check.
+            {"name": "Shouting.5678", "rank": "Invited"},
+            {"name": "Accepted.9012", "rank": "Trial"},
+            {"name": "Member.3456", "rank": "Sunborne"},
+            {"name": "", "rank": "invited"},
+            {"rank": "invited"},
+        ]
+
+        assert get_pending_invite_members(members) == [
+            "Invited.1234",
+            "Shouting.5678",
+        ]
+
+    def test_formats_pending_invite_report_without_status_or_congrats(
+        self,
+    ) -> None:
+        messages = format_pending_invite_report(
+            [
+                TrialMemberReportEntry("Bravo.1234", 2, "Trial"),
+                TrialMemberReportEntry("Alpha.1234", 1, "Sunborne"),
+                TrialMemberReportEntry("Unmatched.5678"),
+            ]
+        )
+
+        assert len(messages) == 1
+        message = messages[0]
+        assert message.startswith("**Pending invites**")
+        assert (
+            "These users have been invited in-game but haven't accepted yet:"
+            in message
+        )
+        # Sorted alphabetically, mentioned where an application matched, and
+        # named plainly where none did.
+        assert "* Alpha.1234 - <@1>\n* Bravo.1234 - <@2>\n" in message
+        assert "* Unmatched.5678" in message
+        # An account that has not accepted holds no in-game rank the status
+        # label could name, and there is nothing to announce yet.
+        assert "- Sunborne" not in message
+        assert "- Trial" not in message
+        assert "```" not in message
+
+    def test_formats_no_pending_invite_report_without_invites(self) -> None:
+        assert format_pending_invite_report([]) == []
 
     def test_schedules_next_report_for_1700_utc(self) -> None:
         assert (

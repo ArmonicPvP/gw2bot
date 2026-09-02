@@ -11,6 +11,10 @@ from typing import Any, Protocol
 LOGGER = logging.getLogger(__name__)
 
 TRIAL_RANK = "Trial"
+# The in-game rank the GW2 API gives an account that has been invited to the
+# guild but has not accepted yet. It is lowercase in the API's own answer, and
+# every comparison against it is case-folded.
+INVITED_RANK = "invited"
 TRIAL_PERIOD = timedelta(days=14)
 TRIAL_WARNING_PERIOD = timedelta(days=7)
 TRIAL_REPORT_HOUR_UTC = 17
@@ -33,6 +37,15 @@ TRIAL_BEFORE_MARK_CONGRATS_MESSAGE = (
 TRIAL_WARNING_MARK_HEADER = (
     "**Trial members past the 7-day warning mark (to be kicked)**\n"
     "These users were warned and have not yet reached Sunborne:\n"
+)
+PENDING_INVITE_HEADER = (
+    "**Pending invites**\n"
+    "These users have been invited in-game but haven't accepted yet:\n"
+)
+PENDING_INVITE_UNMATCHED_NOTE = (
+    "The Trial application forum could not be read in full. An account above "
+    "with no mention beside it may still have applied - the post that names "
+    "it is one of the ones that could not be read."
 )
 
 
@@ -245,6 +258,31 @@ def get_recent_trial_members(
     result = sorted(recent)
     LOGGER.debug(
         "Evaluated %s guild members; recent_trials=%s",
+        len(members),
+        len(result),
+    )
+    return result
+
+
+def get_pending_invite_members(
+    members: list[dict[str, Any]],
+) -> list[str]:
+    """Account names that hold the in-game invited rank.
+
+    An invited account is on the guild's member list and counts against its
+    500-account ceiling, but has not accepted yet, which is what the member
+    count topic reports as "pending".
+    """
+    pending = [
+        name
+        for member in members
+        if str(member.get("rank", "")).strip().casefold() == INVITED_RANK
+        and (name := str(member.get("name", "")).strip())
+    ]
+    # Case-sensitive sort: uppercase sorts before lowercase ("Z" before "a").
+    result = sorted(pending)
+    LOGGER.debug(
+        "Evaluated %s guild members; pending_invites=%s",
         len(members),
         len(result),
     )
@@ -497,6 +535,45 @@ def format_before_mark_trial_report(
         "Formatted before-mark Trial report for %s members into %s messages",
         len(sorted_entries),
         len(messages),
+    )
+    return messages
+
+
+def format_pending_invite_report(
+    entries: Sequence[TrialMemberReportEntry],
+    *,
+    forum_read: bool = True,
+) -> list[str]:
+    """Format the pending-invite report.
+
+    Shaped like the before-14-day report: one line per account, with the
+    Discord mention of whoever wrote the matching application post. The
+    per-line status label is dropped, because an account that has not accepted
+    the invite holds no in-game rank the label could name, and no
+    copy-and-paste block is attached - there is nothing to announce until the
+    invite is accepted.
+
+    ``forum_read`` says whether the whole application forum could be searched.
+    A match found in a partial read is still a real one, but a line without a
+    mention may be missing it only because the post that names it could not be
+    read, so the report says so rather than letting a missing mention read as
+    "never applied".
+    """
+    if not entries:
+        return []
+    sorted_entries = sorted(entries, key=_trial_username_sort_key)
+    lines = [
+        _format_trial_report_line(entry, show_status=False) + "\n"
+        for entry in sorted_entries
+    ]
+    messages = _pack_trial_report_messages(PENDING_INVITE_HEADER, lines)
+    if not forum_read:
+        messages.append(PENDING_INVITE_UNMATCHED_NOTE)
+    LOGGER.debug(
+        "Formatted %s pending invites into %s Discord messages; forum_read=%s",
+        len(sorted_entries),
+        len(messages),
+        forum_read,
     )
     return messages
 

@@ -159,7 +159,14 @@ async def resolve_trial_forum_tags(
 async def refresh_trial_forum_index(
     bot: Gw2Bot,
     forum: discord.ForumChannel,
-) -> None:
+) -> bool:
+    """Refresh the index, reporting whether the whole forum was read.
+
+    False means Discord refused part of the walk - an enumeration or one
+    thread's history - so the index is missing posts it would otherwise hold.
+    The watermark is already withheld on that, and a caller that reads an
+    absent match as "never applied" needs to know it too.
+    """
     accepted_tag_id = bot._config.trial_accepted_tag_id
     # The index is a cache of one forum's posts under one tag. If either has
     # moved since it was built, every row in it describes somewhere else, and
@@ -293,3 +300,4 @@ async def refresh_trial_forum_index(
         cold_build,
         completed,
     )
+    return completed

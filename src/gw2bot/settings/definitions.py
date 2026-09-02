@@ -441,9 +441,10 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=DEFAULT_RAFFLE_OFFICER_ROLE_ID,
         description=(
             "Role allowed to record a gold purchase on someone's behalf, to "
-            "run /check and /track, and to use /settings. The server owner "
-            "and anyone with Administrator can always use /settings, so a "
-            "mistake here cannot lock the bot out of being reconfigured."
+            "run /check, /track and /pending, and to use /settings. The "
+            "server owner and anyone with Administrator can always use "
+            "/settings, so a mistake here cannot lock the bot out of being "
+            "reconfigured."
         ),
         parse=_parse_discord_id("raffle_officer"),
         validates=ValidationTarget.ROLE,

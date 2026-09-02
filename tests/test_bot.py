@@ -23,6 +23,7 @@ from gw2bot.logging_setup import SecretRegistry
 from gw2bot.main import main as run_main
 from gw2bot.raffle import TrialForumPost
 from gw2bot.settings.definitions import definition_for
+from gw2bot.web.server import WebServer
 from gw2bot.events.views import (
     EventSettingsButton,
     EventSignOutButton,
@@ -1143,6 +1144,70 @@ class TestSettingsHotApply:
         assert bot.raffle_store.get_trial_forum_index() == {}
         assert bot.raffle_store.get_trial_forum_watermark() is None
         assert "the Trial application index" in restarted
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_a_new_guild_or_forum_drops_the_pending_invite_cache(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The roster page caches the list for a few minutes, and the web
+        # server survives a change to the guild it was read from or the forum
+        # its Discord matches came from.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        clear = MagicMock()
+        bot._web_server = cast(
+            WebServer,
+            SimpleNamespace(clear_pending_invites=clear, stop=AsyncMock()),
+        )
+
+        bot.settings_store.set_raw(definition_for("gw2_guild_id"), GW2_GUILD_ID)
+        with (
+            self._quiet_bot_patches(),
+            # The reconcile decides whether the server itself is replaced; the
+            # cache is what this covers, so it is held still.
+            patch.object(
+                Gw2Bot,
+                "_reconcile_web_server",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            restarted = await bot.apply_settings_change({"gw2_guild_id"})
+
+        clear.assert_called_once_with()
+        assert "the pending invite list" in restarted
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_an_unrelated_change_keeps_the_pending_invite_cache(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        clear = MagicMock()
+        bot._web_server = cast(
+            WebServer,
+            SimpleNamespace(clear_pending_invites=clear, stop=AsyncMock()),
+        )
+
+        bot.settings_store.set_raw(definition_for("timezone"), "Europe/Berlin")
+        with (
+            self._quiet_bot_patches(),
+            patch.object(
+                Gw2Bot,
+                "_reconcile_web_server",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            await bot.apply_settings_change({"event_timezone"})
+
+        clear.assert_not_called()
 
         await self._close(bot)
 

@@ -59,6 +59,13 @@ from gw2bot.raffle.views import (
     RaffleLeaderboardButton,
     RaffleTicketsListButton,
 )
+from gw2bot.pending_invites import (
+    PendingInvites,
+    build_pending_invite_entries,
+    build_pending_invite_messages,
+    create_pending_command,
+    handle_pending_command,
+)
 from gw2bot.settings.commands import SettingsCommands
 from gw2bot.settings.composition import compose_from_store
 from gw2bot.settings.crypto import SettingsCipher
@@ -78,9 +85,11 @@ from gw2bot.trials.forum import (
     resolve_trial_forum_tags,
 )
 from gw2bot.trials.reports import (
+    TrialForumMatches,
     build_trial_report_messages,
     check_overdue_trials,
     poll_overdue_trials,
+    resolve_trial_forum_matches,
     resolve_trial_member_discord_statuses,
 )
 
@@ -185,6 +194,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(ProfitCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
+        self.tree.add_command(self._create_pending_command())
         # Rebuild raffle audit pager buttons from their custom_ids so old
         # audit messages keep paging after view timeouts and restarts.
         self.add_dynamic_items(RaffleAuditRangesButton)
@@ -479,6 +489,24 @@ class Gw2Bot(discord.Client):
         if web_outcome is not None:
             restarted.append(web_outcome)
 
+        # The roster page's pending invites are cached for a few minutes, and
+        # a server that was not rebuilt above still holds a list read from the
+        # old guild and matched against the old forum. It is dropped after the
+        # reconcile, so a rebuilt server is not asked about a cache it never
+        # had.
+        if (
+            self._web_server is not None
+            and changed
+            & {
+                "gw2_api_key",
+                "gw2_guild_id",
+                "trial_forum_channel_id",
+                "trial_accepted_tag_id",
+            }
+        ):
+            self._web_server.clear_pending_invites()
+            restarted.append("the pending invite list")
+
         LOGGER.debug(
             "Applied settings change; fields=%s restarted=%s",
             sorted(changed),
@@ -519,7 +547,9 @@ class Gw2Bot(discord.Client):
                 "guild bank ledger and the stash poll that anchors it, the "
                 "overdue Trial member report, the "
                 "guild member count channel description and the roster "
-                "history it records, and guild member "
+                "history it records, the pending invite report behind "
+                "/pending and the roster page's Pending invites section, and "
+                "guild member "
                 "lookups in /raffle, /check and /track",
                 ", ".join(f"/settings {name}" for name in missing_gw2),
                 "is" if len(missing_gw2) == 1 else "are",
@@ -950,6 +980,26 @@ class Gw2Bot(discord.Client):
         username: str,
     ) -> None:
         await handle_track_command(self, interaction, username)
+
+    def _create_pending_command(self) -> app_commands.Command[Any, ..., None]:
+        return create_pending_command(self)
+
+    async def _handle_pending_command(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await handle_pending_command(self, interaction)
+
+    async def _build_pending_invite_messages(self) -> list[str]:
+        return await build_pending_invite_messages(self)
+
+    async def build_pending_invite_entries(self) -> PendingInvites:
+        """The pending in-game invites, matched to Discord where possible.
+
+        Public because the roster page's "Pending invites" section is built
+        from the same list the /pending command reports.
+        """
+        return await build_pending_invite_entries(self)
     @property
     def event_store(self) -> EventStore:
         return self._event_store
@@ -999,11 +1049,21 @@ class Gw2Bot(discord.Client):
     ) -> list[TrialMemberReportEntry]:
         return await resolve_trial_member_discord_statuses(self, usernames)
 
+    async def _resolve_trial_forum_matches(
+        self,
+        usernames: list[str],
+        *,
+        resolve_status: bool = True,
+    ) -> TrialForumMatches:
+        return await resolve_trial_forum_matches(
+            self, usernames, resolve_status=resolve_status
+        )
+
     async def _refresh_trial_forum_index(
         self,
         forum: discord.ForumChannel,
-    ) -> None:
-        await refresh_trial_forum_index(self, forum)
+    ) -> bool:
+        return await refresh_trial_forum_index(self, forum)
 
     async def _poll_guild_log(self) -> None:
         await guild_log.poll_guild_log(self)

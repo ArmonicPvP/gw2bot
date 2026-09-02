@@ -14,6 +14,7 @@ from discord import app_commands
 from factories import (
     configured_bot,
     default_config,
+    forbidden_error,
     not_found_error,
     unconfigured_bot,
 )
@@ -1011,6 +1012,71 @@ class TestTrialMemberStatusResolution:
         bot._refresh_trial_forum_index.assert_awaited_once_with(forum)
         guild.fetch_member.assert_awaited_once_with(303)
 
+    async def test_a_match_only_caller_never_asks_for_a_rank(self) -> None:
+        # A member fetch apiece is what resolving the rank costs on a bot
+        # without the members intent, and the pending invites read no rank.
+        index = {1: TrialForumPost(1, 101, "title.1234 application", "t")}
+        guild = SimpleNamespace(
+            get_member=MagicMock(return_value=None),
+            fetch_member=AsyncMock(return_value=SimpleNamespace(roles=[])),
+        )
+        forum = SimpleNamespace(
+            id=TRIAL_FORUM_CHANNEL_ID,
+            guild=guild,
+            archived_threads=None,
+        )
+        bot = SimpleNamespace(
+            _config=default_config(),
+            fetch_channel=AsyncMock(return_value=forum),
+            _refresh_trial_forum_index=AsyncMock(return_value=True),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value=index)
+            ),
+        )
+
+        matches = await Gw2Bot._resolve_trial_forum_matches(
+            cast(Gw2Bot, bot),
+            ["Title.1234"],
+            resolve_status=False,
+        )
+
+        # The post still names the applicant; only the rank is left alone.
+        assert matches.entries == [
+            TrialMemberReportEntry("Title.1234", 101, None)
+        ]
+        assert matches.forum_read is True
+        guild.fetch_member.assert_not_awaited()
+        guild.get_member.assert_not_called()
+
+    async def test_an_incomplete_index_is_reported_as_such(self) -> None:
+        # The refresh could not read the whole forum, so an account missing
+        # from the index says nothing about whether it ever applied.
+        bot = SimpleNamespace(
+            _config=default_config(),
+            fetch_channel=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=TRIAL_FORUM_CHANNEL_ID,
+                    guild=SimpleNamespace(
+                        get_member=MagicMock(return_value=None),
+                        fetch_member=AsyncMock(),
+                    ),
+                    archived_threads=None,
+                )
+            ),
+            _refresh_trial_forum_index=AsyncMock(return_value=False),
+            _raffle_store=SimpleNamespace(
+                get_trial_forum_index=MagicMock(return_value={})
+            ),
+        )
+
+        matches = await Gw2Bot._resolve_trial_forum_matches(
+            cast(Gw2Bot, bot),
+            ["Missing.1234"],
+        )
+
+        assert matches.entries == [TrialMemberReportEntry("Missing.1234")]
+        assert matches.forum_read is False
+
     async def test_resolves_status_via_fetch_member_when_not_cached(self) -> None:
         index = {1: TrialForumPost(1, 777, "matched.1234", "t")}
         guild = SimpleNamespace(
@@ -1207,6 +1273,108 @@ class TestTrialMemberStatusResolution:
             assert index[2].owner_id == 202
             assert store.get_trial_forum_watermark() is not None
             rejected.history.assert_not_called()
+            store.close()
+
+    async def test_a_refused_thread_reports_an_incomplete_refresh(self) -> None:
+        # A thread Discord will not hand over leaves the index missing the
+        # accounts that post named, so the refresh says it did not finish and
+        # the watermark is withheld: a caller must not read a missing match as
+        # "never applied".
+        def refusing_history(**_: Any) -> Any:
+            async def iterate() -> Any:
+                raise forbidden_error(50001)
+                yield  # pragma: no cover - never reached
+
+            return iterate()
+
+        refused = SimpleNamespace(
+            id=1,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            owner_id=101,
+            applied_tags=[SimpleNamespace(id=TRIAL_ACCEPTED_TAG_ID)],
+            name="Refused.1234 application",
+            last_message_id=None,
+            archive_timestamp=datetime(2026, 6, 1, tzinfo=UTC),
+            created_at=datetime(2026, 6, 1, tzinfo=UTC),
+            history=refusing_history,
+        )
+        guild = SimpleNamespace(
+            active_threads=AsyncMock(return_value=[refused]),
+        )
+
+        async def archived_threads(**_: Any) -> Any:
+            return
+            yield  # pragma: no cover - an empty archive
+
+        forum = SimpleNamespace(
+            id=TRIAL_FORUM_CHANNEL_ID,
+            guild=guild,
+            archived_threads=archived_threads,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            bot = SimpleNamespace(
+                _config=default_config(),
+                _raffle_store=store,
+            )
+
+            completed = await Gw2Bot._refresh_trial_forum_index(
+                cast(Gw2Bot, bot),
+                cast(discord.ForumChannel, forum),
+            )
+
+            assert completed is False
+            assert store.get_trial_forum_watermark() is None
+            store.close()
+
+    async def test_a_complete_refresh_reports_itself_complete(self) -> None:
+        def history(*contents: str) -> Any:
+            async def iterate() -> Any:
+                for content in contents:
+                    yield SimpleNamespace(content=content)
+
+            return lambda **_: iterate()
+
+        thread = SimpleNamespace(
+            id=1,
+            parent_id=TRIAL_FORUM_CHANNEL_ID,
+            owner_id=101,
+            applied_tags=[SimpleNamespace(id=TRIAL_ACCEPTED_TAG_ID)],
+            name="Active.1234 application",
+            last_message_id=None,
+            archive_timestamp=datetime(2026, 6, 1, tzinfo=UTC),
+            created_at=datetime(2026, 6, 1, tzinfo=UTC),
+            history=history("Welcome"),
+        )
+        guild = SimpleNamespace(
+            active_threads=AsyncMock(return_value=[thread]),
+        )
+
+        async def archived_threads(**_: Any) -> Any:
+            return
+            yield  # pragma: no cover - an empty archive
+
+        forum = SimpleNamespace(
+            id=TRIAL_FORUM_CHANNEL_ID,
+            guild=guild,
+            archived_threads=archived_threads,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            bot = SimpleNamespace(
+                _config=default_config(),
+                _raffle_store=store,
+            )
+
+            completed = await Gw2Bot._refresh_trial_forum_index(
+                cast(Gw2Bot, bot),
+                cast(discord.ForumChannel, forum),
+            )
+
+            assert completed is True
+            assert store.get_trial_forum_watermark() is not None
             store.close()
 
     async def test_a_moved_forum_rebuilds_the_index_at_the_next_refresh(

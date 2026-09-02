@@ -35,7 +35,10 @@ from gw2bot.profit import (
 )
 from gw2bot.profit.api import ProfitApiError
 from gw2bot.profit.service import MissingProfitApiKey
+from gw2bot.guild_members import TrialMemberReportEntry
+from gw2bot.pending_invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
+from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.web.server import WebServer
 
 from unittest.mock import AsyncMock, MagicMock
@@ -101,6 +104,23 @@ def make_config() -> Config:
     )
 
 
+def make_config_without_gw2() -> Config:
+    values = {
+        key: value
+        for key, value in {
+            "DISCORD_TOKEN": "discord-token",
+            "DISCORD_COMMAND_GUILD_ID": str(GUILD_ID),
+            "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+            "WEB_ENABLED": "true",
+            "WEB_BASE_URL": "http://localhost:8080",
+            "DISCORD_OAUTH_CLIENT_ID": "client-id",
+            "DISCORD_OAUTH_CLIENT_SECRET": CLIENT_SECRET,
+            "WEB_SESSION_SECRET": SESSION_SECRET,
+        }.items()
+    }
+    return config_from_env(values)
+
+
 class FakeGuild:
     def __init__(self):
         self.members: dict[int, object] = {}
@@ -125,6 +145,13 @@ class FakeBot:
         )
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
+        # The roster page's pending-invite section needs the GW2 API, and the
+        # bot answers for it the way every other optional feature does.
+        self.gw2_api_enabled = True
+        self.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites([], True)
+        )
+        self._config = make_config()
 
     def get_guild(self, guild_id: int) -> FakeGuild | None:
         assert guild_id == GUILD_ID
@@ -181,13 +208,17 @@ async def quiet_test_server(app: web.Application) -> TestServer:
 
 
 @pytest.fixture
-async def client(bot: FakeBot):
-    server = WebServer(
+def web_server(bot: FakeBot) -> WebServer:
+    return WebServer(
         cast(Gw2Bot, bot),
         make_config(),
         cast(aiohttp.ClientSession, None),
     )
-    test_client = TestClient(await quiet_test_server(server.app))
+
+
+@pytest.fixture
+async def client(web_server: WebServer):
+    test_client = TestClient(await quiet_test_server(web_server.app))
     yield test_client
     await test_client.close()
 
@@ -1701,6 +1732,297 @@ class TestRosterApi:
 
         assert response.status == 503
         assert await response.json() == {"error": "unavailable"}
+
+
+class TestPendingInviteApi:
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    async def test_member_without_role_is_forbidden(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.get(
+            "/api/pending",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert await response.json() == {"error": "forbidden"}
+        bot.build_pending_invite_entries.assert_not_awaited()
+
+    async def test_returns_each_invite_with_its_matched_discord_name(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        guild.members[77] = member("Applicant")
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [
+                    TrialMemberReportEntry("Zebra.9999"),
+                    TrialMemberReportEntry("Apple.1234", discord_user_id=77),
+                ],
+                True,
+            )
+        )
+
+        response = await client.get("/api/pending", headers=headers)
+
+        assert response.status == 200
+        # Alphabetical, and an unmatched account carries no Discord name
+        # rather than an empty one.
+        assert await response.json() == {
+            "available": True,
+            "matched": True,
+            "invites": [
+                {"name": "Apple.1234", "discord_name": "Applicant"},
+                {"name": "Zebra.9999", "discord_name": None},
+            ],
+        }
+
+    async def test_is_built_once_and_served_from_the_cache(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [TrialMemberReportEntry("Apple.1234")], True
+            )
+        )
+
+        first = await client.get("/api/pending", headers=headers)
+        second = await client.get("/api/pending", headers=headers)
+
+        assert first.status == 200
+        assert await first.json() == await second.json()
+        # Building the list costs a GW2 API call and a forum index refresh, so
+        # a second page load inside the TTL must not pay for it again.
+        bot.build_pending_invite_entries.assert_awaited_once()
+
+    async def test_an_unresolved_name_is_not_cached_as_unknown(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # A name Discord could not answer for is deliberately not cached by
+        # the name lookup, so caching the payload built from it would pin the
+        # applicant to "Unknown" for the rest of the TTL anyway.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [TrialMemberReportEntry("Apple.1234", discord_user_id=77)],
+                True,
+            )
+        )
+
+        unknown = await client.get("/api/pending", headers=headers)
+        guild.members[77] = member("Applicant")
+        recovered = await client.get("/api/pending", headers=headers)
+
+        assert (await unknown.json())["invites"] == [
+            {"name": "Apple.1234", "discord_name": "Unknown"}
+        ]
+        assert (await recovered.json())["invites"] == [
+            {"name": "Apple.1234", "discord_name": "Applicant"}
+        ]
+
+    async def test_a_member_actually_called_unknown_is_still_cached(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # Failure is carried by the resolved names themselves, not inferred
+        # from the rendered name, so a member whose display name really is
+        # "Unknown" does not cost a rebuild on every page load.
+        headers = self._officer_headers(guild)
+        guild.members[77] = member("Unknown")
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [TrialMemberReportEntry("Apple.1234", discord_user_id=77)],
+                True,
+            )
+        )
+
+        first = await client.get("/api/pending", headers=headers)
+        second = await client.get("/api/pending", headers=headers)
+
+        assert (await first.json())["invites"] == [
+            {"name": "Apple.1234", "discord_name": "Unknown"}
+        ]
+        assert await second.json() == await first.json()
+        bot.build_pending_invite_entries.assert_awaited_once()
+
+    async def test_reports_the_section_off_without_the_gw2_settings(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        bot.gw2_api_enabled = False
+        bot._config = make_config_without_gw2()
+
+        response = await client.get("/api/pending", headers=headers)
+
+        assert response.status == 200
+        # The settings are named, so the page can tell the reader which
+        # /settings subcommands turn the section on.
+        assert await response.json() == {
+            "available": False,
+            "invites": [],
+            "missing": ["gw2_api_key", "gw2_guild_id"],
+        }
+        bot.build_pending_invite_entries.assert_not_awaited()
+
+    async def test_a_settings_change_drops_the_cached_list(
+        self,
+        client: TestClient,
+        web_server: WebServer,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # The server outlives a change to the guild the list was read from, so
+        # the bot drops the cache rather than letting the old guild's invites
+        # be served for the rest of the TTL.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=[
+                PendingInvites([TrialMemberReportEntry("Old.1234")], True),
+                PendingInvites([TrialMemberReportEntry("New.5678")], True),
+            ]
+        )
+
+        first = await client.get("/api/pending", headers=headers)
+        web_server.clear_pending_invites()
+        second = await client.get("/api/pending", headers=headers)
+
+        assert (await first.json())["invites"] == [
+            {"name": "Old.1234", "discord_name": None}
+        ]
+        assert (await second.json())["invites"] == [
+            {"name": "New.5678", "discord_name": None}
+        ]
+
+    async def test_unreachable_gw2_api_returns_503_json(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=aiohttp.ClientError("boom")
+        )
+
+        response = await client.get("/api/pending", headers=headers)
+
+        assert response.status == 503
+        assert await response.json() == {"error": "unavailable"}
+
+    async def test_a_failed_build_is_not_cached(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=[
+                aiohttp.ClientError("boom"),
+                PendingInvites([TrialMemberReportEntry("Apple.1234")], True),
+            ]
+        )
+
+        failed = await client.get("/api/pending", headers=headers)
+        recovered = await client.get("/api/pending", headers=headers)
+
+        assert failed.status == 503
+        assert await recovered.json() == {
+            "available": True,
+            "matched": True,
+            "invites": [{"name": "Apple.1234", "discord_name": None}],
+        }
+
+    async def test_a_database_failure_is_reported_rather_than_raised(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # The Trial forum index the match reads lives in SQLite, and a locked
+        # database would otherwise reach the reader as an uncontrolled 500.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=SQLAlchemyError("database is locked")
+        )
+
+        response = await client.get("/api/pending", headers=headers)
+
+        assert response.status == 503
+        assert await response.json() == {"error": "unavailable"}
+
+    async def test_an_unread_forum_is_neither_claimed_nor_cached(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # Every entry comes back unmatched when Discord refuses the forum,
+        # which is not evidence that nobody applied - so the page is told, and
+        # the answer is not kept for the next five minutes.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=[
+                PendingInvites([TrialMemberReportEntry("Apple.1234")], False),
+                PendingInvites(
+                    [TrialMemberReportEntry("Apple.1234", discord_user_id=77)],
+                    True,
+                ),
+            ]
+        )
+        guild.members[77] = member("Applicant")
+
+        unmatched = await client.get("/api/pending", headers=headers)
+        rebuilt = await client.get("/api/pending", headers=headers)
+
+        assert await unmatched.json() == {
+            "available": True,
+            "matched": False,
+            "invites": [{"name": "Apple.1234", "discord_name": None}],
+        }
+        assert await rebuilt.json() == {
+            "available": True,
+            "matched": True,
+            "invites": [{"name": "Apple.1234", "discord_name": "Applicant"}],
+        }
+
+    async def test_failure_logging_omits_the_upstream_detail(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=aiohttp.ClientError("key=secret-value")
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            await client.get("/api/pending", headers=headers)
+
+        assert "secret-value" not in caplog.text
+        assert "error_type=ClientError" in caplog.text
 
 
 class TestGoldPageGate:

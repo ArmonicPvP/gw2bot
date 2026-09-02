@@ -1686,9 +1686,12 @@ button:focus-visible {
 (function () {
   // Okabe-Ito colourblind-safe categorical palette, one hue per tracked feast.
   var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
-  var Y_MAX = 50;
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 5;
+  // Smallest count the y axis ever reaches, so a window that never rose above
+  // a couple of feasts still gets readable gridlines rather than a scale
+  // squeezed onto one or two of them.
+  var MIN_TOP = 10;
 
   var mobileQuery = window.matchMedia("(max-width: 640px)");
   function isMobile() { return mobileQuery.matches; }
@@ -1696,15 +1699,17 @@ button:focus-visible {
   // The chart uses a wide viewBox on desktop and a taller one on mobile, where
   // it scales to the narrow screen width; the extra height makes the graph
   // read large on a phone. Coordinates are computed against whichever set is
-  // active, so M is refreshed at the start of every chart render.
+  // active, so M is refreshed at the start of every chart render. The left
+  // margin matches the roster page's, because the axis is no longer capped at
+  // two digits and a four-figure stock has to fit beside it.
   function metrics() {
     if (isMobile()) {
       return {
-        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 34, ticks: 4
+        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 40, ticks: 4
       };
     }
     return {
-      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 34, ticks: 6
+      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 40, ticks: 6
     };
   }
   var M = metrics();
@@ -1716,7 +1721,7 @@ button:focus-visible {
   // it brings.
   var state = {
     range: "24h", data: null, activeFeast: 0, tablePage: 0, hidden: {},
-    staircase: false
+    staircase: false, scale: null
   };
 
   // A pinned touch selection listens on the whole page, so the chart it
@@ -1773,11 +1778,46 @@ button:focus-visible {
     if (frac > 1) { frac = 1; }
     return M.left + frac * plotW();
   }
+  // A gridline step of 1, 2 or 5 times a power of ten, which is what makes
+  // the axis read as round counts rather than as arbitrary divisions.
+  function niceStep(span, target) {
+    var raw = span / target;
+    if (!(raw > 0)) { return 1; }
+    var magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+    var normalized = raw / magnitude;
+    var step = 10;
+    if (normalized <= 1) { step = 1; }
+    else if (normalized <= 2) { step = 2; }
+    else if (normalized <= 5) { step = 5; }
+    return step * magnitude;
+  }
+
+  // The axis covers the counts actually reached in the window, padded out to
+  // MIN_TOP and rounded up to a readable step, so a stock the guild has grown
+  // past fifty is drawn in full instead of flattened against a fixed ceiling.
+  // The baseline stays at zero: several feasts share the axis, and running out
+  // is the thing the page is read for, so an empty shelf has to sit on the
+  // floor of the chart rather than somewhere up its side.
+  function computeScale() {
+    var high = MIN_TOP;
+    visibleFeasts().forEach(function (feast) {
+      (feast.points || []).forEach(function (point) {
+        if (point.count > high) { high = point.count; }
+      });
+    });
+    // Headroom above the highest sample, so the peak of a line is not drawn
+    // on the topmost gridline.
+    var span = high * 1.1;
+    var step = niceStep(span, 6);
+    return { high: step * Math.ceil(span / step), step: step };
+  }
+
   function scaleY(count) {
+    var high = state.scale.high;
     var value = count;
     if (value < 0) { value = 0; }
-    if (value > Y_MAX) { value = Y_MAX; }
-    return M.top + (1 - value / Y_MAX) * plotH();
+    if (value > high) { value = high; }
+    return M.top + (1 - value / high) * plotH();
   }
 
   // How wide the drawn window is, in seconds.
@@ -1810,6 +1850,7 @@ button:focus-visible {
 
   function renderChart() {
     M = metrics();
+    state.scale = computeScale();
     if (detachHover) { detachHover(); detachHover = null; }
     chart.replaceChildren();
     var canvas = svg("svg", {
@@ -1819,11 +1860,13 @@ button:focus-visible {
       "aria-label": "Stock on hand over time, one line per feast"
     });
 
-    // Horizontal gridlines and y labels every ten counts, 0 through Y_MAX.
-    for (var value = 0; value <= Y_MAX; value += 10) {
+    // Horizontal gridlines and y labels at every step of the computed scale.
+    var lines = Math.round(state.scale.high / state.scale.step);
+    for (var line = 0; line <= lines; line += 1) {
+      var value = state.scale.step * line;
       var y = scaleY(value);
       canvas.appendChild(svg("line", {
-        "class": value === 0 ? "axis" : "grid",
+        "class": line === 0 ? "axis" : "grid",
         x1: M.left, y1: y, x2: M.left + plotW(), y2: y
       }));
       var yLabel = svg("text", {
@@ -2767,6 +2810,18 @@ table.changes .dot {
   margin-right: 0.4rem;
 }
 .empty { color: var(--muted); padding: 0.6rem; }
+.note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
+/* A Discord display name has no spaces to break at either, so it is bounded
+   the same way an account name is. */
+table.changes td.discord { overflow-wrap: anywhere; }
+/* An invited account that no application post matched has no Discord name to
+   show, and the reason reads as an absence rather than as a name. */
+table.changes td.unmatched { color: var(--muted); }
+#pending-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .pager {
   display: flex;
   align-items: center;
@@ -2859,6 +2914,14 @@ button:focus-visible {
     <div id="table"></div>
     <div id="pager" class="pager"></div>
   </section>
+  <section class="card">
+    <h2>Pending invites<span id="pending-count" class="now"></span></h2>
+    <p class="note">These accounts have been invited in-game but have not
+      accepted yet, so they hold a place against the guild's 500 without
+      being members.</p>
+    <div id="pending"></div>
+    <div id="pending-status" role="status" aria-live="polite"></div>
+  </section>
 </main>
 <script>
 "use strict";
@@ -2912,6 +2975,9 @@ button:focus-visible {
   var chartStatus = document.getElementById("chart-status");
   var chartMode = document.getElementById("chart-mode");
   var nowCount = document.getElementById("now-count");
+  var pendingBox = document.getElementById("pending");
+  var pendingStatus = document.getElementById("pending-status");
+  var pendingCount = document.getElementById("pending-count");
   var totals = document.getElementById("totals");
   var tableBox = document.getElementById("table");
   var pager = document.getElementById("pager");
@@ -3662,6 +3728,101 @@ button:focus-visible {
     refresh();
   }
 
+  // Sanitized tracing for the pending invite section: a fixed action name and
+  // a count of rows. No account name, Discord name or payload is ever passed.
+  function tracePending(action, count) {
+    console.debug("roster pending invites:", action, count);
+  }
+
+  function renderPending(invites, matched) {
+    pendingBox.replaceChildren();
+    pendingCount.textContent = invites.length
+      ? "\\u2014 " + invites.length + " waiting"
+      : "";
+    if (!invites.length) {
+      pendingBox.appendChild(el("div", "empty",
+        "No invites are waiting to be accepted."));
+      return;
+    }
+    // Its own class, because the membership table's "By" column is hidden on
+    // a phone and this table's second column is the section's whole point.
+    var table = el("table", "changes pending");
+    var head = el("tr");
+    head.appendChild(el("th", null, "Account"));
+    head.appendChild(el("th", null, "Discord"));
+    table.appendChild(head);
+    invites.forEach(function (invite) {
+      var row = el("tr");
+      row.appendChild(el("td", "name", invite.name));
+      // An account nobody matched to an application post is named as
+      // unmatched rather than left blank, so the empty cell cannot read as a
+      // Discord account with no name. When the forum could not be read in
+      // full, a row without a name may be missing it only because the post
+      // naming it was one of the unread ones, and "no application matched"
+      // would be an assertion the server never made. A name that is shown was
+      // matched either way.
+      row.appendChild(invite.discord_name
+        ? el("td", "discord", invite.discord_name)
+        : el("td", "discord unmatched", matched
+          ? "No application matched"
+          : "Could not be checked"));
+      table.appendChild(row);
+    });
+    pendingBox.appendChild(table);
+  }
+
+  // The pending invites are the guild's state right now rather than a window
+  // of history, so they are loaded once with the page and are not reloaded
+  // when the range changes.
+  function loadPending() {
+    pendingStatus.textContent = "Loading\\u2026";
+    fetch("/api/pending")
+      .then(function (response) {
+        if (response.status === 401) {
+          location.href = "/login";
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) { throw new Error("failed"); }
+        return response.json();
+      })
+      .then(function (payload) {
+        if (!payload.available) {
+          pendingBox.replaceChildren();
+          pendingCount.textContent = "";
+          // The server names the settings that are unset, so the reader is
+          // told which /settings subcommands turn the section on rather than
+          // being sent to the README for them.
+          var missing = payload.missing || [];
+          pendingStatus.textContent = missing.length
+            ? "The pending invites are off until " +
+              missing.map(function (name) { return "/settings " + name; })
+                .join(" and ") + " " +
+              (missing.length === 1 ? "is" : "are") + " set."
+            : "The pending invites are off until the Guild Wars 2 API " +
+              "settings are set.";
+          tracePending("unavailable", missing.length);
+          return;
+        }
+        var invites = payload.invites || [];
+        var matched = payload.matched !== false;
+        renderPending(invites, matched);
+        pendingStatus.textContent = matched
+          ? ""
+          : "The Trial application forum could not be read in full, so an " +
+            "account without a Discord name here may still have applied.";
+        tracePending(matched ? "render" : "unmatched", invites.length);
+      })
+      .catch(function (error) {
+        // renderPending() runs inside this chain, so a drawing fault lands
+        // here too. Only the error's type and message are logged; no request,
+        // response or payload is ever passed through.
+        console.error(
+          "pending invite load failed:",
+          error && error.name, error && error.message);
+        pendingStatus.textContent = "Could not load the pending invites.";
+      });
+  }
+
   // The query the current selection asks for: a preset window by name, or the
   // applied pair of epoch seconds.
   function rangeQuery() {
@@ -3757,6 +3918,7 @@ button:focus-visible {
 
   syncRangeButtons();
   refresh();
+  loadPending();
 })();
 </script>
 </body>

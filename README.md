@@ -137,7 +137,7 @@ that nothing answers to is how a guild silently loses a feature.
 | --- | --- | --- |
 | `/settings roles raffle_draw` | `1317124663847157880` | `/raffle draw` and `/raffle removetickets`. |
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
-| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, and `/settings`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, `/pending`, and `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
 | `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. |
 | `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
@@ -1057,6 +1057,36 @@ polling-status messages are posted in the channel named by
 Every minute, the bot updates that channel's description to the current GW2
 guild member count as `x/500 (y pending)`, excluding `invited` records from
 `x` and reporting them in `y`.
+The `y` in that description is a count and nothing more, so `/pending` names
+the accounts behind it.
+
+- `/pending`: privately lists every account that holds the in-game `invited`
+  rank — invited to the guild but not yet accepted — and returns the list only
+  to the invoker as ephemeral replies, without posting to the notification
+  channel. Each account is matched to a Discord account through the same
+  `Accepted` application forum index the
+  [Trial reports](#overdue-trial-member-report) use, so an invitee who applied
+  is named by their mention; one nobody matched is listed by their account name
+  alone. Only the match is looked up: an invited account holds no in-game rank
+  the Trial reports' status label could name, so the member fetch that resolves
+  one is skipped. When the application forum could not be read in full -
+  refused outright, or only part-way through its threads - a mention may be
+  missing only because the post naming it was one of the unread ones, and the
+  report says so rather than letting the absence read as "never applied". It requires GW2 Leadership role `1317638909735342201`, replies
+  "No pending invites to report." when nobody is waiting, and
+  "Could not read the guild's pending invites. Try again later." when the GW2
+  API or the database cannot be reached. A page Discord refuses is logged and
+  skipped, so the pages behind it are still delivered.
+
+  ```text
+  Pending invites
+  These users have been invited in-game but haven't accepted yet:
+  * Applied.1234 - @DiscordUser
+  * Unmatched.5678
+  ```
+
+  The same list is on the [Guild Roster page](#guild-roster-history-page) under
+  **Pending invites**.
 Raffle-deposit notifications are also posted in the raffle contribution
 channel. Join, leave, and deposit delivery state is persisted so each message
 is posted once per destination, including across restarts. Startup status and
@@ -1369,6 +1399,13 @@ The chart starts with straight lines between samples. The icon at the far
 right of its heading switches between that regular `╱` line and a staircase
 `⎿` line; the same control is available on the roster and gold charts.
 
+The y axis covers the counts the window actually reached rather than a fixed
+ceiling, so a stock held well above fifty is drawn in full instead of flattened
+along the top of the chart. It always starts at zero, so a feast that has run
+out sits on the floor of the graph, and it never spans fewer than ten counts,
+so a quiet week is not blown up into a cliff. Switching a feast off in the
+legend rescales the axis to the feasts still drawn.
+
 **Custom** opens a pair of date fields beside the preset buttons. The window
 they describe covers whole local days, from midnight on the first through the
 last second of the second, and it is drawn once **Apply** is pressed — the
@@ -1405,6 +1442,27 @@ to match.
 The y axis covers the counts the window actually reached rather than the whole
 500-member ceiling, so a handful of departures is visible rather than a flat
 line near the top.
+
+Below the changes, a **Pending invites** section lists the accounts that have
+been invited in-game and have not accepted yet — the `y` of the `x/500 (y
+pending)` channel description, named rather than counted. Each row carries the
+account name and the display name of the Discord account whose `Accepted`
+application post matched it, or "No application matched" when none did. If the
+application forum could not be read in full, the rows without a name say
+"Could not be checked" instead - a name that is shown was matched either way -
+and that answer is not cached, because an unread post is not evidence that
+nobody applied. A Discord name the API could not answer for is not cached
+either, so it is retried rather than held at "Unknown" for the rest of the
+window. The
+list is the guild as it stands now rather than a window of history, so it is
+loaded once with the page and the range buttons do not change it. It is built
+from the GW2 API and the application forum index, which is why one build is
+served to every reader for five minutes rather than rebuilt per page load - a
+change to `/settings gw2_api_key`, `/settings gw2_guild_id`,
+`/settings channels trial_forum` or `/settings channels trial_accepted_tag`
+drops that cache rather than waiting it out. With the GW2 API unset the
+section names the `/settings` subcommands that turn it on instead of listing
+anything.
 
 A long account name wraps inside its column rather than widening the table, and
 on a phone each row's change is the coloured dot alone — the word beside it says

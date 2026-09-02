@@ -517,10 +517,49 @@ class TestFoodPage:
         assert 'data-range="7d"' in FOOD_PAGE
         assert 'data-range="30d"' in FOOD_PAGE
 
-    def test_chart_y_axis_is_fixed_zero_to_fifty(self) -> None:
-        assert "var Y_MAX = 50;" in FOOD_PAGE
-        # Gridlines and labels step through the whole 0..Y_MAX axis.
-        assert "for (var value = 0; value <= Y_MAX; value += 10)" in FOOD_PAGE
+    def test_chart_y_axis_grows_with_the_counts_it_draws(self) -> None:
+        # The axis is no longer capped: it is computed from the samples that
+        # are actually drawn, so a stock above fifty is not flattened against
+        # a fixed ceiling.
+        assert "var Y_MAX" not in FOOD_PAGE
+        assert "function computeScale()" in FOOD_PAGE
+        assert "if (point.count > high) { high = point.count; }" in FOOD_PAGE
+        assert "state.scale = computeScale();" in FOOD_PAGE
+
+    def test_chart_y_axis_only_measures_the_visible_feasts(self) -> None:
+        # A feast switched off in the legend is left out of the drawing, so it
+        # must not hold the axis up either.
+        assert (
+            "  function computeScale() {\n"
+            "    var high = MIN_TOP;\n"
+            "    visibleFeasts().forEach(function (feast) {" in FOOD_PAGE
+        )
+
+    def test_chart_y_axis_keeps_a_zero_baseline_and_a_floor(self) -> None:
+        # Several feasts share the axis and running out is what the page is
+        # read for, so zero stays on the floor of the chart, and a quiet window
+        # still spans at least MIN_TOP rather than a count or two.
+        assert "var MIN_TOP = 10;" in FOOD_PAGE
+        assert "if (value < 0) { value = 0; }" in FOOD_PAGE
+        assert "return M.top + (1 - value / high) * plotH();" in FOOD_PAGE
+
+    def test_chart_y_axis_lands_on_round_counts(self) -> None:
+        # Gridlines step through the computed scale on a 1, 2 or 5 times a
+        # power of ten step, so the labels read as round counts.
+        assert "function niceStep(span, target)" in FOOD_PAGE
+        assert "var step = niceStep(span, 6);" in FOOD_PAGE
+        assert (
+            "var lines = Math.round(state.scale.high / state.scale.step);"
+            in FOOD_PAGE
+        )
+        assert "for (var line = 0; line <= lines; line += 1)" in FOOD_PAGE
+
+    def test_chart_axis_margin_fits_a_wider_count(self) -> None:
+        # An uncapped axis can label counts of three or four digits, which do
+        # not fit the margin a two-digit ceiling allowed.
+        assert "left: 34" not in FOOD_PAGE
+        assert "top: 16, right: 14, bottom: 36, left: 40, ticks: 4" in FOOD_PAGE
+        assert "top: 16, right: 16, bottom: 32, left: 40, ticks: 6" in FOOD_PAGE
 
     def test_chart_times_come_from_the_browser_clock(self) -> None:
         # Every timestamp is an absolute instant rendered through the browser's
@@ -1043,6 +1082,93 @@ class TestRosterTable:
     def test_the_desktop_layout_keeps_the_word(self) -> None:
         desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
         assert "change-label" not in desktop
+
+
+class TestRosterPendingInvites:
+    def test_the_section_is_on_the_page_with_its_own_heading(self) -> None:
+        assert "<h2>Pending invites" in ROSTER_PAGE
+        assert (
+            "These accounts have been invited in-game but have not" in
+            ROSTER_PAGE
+        )
+        assert 'id="pending"' in ROSTER_PAGE
+        assert 'id="pending-status"' in ROSTER_PAGE
+
+    def test_the_list_is_loaded_once_rather_than_per_range(self) -> None:
+        # The invites are the guild's state now, not a window of history, so
+        # the range buttons do not reload them.
+        assert 'fetch("/api/pending")' in ROSTER_PAGE
+        assert "function loadPending()" in ROSTER_PAGE
+        assert "  loadPending();\n})();" in ROSTER_PAGE
+        assert "loadPending" not in ROSTER_PAGE[
+            ROSTER_PAGE.index("function refresh()"):
+            ROSTER_PAGE.index("document.querySelectorAll(\"[data-range]\")")
+        ]
+
+    def test_an_unmatched_invite_says_so_instead_of_showing_a_blank(
+        self,
+    ) -> None:
+        assert '"No application matched"' in ROSTER_PAGE
+        assert 'el("td", "discord unmatched", matched' in ROSTER_PAGE
+        assert "table.changes td.unmatched { color: var(--muted); }" in (
+            ROSTER_PAGE
+        )
+
+    def test_an_empty_list_and_a_disabled_section_read_differently(
+        self,
+    ) -> None:
+        # Nobody waiting is a fact about the guild; an unconfigured GW2 API is
+        # a fact about the bot, and the reader is told which they are seeing.
+        assert "No invites are waiting to be accepted." in ROSTER_PAGE
+        assert "The pending invites are off until " in ROSTER_PAGE
+        assert "Could not load the pending invites." in ROSTER_PAGE
+
+    def test_the_disabled_section_names_the_settings_it_needs(self) -> None:
+        # A feature that needs a setting says which /settings subcommand turns
+        # it on, rather than sending the reader to the README for it.
+        assert 'var missing = payload.missing || [];' in ROSTER_PAGE
+        assert 'return "/settings " + name;' in ROSTER_PAGE
+
+    def test_an_unread_forum_is_not_called_a_non_match(self) -> None:
+        # Every row comes back unmatched when the application forum could not
+        # be read, and saying "no application matched" there would assert
+        # something the server never established.
+        assert 'var matched = payload.matched !== false;' in ROSTER_PAGE
+        assert '"Could not be checked"' in ROSTER_PAGE
+        assert (
+            "The Trial application forum could not be read in full, so an "
+            in ROSTER_PAGE
+        )
+
+    def test_the_discord_column_survives_the_phone_layout(self) -> None:
+        # The membership table hides its "By" column on a phone, and this
+        # table's second column is the section's whole point, so it is not
+        # that column.
+        assert 'el("table", "changes pending")' in ROSTER_PAGE
+        assert 'el("td", "discord", invite.discord_name)' in ROSTER_PAGE
+        # The table rules live in the last of the page's mobile blocks.
+        mobile = ROSTER_PAGE[
+            ROSTER_PAGE.rindex("@media (max-width: 640px)"):
+            ROSTER_PAGE.index("</style>")
+        ]
+        assert "table.changes .by { display: none; }" in mobile
+        assert "discord" not in mobile
+        # A Discord display name is bounded like an account name, so a long
+        # one wraps instead of widening the table.
+        assert "table.changes td.discord { overflow-wrap: anywhere; }" in (
+            ROSTER_PAGE
+        )
+
+    def test_tracing_carries_no_account_or_discord_name(self) -> None:
+        # Only a fixed action name and a row count reach the console.
+        assert 'console.debug("roster pending invites:", action, count)' in (
+            ROSTER_PAGE
+        )
+        assert (
+            'tracePending(matched ? "render" : "unmatched", invites.length)'
+            in ROSTER_PAGE
+        )
+        assert 'tracePending("unavailable", missing.length)' in ROSTER_PAGE
 
 
 class TestGoldPage:

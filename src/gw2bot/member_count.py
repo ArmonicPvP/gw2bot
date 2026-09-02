@@ -15,6 +15,7 @@ from gw2bot.discord_utils import (
     discord_failure_signature,
     log_discord_failure,
 )
+from gw2bot.guild_members import INVITED_RANK
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -22,7 +23,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 GW2_GUILD_MEMBER_LIMIT = 500
-GW2_GUILD_INVITED_RANK = "invited"
 GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS = 60
 
 
@@ -32,8 +32,7 @@ def count_active_guild_members(
     pending_invite_count = sum(
         1
         for member in members
-        if str(member.get("rank", "")).strip().casefold()
-        == GW2_GUILD_INVITED_RANK
+        if str(member.get("rank", "")).strip().casefold() == INVITED_RANK
     )
     return len(members) - pending_invite_count, pending_invite_count
 
