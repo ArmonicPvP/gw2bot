@@ -1109,7 +1109,8 @@ class TestRosterPendingInvites:
         self,
     ) -> None:
         assert (
-            'el("td", "by unmatched", "No application matched")' in ROSTER_PAGE
+            'el("td", "discord unmatched", "No application matched")'
+            in ROSTER_PAGE
         )
         assert "table.changes td.unmatched { color: var(--muted); }" in (
             ROSTER_PAGE
@@ -1121,11 +1122,33 @@ class TestRosterPendingInvites:
         # Nobody waiting is a fact about the guild; an unconfigured GW2 API is
         # a fact about the bot, and the reader is told which they are seeing.
         assert "No invites are waiting to be accepted." in ROSTER_PAGE
-        assert (
-            "The pending invites need the GW2 API settings, which are not "
-            in ROSTER_PAGE
-        )
+        assert "The pending invites are off until " in ROSTER_PAGE
         assert "Could not load the pending invites." in ROSTER_PAGE
+
+    def test_the_disabled_section_names_the_settings_it_needs(self) -> None:
+        # A feature that needs a setting says which /settings subcommand turns
+        # it on, rather than sending the reader to the README for it.
+        assert 'var missing = payload.missing || [];' in ROSTER_PAGE
+        assert 'return "/settings " + name;' in ROSTER_PAGE
+
+    def test_the_discord_column_survives_the_phone_layout(self) -> None:
+        # The membership table hides its "By" column on a phone, and this
+        # table's second column is the section's whole point, so it is not
+        # that column.
+        assert 'el("table", "changes pending")' in ROSTER_PAGE
+        assert 'el("td", "discord", invite.discord_name)' in ROSTER_PAGE
+        # The table rules live in the last of the page's mobile blocks.
+        mobile = ROSTER_PAGE[
+            ROSTER_PAGE.rindex("@media (max-width: 640px)"):
+            ROSTER_PAGE.index("</style>")
+        ]
+        assert "table.changes .by { display: none; }" in mobile
+        assert "discord" not in mobile
+        # A Discord display name is bounded like an account name, so a long
+        # one wraps instead of widening the table.
+        assert "table.changes td.discord { overflow-wrap: anywhere; }" in (
+            ROSTER_PAGE
+        )
 
     def test_tracing_carries_no_account_or_discord_name(self) -> None:
         # Only a fixed action name and a row count reach the console.
@@ -1133,7 +1156,7 @@ class TestRosterPendingInvites:
             ROSTER_PAGE
         )
         assert 'tracePending("render", invites.length)' in ROSTER_PAGE
-        assert 'tracePending("unavailable", 0)' in ROSTER_PAGE
+        assert 'tracePending("unavailable", missing.length)' in ROSTER_PAGE
 
 
 class TestGoldPage:

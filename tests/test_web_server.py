@@ -102,6 +102,23 @@ def make_config() -> Config:
     )
 
 
+def make_config_without_gw2() -> Config:
+    values = {
+        key: value
+        for key, value in {
+            "DISCORD_TOKEN": "discord-token",
+            "DISCORD_COMMAND_GUILD_ID": str(GUILD_ID),
+            "DISCORD_NOTIFICATION_CHANNEL_ID": "9012",
+            "WEB_ENABLED": "true",
+            "WEB_BASE_URL": "http://localhost:8080",
+            "DISCORD_OAUTH_CLIENT_ID": "client-id",
+            "DISCORD_OAUTH_CLIENT_SECRET": CLIENT_SECRET,
+            "WEB_SESSION_SECRET": SESSION_SECRET,
+        }.items()
+    }
+    return config_from_env(values)
+
+
 class FakeGuild:
     def __init__(self):
         self.members: dict[int, object] = {}
@@ -130,6 +147,7 @@ class FakeBot:
         # bot answers for it the way every other optional feature does.
         self.gw2_api_enabled = True
         self.build_pending_invite_entries = AsyncMock(return_value=[])
+        self._config = make_config()
 
     def get_guild(self, guild_id: int) -> FakeGuild | None:
         assert guild_id == GUILD_ID
@@ -186,13 +204,17 @@ async def quiet_test_server(app: web.Application) -> TestServer:
 
 
 @pytest.fixture
-async def client(bot: FakeBot):
-    server = WebServer(
+def web_server(bot: FakeBot) -> WebServer:
+    return WebServer(
         cast(Gw2Bot, bot),
         make_config(),
         cast(aiohttp.ClientSession, None),
     )
-    test_client = TestClient(await quiet_test_server(server.app))
+
+
+@pytest.fixture
+async def client(web_server: WebServer):
+    test_client = TestClient(await quiet_test_server(web_server.app))
     yield test_client
     await test_client.close()
 
@@ -1783,12 +1805,48 @@ class TestPendingInviteApi:
     ) -> None:
         headers = self._officer_headers(guild)
         bot.gw2_api_enabled = False
+        bot._config = make_config_without_gw2()
 
         response = await client.get("/api/pending", headers=headers)
 
         assert response.status == 200
-        assert await response.json() == {"available": False, "invites": []}
+        # The settings are named, so the page can tell the reader which
+        # /settings subcommands turn the section on.
+        assert await response.json() == {
+            "available": False,
+            "invites": [],
+            "missing": ["gw2_api_key", "gw2_guild_id"],
+        }
         bot.build_pending_invite_entries.assert_not_awaited()
+
+    async def test_a_settings_change_drops_the_cached_list(
+        self,
+        client: TestClient,
+        web_server: WebServer,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # The server outlives a change to the guild the list was read from, so
+        # the bot drops the cache rather than letting the old guild's invites
+        # be served for the rest of the TTL.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=[
+                [TrialMemberReportEntry("Old.1234")],
+                [TrialMemberReportEntry("New.5678")],
+            ]
+        )
+
+        first = await client.get("/api/pending", headers=headers)
+        web_server.clear_pending_invites()
+        second = await client.get("/api/pending", headers=headers)
+
+        assert (await first.json())["invites"] == [
+            {"name": "Old.1234", "discord_name": None}
+        ]
+        assert (await second.json())["invites"] == [
+            {"name": "New.5678", "discord_name": None}
+        ]
 
     async def test_unreachable_gw2_api_returns_503_json(
         self,

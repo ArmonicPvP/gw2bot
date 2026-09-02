@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import discord
 from discord import app_commands
 
@@ -99,7 +101,22 @@ async def handle_pending_command(
         return
 
     await interaction.response.defer(ephemeral=True)
-    messages = await bot._build_pending_invite_messages()
+    try:
+        messages = await bot._build_pending_invite_messages()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        # The interaction is already deferred, so an unhandled failure would
+        # leave the officer looking at a reply that never arrives. Only the
+        # exception's type is logged; no request, response or account reaches
+        # the console.
+        LOGGER.error(
+            "Could not build the pending invite report; error_type=%s",
+            type(exc).__name__,
+        )
+        await interaction.followup.send(
+            "Could not read the guild's pending invites. Try again later.",
+            ephemeral=True,
+        )
+        return
     if not messages:
         LOGGER.debug("Pending invite command found no invites to report")
         await interaction.followup.send(

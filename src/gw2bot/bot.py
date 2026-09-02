@@ -486,6 +486,24 @@ class Gw2Bot(discord.Client):
         if web_outcome is not None:
             restarted.append(web_outcome)
 
+        # The roster page's pending invites are cached for a few minutes, and
+        # a server that was not rebuilt above still holds a list read from the
+        # old guild and matched against the old forum. It is dropped after the
+        # reconcile, so a rebuilt server is not asked about a cache it never
+        # had.
+        if (
+            self._web_server is not None
+            and changed
+            & {
+                "gw2_api_key",
+                "gw2_guild_id",
+                "trial_forum_channel_id",
+                "trial_accepted_tag_id",
+            }
+        ):
+            self._web_server.clear_pending_invites()
+            restarted.append("the pending invite list")
+
         LOGGER.debug(
             "Applied settings change; fields=%s restarted=%s",
             sorted(changed),

@@ -137,7 +137,7 @@ that nothing answers to is how a guild silently loses a feature.
 | --- | --- | --- |
 | `/settings roles raffle_draw` | `1317124663847157880` | `/raffle draw` and `/raffle removetickets`. |
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
-| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, and `/settings`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, `/pending`, and `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
 | `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. |
 | `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
@@ -1067,8 +1067,10 @@ the accounts behind it.
   `Accepted` application forum index the
   [Trial reports](#overdue-trial-member-report) use, so an invitee who applied
   is named by their mention; one nobody matched is listed by their account name
-  alone. It requires GW2 Leadership role `1317638909735342201`, and replies
-  "No pending invites to report." when nobody is waiting.
+  alone. It requires GW2 Leadership role `1317638909735342201`, replies
+  "No pending invites to report." when nobody is waiting, and
+  "Could not read the guild's pending invites. Try again later." when the GW2
+  API cannot be reached.
 
   ```text
   Pending invites
@@ -1443,8 +1445,12 @@ application post matched it, or "No application matched" when none did. The
 list is the guild as it stands now rather than a window of history, so it is
 loaded once with the page and the range buttons do not change it. It is built
 from the GW2 API and the application forum index, which is why one build is
-served to every reader for five minutes rather than rebuilt per page load, and
-the section says so plainly when the GW2 API settings are unset.
+served to every reader for five minutes rather than rebuilt per page load - a
+change to `/settings gw2_api_key`, `/settings gw2_guild_id`,
+`/settings channels trial_forum` or `/settings channels trial_accepted_tag`
+drops that cache rather than waiting it out. With the GW2 API unset the
+section names the `/settings` subcommands that turn it on instead of listing
+anything.
 
 A long account name wraps inside its column rather than widening the table, and
 on a phone each row's change is the coloured dot alone — the word beside it says

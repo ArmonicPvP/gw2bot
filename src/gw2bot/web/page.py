@@ -2815,6 +2815,9 @@ table.changes .dot {
   font-size: 0.85rem;
   margin: 0 0 0.75rem;
 }
+/* A Discord display name has no spaces to break at either, so it is bounded
+   the same way an account name is. */
+table.changes td.discord { overflow-wrap: anywhere; }
 /* An invited account that no application post matched has no Discord name to
    show, and the reason reads as an absence rather than as a name. */
 table.changes td.unmatched { color: var(--muted); }
@@ -3741,7 +3744,9 @@ button:focus-visible {
         "No invites are waiting to be accepted."));
       return;
     }
-    var table = el("table", "changes");
+    // Its own class, because the membership table's "By" column is hidden on
+    // a phone and this table's second column is the section's whole point.
+    var table = el("table", "changes pending");
     var head = el("tr");
     head.appendChild(el("th", null, "Account"));
     head.appendChild(el("th", null, "Discord"));
@@ -3753,8 +3758,8 @@ button:focus-visible {
       // unmatched rather than left blank, so the empty cell cannot read as a
       // Discord account with no name.
       row.appendChild(invite.discord_name
-        ? el("td", "by", invite.discord_name)
-        : el("td", "by unmatched", "No application matched"));
+        ? el("td", "discord", invite.discord_name)
+        : el("td", "discord unmatched", "No application matched"));
       table.appendChild(row);
     });
     pendingBox.appendChild(table);
@@ -3778,10 +3783,18 @@ button:focus-visible {
         if (!payload.available) {
           pendingBox.replaceChildren();
           pendingCount.textContent = "";
-          pendingStatus.textContent =
-            "The pending invites need the GW2 API settings, which are not " +
-            "configured.";
-          tracePending("unavailable", 0);
+          // The server names the settings that are unset, so the reader is
+          // told which /settings subcommands turn the section on rather than
+          // being sent to the README for them.
+          var missing = payload.missing || [];
+          pendingStatus.textContent = missing.length
+            ? "The pending invites are off until " +
+              missing.map(function (name) { return "/settings " + name; })
+                .join(" and ") + " " +
+              (missing.length === 1 ? "is" : "are") + " set."
+            : "The pending invites are off until the Guild Wars 2 API " +
+              "settings are set.";
+          tracePending("unavailable", missing.length);
           return;
         }
         var invites = payload.invites || [];

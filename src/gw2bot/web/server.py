@@ -954,6 +954,18 @@ class WebServer:
             }
         )
 
+    def clear_pending_invites(self) -> None:
+        """Drop the cached pending-invite payload.
+
+        The guild the list is read from and the forum its Discord matches come
+        from are settings, and this server outlives a change to either, so the
+        bot calls this rather than letting the old guild's invites be served
+        for the rest of the TTL.
+        """
+        had_cache = self._pending_invites is not None
+        self._pending_invites = None
+        LOGGER.debug("Cleared the pending invite cache; had_cache=%s", had_cache)
+
     async def _pending_data(self, request: web.Request) -> web.StreamResponse:
         denied = await self._require_roster_access(request)
         if denied is not None:
@@ -961,10 +973,18 @@ class WebServer:
         if not self._bot.gw2_api_enabled:
             # The startup warning already named the settings this needs, so
             # the page is told the section is off rather than shown an error.
+            missing = self._bot._config.missing_gw2_api_settings
             LOGGER.debug(
-                "Served pending invites; available=false reason=gw2-api-unset"
+                "Served pending invites; available=false reason=gw2-api-unset "
+                "missing=%s",
+                len(missing),
             )
-            return self._json({"available": False, "invites": []})
+            # The settings are named, not merely counted, so the section can
+            # tell the reader which /settings subcommands turn it on - the same
+            # thing a command that needs the GW2 API replies with.
+            return self._json(
+                {"available": False, "invites": [], "missing": list(missing)}
+            )
 
         cached = self._pending_invites
         if cached is not None and time.monotonic() < cached[1]:

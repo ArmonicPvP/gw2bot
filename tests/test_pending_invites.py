@@ -1,7 +1,11 @@
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, call
 
+import aiohttp
 import discord
 import pytest
 
@@ -133,10 +137,17 @@ class TestPendingCommand:
             _config=default_config(),
             _handle_pending_command=AsyncMock(),
         )
-        interaction = SimpleNamespace()
+        interaction = cast(discord.Interaction, SimpleNamespace())
 
         command = Gw2Bot._create_pending_command(cast(Gw2Bot, bot))
-        await command.callback(interaction)  # type: ignore[arg-type]
+        # A command's callback is typed as taking the group it is bound to
+        # first; this one is a bare command with no group, so the interaction
+        # is its only argument.
+        callback = cast(
+            Callable[[discord.Interaction], Awaitable[None]],
+            command.callback,
+        )
+        await callback(interaction)
 
         bot._handle_pending_command.assert_awaited_once_with(interaction)
 
@@ -207,6 +218,64 @@ class TestPendingCommand:
         bot.reject_without_gw2_api.assert_awaited_once()
         bot._build_pending_invite_messages.assert_not_awaited()
         interaction.response.defer.assert_not_awaited()
+
+    async def test_reports_an_upstream_failure_after_deferring(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The reply was already deferred, so an unhandled failure would leave
+        # the officer waiting on a followup that never comes.
+        bot = configured_bot(
+            _build_pending_invite_messages=AsyncMock(
+                side_effect=aiohttp.ClientError("key=secret-value")
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            await Gw2Bot._handle_pending_command(
+                cast(Gw2Bot, bot),
+                cast(discord.Interaction, interaction),
+            )
+
+        interaction.followup.send.assert_awaited_once_with(
+            "Could not read the guild's pending invites. Try again later.",
+            ephemeral=True,
+        )
+        assert "error_type=ClientError" in caplog.text
+        assert "secret-value" not in caplog.text
+
+    async def test_a_timeout_is_reported_the_same_way(self) -> None:
+        bot = configured_bot(
+            _build_pending_invite_messages=AsyncMock(
+                side_effect=asyncio.TimeoutError()
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_pending_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.followup.send.assert_awaited_once_with(
+            "Could not read the guild's pending invites. Try again later.",
+            ephemeral=True,
+        )
 
     async def test_reports_when_nobody_is_waiting(self) -> None:
         bot = configured_bot(
