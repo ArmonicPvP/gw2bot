@@ -75,6 +75,26 @@ main { width: 100%; margin: 0; padding: 1rem; }
 .pick-toggle button:first-child { border-radius: 6px 0 0 6px; }
 .pick-toggle button:last-child { border-radius: 0 6px 6px 0; }
 .pick-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.card h3.subheading { font-size: 0.92rem; padding: 0.85rem 1rem 0.15rem; }
+.row-action { padding: 0.25rem 0.55rem; font-size: 0.78rem; }
+.exclusions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0 1rem 0.85rem;
+  list-style: none;
+}
+.exclusions li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.25rem 0.3rem 0.25rem 0.6rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+.exclusions .exclusion-name { overflow-wrap: anywhere; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {
@@ -320,6 +340,32 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       </table></div>
     </section>
     <section class="card">
+      <h2>Open Orders</h2>
+      <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling each unit at the current lowest sell listing after the 5% listing and 10% exchange fees, and ROI is that profit over your order price.</p>
+      <p class="note" id="orders-key-help" hidden>Open orders are unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows <code>/v2/commerce/transactions/current/buys</code>.</p>
+      <div id="orders-excluded" hidden>
+        <h3 class="subheading">Excluded items</h3>
+        <p class="note">These items are left out of the table below. The list is remembered for your Discord account.</p>
+        <ul class="exclusions" id="orders-excluded-list"></ul>
+      </div>
+      <div class="table-scroll"><table id="orders-table" data-sort-table="orders">
+        <thead><tr>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="order-price" data-sort-default="descending">Your Price</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="order-cost" data-sort-default="descending">Order Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="highest-buy" data-sort-default="descending">Highest Buy Order</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell Listing</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="order-profit" data-sort-default="descending">Profit / Unit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="order-total-profit" data-sort-default="descending">Total Profit</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="order-roi" data-sort-default="descending">ROI</button></th>
+          <th>Exclude</th>
+        </tr></thead>
+        <tbody id="orders-body"></tbody>
+        <tfoot id="orders-foot"></tfoot>
+      </table></div>
+    </section>
+    <section class="card">
       <h2>Unclaimed Trading Post</h2>
       <p class="note">Coins and items waiting for pickup in your Trading Post delivery box.</p>
       <p class="note" id="delivery-key-help" hidden>Delivery access is unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows the Trading Post delivery endpoint.</p>
@@ -327,8 +373,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <thead><tr><th>Measure</th><th>Value</th></tr></thead>
         <tbody>
           <tr><td>Gold available to collect</td><td id="unclaimed-coins">0c</td></tr>
-          <tr><td>Items available to collect</td><td id="unclaimed-items">0</td></tr>
         </tbody>
+      </table></div>
+      <h3 class="subheading">Items available to collect</h3>
+      <div class="table-scroll"><table id="delivery-table" data-sort-table="delivery">
+        <thead><tr>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="quantity" data-sort-default="descending">Quantity</button></th>
+        </tr></thead>
+        <tbody id="delivery-body"></tbody>
+        <tfoot id="delivery-foot"></tfoot>
       </table></div>
     </section>
   </div>
@@ -401,6 +455,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   function profitCell(row, value) {
     return cell(row, coin(value), tone(value), value);
+  }
+
+  function optionalCoinCell(row, value) {
+    return value === null
+      ? cell(row, "\u2014", "", 0) : cell(row, coin(value), "", value);
+  }
+
+  function optionalProfitCell(row, value) {
+    return value === null
+      ? cell(row, "\u2014", "", 0) : profitCell(row, value);
   }
 
   function percentCell(row, value, toneValue) {
@@ -1190,26 +1254,180 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     applySort("unrealized-table");
   }
 
+  var ordersRows = [];
+  var ordersAvailable = true;
+
+  function exclusionButton(itemId, excluded) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "row-action";
+    button.textContent = excluded ? "Restore" : "Exclude";
+    button.setAttribute(
+      "aria-label",
+      (excluded ? "Restore " : "Exclude ") + "item " + itemId);
+    button.addEventListener("click", function () {
+      setOrderExclusion(itemId, !excluded, button);
+    });
+    return button;
+  }
+
+  function setOrderExclusion(itemId, excluded, button) {
+    button.disabled = true;
+    fetch("/api/profit/exclusions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: itemId, excluded: excluded })
+    }).then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login?next=" + encodeURIComponent(
+          location.pathname + location.search);
+        return false;
+      }
+      if (!response.ok) { throw new Error("exclusion request failed"); }
+      return true;
+    }).then(function (stored) {
+      if (!stored) { return; }
+      ordersRows.forEach(function (row) {
+        if (row.item_id === itemId) { row.excluded = excluded; }
+      });
+      if (!excluded) {
+        // A restored item with no live order has nothing left to show.
+        ordersRows = ordersRows.filter(function (row) {
+          return row.has_order || row.item_id !== itemId;
+        });
+      }
+      status.className = "";
+      status.textContent = excluded
+        ? "Excluded that item from your open orders."
+        : "Restored that item to your open orders.";
+      renderOrders();
+      trace(excluded ? "order-excluded" : "order-restored", 1);
+    }).catch(function () {
+      button.disabled = false;
+      status.className = "error";
+      status.textContent =
+        "That change could not be saved. Try again in a moment.";
+      trace("exclusion-failure", 0);
+    });
+  }
+
+  function renderExcludedOrders() {
+    var panel = document.getElementById("orders-excluded");
+    var list = document.getElementById("orders-excluded-list");
+    list.replaceChildren();
+    var seen = Object.create(null);
+    var excluded = [];
+    ordersRows.forEach(function (row) {
+      if (!row.excluded || seen[row.item_id]) { return; }
+      seen[row.item_id] = true;
+      excluded.push(row);
+    });
+    excluded.sort(function (left, right) {
+      return left.name.localeCompare(
+        right.name, undefined, { sensitivity: "base", numeric: true });
+    });
+    excluded.forEach(function (row) {
+      var entry = document.createElement("li");
+      var name = document.createElement("span");
+      name.className = "exclusion-name";
+      name.textContent = row.name;
+      entry.appendChild(name);
+      entry.appendChild(exclusionButton(row.item_id, true));
+      list.appendChild(entry);
+    });
+    panel.hidden = excluded.length === 0;
+    trace("open-orders-excluded", excluded.length);
+  }
+
+  function renderOrders() {
+    var body = document.getElementById("orders-body");
+    var help = document.getElementById("orders-key-help");
+    help.hidden = ordersAvailable;
+    body.replaceChildren();
+    var kept = ordersRows.filter(function (row) {
+      return row.has_order && !row.excluded;
+    });
+    var units = 0;
+    var cost = 0;
+    var profit = 0;
+    var pricedCost = 0;
+    kept.forEach(function (order, index) {
+      var row = sortableRow(index);
+      cell(row, order.name, "name", order.name);
+      cell(row, order.quantity, "", order.quantity);
+      cell(row, coin(order.unit_price), "", order.unit_price);
+      cell(row, coin(order.cost), "", order.cost);
+      optionalCoinCell(row, order.buy_price);
+      optionalCoinCell(row, order.sell_price);
+      optionalProfitCell(row, order.profit);
+      optionalProfitCell(row, order.total_profit);
+      percentCell(row, order.roi_percent);
+      cell(row, "").appendChild(exclusionButton(order.item_id, false));
+      body.appendChild(row);
+      units += order.quantity;
+      cost += order.cost;
+      if (order.total_profit !== null) {
+        profit += order.total_profit;
+        pricedCost += order.cost;
+      }
+    });
+    if (!kept.length) {
+      emptyRow(body, 10, ordersAvailable
+        ? "No open buy orders were found."
+        : "Open buy orders are unavailable for this saved key.");
+    }
+    totalRow(document.getElementById("orders-foot"), [
+      "Total", units, "\u2014", coin(cost), "\u2014", "\u2014", "\u2014",
+      profit, percent(pricedCost ? profit / pricedCost * 100 : null), ""
+    ], 7);
+    applySort("orders-table");
+    renderExcludedOrders();
+    trace("open-orders", kept.length);
+  }
+
   function renderDelivery(data) {
-    var node = document.getElementById("unclaimed-coins");
-    var items = document.getElementById("unclaimed-items");
+    var coins = document.getElementById("unclaimed-coins");
+    var body = document.getElementById("delivery-body");
     var help = document.getElementById("delivery-key-help");
+    body.replaceChildren();
     if (data.delivery.coins === null) {
-      node.textContent = "Unavailable";
-      node.className = "";
-      items.textContent = "Unavailable";
-      items.className = "";
+      coins.textContent = "Unavailable";
+      coins.className = "";
+      emptyRow(body, 2, "Delivery is unavailable for this saved key.");
+      totalRow(
+        document.getElementById("delivery-foot"),
+        ["Total", "\u2014"], -1);
       help.hidden = false;
+      trace("delivery-unavailable", 0);
       return;
     }
-    node.textContent = coin(data.delivery.coins);
-    node.className = data.delivery.coins > 0 ? "positive" : "";
-    items.textContent = String(data.delivery.items);
-    items.className = data.delivery.items > 0 ? "positive" : "";
+    coins.textContent = coin(data.delivery.coins);
+    coins.className = data.delivery.coins > 0 ? "positive" : "";
     help.hidden = true;
+    var items = data.delivery.items;
+    var quantity = 0;
+    items.forEach(function (item, index) {
+      var row = sortableRow(index);
+      cell(row, item.name, "name", item.name);
+      cell(row, item.quantity, "positive", item.quantity);
+      body.appendChild(row);
+      quantity += item.quantity;
+    });
+    if (!items.length) {
+      emptyRow(body, 2, "No items are waiting for pickup.");
+    }
+    totalRow(document.getElementById("delivery-foot"),
+      ["Total", quantity], -1);
+    applySort("delivery-table");
+    trace("delivery", items.length);
   }
 
   function render(data) {
+    // The window the server served is the one it remembered, so the control
+    // and the address bar follow it rather than the other way round.
+    daysInput.value = String(data.days);
+    history.replaceState(
+      null, "", "/profit?days=" + encodeURIComponent(String(data.days)));
     renderSummary(data);
     renderCharts(data);
     picksData = data.picks;
@@ -1217,6 +1435,15 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     renderItems(data);
     renderDays(data);
     renderUnrealized(data);
+    ordersAvailable = data.open_orders.available;
+    ordersRows = data.open_orders.orders.map(function (order) {
+      order.excluded = false;
+      return order;
+    }).concat(data.open_orders.excluded.map(function (order) {
+      order.excluded = true;
+      return order;
+    }));
+    renderOrders();
     renderDelivery(data);
     reports.hidden = false;
     keyHelp.classList.remove("open");
@@ -1225,7 +1452,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     trace(
       "render",
       data.items.length + data.days_table.length
-        + data.unrealized.items.length + 1);
+        + data.unrealized.items.length + ordersRows.length + 1);
   }
 
   function selectedDays() {
@@ -1233,20 +1460,25 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     return Number.isInteger(days) && days >= 1 && days <= 90 ? days : null;
   }
 
-  function load() {
-    var days = selectedDays();
-    if (days === null) {
-      status.className = "error";
-      status.textContent = "Choose a number of days from 1 through 90.";
-      trace("refuse-range", 0);
-      return;
+  function load(useRemembered) {
+    // Asking without a window lets the server answer with the one this member
+    // last chose; the page only names a window when they just picked one.
+    var days = null;
+    if (!useRemembered) {
+      days = selectedDays();
+      if (days === null) {
+        status.className = "error";
+        status.textContent = "Choose a number of days from 1 through 90.";
+        trace("refuse-range", 0);
+        return;
+      }
     }
     status.className = "";
     status.textContent = "Loading\u2026";
     reports.hidden = true;
     keyHelp.classList.remove("open");
-    history.replaceState(null, "", "/profit?days=" + encodeURIComponent(String(days)));
-    fetch("/api/profit?days=" + encodeURIComponent(String(days)))
+    fetch("/api/profit" + (days === null
+      ? "" : "?days=" + encodeURIComponent(String(days))))
       .then(function (response) {
         if (response.status === 401) {
           location.href = "/login?next=" + encodeURIComponent(
@@ -1273,7 +1505,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   rangeForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    load();
+    load(false);
   });
   document.getElementById("days-page-size").addEventListener(
     "change", function (event) {
@@ -1302,7 +1534,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   });
   initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
-  if (Number.isInteger(initial) && initial >= 1 && initial <= 90) {
+  var requested = Number.isInteger(initial) && initial >= 1 && initial <= 90;
+  if (requested) {
     daysInput.value = String(initial);
   }
   fetch("/api/me")
@@ -1310,7 +1543,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     .then(function (identity) {
       if (identity) { document.getElementById("whoami").textContent = identity.name; }
     });
-  load();
+  load(!requested);
 }());
 </script>
 </body>

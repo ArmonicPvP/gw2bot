@@ -81,6 +81,32 @@ class MarketPrice:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryItem:
+    """One item stack waiting for pickup in the Trading Post delivery box."""
+
+    item_id: int
+    quantity: int
+
+
+@dataclass(frozen=True, slots=True)
+class OpenBuyOrder:
+    """The member's outstanding buy orders for one item at one price.
+
+    The Trading Post splits a large purchase into many orders, so a member
+    who is buying one item can hold dozens of rows that differ in nothing a
+    reader cares about. They are collapsed per item and price; an item bought
+    at two prices stays two rows, because the price is what decides the
+    order's profit and return.
+    """
+
+    item_id: int
+    unit_price: int
+    quantity: int
+    order_count: int
+    placed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ProfitReport:
     days: int
     window_start: datetime
@@ -90,9 +116,12 @@ class ProfitReport:
     realized: RealizedProfit
     unrealized: UnrealizedProfit
     unclaimed_coins: int | None
-    unclaimed_items: int | None
+    unclaimed_items: tuple[DeliveryItem, ...] | None
     item_names: dict[int, str]
     market_prices: dict[int, MarketPrice] = field(default_factory=dict)
+    open_buy_orders: tuple[OpenBuyOrder, ...] = ()
+    open_orders_available: bool = True
+    excluded_order_items: frozenset[int] = frozenset()
 
 
 @dataclass(slots=True)
@@ -116,6 +145,13 @@ class _MutableListing:
     unit_price: int
     occurred_at: datetime
     original_quantity: int
+
+
+@dataclass(slots=True)
+class _MutableOrder:
+    quantity: int
+    order_count: int
+    placed_at: datetime
 
 
 @dataclass(slots=True)
@@ -455,3 +491,42 @@ def calculate_unrealized_profit(
         chronology_blocked_listings,
     )
     return result
+
+
+def group_open_buy_orders(
+    orders: list[Transaction],
+) -> tuple[OpenBuyOrder, ...]:
+    """Collapse outstanding buy orders into one row per item and price."""
+    grouped: dict[tuple[int, int], _MutableOrder] = {}
+    for order in orders:
+        key = (order.item_id, order.price)
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = _MutableOrder(
+                order.quantity,
+                1,
+                order.occurred_at,
+            )
+            continue
+        existing.quantity += order.quantity
+        existing.order_count += 1
+        existing.placed_at = min(existing.placed_at, order.occurred_at)
+    collapsed = tuple(
+        OpenBuyOrder(
+            item_id=item_id,
+            unit_price=unit_price,
+            quantity=totals.quantity,
+            order_count=totals.order_count,
+            placed_at=totals.placed_at,
+        )
+        for (item_id, unit_price), totals in sorted(grouped.items())
+    )
+    LOGGER.debug(
+        "Grouped open Trading Post buy orders; orders=%s rows=%s items=%s "
+        "units=%s",
+        len(orders),
+        len(collapsed),
+        len({row.item_id for row in collapsed}),
+        sum(row.quantity for row in collapsed),
+    )
+    return collapsed

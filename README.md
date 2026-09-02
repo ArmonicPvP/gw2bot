@@ -1324,19 +1324,22 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
 - `/profit setkey` opens a private modal, checks the key with `/v2/tokeninfo`,
   and saves it only when the `tradingpost` permission is present. A
   route-restricted subtoken must allow the history buys, history sells, current
-  sells, and `/v2/commerce/delivery` endpoints.
+  sells, current buys, and `/v2/commerce/delivery` endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window defaults to 30 days and accepts 1 through 90 UTC calendar dates,
-  including today. If the web session has expired, Discord sign-in returns the
-  member to that same profit window.
-- `/profit deletekey` removes the caller's encrypted key and cached Trading
-  Post data. It cannot affect any other member's key or cache.
+  window accepts 1 through 90 UTC calendar dates, including today, and defaults
+  to 30 days until the member picks one. If the web session has expired, Discord
+  sign-in returns the member to that same profit window.
+- `/profit deletekey` removes the caller's encrypted key, cached Trading Post
+  data, remembered report window, and excluded Open Orders items. It cannot
+  affect any other member's key, cache, or choices. Replacing a key with
+  `/profit setkey` keeps the window and the exclusions.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
 summary, realized profit grouped by item, realized profit grouped by sale date,
-projected profit for unmatched buys currently listed for sale, and the coins
-and total item quantity currently awaiting pickup from the Trading Post. The
+projected profit for unmatched buys currently listed for sale, the items the
+member is currently buying, and the coins and each item awaiting pickup from the
+Trading Post. The
 daily realized-profit table is paginated with 10 rows by default; its bottom-left
 control accepts page sizes from 1 through 90, and page links appear above and
 below the table. Coin amounts account for the
@@ -1345,7 +1348,7 @@ listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
 the original profit bot. An item counts as a flip only after at least five units
 have been bought and then sold; items with fewer than five matched units and
 sales made before a purchase are excluded. Click any column heading in the
-three detail tables to sort it; click the same heading again to reverse the
+detail tables to sort it; click the same heading again to reverse the
 order. The totals remain
 pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
@@ -1355,6 +1358,37 @@ The **Your Picks** table revisits items flipped in the selected window using
 their current highest buy order and lowest sell listing. It shows the ten best
 opportunities after fees and can rank them by either ROI or profit per unit.
 Items whose current return after fees is a negative ROI are left out entirely.
+
+The **Open Orders** table lists every item the member is currently buying on the
+Trading Post. Each row gives the units on order, the price the member is buying
+at, that order's total cost, the item's current highest buy order and lowest
+sell listing, and the profit per unit, total profit, and ROI of finishing the
+trade — selling each unit at that lowest listing after the 5% listing and 10%
+exchange fees. The Trading Post splits one purchase into many orders, so orders
+for the same item at the same price are collapsed into one row; an item bought
+at two prices stays two rows, because the price is what decides the return. A
+row whose item has no usable current price shows dashes instead of a return and
+is left out of the total. Unlike **Your Picks**, a negative return is shown
+rather than hidden: it is an order the member is holding, not a suggestion.
+
+Each row has an **Exclude** button that drops that item from the table — useful
+for a long-term buy that is not a flip, or an item whose spread is not worth
+reading every visit. Excluded items are listed above the table with a **Restore**
+button, and both lists are remembered against the member's Discord account, so
+they survive a reload, a new sign-in, and a different browser. An item excluded
+while it had an order keeps its entry after the order fills or is cancelled, so
+it can always be restored. Excluding an item affects only that member's own
+dashboard.
+
+The **Unclaimed Trading Post** section shows the coins waiting for pickup and
+then one row per item waiting with it, with the total below them. An item
+delivered as several stacks is added together into a single row.
+
+The window in the header is remembered the same way: whenever a member loads a
+report the chosen number of days is stored against their Discord account, and
+opening `/profit` without a `days` value in the URL reopens that window instead
+of the 30-day default. A `days` value in the URL — the one `/profit view` links
+to — still wins and becomes the new remembered window.
 
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
@@ -1366,13 +1400,13 @@ applicable). On a touch screen, tap a bar or dot to pin the same reading; it
 stays open until another reading is tapped, the page is tapped elsewhere, the
 page scrolls, the window loses focus, or Escape is pressed.
 
-History, current listings, and item names are cached for five minutes in rows
-keyed by Discord user ID; unclaimed coins and items are read when each report is built.
-Keys saved before delivery reporting was added can still load their existing
-reports if a route restriction blocks that new endpoint: the unclaimed amount
-is marked unavailable and the page directs the member to run `/profit setkey`
-again. Other API failures continue to fail the report instead of presenting
-partial data.
+History, current listings, current buy orders, and item names are cached for
+five minutes in rows keyed by Discord user ID; unclaimed coins and items are read
+when each report is built. Keys saved before delivery reporting or Open Orders
+were added can still load their existing reports if a route restriction blocks
+one of those newer endpoints: that section alone is marked unavailable and the
+page directs the member to run `/profit setkey` again. Other API failures
+continue to fail the report instead of presenting partial data.
 The signed web session supplies that same ID; the API key never appears in the
 page, a URL, or a browser response. Access uses the site's normal Discord OAuth
 guild-membership check and needs the four web settings plus `WEB_ENABLED=true`

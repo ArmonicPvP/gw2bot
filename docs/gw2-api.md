@@ -27,7 +27,8 @@ needs `tradingpost`; the command verifies that permission here before storing
 the key. If `urls` is present, it also requires
 `/v2/commerce/transactions/history/buys`,
 `/v2/commerce/transactions/history/sells`,
-`/v2/commerce/transactions/current/sells`, and
+`/v2/commerce/transactions/current/sells`,
+`/v2/commerce/transactions/current/buys`, and
 `/v2/commerce/delivery`; an unrestricted key has no `urls` field.
 
 ### `/v2/createsubtoken`
@@ -77,19 +78,43 @@ item.
 
 Returns the member's current sale listings. The cached collection is replaced
 as a snapshot rather than merged, so cancelled or completed listings disappear
-from the next unrealized-profit report. All three transaction collections are
+from the next unrealized-profit report. All four transaction collections are
 refreshed after five minutes.
+
+### `/v2/commerce/transactions/current/buys`
+
+Returns the member's outstanding buy orders, in the same shape as the sell
+routes: `id`, `item_id`, `price`, `quantity`, and `created`. The Trading Post
+splits one purchase into many orders, so this collection is long and repetitive;
+the dashboard's **Open Orders** table collapses it to one row per item and
+price. Like the current sells above, it is stored as a replacing snapshot so a
+cancelled or filled order disappears from the next report.
+
+This is the newest required route, so a member subtoken saved before it existed
+may be restricted away from it. That single 401 or 403 leaves Open Orders marked
+unavailable and does not store an empty snapshot, so a replacement key picks the
+orders up on the next report; every other transaction collection failing
+authorization still fails the report.
+
+### `/v2/commerce/prices`
+
+Returns `buys.unit_price` (the highest standing buy order) and
+`sells.unit_price` (the lowest sell listing) for each requested item, in chunks
+of 200 ids. The dashboard reads it for the items already flipped in the window
+and for every open buy order, and skips an item whose response has a zero price
+on either side. It needs no API key.
 
 ### `/v2/commerce/delivery`
 
-Returns the items and copper waiting for pickup from the Trading Post. The
-profit dashboard reads the current `coins` value when it builds a report and
-shows it as unclaimed Trading Post gold. Route-restricted member subtokens must
-allow this endpoint along with the three transaction endpoints above. A legacy
-subtoken accepted before this route was required can still load its transaction
-report; only the unclaimed amount is marked unavailable after a 401 or 403, with
-the page prompting the member to replace the key. Other delivery errors still
-fail the report.
+Returns the items and copper waiting for pickup from the Trading Post as
+`{"coins": <copper>, "items": [{"id": <item id>, "count": <quantity>}]}`. The
+profit dashboard shows `coins` as unclaimed Trading Post gold and lists the
+items one row per item; a single item delivered as several stacks has its counts
+added together. Route-restricted member subtokens must allow this endpoint along
+with the four transaction endpoints above. A legacy subtoken accepted before this
+route was required can still load its transaction report; only the unclaimed
+amount is marked unavailable after a 401 or 403, with the page prompting the
+member to replace the key. Other delivery errors still fail the report.
 
 ## Guilds
 
