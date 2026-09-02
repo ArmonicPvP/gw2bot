@@ -10,7 +10,11 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import log_discord_failure, user_has_role
+from gw2bot.discord_utils import (
+    log_discord_failure,
+    send_interaction_notice,
+    user_has_role,
+)
 from gw2bot.guild_members import (
     TrialMemberReportEntry,
     format_pending_invite_report,
@@ -145,16 +149,18 @@ async def handle_pending_command(
             "Could not build the pending invite report; error_type=%s",
             type(exc).__name__,
         )
-        await interaction.followup.send(
+        # Discord can refuse this notice too, and a guarded command must not
+        # turn into an unhandled error on the way to reporting a failure.
+        await send_interaction_notice(
+            interaction,
             "Could not read the guild's pending invites. Try again later.",
-            ephemeral=True,
         )
         return
     if not messages:
         LOGGER.debug("Pending invite command found no invites to report")
-        await interaction.followup.send(
+        await send_interaction_notice(
+            interaction,
             "No pending invites to report.",
-            ephemeral=True,
         )
         return
 
@@ -163,7 +169,10 @@ async def handle_pending_command(
         len(messages),
     )
     delivered = 0
-    for message in messages:
+    # The page is numbered by where it sits in the report, not by how many
+    # went out before it: with an earlier page refused those differ, and the
+    # trace has to name the page that actually failed.
+    for page, message in enumerate(messages, start=1):
         try:
             await interaction.followup.send(message, ephemeral=True)
         except discord.DiscordException as error:
@@ -173,7 +182,7 @@ async def handle_pending_command(
             log_discord_failure(
                 "Could not deliver a pending invite report page; page=%s of %s",
                 error,
-                delivered + 1,
+                page,
                 len(messages),
             )
             continue

@@ -3,7 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import aiohttp
 import discord
@@ -231,7 +231,11 @@ class TestPendingCommand:
                 id=1,
                 roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
             ),
-            response=SimpleNamespace(defer=AsyncMock()),
+            # A deferred interaction answers through its followup, which is
+            # what send_interaction_notice picks by asking.
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
@@ -253,7 +257,11 @@ class TestPendingCommand:
                 id=1,
                 roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
             ),
-            response=SimpleNamespace(defer=AsyncMock()),
+            # A deferred interaction answers through its followup, which is
+            # what send_interaction_notice picks by asking.
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
@@ -282,7 +290,11 @@ class TestPendingCommand:
                 id=1,
                 roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
             ),
-            response=SimpleNamespace(defer=AsyncMock()),
+            # A deferred interaction answers through its followup, which is
+            # what send_interaction_notice picks by asking.
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
@@ -310,7 +322,11 @@ class TestPendingCommand:
                 id=1,
                 roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
             ),
-            response=SimpleNamespace(defer=AsyncMock()),
+            # A deferred interaction answers through its followup, which is
+            # what send_interaction_notice picks by asking.
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
@@ -337,7 +353,11 @@ class TestPendingCommand:
                 id=1,
                 roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
             ),
-            response=SimpleNamespace(defer=AsyncMock()),
+            # A deferred interaction answers through its followup, which is
+            # what send_interaction_notice picks by asking.
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
@@ -390,6 +410,74 @@ class TestPendingCommand:
         # The page the refusal was carrying never reaches the console.
         assert "second page" not in caplog.text
 
+    async def test_a_refused_notice_does_not_raise(self) -> None:
+        # Discord can refuse the failure notice itself, and a guarded command
+        # must not turn into an unhandled error on the way to reporting one.
+        bot = configured_bot(
+            _build_pending_invite_messages=AsyncMock(
+                side_effect=aiohttp.ClientError("boom")
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
+            followup=SimpleNamespace(
+                send=AsyncMock(side_effect=forbidden_error(50013))
+            ),
+        )
+
+        await Gw2Bot._handle_pending_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+        )
+
+        interaction.followup.send.assert_awaited_once()
+
+    async def test_a_refused_page_is_logged_by_its_own_number(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The page is numbered by where it sits in the report: counting
+        # deliveries instead would log every failure as page 1 when Discord
+        # refuses them all.
+        bot = configured_bot(
+            _build_pending_invite_messages=AsyncMock(
+                return_value=["first page", "second page"]
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
+            followup=SimpleNamespace(
+                send=AsyncMock(
+                    side_effect=[
+                        forbidden_error(50013),
+                        forbidden_error(50013),
+                    ]
+                )
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            await Gw2Bot._handle_pending_command(
+                cast(Gw2Bot, bot),
+                cast(discord.Interaction, interaction),
+            )
+
+        assert "page=1 of 2" in caplog.text
+        assert "page=2 of 2" in caplog.text
+        assert "delivered=0 of 2" in caplog.text
+
     async def test_reports_when_nobody_is_waiting(self) -> None:
         bot = configured_bot(
             _build_pending_invite_messages=AsyncMock(return_value=[]),
@@ -399,7 +487,11 @@ class TestPendingCommand:
                 id=1,
                 roles=[SimpleNamespace(id=OFFICER_ROLE_ID)],
             ),
-            response=SimpleNamespace(defer=AsyncMock()),
+            # A deferred interaction answers through its followup, which is
+            # what send_interaction_notice picks by asking.
+            response=SimpleNamespace(
+                defer=AsyncMock(), is_done=MagicMock(return_value=True)
+            ),
             followup=SimpleNamespace(send=AsyncMock()),
         )
 
