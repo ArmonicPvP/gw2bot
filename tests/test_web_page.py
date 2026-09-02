@@ -1108,10 +1108,8 @@ class TestRosterPendingInvites:
     def test_an_unmatched_invite_says_so_instead_of_showing_a_blank(
         self,
     ) -> None:
-        assert (
-            'el("td", "discord unmatched", "No application matched")'
-            in ROSTER_PAGE
-        )
+        assert '"No application matched"' in ROSTER_PAGE
+        assert 'el("td", "discord unmatched", matched' in ROSTER_PAGE
         assert "table.changes td.unmatched { color: var(--muted); }" in (
             ROSTER_PAGE
         )
@@ -1130,6 +1128,17 @@ class TestRosterPendingInvites:
         # it on, rather than sending the reader to the README for it.
         assert 'var missing = payload.missing || [];' in ROSTER_PAGE
         assert 'return "/settings " + name;' in ROSTER_PAGE
+
+    def test_an_unread_forum_is_not_called_a_non_match(self) -> None:
+        # Every row comes back unmatched when the application forum could not
+        # be read, and saying "no application matched" there would assert
+        # something the server never established.
+        assert 'var matched = payload.matched !== false;' in ROSTER_PAGE
+        assert '"Could not be checked"' in ROSTER_PAGE
+        assert (
+            "The Trial application forum could not be read, so no invite "
+            in ROSTER_PAGE
+        )
 
     def test_the_discord_column_survives_the_phone_layout(self) -> None:
         # The membership table hides its "By" column on a phone, and this
@@ -1155,7 +1164,10 @@ class TestRosterPendingInvites:
         assert 'console.debug("roster pending invites:", action, count)' in (
             ROSTER_PAGE
         )
-        assert 'tracePending("render", invites.length)' in ROSTER_PAGE
+        assert (
+            'tracePending(matched ? "render" : "unmatched", invites.length)'
+            in ROSTER_PAGE
+        )
         assert 'tracePending("unavailable", missing.length)' in ROSTER_PAGE
 
 

@@ -993,11 +993,20 @@ class WebServer:
                 "invites=%s",
                 len(cached[0]),
             )
-            return self._json({"available": True, "invites": cached[0]})
+            # Only a list built from a forum that was read is ever cached, so
+            # a cache hit is always a matched one.
+            return self._json(
+                {"available": True, "invites": cached[0], "matched": True}
+            )
 
         try:
-            entries = await self._bot.build_pending_invite_entries()
-        except (aiohttp.ClientError, TimeoutError, RuntimeError) as exc:
+            pending = await self._bot.build_pending_invite_entries()
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            SQLAlchemyError,
+            RuntimeError,
+        ) as exc:
             LOGGER.warning(
                 "Could not serve pending invites; error_type=%s",
                 type(exc).__name__,
@@ -1007,7 +1016,7 @@ class WebServer:
         names = await self._display_names(
             {
                 entry.discord_user_id
-                for entry in entries
+                for entry in pending.entries
                 if entry.discord_user_id is not None
             }
         )
@@ -1025,20 +1034,33 @@ class WebServer:
                 ),
             }
             for entry in sorted(
-                entries, key=lambda entry: (entry.username.casefold(), entry.username)
+                pending.entries,
+                key=lambda entry: (entry.username.casefold(), entry.username),
             )
         ]
-        self._pending_invites = (
-            invites,
-            time.monotonic() + PENDING_INVITE_CACHE_TTL_SECONDS,
-        )
+        if pending.forum_read:
+            self._pending_invites = (
+                invites,
+                time.monotonic() + PENDING_INVITE_CACHE_TTL_SECONDS,
+            )
         LOGGER.debug(
             "Served pending invites; available=true cached=false invites=%s "
-            "matched=%s",
+            "matched=%s forum_read=%s",
             len(invites),
             sum(1 for invite in invites if invite["discord_name"] is not None),
+            pending.forum_read,
         )
-        return self._json({"available": True, "invites": invites})
+        # An unread forum leaves every account unmatched for a reason that has
+        # nothing to do with the accounts, so the page is told the difference
+        # rather than calling them all confirmed non-matches - and an answer
+        # that says nothing is not kept for the next five minutes either.
+        return self._json(
+            {
+                "available": True,
+                "invites": invites,
+                "matched": pending.forum_read,
+            }
+        )
 
     @staticmethod
     def _serialize_roster_event(event: RosterEvent) -> dict[str, object]:

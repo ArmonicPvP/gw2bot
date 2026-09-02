@@ -42,6 +42,11 @@ PENDING_INVITE_HEADER = (
     "**Pending invites**\n"
     "These users have been invited in-game but haven't accepted yet:\n"
 )
+PENDING_INVITE_UNMATCHED_NOTE = (
+    "The Trial application forum could not be read, so nobody above could be "
+    "matched to a Discord account. A missing mention here does not mean the "
+    "account never applied."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +541,8 @@ def format_before_mark_trial_report(
 
 def format_pending_invite_report(
     entries: Sequence[TrialMemberReportEntry],
+    *,
+    forum_read: bool = True,
 ) -> list[str]:
     """Format the pending-invite report.
 
@@ -545,6 +552,11 @@ def format_pending_invite_report(
     the invite holds no in-game rank the label could name, and no
     copy-and-paste block is attached - there is nothing to announce until the
     invite is accepted.
+
+    ``forum_read`` says whether the application forum could be searched. When
+    it could not, every line comes back without a mention for a reason that
+    has nothing to do with the accounts, so the report says so rather than
+    letting a missing mention read as "never applied".
     """
     if not entries:
         return []
@@ -554,10 +566,13 @@ def format_pending_invite_report(
         for entry in sorted_entries
     ]
     messages = _pack_trial_report_messages(PENDING_INVITE_HEADER, lines)
+    if not forum_read:
+        messages.append(PENDING_INVITE_UNMATCHED_NOTE)
     LOGGER.debug(
-        "Formatted %s pending invites into %s Discord messages",
+        "Formatted %s pending invites into %s Discord messages; forum_read=%s",
         len(sorted_entries),
         len(messages),
+        forum_read,
     )
     return messages
 

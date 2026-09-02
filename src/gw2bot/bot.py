@@ -60,6 +60,7 @@ from gw2bot.raffle.views import (
     RaffleTicketsListButton,
 )
 from gw2bot.pending_invites import (
+    PendingInvites,
     build_pending_invite_entries,
     build_pending_invite_messages,
     create_pending_command,
@@ -84,9 +85,11 @@ from gw2bot.trials.forum import (
     resolve_trial_forum_tags,
 )
 from gw2bot.trials.reports import (
+    TrialForumMatches,
     build_trial_report_messages,
     check_overdue_trials,
     poll_overdue_trials,
+    resolve_trial_forum_matches,
     resolve_trial_member_discord_statuses,
 )
 
@@ -544,7 +547,9 @@ class Gw2Bot(discord.Client):
                 "guild bank ledger and the stash poll that anchors it, the "
                 "overdue Trial member report, the "
                 "guild member count channel description and the roster "
-                "history it records, and guild member "
+                "history it records, the pending invite report behind "
+                "/pending and the roster page's Pending invites section, and "
+                "guild member "
                 "lookups in /raffle, /check and /track",
                 ", ".join(f"/settings {name}" for name in missing_gw2),
                 "is" if len(missing_gw2) == 1 else "are",
@@ -988,9 +993,7 @@ class Gw2Bot(discord.Client):
     async def _build_pending_invite_messages(self) -> list[str]:
         return await build_pending_invite_messages(self)
 
-    async def build_pending_invite_entries(
-        self,
-    ) -> list[TrialMemberReportEntry]:
+    async def build_pending_invite_entries(self) -> PendingInvites:
         """The pending in-game invites, matched to Discord where possible.
 
         Public because the roster page's "Pending invites" section is built
@@ -1045,6 +1048,12 @@ class Gw2Bot(discord.Client):
         usernames: list[str],
     ) -> list[TrialMemberReportEntry]:
         return await resolve_trial_member_discord_statuses(self, usernames)
+
+    async def _resolve_trial_forum_matches(
+        self,
+        usernames: list[str],
+    ) -> TrialForumMatches:
+        return await resolve_trial_forum_matches(self, usernames)
 
     async def _refresh_trial_forum_index(
         self,

@@ -3734,7 +3734,7 @@ button:focus-visible {
     console.debug("roster pending invites:", action, count);
   }
 
-  function renderPending(invites) {
+  function renderPending(invites, matched) {
     pendingBox.replaceChildren();
     pendingCount.textContent = invites.length
       ? "\\u2014 " + invites.length + " waiting"
@@ -3756,10 +3756,15 @@ button:focus-visible {
       row.appendChild(el("td", "name", invite.name));
       // An account nobody matched to an application post is named as
       // unmatched rather than left blank, so the empty cell cannot read as a
-      // Discord account with no name.
+      // Discord account with no name. When the application forum could not be
+      // read at all, nothing was matched for a reason that has nothing to do
+      // with the account, and saying "no application matched" there would be
+      // an assertion the server never made.
       row.appendChild(invite.discord_name
         ? el("td", "discord", invite.discord_name)
-        : el("td", "discord unmatched", "No application matched"));
+        : el("td", "discord unmatched", matched
+          ? "No application matched"
+          : "Could not be checked"));
       table.appendChild(row);
     });
     pendingBox.appendChild(table);
@@ -3798,9 +3803,13 @@ button:focus-visible {
           return;
         }
         var invites = payload.invites || [];
-        renderPending(invites);
-        pendingStatus.textContent = "";
-        tracePending("render", invites.length);
+        var matched = payload.matched !== false;
+        renderPending(invites, matched);
+        pendingStatus.textContent = matched
+          ? ""
+          : "The Trial application forum could not be read, so no invite " +
+            "could be matched to a Discord account.";
+        tracePending(matched ? "render" : "unmatched", invites.length);
       })
       .catch(function (error) {
         // renderPending() runs inside this chain, so a drawing fault lands

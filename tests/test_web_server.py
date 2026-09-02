@@ -36,7 +36,9 @@ from gw2bot.profit import (
 from gw2bot.profit.api import ProfitApiError
 from gw2bot.profit.service import MissingProfitApiKey
 from gw2bot.guild_members import TrialMemberReportEntry
+from gw2bot.pending_invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
+from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.web.server import WebServer
 
 from unittest.mock import AsyncMock, MagicMock
@@ -146,7 +148,9 @@ class FakeBot:
         # The roster page's pending-invite section needs the GW2 API, and the
         # bot answers for it the way every other optional feature does.
         self.gw2_api_enabled = True
-        self.build_pending_invite_entries = AsyncMock(return_value=[])
+        self.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites([], True)
+        )
         self._config = make_config()
 
     def get_guild(self, guild_id: int) -> FakeGuild | None:
@@ -1758,10 +1762,13 @@ class TestPendingInviteApi:
         headers = self._officer_headers(guild)
         guild.members[77] = member("Applicant")
         bot.build_pending_invite_entries = AsyncMock(
-            return_value=[
-                TrialMemberReportEntry("Zebra.9999"),
-                TrialMemberReportEntry("Apple.1234", discord_user_id=77),
-            ]
+            return_value=PendingInvites(
+                [
+                    TrialMemberReportEntry("Zebra.9999"),
+                    TrialMemberReportEntry("Apple.1234", discord_user_id=77),
+                ],
+                True,
+            )
         )
 
         response = await client.get("/api/pending", headers=headers)
@@ -1771,6 +1778,7 @@ class TestPendingInviteApi:
         # rather than an empty one.
         assert await response.json() == {
             "available": True,
+            "matched": True,
             "invites": [
                 {"name": "Apple.1234", "discord_name": "Applicant"},
                 {"name": "Zebra.9999", "discord_name": None},
@@ -1785,7 +1793,9 @@ class TestPendingInviteApi:
     ) -> None:
         headers = self._officer_headers(guild)
         bot.build_pending_invite_entries = AsyncMock(
-            return_value=[TrialMemberReportEntry("Apple.1234")]
+            return_value=PendingInvites(
+                [TrialMemberReportEntry("Apple.1234")], True
+            )
         )
 
         first = await client.get("/api/pending", headers=headers)
@@ -1832,8 +1842,8 @@ class TestPendingInviteApi:
         headers = self._officer_headers(guild)
         bot.build_pending_invite_entries = AsyncMock(
             side_effect=[
-                [TrialMemberReportEntry("Old.1234")],
-                [TrialMemberReportEntry("New.5678")],
+                PendingInvites([TrialMemberReportEntry("Old.1234")], True),
+                PendingInvites([TrialMemberReportEntry("New.5678")], True),
             ]
         )
 
@@ -1874,7 +1884,7 @@ class TestPendingInviteApi:
         bot.build_pending_invite_entries = AsyncMock(
             side_effect=[
                 aiohttp.ClientError("boom"),
-                [TrialMemberReportEntry("Apple.1234")],
+                PendingInvites([TrialMemberReportEntry("Apple.1234")], True),
             ]
         )
 
@@ -1884,7 +1894,61 @@ class TestPendingInviteApi:
         assert failed.status == 503
         assert await recovered.json() == {
             "available": True,
+            "matched": True,
             "invites": [{"name": "Apple.1234", "discord_name": None}],
+        }
+
+    async def test_a_database_failure_is_reported_rather_than_raised(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # The Trial forum index the match reads lives in SQLite, and a locked
+        # database would otherwise reach the reader as an uncontrolled 500.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=SQLAlchemyError("database is locked")
+        )
+
+        response = await client.get("/api/pending", headers=headers)
+
+        assert response.status == 503
+        assert await response.json() == {"error": "unavailable"}
+
+    async def test_an_unread_forum_is_neither_claimed_nor_cached(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # Every entry comes back unmatched when Discord refuses the forum,
+        # which is not evidence that nobody applied - so the page is told, and
+        # the answer is not kept for the next five minutes.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            side_effect=[
+                PendingInvites([TrialMemberReportEntry("Apple.1234")], False),
+                PendingInvites(
+                    [TrialMemberReportEntry("Apple.1234", discord_user_id=77)],
+                    True,
+                ),
+            ]
+        )
+        guild.members[77] = member("Applicant")
+
+        unmatched = await client.get("/api/pending", headers=headers)
+        rebuilt = await client.get("/api/pending", headers=headers)
+
+        assert await unmatched.json() == {
+            "available": True,
+            "matched": False,
+            "invites": [{"name": "Apple.1234", "discord_name": None}],
+        }
+        assert await rebuilt.json() == {
+            "available": True,
+            "matched": True,
+            "invites": [{"name": "Apple.1234", "discord_name": "Applicant"}],
         }
 
     async def test_failure_logging_omits_the_upstream_detail(

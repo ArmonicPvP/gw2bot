@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
 import discord
 from discord import app_commands
+from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import user_has_role
+from gw2bot.discord_utils import log_discord_failure, user_has_role
 from gw2bot.guild_members import (
     TrialMemberReportEntry,
     format_pending_invite_report,
@@ -21,9 +23,21 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
-async def build_pending_invite_entries(
-    bot: Gw2Bot,
-) -> list[TrialMemberReportEntry]:
+@dataclass(frozen=True, slots=True)
+class PendingInvites:
+    """The accounts still holding an invite, and how well they were matched.
+
+    ``forum_read`` is False when the Trial application forum could not be
+    read. Every entry is unmatched then, which says nothing about whether the
+    account applied, so a caller must not report those as confirmed
+    non-matches or keep them as an answer.
+    """
+
+    entries: list[TrialMemberReportEntry]
+    forum_read: bool
+
+
+async def build_pending_invite_entries(bot: Gw2Bot) -> PendingInvites:
     """Every account invited in-game that has not accepted yet.
 
     The names come from the same guild member list the member count topic is
@@ -39,23 +53,32 @@ async def build_pending_invite_entries(
     usernames = get_pending_invite_members(members)
     if not usernames:
         LOGGER.debug(
-            "Built pending invite list; members=%s pending=0 matched=0",
+            "Built pending invite list; members=%s pending=0 matched=0 "
+            "forum_read=true",
             len(members),
         )
-        return []
-    entries = await bot._resolve_trial_member_discord_statuses(usernames)
+        return PendingInvites([], True)
+    matches = await bot._resolve_trial_forum_matches(usernames)
     LOGGER.debug(
-        "Built pending invite list; members=%s pending=%s matched=%s",
+        "Built pending invite list; members=%s pending=%s matched=%s "
+        "forum_read=%s",
         len(members),
-        len(entries),
-        sum(1 for entry in entries if entry.discord_user_id is not None),
+        len(matches.entries),
+        sum(
+            1
+            for entry in matches.entries
+            if entry.discord_user_id is not None
+        ),
+        matches.forum_read,
     )
-    return entries
+    return PendingInvites(matches.entries, matches.forum_read)
 
 
 async def build_pending_invite_messages(bot: Gw2Bot) -> list[str]:
-    entries = await build_pending_invite_entries(bot)
-    messages = format_pending_invite_report(entries)
+    pending = await build_pending_invite_entries(bot)
+    messages = format_pending_invite_report(
+        pending.entries, forum_read=pending.forum_read
+    )
     LOGGER.debug("Formatted pending invite report into %s messages", len(messages))
     return messages
 
@@ -103,7 +126,11 @@ async def handle_pending_command(
     await interaction.response.defer(ephemeral=True)
     try:
         messages = await bot._build_pending_invite_messages()
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (
+        aiohttp.ClientError,
+        asyncio.TimeoutError,
+        SQLAlchemyError,
+    ) as exc:
         # The interaction is already deferred, so an unhandled failure would
         # leave the officer looking at a reply that never arrives. Only the
         # exception's type is logged; no request, response or account reaches
@@ -129,5 +156,24 @@ async def handle_pending_command(
         "Pending invite command delivering %s messages privately",
         len(messages),
     )
+    delivered = 0
     for message in messages:
-        await interaction.followup.send(message, ephemeral=True)
+        try:
+            await interaction.followup.send(message, ephemeral=True)
+        except discord.DiscordException as error:
+            # One refused page must not swallow the rest of the report, and
+            # the refusal is logged by its sanitized identity rather than by
+            # the page it was carrying.
+            log_discord_failure(
+                "Could not deliver a pending invite report page; page=%s of %s",
+                error,
+                delivered + 1,
+                len(messages),
+            )
+            continue
+        delivered += 1
+    LOGGER.debug(
+        "Pending invite command delivery completed; delivered=%s of %s",
+        delivered,
+        len(messages),
+    )

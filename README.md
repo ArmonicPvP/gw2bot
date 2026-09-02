@@ -1067,10 +1067,14 @@ the accounts behind it.
   `Accepted` application forum index the
   [Trial reports](#overdue-trial-member-report) use, so an invitee who applied
   is named by their mention; one nobody matched is listed by their account name
-  alone. It requires GW2 Leadership role `1317638909735342201`, replies
+  alone. When the application forum itself could not be read, every account
+  comes back without a mention for a reason that has nothing to do with them,
+  and the report says so rather than letting the absence read as "never
+  applied". It requires GW2 Leadership role `1317638909735342201`, replies
   "No pending invites to report." when nobody is waiting, and
   "Could not read the guild's pending invites. Try again later." when the GW2
-  API cannot be reached.
+  API or the database cannot be reached. A page Discord refuses is logged and
+  skipped, so the pages behind it are still delivered.
 
   ```text
   Pending invites
@@ -1441,7 +1445,10 @@ Below the changes, a **Pending invites** section lists the accounts that have
 been invited in-game and have not accepted yet — the `y` of the `x/500 (y
 pending)` channel description, named rather than counted. Each row carries the
 account name and the display name of the Discord account whose `Accepted`
-application post matched it, or "No application matched" when none did. The
+application post matched it, or "No application matched" when none did. If the
+application forum could not be read at all, the rows say "Could not be checked"
+instead and that answer is not cached, because an unread forum is not evidence
+that nobody applied. The
 list is the guild as it stands now rather than a window of history, so it is
 loaded once with the page and the range buttons do not change it. It is built
 from the GW2 API and the application forum index, which is why one build is

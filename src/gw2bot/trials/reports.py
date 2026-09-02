@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
@@ -175,30 +176,55 @@ async def check_overdue_trials(bot: Gw2Bot, now: datetime | None = None) -> bool
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class TrialForumMatches:
+    """What one pass over the application forum could establish.
+
+    ``forum_read`` is deliberately kept beside the entries. Discord refusing
+    the forum, or the channel not being one, brings every entry back unmatched
+    - and an unmatched entry there proves nothing about whether the account
+    ever applied. A caller that tells a reader "no application matched" has to
+    be able to tell that apart from a forum that was actually searched.
+    """
+
+    entries: list[TrialMemberReportEntry]
+    forum_read: bool
+
+
 async def resolve_trial_member_discord_statuses(
     bot: Gw2Bot,
     usernames: list[str],
 ) -> list[TrialMemberReportEntry]:
+    """The matched entries alone, for the reports that only list names."""
+    return (await resolve_trial_forum_matches(bot, usernames)).entries
+
+
+async def resolve_trial_forum_matches(
+    bot: Gw2Bot,
+    usernames: list[str],
+) -> TrialForumMatches:
     forum_channel_id = bot._config.trial_forum_channel_id
     trial_role_id = bot._config.trial_role_id
     sunborne_role_id = bot._config.sunborne_role_id
     entries = [TrialMemberReportEntry(username) for username in usernames]
     unresolved = {username.casefold(): username for username in usernames}
     if not unresolved:
-        return entries
+        # Nothing was asked about, so nothing is unmatched: an empty answer is
+        # as complete as a full one.
+        return TrialForumMatches(entries, True)
 
     LOGGER.debug("Resolving %s Trial members from application forum", len(unresolved))
     try:
         forum = await bot.fetch_channel(forum_channel_id)
     except discord.DiscordException as error:
         log_discord_failure("Could not access the Trial application forum", error)
-        return entries
+        return TrialForumMatches(entries, False)
     if not hasattr(forum, "archived_threads") or not hasattr(forum, "guild"):
         LOGGER.error(
             "Trial application channel %s is not a forum channel",
             forum_channel_id,
         )
-        return entries
+        return TrialForumMatches(entries, False)
     forum = cast(discord.ForumChannel, forum)
 
     await bot._refresh_trial_forum_index(forum)
@@ -289,4 +315,7 @@ async def resolve_trial_member_discord_statuses(
         len(resolved),
         len(unresolved),
     )
-    return [resolved.get(entry.username.casefold(), entry) for entry in entries]
+    return TrialForumMatches(
+        [resolved.get(entry.username.casefold(), entry) for entry in entries],
+        True,
+    )
