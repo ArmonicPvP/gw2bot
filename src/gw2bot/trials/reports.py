@@ -202,7 +202,16 @@ async def resolve_trial_member_discord_statuses(
 async def resolve_trial_forum_matches(
     bot: Gw2Bot,
     usernames: list[str],
+    *,
+    resolve_status: bool = True,
 ) -> TrialForumMatches:
+    """Match accounts to their application posts.
+
+    ``resolve_status`` reads each matched author's current Discord rank, which
+    costs a member fetch apiece on a bot without the members intent. A caller
+    that only wants the match - the pending invites do, and name the account
+    themselves - passes False and gets entries without a status.
+    """
     forum_channel_id = bot._config.trial_forum_channel_id
     trial_role_id = bot._config.trial_role_id
     sunborne_role_id = bot._config.sunborne_role_id
@@ -227,7 +236,9 @@ async def resolve_trial_forum_matches(
         return TrialForumMatches(entries, False)
     forum = cast(discord.ForumChannel, forum)
 
-    await bot._refresh_trial_forum_index(forum)
+    # A refusal part-way through the walk leaves the index missing posts, so
+    # a match that is absent from it proves nothing about the account.
+    forum_read = await bot._refresh_trial_forum_index(forum)
     index = bot._raffle_store.get_trial_forum_index()
     LOGGER.debug(
         "Matching %s unresolved Trial members against %s indexed forum posts",
@@ -239,6 +250,8 @@ async def resolve_trial_forum_matches(
     owner_statuses: dict[int, str | None] = {}
 
     async def resolve_owner_status(owner_id: int) -> str | None:
+        if not resolve_status:
+            return None
         if owner_id in owner_statuses:
             return owner_statuses[owner_id]
 
@@ -311,11 +324,14 @@ async def resolve_trial_forum_matches(
         )
 
     LOGGER.debug(
-        "Forum index resolution completed; resolved=%s unresolved=%s",
+        "Forum index resolution completed; resolved=%s unresolved=%s "
+        "statuses=%s forum_read=%s",
         len(resolved),
         len(unresolved),
+        resolve_status,
+        forum_read,
     )
     return TrialForumMatches(
         [resolved.get(entry.username.casefold(), entry) for entry in entries],
-        True,
+        forum_read,
     )

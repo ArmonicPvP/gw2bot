@@ -1807,6 +1807,34 @@ class TestPendingInviteApi:
         # a second page load inside the TTL must not pay for it again.
         bot.build_pending_invite_entries.assert_awaited_once()
 
+    async def test_an_unresolved_name_is_not_cached_as_unknown(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # A name Discord could not answer for is deliberately not cached by
+        # the name lookup, so caching the payload built from it would pin the
+        # applicant to "Unknown" for the rest of the TTL anyway.
+        headers = self._officer_headers(guild)
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [TrialMemberReportEntry("Apple.1234", discord_user_id=77)],
+                True,
+            )
+        )
+
+        unknown = await client.get("/api/pending", headers=headers)
+        guild.members[77] = member("Applicant")
+        recovered = await client.get("/api/pending", headers=headers)
+
+        assert (await unknown.json())["invites"] == [
+            {"name": "Apple.1234", "discord_name": "Unknown"}
+        ]
+        assert (await recovered.json())["invites"] == [
+            {"name": "Apple.1234", "discord_name": "Applicant"}
+        ]
+
     async def test_reports_the_section_off_without_the_gw2_settings(
         self,
         client: TestClient,

@@ -58,7 +58,13 @@ async def build_pending_invite_entries(bot: Gw2Bot) -> PendingInvites:
             len(members),
         )
         return PendingInvites([], True)
-    matches = await bot._resolve_trial_forum_matches(usernames)
+    # Only the match matters here: the report drops the in-game status label
+    # an invited account has no rank for, and the roster page names the
+    # matched Discord account itself. Asking for the status would cost a
+    # member fetch per matched invite for a value nothing reads.
+    matches = await bot._resolve_trial_forum_matches(
+        usernames, resolve_status=False
+    )
     LOGGER.debug(
         "Built pending invite list; members=%s pending=%s matched=%s "
         "forum_read=%s",

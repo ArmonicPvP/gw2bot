@@ -1052,14 +1052,18 @@ class Gw2Bot(discord.Client):
     async def _resolve_trial_forum_matches(
         self,
         usernames: list[str],
+        *,
+        resolve_status: bool = True,
     ) -> TrialForumMatches:
-        return await resolve_trial_forum_matches(self, usernames)
+        return await resolve_trial_forum_matches(
+            self, usernames, resolve_status=resolve_status
+        )
 
     async def _refresh_trial_forum_index(
         self,
         forum: discord.ForumChannel,
-    ) -> None:
-        await refresh_trial_forum_index(self, forum)
+    ) -> bool:
+        return await refresh_trial_forum_index(self, forum)
 
     async def _poll_guild_log(self) -> None:
         await guild_log.poll_guild_log(self)

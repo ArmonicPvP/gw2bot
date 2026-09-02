@@ -1038,17 +1038,25 @@ class WebServer:
                 key=lambda entry: (entry.username.casefold(), entry.username),
             )
         ]
-        if pending.forum_read:
+        # A name Discord could not answer for comes back as UNKNOWN_NAME, and
+        # _display_names deliberately does not cache that so the next request
+        # retries. Caching the payload built from it would undo exactly that,
+        # pinning a matched applicant to "Unknown" for the rest of the TTL.
+        named = all(
+            invite["discord_name"] != UNKNOWN_NAME for invite in invites
+        )
+        if pending.forum_read and named:
             self._pending_invites = (
                 invites,
                 time.monotonic() + PENDING_INVITE_CACHE_TTL_SECONDS,
             )
         LOGGER.debug(
             "Served pending invites; available=true cached=false invites=%s "
-            "matched=%s forum_read=%s",
+            "matched=%s forum_read=%s named=%s",
             len(invites),
             sum(1 for invite in invites if invite["discord_name"] is not None),
             pending.forum_read,
+            named,
         )
         # An unread forum leaves every account unmatched for a reason that has
         # nothing to do with the accounts, so the page is told the difference

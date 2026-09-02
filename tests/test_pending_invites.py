@@ -40,9 +40,14 @@ def api_bot(members: list[dict[str, object]], **attributes: object):
     attributes.setdefault(
         "_resolve_trial_forum_matches",
         AsyncMock(
-            side_effect=lambda usernames: TrialForumMatches(
-                [TrialMemberReportEntry(username) for username in usernames],
-                True,
+            side_effect=lambda usernames, resolve_status=True: (
+                TrialForumMatches(
+                    [
+                        TrialMemberReportEntry(username)
+                        for username in usernames
+                    ],
+                    True,
+                )
             )
         ),
     )
@@ -69,8 +74,10 @@ class TestPendingInviteEntries:
 
         assert pending.entries == [TrialMemberReportEntry("Waiting.1234")]
         assert pending.forum_read
+        # Only the match is asked for: the in-game status label an invited
+        # account has no rank for would cost a member fetch apiece.
         bot._resolve_trial_forum_matches.assert_awaited_once_with(
-            ["Waiting.1234"]
+            ["Waiting.1234"], resolve_status=False
         )
 
     async def test_does_not_touch_discord_when_nobody_is_waiting(self) -> None:
