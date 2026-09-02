@@ -1069,9 +1069,9 @@ the accounts behind it.
   is named by their mention; one nobody matched is listed by their account name
   alone. Only the match is looked up: an invited account holds no in-game rank
   the Trial reports' status label could name, so the member fetch that resolves
-  one is skipped. When the application forum could not be read - refused
-  outright, or only part-way through its threads - every account comes back
-  without a mention for a reason that has nothing to do with them, and the
+  one is skipped. When the application forum could not be read in full -
+  refused outright, or only part-way through its threads - a mention may be
+  missing only because the post naming it was one of the unread ones, and the
   report says so rather than letting the absence read as "never applied". It requires GW2 Leadership role `1317638909735342201`, replies
   "No pending invites to report." when nobody is waiting, and
   "Could not read the guild's pending invites. Try again later." when the GW2
@@ -1448,11 +1448,12 @@ been invited in-game and have not accepted yet — the `y` of the `x/500 (y
 pending)` channel description, named rather than counted. Each row carries the
 account name and the display name of the Discord account whose `Accepted`
 application post matched it, or "No application matched" when none did. If the
-application forum could not be read in full, the rows say "Could not be
-checked" instead and that answer is not cached, because an unread forum is not
-evidence that nobody applied. A Discord name the API could not answer for is
-not cached either, so it is retried rather than held at "Unknown" for the rest
-of the window. The
+application forum could not be read in full, the rows without a name say
+"Could not be checked" instead - a name that is shown was matched either way -
+and that answer is not cached, because an unread post is not evidence that
+nobody applied. A Discord name the API could not answer for is not cached
+either, so it is retried rather than held at "Unknown" for the rest of the
+window. The
 list is the guild as it stands now rather than a window of history, so it is
 loaded once with the page and the range buttons do not change it. It is built
 from the GW2 API and the application forum index, which is why one build is

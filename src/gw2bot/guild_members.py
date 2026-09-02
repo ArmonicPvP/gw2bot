@@ -43,9 +43,9 @@ PENDING_INVITE_HEADER = (
     "These users have been invited in-game but haven't accepted yet:\n"
 )
 PENDING_INVITE_UNMATCHED_NOTE = (
-    "The Trial application forum could not be read, so nobody above could be "
-    "matched to a Discord account. A missing mention here does not mean the "
-    "account never applied."
+    "The Trial application forum could not be read in full. An account above "
+    "with no mention beside it may still have applied - the post that names "
+    "it is one of the ones that could not be read."
 )
 
 
@@ -553,10 +553,11 @@ def format_pending_invite_report(
     copy-and-paste block is attached - there is nothing to announce until the
     invite is accepted.
 
-    ``forum_read`` says whether the application forum could be searched. When
-    it could not, every line comes back without a mention for a reason that
-    has nothing to do with the accounts, so the report says so rather than
-    letting a missing mention read as "never applied".
+    ``forum_read`` says whether the whole application forum could be searched.
+    A match found in a partial read is still a real one, but a line without a
+    mention may be missing it only because the post that names it could not be
+    read, so the report says so rather than letting a missing mention read as
+    "never applied".
     """
     if not entries:
         return []

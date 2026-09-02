@@ -3756,10 +3756,11 @@ button:focus-visible {
       row.appendChild(el("td", "name", invite.name));
       // An account nobody matched to an application post is named as
       // unmatched rather than left blank, so the empty cell cannot read as a
-      // Discord account with no name. When the application forum could not be
-      // read at all, nothing was matched for a reason that has nothing to do
-      // with the account, and saying "no application matched" there would be
-      // an assertion the server never made.
+      // Discord account with no name. When the forum could not be read in
+      // full, a row without a name may be missing it only because the post
+      // naming it was one of the unread ones, and "no application matched"
+      // would be an assertion the server never made. A name that is shown was
+      // matched either way.
       row.appendChild(invite.discord_name
         ? el("td", "discord", invite.discord_name)
         : el("td", "discord unmatched", matched
@@ -3807,8 +3808,8 @@ button:focus-visible {
         renderPending(invites, matched);
         pendingStatus.textContent = matched
           ? ""
-          : "The Trial application forum could not be read, so no invite " +
-            "could be matched to a Discord account.";
+          : "The Trial application forum could not be read in full, so an " +
+            "account without a Discord name here may still have applied.";
         tracePending(matched ? "render" : "unmatched", invites.length);
       })
       .catch(function (error) {

@@ -1136,7 +1136,7 @@ class TestRosterPendingInvites:
         assert 'var matched = payload.matched !== false;' in ROSTER_PAGE
         assert '"Could not be checked"' in ROSTER_PAGE
         assert (
-            "The Trial application forum could not be read, so no invite "
+            "The Trial application forum could not be read in full, so an "
             in ROSTER_PAGE
         )
 

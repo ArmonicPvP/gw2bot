@@ -148,9 +148,10 @@ class TestPendingInviteEntries:
 
         assert not pending.forum_read
         assert messages[-1] == (
-            "The Trial application forum could not be read, so nobody above "
-            "could be matched to a Discord account. A missing mention here "
-            "does not mean the account never applied."
+            "The Trial application forum could not be read in full. An "
+            "account above with no mention beside it may still have applied "
+            "- the post that names it is one of the ones that could not be "
+            "read."
         )
 
     async def test_logging_names_no_account(

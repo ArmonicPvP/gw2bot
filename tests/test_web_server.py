@@ -1835,6 +1835,33 @@ class TestPendingInviteApi:
             {"name": "Apple.1234", "discord_name": "Applicant"}
         ]
 
+    async def test_a_member_actually_called_unknown_is_still_cached(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # Failure is carried by the resolved names themselves, not inferred
+        # from the rendered name, so a member whose display name really is
+        # "Unknown" does not cost a rebuild on every page load.
+        headers = self._officer_headers(guild)
+        guild.members[77] = member("Unknown")
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [TrialMemberReportEntry("Apple.1234", discord_user_id=77)],
+                True,
+            )
+        )
+
+        first = await client.get("/api/pending", headers=headers)
+        second = await client.get("/api/pending", headers=headers)
+
+        assert (await first.json())["invites"] == [
+            {"name": "Apple.1234", "discord_name": "Unknown"}
+        ]
+        assert await second.json() == await first.json()
+        bot.build_pending_invite_entries.assert_awaited_once()
+
     async def test_reports_the_section_off_without_the_gw2_settings(
         self,
         client: TestClient,

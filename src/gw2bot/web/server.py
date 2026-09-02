@@ -1038,12 +1038,16 @@ class WebServer:
                 key=lambda entry: (entry.username.casefold(), entry.username),
             )
         ]
-        # A name Discord could not answer for comes back as UNKNOWN_NAME, and
-        # _display_names deliberately does not cache that so the next request
-        # retries. Caching the payload built from it would undo exactly that,
-        # pinning a matched applicant to "Unknown" for the rest of the TTL.
+        # A name Discord could not answer for is absent from the resolved
+        # names, and _display_names deliberately does not cache it so the next
+        # request retries. Caching the payload built from it would undo
+        # exactly that, pinning a matched applicant to "Unknown" for the rest
+        # of the TTL. The answer's own membership says which ids resolved, so
+        # a member genuinely called "Unknown" is not mistaken for a failure.
         named = all(
-            invite["discord_name"] != UNKNOWN_NAME for invite in invites
+            entry.discord_user_id in names
+            for entry in pending.entries
+            if entry.discord_user_id is not None
         )
         if pending.forum_read and named:
             self._pending_invites = (
@@ -1257,15 +1261,19 @@ class WebServer:
         for user_id, name in zip(missing, names, strict=True):
             if name is None:
                 # A failed lookup is never cached, so one transient Discord
-                # error cannot pin a leader to "Unknown" for the whole TTL.
-                resolved[user_id] = UNKNOWN_NAME
+                # error cannot pin a leader to "Unknown" for the whole TTL -
+                # and it is left out of the answer rather than rendered as
+                # "Unknown" in it, so a caller can tell a name that could not
+                # be read from a member actually called that. Callers
+                # substitute UNKNOWN_NAME for an id that is missing here.
                 continue
             self._names[user_id] = (name, time.monotonic())
             resolved[user_id] = name
         LOGGER.debug(
-            "Resolved leader display names; cached=%s fetched=%s",
-            len(resolved) - len(missing),
+            "Resolved display names; cached=%s requested=%s resolved=%s",
+            len(resolved) - sum(1 for user_id in missing if user_id in resolved),
             len(missing),
+            len(resolved),
         )
         return resolved
 
