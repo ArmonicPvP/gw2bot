@@ -183,16 +183,21 @@ class ProfitCommands(app_commands.Group):
         name="view",
         description="Open your Trading Post profit dashboard",
     )
-    @app_commands.describe(days="Number of days to report, from 1 through 90")
+    @app_commands.describe(
+        days=(
+            "Days to report, from 1 through 90; leave empty to reopen your "
+            "last window"
+        )
+    )
     async def view(
         self,
         interaction: discord.Interaction,
-        days: app_commands.Range[int, 1, 90] = 30,
+        days: app_commands.Range[int, 1, 90] | None = None,
     ) -> None:
         LOGGER.debug(
             "Profit dashboard command invoked; user_id=%s days=%s",
             interaction.user.id,
-            days,
+            "remembered" if days is None else days,
         )
         if (
             not self._bot._config.web_calendar_enabled
@@ -208,15 +213,20 @@ class ProfitCommands(app_commands.Group):
                 "configure the four web `/settings` values first.",
             )
             return
-        url = (
-            f"{self._bot._config.web_base_url.rstrip('/')}/profit?days={days}"
+        # An omitted window must not name one. The dashboard remembers the
+        # window a member last loaded, and a link carrying days=30 would
+        # silently replace their choice with the default every time they ran
+        # this command without the argument.
+        base = f"{self._bot._config.web_base_url.rstrip('/')}/profit"
+        url = base if days is None else f"{base}?days={days}"
+        label = (
+            "Open your profit dashboard"
+            if days is None
+            else f"Open your {days}-day profit dashboard"
         )
-        await send_interaction_notice(
-            interaction,
-            f"[Open your {days}-day profit dashboard]({url})",
-        )
+        await send_interaction_notice(interaction, f"[{label}]({url})")
         LOGGER.debug(
             "Delivered profit dashboard link; user_id=%s days=%s",
             interaction.user.id,
-            days,
+            "remembered" if days is None else days,
         )

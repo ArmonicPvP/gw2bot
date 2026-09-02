@@ -193,6 +193,13 @@ class WebServer:
                 web.get("/api/gold", self._gold_data),
                 web.get("/profit", self._profit),
                 web.get("/api/profit", self._profit_data),
+                # POST, not GET: it changes stored member state, and the
+                # SameSite=Lax session cookie is withheld from a cross-site
+                # POST, so no third-party page can fire it.
+                web.post(
+                    "/api/profit/exclusions",
+                    self._profit_exclusion,
+                ),
             ]
         )
 
@@ -699,21 +706,30 @@ class WebServer:
         return self._html(PROFIT_PAGE)
 
     async def _profit_data(self, request: web.Request) -> web.StreamResponse:
-        raw_days = request.query.get("days", "30")
-        try:
-            days = int(raw_days)
-        except ValueError:
-            LOGGER.debug("Rejected profit report; reason=days-malformed")
-            return self._json({"error": "invalid days"}, status=400)
-        if not 1 <= days <= 90:
-            LOGGER.debug("Rejected profit report; reason=days-range")
-            return self._json({"error": "invalid days"}, status=400)
+        # The window is optional now. A page opened without one is served the
+        # window the member last chose, so the dashboard reopens where they
+        # left it instead of falling back to the 30-day default.
+        raw_days = request.query.get("days")
+        requested_days: int | None = None
+        if raw_days is not None:
+            try:
+                requested_days = int(raw_days)
+            except ValueError:
+                LOGGER.debug("Rejected profit report; reason=days-malformed")
+                return self._json({"error": "invalid days"}, status=400)
+            if not 1 <= requested_days <= 90:
+                LOGGER.debug("Rejected profit report; reason=days-range")
+                return self._json({"error": "invalid days"}, status=400)
         service = self._bot.profit_service
         if service is None:
             LOGGER.error("Could not serve profit report; service=unavailable")
             return self._json({"error": "unavailable"}, status=503)
         session = request[SESSION_KEY]
         try:
+            days = await service.resolve_report_days(
+                session.user_id,
+                requested_days,
+            )
             report = await service.load_report(session.user_id, days)
         except MissingProfitApiKey:
             LOGGER.debug(
@@ -737,14 +753,74 @@ class WebServer:
             return self._json({"error": "report unavailable"}, status=500)
         payload = serialize_profit_report(report)
         LOGGER.debug(
-            "Served profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s",
+            "Served profit report; user_id=%s days=%s remembered_window=%s "
+            "realized_items=%s unrealized_items=%s open_order_rows=%s",
             session.user_id,
             days,
+            requested_days is None,
             len(report.realized.items),
             len(report.unrealized.items),
+            len(report.open_buy_orders),
         )
         return self._json(payload)
+
+    async def _profit_exclusion(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        session = request[SESSION_KEY]
+        try:
+            body = await request.json()
+        except ValueError:
+            LOGGER.debug(
+                "Rejected profit order exclusion; user_id=%s reason=malformed",
+                session.user_id,
+            )
+            return self._json({"error": "invalid request"}, status=400)
+        item_id = body.get("item_id") if isinstance(body, dict) else None
+        excluded = body.get("excluded") if isinstance(body, dict) else None
+        if (
+            not isinstance(item_id, int)
+            or isinstance(item_id, bool)
+            or item_id <= 0
+            or not isinstance(excluded, bool)
+        ):
+            LOGGER.debug(
+                "Rejected profit order exclusion; user_id=%s reason=fields",
+                session.user_id,
+            )
+            return self._json({"error": "invalid request"}, status=400)
+        service = self._bot.profit_service
+        if service is None:
+            LOGGER.error(
+                "Could not store profit order exclusion; service=unavailable"
+            )
+            return self._json({"error": "unavailable"}, status=503)
+        try:
+            changed = await service.set_order_exclusion(
+                session.user_id,
+                item_id,
+                excluded,
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not store profit order exclusion; user_id=%s "
+                "error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "exclusion unavailable"}, status=500)
+        LOGGER.info(
+            "Stored profit order exclusion; user_id=%s item_id=%s "
+            "excluded=%s changed=%s",
+            session.user_id,
+            item_id,
+            excluded,
+            changed,
+        )
+        return self._json(
+            {"item_id": item_id, "excluded": excluded, "changed": changed}
+        )
 
     async def _food(self, request: web.Request) -> web.StreamResponse:
         denied = await self._require_food_access(request)

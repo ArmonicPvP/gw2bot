@@ -26,8 +26,10 @@ from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
 from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
 from gw2bot.profit import (
     DayProfit,
+    DeliveryItem,
     ItemProfit,
     MarketPrice,
+    OpenBuyOrder,
     ProfitReport,
     RealizedProfit,
     UnrealizedItemProfit,
@@ -76,9 +78,25 @@ def profit_report(days: int = 30) -> ProfitReport:
             total_projected_profit=155,
         ),
         unclaimed_coins=12_345,
-        unclaimed_items=7,
-        item_names={1: "Realized Item", 2: "Listed Item"},
-        market_prices={1: MarketPrice(100, 200)},
+        unclaimed_items=(DeliveryItem(3, 7),),
+        item_names={
+            1: "Realized Item",
+            2: "Listed Item",
+            3: "Delivered Item",
+            4: "Ordered Item",
+            5: "Excluded Item",
+        },
+        market_prices={1: MarketPrice(100, 200), 4: MarketPrice(80, 160)},
+        open_buy_orders=(
+            OpenBuyOrder(
+                item_id=4,
+                unit_price=70,
+                quantity=10,
+                order_count=2,
+                placed_at=window_end,
+            ),
+        ),
+        excluded_order_items=frozenset({5}),
     )
 
 
@@ -141,7 +159,11 @@ class FakeBot:
         self.event_timezone = ZoneInfo("UTC")
         self.raffle_store = raffle_store
         self.profit_service = SimpleNamespace(
-            load_report=AsyncMock(return_value=profit_report())
+            load_report=AsyncMock(return_value=profit_report()),
+            resolve_report_days=AsyncMock(
+                side_effect=lambda user_id, days: 30 if days is None else days
+            ),
+            set_order_exclusion=AsyncMock(return_value=True),
         )
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
@@ -948,6 +970,7 @@ class TestProfitPage:
         assert "Realized Profit by Item" in page
         assert "Realized Profit by Day" in page
         assert "Unrealized Profit" in page
+        assert "Open Orders" in page
         assert "Unclaimed Trading Post" in page
 
     async def test_api_loads_only_the_signed_in_members_report(
@@ -984,11 +1007,192 @@ class TestProfitPage:
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
         assert payload["unrealized"]["roi_percent"] == 155
         assert payload["delivery"]["coins"] == 12_345
-        assert payload["delivery"]["items"] == 7
+        assert payload["delivery"]["items"] == [
+            {"item_id": 3, "name": "Delivered Item", "quantity": 7}
+        ]
+        assert payload["open_orders"]["available"] is True
+        assert payload["open_orders"]["orders"] == [
+            {
+                "item_id": 4,
+                "name": "Ordered Item",
+                "quantity": 10,
+                "order_count": 2,
+                "unit_price": 70,
+                "cost": 700,
+                "buy_price": 80,
+                "sell_price": 160,
+                "net_revenue": 1_360,
+                "profit": 66,
+                "total_profit": 660,
+                "roi_percent": pytest.approx(94.285, rel=1e-3),
+                "has_order": True,
+            }
+        ]
+        assert payload["open_orders"]["excluded"] == [
+            {
+                "item_id": 5,
+                "name": "Excluded Item",
+                "quantity": 0,
+                "order_count": 0,
+                "unit_price": None,
+                "cost": 0,
+                "buy_price": None,
+                "sell_price": None,
+                "net_revenue": None,
+                "profit": None,
+                "total_profit": None,
+                "roi_percent": None,
+                "has_order": False,
+            }
+        ]
+        # An item priced only because it has an open order is not a pick.
+        assert [row["item_id"] for row in payload["picks"]] == [1]
+        bot.profit_service.resolve_report_days.assert_awaited_once_with(
+            other_user_id,
+            60,
+        )
         bot.profit_service.load_report.assert_awaited_once_with(
             other_user_id,
             60,
         )
+
+    async def test_api_without_a_window_serves_the_remembered_one(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        bot.profit_service.resolve_report_days.side_effect = None
+        bot.profit_service.resolve_report_days.return_value = 14
+        bot.profit_service.load_report.return_value = profit_report(14)
+
+        response = await client.get("/api/profit", headers=self._headers())
+
+        assert response.status == 200
+        assert (await response.json())["days"] == 14
+        bot.profit_service.resolve_report_days.assert_awaited_once_with(
+            SESSION_USER_ID,
+            None,
+        )
+        bot.profit_service.load_report.assert_awaited_once_with(
+            SESSION_USER_ID,
+            14,
+        )
+
+    async def test_exclusion_is_stored_for_the_signed_in_member_only(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        guild: FakeGuild,
+    ) -> None:
+        other_user_id = 202
+        guild.members[other_user_id] = member("Other Kitty")
+
+        response = await client.post(
+            "/api/profit/exclusions",
+            json={"item_id": 4, "excluded": True},
+            headers=self._headers(other_user_id),
+        )
+
+        assert response.status == 200
+        assert await response.json() == {
+            "item_id": 4,
+            "excluded": True,
+            "changed": True,
+        }
+        bot.profit_service.set_order_exclusion.assert_awaited_once_with(
+            other_user_id,
+            4,
+            True,
+        )
+
+    async def test_exclusion_needs_a_session(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/exclusions",
+            json={"item_id": 4, "excluded": True},
+        )
+
+        assert response.status == 401
+        bot.profit_service.set_order_exclusion.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"item_id": 4},
+            {"excluded": True},
+            {"item_id": 0, "excluded": True},
+            {"item_id": -3, "excluded": True},
+            {"item_id": "4", "excluded": True},
+            {"item_id": True, "excluded": True},
+            {"item_id": 4, "excluded": "yes"},
+            [],
+        ],
+        ids=(
+            "no-excluded",
+            "no-item",
+            "zero-item",
+            "negative-item",
+            "string-item",
+            "boolean-item",
+            "string-excluded",
+            "not-an-object",
+        ),
+    )
+    async def test_exclusion_rejects_an_unusable_body_without_storing(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        body: object,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/exclusions",
+            json=body,
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid request"}
+        bot.profit_service.set_order_exclusion.assert_not_awaited()
+
+    async def test_exclusion_rejects_a_body_that_is_not_json(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/exclusions",
+            data="item_id=4",
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        bot.profit_service.set_order_exclusion.assert_not_awaited()
+
+    async def test_exclusion_failure_reports_without_its_error_text(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "exclusion-failure-secret"
+        bot.profit_service.set_order_exclusion.side_effect = SQLAlchemyError(
+            secret
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.post(
+                "/api/profit/exclusions",
+                json={"item_id": 4, "excluded": False},
+                headers=self._headers(),
+            )
+        body = await response.text()
+
+        assert response.status == 500
+        assert secret not in caplog.text
+        assert secret not in body
 
     @pytest.mark.parametrize("days", ["0", "91", "abc", "1.5"])
     async def test_api_rejects_invalid_days_without_loading_data(

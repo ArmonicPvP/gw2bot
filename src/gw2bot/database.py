@@ -114,6 +114,32 @@ class ProfitItemRecord(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class ProfitPreferenceRecord(Base):
+    """One member's remembered choices on the profit dashboard.
+
+    The report window used to live only in the page's URL, so a member who
+    opened /profit without one was put back on the default window. It is kept
+    here instead, beside the excluded items below, so the dashboard opens the
+    way the member left it on any browser they sign in from.
+    """
+
+    __tablename__ = "gw2_profit_preferences"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitOrderExclusionRecord(Base):
+    """One item a member left out of their Open Orders table."""
+
+    __tablename__ = "gw2_profit_order_exclusions"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class RaffleTotalRecord(Base):
     __tablename__ = "raffle_totals"
 

@@ -12,6 +12,8 @@ from gw2bot.database import (
     ProfitApiKeyRecord,
     ProfitCacheSyncRecord,
     ProfitItemRecord,
+    ProfitOrderExclusionRecord,
+    ProfitPreferenceRecord,
     ProfitTransactionRecord,
     create_database_engine,
     initialize_database,
@@ -23,9 +25,11 @@ from gw2bot.settings.crypto import SettingsCipher
 LOGGER = logging.getLogger(__name__)
 
 HISTORY_KINDS = frozenset({"history_buys", "history_sells"})
-CURRENT_KINDS = frozenset({"current_sells"})
+CURRENT_KINDS = frozenset({"current_sells", "current_buys"})
 TRANSACTION_KINDS = HISTORY_KINDS | CURRENT_KINDS
 HISTORY_RETENTION_DAYS = 92
+MIN_REPORT_DAYS = 1
+MAX_REPORT_DAYS = 90
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,13 +137,125 @@ class ProfitStore:
             if record is not None:
                 session.delete(record)
             _clear_member_cache(session, discord_user_id)
+            # /profit deletekey is how a member takes their data back out of
+            # the bot, so the remembered window and excluded items go with the
+            # key. Replacing a key with set_api_key deliberately keeps both.
+            _clear_member_preferences(session, discord_user_id)
         LOGGER.debug(
             "Deleted profit API key; user_id=%s removed=%s "
-            "cache_cleared=true",
+            "cache_cleared=true preferences_cleared=true",
             discord_user_id,
             removed,
         )
         return removed
+
+    def get_report_days(self, discord_user_id: int) -> int | None:
+        """Return the member's remembered report window, if they set one."""
+        with self._sessions() as session:
+            record = session.get(ProfitPreferenceRecord, discord_user_id)
+        days = None if record is None else record.report_days
+        if days is not None and not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
+            # A row written by another release, or edited by hand. Read it as
+            # unset rather than serving a window the report would refuse.
+            LOGGER.warning(
+                "Ignored a stored profit report window; user_id=%s "
+                "reason=out-of-range",
+                discord_user_id,
+            )
+            days = None
+        LOGGER.debug(
+            "Read profit report window; user_id=%s stored=%s",
+            discord_user_id,
+            days is not None,
+        )
+        return days
+
+    def set_report_days(
+        self,
+        discord_user_id: int,
+        days: int,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
+            raise ValueError("Profit report days must be between 1 and 90")
+        updated_at = (datetime.now(UTC) if now is None else now).isoformat()
+        with self._sessions.begin() as session:
+            record = session.get(ProfitPreferenceRecord, discord_user_id)
+            if record is None:
+                session.add(
+                    ProfitPreferenceRecord(
+                        discord_user_id=discord_user_id,
+                        report_days=days,
+                        updated_at=updated_at,
+                    )
+                )
+            else:
+                record.report_days = days
+                record.updated_at = updated_at
+        LOGGER.debug(
+            "Stored profit report window; user_id=%s days=%s",
+            discord_user_id,
+            days,
+        )
+
+    def get_excluded_order_items(self, discord_user_id: int) -> frozenset[int]:
+        with self._sessions() as session:
+            item_ids = frozenset(
+                session.scalars(
+                    select(ProfitOrderExclusionRecord.item_id).where(
+                        ProfitOrderExclusionRecord.discord_user_id
+                        == discord_user_id
+                    )
+                )
+            )
+        LOGGER.debug(
+            "Read profit order exclusions; user_id=%s items=%s",
+            discord_user_id,
+            len(item_ids),
+        )
+        return item_ids
+
+    def set_order_exclusion(
+        self,
+        discord_user_id: int,
+        item_id: int,
+        excluded: bool,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Exclude or restore one item; return whether the row changed."""
+        if item_id <= 0:
+            raise ValueError("Profit order exclusions need a positive item id")
+        created_at = (datetime.now(UTC) if now is None else now).isoformat()
+        with self._sessions.begin() as session:
+            record = session.get(
+                ProfitOrderExclusionRecord,
+                (discord_user_id, item_id),
+            )
+            if excluded:
+                changed = record is None
+                if record is None:
+                    session.add(
+                        ProfitOrderExclusionRecord(
+                            discord_user_id=discord_user_id,
+                            item_id=item_id,
+                            created_at=created_at,
+                        )
+                    )
+            else:
+                changed = record is not None
+                if record is not None:
+                    session.delete(record)
+        LOGGER.debug(
+            "Stored profit order exclusion; user_id=%s item_id=%s "
+            "excluded=%s changed=%s",
+            discord_user_id,
+            item_id,
+            excluded,
+            changed,
+        )
+        return changed
 
     def is_cache_fresh(
         self,
@@ -474,6 +590,19 @@ def _store_transaction_records(
                 ProfitTransactionRecord.occurred_at < cutoff.isoformat(),
             )
         )
+
+
+def _clear_member_preferences(session: Session, discord_user_id: int) -> None:
+    session.execute(
+        delete(ProfitPreferenceRecord).where(
+            ProfitPreferenceRecord.discord_user_id == discord_user_id
+        )
+    )
+    session.execute(
+        delete(ProfitOrderExclusionRecord).where(
+            ProfitOrderExclusionRecord.discord_user_id == discord_user_id
+        )
+    )
 
 
 def _clear_member_cache(session: Session, discord_user_id: int) -> None:

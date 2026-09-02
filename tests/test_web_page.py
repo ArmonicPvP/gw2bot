@@ -62,18 +62,79 @@ class TestProfitPage:
         assert "Realized Profit by Item" in PROFIT_PAGE
         assert "Realized Profit by Day" in PROFIT_PAGE
         assert "Unrealized Profit" in PROFIT_PAGE
+        assert "Open Orders" in PROFIT_PAGE
         assert "Unclaimed Trading Post" in PROFIT_PAGE
         assert "Unclaimed Trading Post Gold" not in PROFIT_PAGE
         assert 'id="unclaimed-coins"' in PROFIT_PAGE
-        assert 'id="unclaimed-items"' in PROFIT_PAGE
         assert 'id="delivery-key-help" hidden' in PROFIT_PAGE
         assert "coin(data.delivery.coins)" in PROFIT_PAGE
-        assert "String(data.delivery.items)" in PROFIT_PAGE
         assert "data.delivery.coins === null" in PROFIT_PAGE
-        assert 'node.textContent = "Unavailable";' in PROFIT_PAGE
+        assert 'coins.textContent = "Unavailable";' in PROFIT_PAGE
         assert "help.hidden = false;" in PROFIT_PAGE
         assert "renderDelivery(data);" in PROFIT_PAGE
-        assert 'fetch("/api/profit?days=" +' in PROFIT_PAGE
+        assert 'fetch("/api/profit" + (days === null' in PROFIT_PAGE
+
+    def test_delivery_lists_each_waiting_item_instead_of_one_count(
+        self,
+    ) -> None:
+        assert "Items available to collect" in PROFIT_PAGE
+        assert 'id="delivery-table" data-sort-table="delivery"' in PROFIT_PAGE
+        assert 'id="delivery-body"' in PROFIT_PAGE
+        assert 'id="delivery-foot"' in PROFIT_PAGE
+        assert "var items = data.delivery.items;" in PROFIT_PAGE
+        assert "quantity += item.quantity;" in PROFIT_PAGE
+        assert '"No items are waiting for pickup."' in PROFIT_PAGE
+        # The old single-count row is gone rather than kept alongside it.
+        assert 'id="unclaimed-items"' not in PROFIT_PAGE
+
+    def test_open_orders_shows_both_market_sides_with_profit_and_roi(
+        self,
+    ) -> None:
+        assert 'id="orders-table" data-sort-table="orders"' in PROFIT_PAGE
+        assert ">Your Price<" in PROFIT_PAGE
+        assert ">Highest Buy Order<" in PROFIT_PAGE
+        assert ">Lowest Sell Listing<" in PROFIT_PAGE
+        assert ">Profit / Unit<" in PROFIT_PAGE
+        assert ">ROI<" in PROFIT_PAGE
+        assert "optionalCoinCell(row, order.buy_price);" in PROFIT_PAGE
+        assert "optionalCoinCell(row, order.sell_price);" in PROFIT_PAGE
+        assert "optionalProfitCell(row, order.profit);" in PROFIT_PAGE
+        assert "percentCell(row, order.roi_percent);" in PROFIT_PAGE
+        assert 'id="orders-key-help" hidden' in PROFIT_PAGE
+        assert "help.hidden = ordersAvailable;" in PROFIT_PAGE
+
+    def test_open_order_totals_cover_the_priced_rows_only(self) -> None:
+        assert 'id="orders-unpriced" hidden' in PROFIT_PAGE
+        assert "if (order.total_profit === null) {" in PROFIT_PAGE
+        assert "unpriced += 1;" in PROFIT_PAGE
+        assert 'document.getElementById("orders-unpriced").hidden' in (
+            PROFIT_PAGE
+        )
+        assert "percent(cost ? profit / cost * 100 : null)" in PROFIT_PAGE
+
+    def test_open_orders_exclusions_are_saved_and_restorable(self) -> None:
+        assert 'fetch("/api/profit/exclusions", {' in PROFIT_PAGE
+        assert 'method: "POST",' in PROFIT_PAGE
+        assert (
+            "JSON.stringify({ item_id: itemId, excluded: excluded })"
+            in PROFIT_PAGE
+        )
+        assert 'id="orders-excluded" hidden' in PROFIT_PAGE
+        assert 'id="orders-excluded-list"' in PROFIT_PAGE
+        assert "function renderExcludedOrders()" in PROFIT_PAGE
+        assert 'button.textContent = excluded ? "Restore" : "Exclude";' in (
+            PROFIT_PAGE
+        )
+        assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
+
+    def test_report_window_follows_the_remembered_choice(self) -> None:
+        assert "daysInput.value = String(data.days);" in PROFIT_PAGE
+        assert 'history.replaceState(\n      null, "", "/profit?days=" +' in (
+            PROFIT_PAGE
+        )
+        assert "function load(useRemembered)" in PROFIT_PAGE
+        assert "load(!requested);" in PROFIT_PAGE
+        assert "load(false);" in PROFIT_PAGE
 
     def test_daily_profit_has_adjustable_pagination(self) -> None:
         assert 'id="days-page-size" type="number" min="1" max="90" value="10"' in PROFIT_PAGE
@@ -96,14 +157,16 @@ class TestProfitPage:
         assert "location.pathname + location.search" in PROFIT_PAGE
 
     def test_detail_tables_have_accessible_sort_buttons(self) -> None:
-        assert PROFIT_PAGE.count('data-sort-table="') == 3
-        assert PROFIT_PAGE.count('class="sort-button"') == 20
+        assert PROFIT_PAGE.count('data-sort-table="') == 5
+        assert PROFIT_PAGE.count('class="sort-button"') == 31
         assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
         assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
         assert (
             'id="unrealized-table" data-sort-table="unrealized"'
             in PROFIT_PAGE
         )
+        assert 'id="orders-table" data-sort-table="orders"' in PROFIT_PAGE
+        assert 'id="delivery-table" data-sort-table="delivery"' in PROFIT_PAGE
         assert 'th[aria-sort="ascending"]' in PROFIT_PAGE
         assert 'th[aria-sort="descending"]' in PROFIT_PAGE
 

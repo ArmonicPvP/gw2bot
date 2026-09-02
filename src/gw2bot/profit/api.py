@@ -7,7 +7,12 @@ from collections.abc import Mapping
 
 import aiohttp
 
-from gw2bot.profit.models import MarketPrice, Transaction, parse_gw2_time
+from gw2bot.profit.models import (
+    DeliveryItem,
+    MarketPrice,
+    Transaction,
+    parse_gw2_time,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,6 +22,7 @@ TRANSACTION_PATHS = {
     "history_buys": "/v2/commerce/transactions/history/buys",
     "history_sells": "/v2/commerce/transactions/history/sells",
     "current_sells": "/v2/commerce/transactions/current/sells",
+    "current_buys": "/v2/commerce/transactions/current/buys",
 }
 DELIVERY_PATH = "/v2/commerce/delivery"
 REQUIRED_PROFIT_PATHS = frozenset((*TRANSACTION_PATHS.values(), DELIVERY_PATH))
@@ -122,8 +128,11 @@ class ProfitApiClient:
         )
         return transactions
 
-    async def fetch_delivery(self, api_key: str) -> tuple[int, int]:
-        """Return the copper and item quantity waiting in TP delivery."""
+    async def fetch_delivery(
+        self,
+        api_key: str,
+    ) -> tuple[int, tuple[DeliveryItem, ...]]:
+        """Return the copper and per-item stacks waiting in TP delivery."""
         payload, _ = await self._get(DELIVERY_PATH, api_key=api_key)
         if not isinstance(payload, dict):
             raise ProfitApiError("GW2 delivery response was not an object")
@@ -133,21 +142,37 @@ class ProfitApiClient:
         items = payload.get("items")
         if not isinstance(items, list):
             raise ProfitApiError("GW2 delivery response had invalid items")
-        quantity = 0
+        # One item can be delivered as several stacks - a bought order that
+        # filled in pieces, or the leftovers of separate purchases - so the
+        # counts are added together before the dashboard draws a row per item.
+        quantities: dict[int, int] = {}
         for item in items:
             if not isinstance(item, dict):
                 raise ProfitApiError("GW2 delivery response had invalid items")
+            item_id = item.get("id")
             count = item.get("count")
-            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            if (
+                not isinstance(item_id, int)
+                or isinstance(item_id, bool)
+                or item_id <= 0
+                or not isinstance(count, int)
+                or isinstance(count, bool)
+                or count < 0
+            ):
                 raise ProfitApiError("GW2 delivery response had invalid items")
-            quantity += count
+            quantities[item_id] = quantities.get(item_id, 0) + count
+        delivered = tuple(
+            DeliveryItem(item_id, quantity)
+            for item_id, quantity in sorted(quantities.items())
+        )
         LOGGER.debug(
             "Fetched GW2 Trading Post delivery; coins_available=%s "
-            "item_quantity=%s",
+            "item_rows=%s item_quantity=%s",
             coins > 0,
-            quantity,
+            len(delivered),
+            sum(row.quantity for row in delivered),
         )
-        return coins, quantity
+        return coins, delivered
 
     async def fetch_item_names(self, item_ids: set[int]) -> dict[int, str]:
         names: dict[int, str] = {}

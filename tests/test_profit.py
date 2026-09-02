@@ -13,6 +13,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from factories import default_config
+from gw2bot.database import create_database_engine
 from gw2bot.logging_setup import SecretRegistry
 from gw2bot.profit.api import (
     DELIVERY_PATH,
@@ -24,13 +25,18 @@ from gw2bot.profit.api import (
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.models import (
     BuyLot,
+    DeliveryItem,
+    ItemProfit,
     MarketPrice,
+    OpenBuyOrder,
     ProfitReport,
+    RealizedProfit,
     Transaction,
     UnrealizedProfit,
     allocated_net_revenue,
     calculate_realized_profit,
     calculate_unrealized_profit,
+    group_open_buy_orders,
     sale_fee_total,
 )
 from gw2bot.profit.service import (
@@ -229,7 +235,7 @@ class TestProfitCalculation:
             realized=realized,
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
             unclaimed_coins=0,
-            unclaimed_items=0,
+            unclaimed_items=(),
             item_names={1: "Winner", 2: "Loser"},
         )
 
@@ -375,10 +381,21 @@ class TestProfitCalculation:
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=0,
             sell_transaction_count=0,
-            realized=calculate_realized_profit([], []),
+            realized=RealizedProfit(
+                items={
+                    item_id: ItemProfit(5, 500, 850, 350, 0.0)
+                    for item_id in (1, 2, 3)
+                },
+                days={},
+                unmatched_buys={},
+                total_cost=1_500,
+                total_net_revenue=2_550,
+                total_profit=1_050,
+                total_matched_quantity=15,
+            ),
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
             unclaimed_coins=0,
-            unclaimed_items=0,
+            unclaimed_items=(),
             item_names={
                 1: kept_name,
                 2: skipped_name,
@@ -403,6 +420,59 @@ class TestProfitCalculation:
         assert kept_name not in caplog.text
         assert skipped_name not in caplog.text
         assert undefined_name not in caplog.text
+
+
+class TestOpenBuyOrders:
+    def test_collapses_orders_that_share_an_item_and_price(self) -> None:
+        placed = datetime(2026, 8, 20, tzinfo=UTC)
+        orders = [
+            transaction(
+                "second",
+                item_id=7,
+                price=19,
+                quantity=250,
+                occurred_at=placed + timedelta(minutes=5),
+            ),
+            transaction(
+                "first",
+                item_id=7,
+                price=19,
+                quantity=178,
+                occurred_at=placed,
+            ),
+        ]
+
+        grouped = group_open_buy_orders(orders)
+
+        assert grouped == (
+            OpenBuyOrder(
+                item_id=7,
+                unit_price=19,
+                quantity=428,
+                order_count=2,
+                placed_at=placed,
+            ),
+        )
+
+    def test_keeps_two_prices_for_one_item_apart(self) -> None:
+        # The order price decides the trade's profit, so orders placed at
+        # different prices stay separate rows even for the same item.
+        orders = [
+            transaction("cheap", item_id=7, price=17, quantity=100),
+            transaction("dear", item_id=7, price=19, quantity=50),
+            transaction("other", item_id=2, price=61, quantity=10),
+        ]
+
+        grouped = group_open_buy_orders(orders)
+
+        assert [(row.item_id, row.unit_price, row.quantity) for row in grouped] == [
+            (2, 61, 10),
+            (7, 17, 100),
+            (7, 19, 50),
+        ]
+
+    def test_no_orders_group_to_nothing(self) -> None:
+        assert group_open_buy_orders([]) == ()
 
 
 class TestProfitStore:
@@ -637,6 +707,116 @@ class TestProfitStore:
         }
 
 
+    def test_remembers_each_members_report_window_separately(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+
+        assert store.get_report_days(101) is None
+
+        store.set_report_days(101, 60)
+        store.set_report_days(202, 7)
+        store.set_report_days(101, 14)
+
+        assert store.get_report_days(101) == 14
+        assert store.get_report_days(202) == 7
+
+    @pytest.mark.parametrize("days", [0, 91, -1])
+    def test_refuses_a_report_window_outside_the_served_range(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        days: int,
+    ) -> None:
+        store, _, _ = profit_store
+
+        with pytest.raises(ValueError):
+            store.set_report_days(101, days)
+
+        assert store.get_report_days(101) is None
+
+    def test_reads_an_out_of_range_stored_window_as_unset(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, database = profit_store
+        store.set_report_days(101, 30)
+        engine = create_database_engine(str(database))
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE gw2_profit_preferences SET report_days = 365"
+            )
+        engine.dispose()
+
+        assert store.get_report_days(101) is None
+
+    def test_excluded_order_items_stay_with_the_member_who_set_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+
+        assert store.get_excluded_order_items(101) == frozenset()
+        assert store.set_order_exclusion(101, 19_721, True)
+        # Excluding an already excluded item changes nothing and does not fail.
+        assert not store.set_order_exclusion(101, 19_721, True)
+        assert store.set_order_exclusion(101, 24_292, True)
+        assert store.set_order_exclusion(202, 8_871, True)
+
+        assert store.get_excluded_order_items(101) == frozenset(
+            {19_721, 24_292}
+        )
+        assert store.get_excluded_order_items(202) == frozenset({8_871})
+
+        assert store.set_order_exclusion(101, 19_721, False)
+        assert not store.set_order_exclusion(101, 19_721, False)
+
+        assert store.get_excluded_order_items(101) == frozenset({24_292})
+        assert store.get_excluded_order_items(202) == frozenset({8_871})
+
+    def test_refuses_an_exclusion_without_a_usable_item(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+
+        with pytest.raises(ValueError):
+            store.set_order_exclusion(101, 0, True)
+
+    def test_replacing_a_key_keeps_the_window_and_exclusions(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-member-secret")
+        store.set_report_days(101, 60)
+        store.set_order_exclusion(101, 19_721, True)
+
+        store.set_api_key(101, "replacement-member-secret")
+
+        assert store.get_report_days(101) == 60
+        assert store.get_excluded_order_items(101) == frozenset({19_721})
+
+    def test_deleting_a_key_takes_the_window_and_exclusions_with_it(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        store.set_report_days(101, 60)
+        store.set_order_exclusion(101, 19_721, True)
+        store.set_api_key(202, "other-member-secret")
+        store.set_report_days(202, 7)
+        store.set_order_exclusion(202, 8_871, True)
+
+        assert store.delete_api_key(101)
+
+        assert store.get_report_days(101) is None
+        assert store.get_excluded_order_items(101) == frozenset()
+        assert store.get_report_days(202) == 7
+        assert store.get_excluded_order_items(202) == frozenset({8_871})
+
+
 class TestProfitService:
     async def test_refreshes_stale_collections_then_uses_the_member_cache(
         self,
@@ -670,12 +850,23 @@ class TestProfitService:
             )
         ]
 
+        orders = [
+            transaction(
+                "order",
+                price=90,
+                quantity=20,
+                occurred_at=now,
+            )
+        ]
+
         async def fetched(path: str, api_key: str) -> list[Transaction]:
             assert api_key == "member-secret"
             if path.endswith("history/buys"):
                 return buys
             if path.endswith("history/sells"):
                 return sells
+            if path.endswith("current/buys"):
+                return orders
             return current
 
         service = ProfitService(
@@ -685,7 +876,9 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_delivery=AsyncMock(return_value=(12_345, 7)),
+            fetch_delivery=AsyncMock(
+                return_value=(12_345, (DeliveryItem(1, 7),))
+            ),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
             fetch_market_prices=AsyncMock(return_value={1: MarketPrice(100, 200)}),
         )
@@ -701,7 +894,17 @@ class TestProfitService:
         assert first.realized.total_profit == 350
         assert first.unrealized.total_projected_profit == 775
         assert first.unclaimed_coins == 12_345
-        assert first.unclaimed_items == 7
+        assert first.unclaimed_items == (DeliveryItem(1, 7),)
+        assert first.open_buy_orders == (
+            OpenBuyOrder(
+                item_id=1,
+                unit_price=90,
+                quantity=20,
+                order_count=1,
+                placed_at=now,
+            ),
+        )
+        assert first.open_orders_available
         payload = cast(dict[str, Any], serialize_profit_report(first))
         assert payload["summary"]["roi_percent"] == 70
         assert payload["items"][0]["roi_percent"] == 70
@@ -721,8 +924,29 @@ class TestProfitService:
         assert payload["unrealized"]["roi_percent"] == 155
         assert payload["unrealized"]["items"][0]["roi_percent"] == 155
         assert payload["delivery"]["coins"] == 12_345
-        assert payload["delivery"]["items"] == 7
-        assert api.fetch_transactions.await_count == 3
+        assert payload["delivery"]["items"] == [
+            {"item_id": 1, "name": "Test Item", "quantity": 7}
+        ]
+        assert payload["open_orders"]["available"]
+        assert payload["open_orders"]["excluded"] == []
+        assert payload["open_orders"]["orders"] == [
+            {
+                "item_id": 1,
+                "name": "Test Item",
+                "quantity": 20,
+                "order_count": 1,
+                "unit_price": 90,
+                "cost": 1_800,
+                "buy_price": 100,
+                "sell_price": 200,
+                "net_revenue": 3_400,
+                "profit": 80,
+                "total_profit": 1_600,
+                "roi_percent": pytest.approx(88.888, rel=1e-3),
+                "has_order": True,
+            }
+        ]
+        assert api.fetch_transactions.await_count == 4
         assert api.fetch_delivery.await_count == 2
         api.fetch_delivery.assert_awaited_with("member-secret")
         api.fetch_item_names.assert_awaited_once_with({1})
@@ -762,6 +986,11 @@ class TestProfitService:
         assert report.unclaimed_coins is None
         payload = cast(dict[str, Any], serialize_profit_report(report))
         assert payload["delivery"] == {"coins": None, "items": None}
+        assert payload["open_orders"] == {
+            "available": True,
+            "orders": [],
+            "excluded": [],
+        }
         api.fetch_transactions.assert_not_awaited()
         api.fetch_delivery.assert_awaited_once_with(secret)
         assert "reason=unauthorized" in caplog.text
@@ -844,7 +1073,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_delivery=AsyncMock(return_value=(0, 0)),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
@@ -854,7 +1083,7 @@ class TestProfitService:
             report = await service.load_report(101, 30, now=now)
 
         assert report.realized.total_profit == 350
-        assert api.fetch_transactions.await_count == 6
+        assert api.fetch_transactions.await_count == 8
         api.fetch_delivery.assert_awaited_once_with(replacement_key)
         assert [
             row.transaction_id
@@ -928,7 +1157,7 @@ class TestProfitService:
         )
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
-            fetch_delivery=AsyncMock(return_value=(0, 0)),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
             fetch_item_names=AsyncMock(return_value={1: "New Name"}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
@@ -940,6 +1169,272 @@ class TestProfitService:
         api.fetch_transactions.assert_not_awaited()
         api.fetch_item_names.assert_awaited_once_with({1})
         assert store.get_item_names({1}, 300, now=now) == {1: "New Name"}
+
+
+    async def test_excluded_items_leave_the_open_order_table(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "current_buys",
+            [
+                transaction("kept", item_id=1, price=90, quantity=10),
+                transaction("hidden", item_id=2, price=40, quantity=5),
+            ],
+            now=now,
+        )
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        store.set_order_exclusion(101, 2, True)
+        # An item excluded while it had an order but with none left today
+        # still has to be offered back to the member.
+        store.set_order_exclusion(101, 3, True)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_names=AsyncMock(
+                return_value={1: "Kept", 2: "Hidden", 3: "Gone"}
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        report = await service.load_report(101, 30, now=now)
+
+        assert report.excluded_order_items == frozenset({2, 3})
+        api.fetch_market_prices.assert_awaited_once_with({1, 2})
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        orders = payload["open_orders"]
+        assert [row["item_id"] for row in orders["orders"]] == [1]
+        assert [row["item_id"] for row in orders["excluded"]] == [2, 3]
+        assert orders["excluded"][0]["has_order"] is True
+        assert orders["excluded"][0]["quantity"] == 5
+        assert orders["excluded"][1] == {
+            "item_id": 3,
+            "name": "Gone",
+            "quantity": 0,
+            "order_count": 0,
+            "unit_price": None,
+            "cost": 0,
+            "buy_price": None,
+            "sell_price": None,
+            "net_revenue": None,
+            "profit": None,
+            "total_profit": None,
+            "roi_percent": None,
+            "has_order": False,
+        }
+
+    async def test_open_order_fees_round_over_the_whole_order(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "current_buys",
+            [transaction("order", item_id=1, price=50, quantity=3)],
+            now=now,
+        )
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(90, 101)}
+            ),
+        )
+
+        report = await service.load_report(101, 30, now=now)
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        order = payload["open_orders"]["orders"][0]
+        # Both fees round up against the order's gross value, exactly as a
+        # realized sale of three units at 101 would be charged. Rounding each
+        # unit alone would take 51 instead of 47 and understate the return.
+        assert sale_fee_total(101, 3) == 47
+        assert order["net_revenue"] == 101 * 3 - 47
+        assert order["total_profit"] == 256 - 150
+        assert order["profit"] == 35
+        assert order["roi_percent"] == pytest.approx(106 / 150 * 100)
+
+    async def test_an_unpriced_open_order_still_lists_without_a_return(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "current_buys",
+            [transaction("order", item_id=1, price=90, quantity=10)],
+            now=now,
+        )
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        report = await service.load_report(101, 30, now=now)
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        order = payload["open_orders"]["orders"][0]
+        assert order["name"] == "Item 1"
+        assert order["quantity"] == 10
+        assert order["cost"] == 900
+        assert order["buy_price"] is None
+        assert order["sell_price"] is None
+        assert order["profit"] is None
+        assert order["roi_percent"] is None
+
+    async def test_legacy_key_without_buy_orders_keeps_the_rest_of_the_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        secret = "buy-order-restricted-secret"
+        store.set_api_key(101, secret)
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for transaction_kind in TRANSACTION_PATHS:
+            if transaction_kind != "current_buys":
+                store.touch_cache(101, transaction_kind, now=now)
+
+        async def fetched(path: str, api_key: str) -> list[Transaction]:
+            assert api_key == secret
+            raise ProfitApiAuthorizationError(
+                "GW2 API request returned HTTP 403"
+            )
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            report = await service.load_report(101, 30, now=now)
+
+        assert not report.open_orders_available
+        assert report.open_buy_orders == ()
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert payload["open_orders"]["available"] is False
+        # The collection was not stored as an empty snapshot, so a replacement
+        # key picks the buy orders up on the next report.
+        assert not store.is_cache_fresh(101, "current_buys", 300, now=now)
+        assert "open_orders=unavailable" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_an_unauthorized_sale_history_still_fails_the_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(
+                side_effect=ProfitApiAuthorizationError(
+                    "GW2 API request returned HTTP 403"
+                )
+            ),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        with pytest.raises(ProfitApiAuthorizationError):
+            await service.load_report(101, 30, now=now)
+
+    async def test_report_window_is_remembered_once_a_member_picks_one(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+
+        assert await service.resolve_report_days(101, None) == 30
+        assert await service.resolve_report_days(101, 60) == 60
+        assert await service.resolve_report_days(101, None) == 60
+        assert await service.resolve_report_days(202, None) == 30
+
+    async def test_report_window_refuses_a_value_outside_the_range(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+
+        with pytest.raises(ValueError):
+            await service.resolve_report_days(101, 91)
+
+        assert store.get_report_days(101) is None
+
+    async def test_order_exclusions_are_stored_through_the_service(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+
+        assert await service.set_order_exclusion(101, 19_721, True)
+        assert store.get_excluded_order_items(101) == frozenset({19_721})
+        assert await service.set_order_exclusion(101, 19_721, False)
+        assert store.get_excluded_order_items(101) == frozenset()
 
 
 class _FakeResponse:
@@ -1076,12 +1571,19 @@ class TestProfitApiLogging:
 
         assert not await client.validate_key("member-key")
 
-    async def test_fetches_unclaimed_delivery_coins(self) -> None:
+    async def test_fetches_unclaimed_delivery_coins_and_items(self) -> None:
         http = SimpleNamespace(
             get=MagicMock(
                 return_value=_FakeResponse(
                     200,
-                    {"coins": 12_345, "items": [{"id": 1, "count": 2}]},
+                    {
+                        "coins": 12_345,
+                        "items": [
+                            {"id": 2, "count": 2},
+                            {"id": 1, "count": 3},
+                            {"id": 2, "count": 5},
+                        ],
+                    },
                 )
             )
         )
@@ -1090,12 +1592,51 @@ class TestProfitApiLogging:
             "https://api.example",
         )
 
-        assert await client.fetch_delivery("member-key") == (12_345, 2)
+        # Two stacks of the same item are one delivery row, and the rows come
+        # back ordered so the dashboard renders the same list every reload.
+        assert await client.fetch_delivery("member-key") == (
+            12_345,
+            (DeliveryItem(1, 3), DeliveryItem(2, 7)),
+        )
         request = http.get.call_args
         assert request.args[0] == "https://api.example/v2/commerce/delivery"
         assert request.kwargs["headers"] == {
             "Authorization": "Bearer member-key"
         }
+
+    @pytest.mark.parametrize(
+        "items",
+        [
+            [{"count": 2}],
+            [{"id": 0, "count": 2}],
+            [{"id": 1}],
+            [{"id": 1, "count": -1}],
+            [{"id": True, "count": 2}],
+        ],
+        ids=(
+            "no-id",
+            "zero-id",
+            "no-count",
+            "negative-count",
+            "boolean-id",
+        ),
+    )
+    async def test_rejects_a_delivery_item_without_usable_fields(
+        self,
+        items: list[dict[str, object]],
+    ) -> None:
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(200, {"coins": 0, "items": items})
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with pytest.raises(ProfitApiError):
+            await client.fetch_delivery("member-key")
 
     @pytest.mark.parametrize("status", [401, 403])
     async def test_delivery_authorization_failure_is_typed_and_sanitized(
@@ -1290,6 +1831,49 @@ class TestProfitCommands:
             "[Open your 60-day profit dashboard](https://guild.example/profit?days=60)",
             ephemeral=True,
         )
+
+    async def test_view_without_a_window_links_the_remembered_one(
+        self,
+    ) -> None:
+        bot = SimpleNamespace(
+            _config=default_config(
+                web_enabled=True,
+                web_base_url="https://guild.example",
+                discord_oauth_client_id="client",
+                discord_oauth_client_secret="secret",
+                web_session_secret="s" * 32,
+            )
+        )
+        group = ProfitCommands(cast(Any, bot))
+        command = next(
+            command for command in group.commands if command.name == "view"
+        )
+        invoked = interaction()
+
+        await command.callback(group, invoked)  # type: ignore[arg-type]
+
+        # No days in the link, so the dashboard serves the window this member
+        # last chose instead of replacing it with the 30-day default.
+        invoked.response.send_message.assert_awaited_once_with(
+            "[Open your profit dashboard](https://guild.example/profit)",
+            ephemeral=True,
+        )
+
+    def test_view_leaves_its_window_argument_optional(self) -> None:
+        group = ProfitCommands(cast(Any, SimpleNamespace()))
+        command = next(
+            command
+            for command in group.commands
+            if isinstance(command, discord.app_commands.Command)
+            and command.name == "view"
+        )
+        window = next(
+            parameter
+            for parameter in command.parameters
+            if parameter.name == "days"
+        )
+
+        assert not window.required
 
     async def test_modal_registers_a_candidate_before_a_failed_validation(
         self,
