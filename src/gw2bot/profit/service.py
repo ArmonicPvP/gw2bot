@@ -585,6 +585,7 @@ def _open_order_row(
     order: OpenBuyOrder,
 ) -> dict[str, object]:
     price = report.market_prices.get(order.item_id)
+    cost = order.unit_price * order.quantity
     net_revenue: int | None = None
     profit: int | None = None
     total_profit: int | None = None
@@ -592,15 +593,17 @@ def _open_order_row(
     if price is not None:
         # The exit assumed here is the one the member controls: undercutting
         # nothing and selling at the current lowest listing, after both fees.
-        net_revenue = price.sell_unit_price - sale_fee_total(
+        # Both fees round up against the gross value of the whole order, the
+        # way a realized sale of that quantity is charged; rounding each unit
+        # on its own would overcharge every multi-unit order and understate
+        # the return. The per-unit figure is then derived from that total.
+        net_revenue = price.sell_unit_price * order.quantity - sale_fee_total(
             price.sell_unit_price,
-            1,
+            order.quantity,
         )
-        profit = net_revenue - order.unit_price
-        total_profit = profit * order.quantity
-        roi_percent = (
-            profit / order.unit_price * 100 if order.unit_price else None
-        )
+        total_profit = net_revenue - cost
+        profit = round(total_profit / order.quantity)
+        roi_percent = total_profit / cost * 100 if cost else None
     return {
         "item_id": order.item_id,
         "name": report.item_names.get(
@@ -610,7 +613,7 @@ def _open_order_row(
         "quantity": order.quantity,
         "order_count": order.order_count,
         "unit_price": order.unit_price,
-        "cost": order.unit_price * order.quantity,
+        "cost": cost,
         "buy_price": None if price is None else price.buy_unit_price,
         "sell_price": None if price is None else price.sell_unit_price,
         "net_revenue": net_revenue,

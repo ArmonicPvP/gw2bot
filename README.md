@@ -1326,9 +1326,10 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   route-restricted subtoken must allow the history buys, history sells, current
   sells, current buys, and `/v2/commerce/delivery` endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window accepts 1 through 90 UTC calendar dates, including today, and defaults
-  to 30 days until the member picks one. If the web session has expired, Discord
-  sign-in returns the member to that same profit window.
+  window accepts 1 through 90 UTC calendar dates, including today. Left empty,
+  the link names no window and the page reopens the one the member last used,
+  defaulting to 30 days until they pick one. If the web session has expired,
+  Discord sign-in returns the member to that same profit window.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
   data, remembered report window, and excluded Open Orders items. It cannot
   affect any other member's key, cache, or choices. Replacing a key with
@@ -1363,13 +1364,17 @@ The **Open Orders** table lists every item the member is currently buying on the
 Trading Post. Each row gives the units on order, the price the member is buying
 at, that order's total cost, the item's current highest buy order and lowest
 sell listing, and the profit per unit, total profit, and ROI of finishing the
-trade — selling each unit at that lowest listing after the 5% listing and 10%
-exchange fees. The Trading Post splits one purchase into many orders, so orders
-for the same item at the same price are collapsed into one row; an item bought
-at two prices stays two rows, because the price is what decides the return. A
-row whose item has no usable current price shows dashes instead of a return and
-is left out of the total. Unlike **Your Picks**, a negative return is shown
-rather than hidden: it is an order the member is holding, not a suggestion.
+trade — selling the whole order at that lowest listing after the 5% listing and
+10% exchange fees. Those fees round up against the order's gross value, the way
+a realized sale of the same quantity is charged, and the profit per unit is
+derived from that total. The Trading Post splits one purchase into many orders,
+so orders for the same item at the same price are collapsed into one row; an
+item bought at two prices stays two rows, because the price is what decides the
+return. A row whose item has no usable current price shows dashes instead of a
+return and is left out of every total in the footer, so the units, cost, profit
+and ROI below the table always describe the same orders. Unlike **Your Picks**,
+a negative return is shown rather than hidden: it is an order the member is
+holding, not a suggestion.
 
 Each row has an **Exclude** button that drops that item from the table — useful
 for a long-term buy that is not a flip, or an item whose spread is not worth
@@ -1387,8 +1392,10 @@ delivered as several stacks is added together into a single row.
 The window in the header is remembered the same way: whenever a member loads a
 report the chosen number of days is stored against their Discord account, and
 opening `/profit` without a `days` value in the URL reopens that window instead
-of the 30-day default. A `days` value in the URL — the one `/profit view` links
-to — still wins and becomes the new remembered window.
+of the 30-day default. A `days` value in the URL — the one `/profit view 60`
+links to — still wins and becomes the new remembered window, while
+`/profit view` with no argument links without one and leaves the saved window
+alone.
 
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts

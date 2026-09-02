@@ -103,6 +103,15 @@ class TestProfitPage:
         assert 'id="orders-key-help" hidden' in PROFIT_PAGE
         assert "help.hidden = ordersAvailable;" in PROFIT_PAGE
 
+    def test_open_order_totals_cover_the_priced_rows_only(self) -> None:
+        assert 'id="orders-unpriced" hidden' in PROFIT_PAGE
+        assert "if (order.total_profit === null) {" in PROFIT_PAGE
+        assert "unpriced += 1;" in PROFIT_PAGE
+        assert 'document.getElementById("orders-unpriced").hidden' in (
+            PROFIT_PAGE
+        )
+        assert "percent(cost ? profit / cost * 100 : null)" in PROFIT_PAGE
+
     def test_open_orders_exclusions_are_saved_and_restorable(self) -> None:
         assert 'fetch("/api/profit/exclusions", {' in PROFIT_PAGE
         assert 'method: "POST",' in PROFIT_PAGE

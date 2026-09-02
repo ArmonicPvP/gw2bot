@@ -939,7 +939,7 @@ class TestProfitService:
                 "cost": 1_800,
                 "buy_price": 100,
                 "sell_price": 200,
-                "net_revenue": 170,
+                "net_revenue": 3_400,
                 "profit": 80,
                 "total_profit": 1_600,
                 "roi_percent": pytest.approx(88.888, rel=1e-3),
@@ -1235,6 +1235,48 @@ class TestProfitService:
             "roi_percent": None,
             "has_order": False,
         }
+
+    async def test_open_order_fees_round_over_the_whole_order(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "current_buys",
+            [transaction("order", item_id=1, price=50, quantity=3)],
+            now=now,
+        )
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(90, 101)}
+            ),
+        )
+
+        report = await service.load_report(101, 30, now=now)
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        order = payload["open_orders"]["orders"][0]
+        # Both fees round up against the order's gross value, exactly as a
+        # realized sale of three units at 101 would be charged. Rounding each
+        # unit alone would take 51 instead of 47 and understate the return.
+        assert sale_fee_total(101, 3) == 47
+        assert order["net_revenue"] == 101 * 3 - 47
+        assert order["total_profit"] == 256 - 150
+        assert order["profit"] == 35
+        assert order["roi_percent"] == pytest.approx(106 / 150 * 100)
 
     async def test_an_unpriced_open_order_still_lists_without_a_return(
         self,
@@ -1789,6 +1831,49 @@ class TestProfitCommands:
             "[Open your 60-day profit dashboard](https://guild.example/profit?days=60)",
             ephemeral=True,
         )
+
+    async def test_view_without_a_window_links_the_remembered_one(
+        self,
+    ) -> None:
+        bot = SimpleNamespace(
+            _config=default_config(
+                web_enabled=True,
+                web_base_url="https://guild.example",
+                discord_oauth_client_id="client",
+                discord_oauth_client_secret="secret",
+                web_session_secret="s" * 32,
+            )
+        )
+        group = ProfitCommands(cast(Any, bot))
+        command = next(
+            command for command in group.commands if command.name == "view"
+        )
+        invoked = interaction()
+
+        await command.callback(group, invoked)  # type: ignore[arg-type]
+
+        # No days in the link, so the dashboard serves the window this member
+        # last chose instead of replacing it with the 30-day default.
+        invoked.response.send_message.assert_awaited_once_with(
+            "[Open your profit dashboard](https://guild.example/profit)",
+            ephemeral=True,
+        )
+
+    def test_view_leaves_its_window_argument_optional(self) -> None:
+        group = ProfitCommands(cast(Any, SimpleNamespace()))
+        command = next(
+            command
+            for command in group.commands
+            if isinstance(command, discord.app_commands.Command)
+            and command.name == "view"
+        )
+        window = next(
+            parameter
+            for parameter in command.parameters
+            if parameter.name == "days"
+        )
+
+        assert not window.required
 
     async def test_modal_registers_a_candidate_before_a_failed_validation(
         self,

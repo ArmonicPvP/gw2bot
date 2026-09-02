@@ -341,7 +341,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </section>
     <section class="card">
       <h2>Open Orders</h2>
-      <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling each unit at the current lowest sell listing after the 5% listing and 10% exchange fees, and ROI is that profit over your order price.</p>
+      <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling the whole order at the current lowest sell listing after the 5% listing and 10% exchange fees, and ROI is that profit over what the order costs you.</p>
+      <p class="note" id="orders-unpriced" hidden>Rows with no current Trading Post price show dashes and are left out of every total below, so the totals cover the same orders throughout.</p>
       <p class="note" id="orders-key-help" hidden>Open orders are unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows <code>/v2/commerce/transactions/current/buys</code>.</p>
       <div id="orders-excluded" hidden>
         <h3 class="subheading">Excluded items</h3>
@@ -1347,10 +1348,14 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     var kept = ordersRows.filter(function (row) {
       return row.has_order && !row.excluded;
     });
+    // Every footer figure covers the same rows: the ones with a usable
+    // current price. Adding an unpriced order's units and cost to totals its
+    // profit and ROI cannot include would leave a footer that does not
+    // reconcile with itself.
     var units = 0;
     var cost = 0;
     var profit = 0;
-    var pricedCost = 0;
+    var unpriced = 0;
     kept.forEach(function (order, index) {
       var row = sortableRow(index);
       cell(row, order.name, "name", order.name);
@@ -1364,21 +1369,23 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       percentCell(row, order.roi_percent);
       cell(row, "").appendChild(exclusionButton(order.item_id, false));
       body.appendChild(row);
+      if (order.total_profit === null) {
+        unpriced += 1;
+        return;
+      }
       units += order.quantity;
       cost += order.cost;
-      if (order.total_profit !== null) {
-        profit += order.total_profit;
-        pricedCost += order.cost;
-      }
+      profit += order.total_profit;
     });
     if (!kept.length) {
       emptyRow(body, 10, ordersAvailable
         ? "No open buy orders were found."
         : "Open buy orders are unavailable for this saved key.");
     }
+    document.getElementById("orders-unpriced").hidden = unpriced === 0;
     totalRow(document.getElementById("orders-foot"), [
       "Total", units, "\u2014", coin(cost), "\u2014", "\u2014", "\u2014",
-      profit, percent(pricedCost ? profit / pricedCost * 100 : null), ""
+      profit, percent(cost ? profit / cost * 100 : null), ""
     ], 7);
     applySort("orders-table");
     renderExcludedOrders();

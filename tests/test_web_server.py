@@ -1021,7 +1021,7 @@ class TestProfitPage:
                 "cost": 700,
                 "buy_price": 80,
                 "sell_price": 160,
-                "net_revenue": 136,
+                "net_revenue": 1_360,
                 "profit": 66,
                 "total_profit": 660,
                 "roi_percent": pytest.approx(94.285, rel=1e-3),
