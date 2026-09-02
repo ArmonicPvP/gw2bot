@@ -3277,12 +3277,19 @@ button:focus-visible {
     tooltip.style.visibility = "hidden";
     chart.appendChild(tooltip);
 
-    function nearestColumn(vbX) {
+    // Pick from the actual dots in two dimensions, then return its time
+    // column. Close timestamps can occupy nearly the same x coordinate, so
+    // x-only navigation made their different y positions impossible to use.
+    function nearestColumn(vbX, vbY) {
       var best = null;
       var bestDist = Infinity;
       columns.forEach(function (column) {
-        var dist = Math.abs(column.x - vbX);
-        if (dist < bestDist) { bestDist = dist; best = column; }
+        column.points.forEach(function (point) {
+          var dx = point.x - vbX;
+          var dy = point.y - vbY;
+          var dist = dx * dx + dy * dy;
+          if (dist < bestDist) { bestDist = dist; best = column; }
+        });
       });
       return best;
     }
@@ -3418,7 +3425,7 @@ button:focus-visible {
       if (!columns.length) { return { column: null, reason: "no-changes" }; }
       var at = pointFromEvent(event);
       if (!at) { return { column: null, reason: "unsized-canvas" }; }
-      var column = nearestColumn(at.x);
+      var column = nearestColumn(at.x, at.y);
       if (!column) { return { column: null, reason: "no-nearest" }; }
       return { column: column, at: at, reason: "ok" };
     }

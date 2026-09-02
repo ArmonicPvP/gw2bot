@@ -751,7 +751,7 @@ history untouched rather than logging it as zero.
 ## Overdue Trial Member Report
 
 After connecting to Discord, the bot checks `/v2/guild/:id/members` for accounts
-whose in-game guild rank is `Trial` and posts up to two reports to the configured
+whose in-game guild rank is `Trial` and posts up to three reports to the configured
 notification channel:
 
 - **Trial members before the 14-day mark** — Trial accounts whose `joined`

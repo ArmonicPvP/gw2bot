@@ -8,7 +8,6 @@ import pytest
 from gw2bot.guild_members import (
     DISCORD_MESSAGE_LIMIT,
     TRIAL_WARNING_MARK_HEADER,
-    TRIAL_WARNING_PENDING_HEADER,
     GuildMemberCache,
     TrialMemberReportEntry,
     filter_sunborne_discord_entries,
@@ -20,7 +19,6 @@ from gw2bot.guild_members import (
     get_recent_trial_members,
     partition_tracked_overdue_members,
     seconds_until_trial_report,
-    select_pending_warning_members,
     select_warned_overdue_members,
 )
 
@@ -481,52 +479,6 @@ class TestTrialMemberReport:
             "**Trial members past the 7-day warning mark (to be kicked)**"
         )
         assert "* Tracked.1234" in message
-
-    def test_selects_pending_members_inside_the_warning_window(self) -> None:
-        now = datetime(2026, 6, 10, 17, 0, tzinfo=UTC)
-        tracked_times = {
-            "Warned.1234": now - timedelta(days=7),
-            "Grace.5678": now - timedelta(days=6, hours=23),
-            "CASEFOLD.9012": now - timedelta(days=2),
-        }
-
-        pending = select_pending_warning_members(
-            ["Warned.1234", "Grace.5678", "casefold.9012", "NoTime.7890"],
-            tracked_times,
-            now,
-        )
-
-        assert pending == {
-            "Grace.5678": now + timedelta(hours=1),
-            "casefold.9012": now + timedelta(days=5),
-        }
-
-    def test_pending_warning_report_shows_kick_countdown_timestamp(self) -> None:
-        deadline = datetime(2026, 6, 12, 17, 0, tzinfo=UTC)
-        message = format_overdue_trial_report(
-            [
-                TrialMemberReportEntry(
-                    "Tracked.1234",
-                    discord_user_id=42,
-                    discord_status="Trial",
-                    warning_deadline=deadline,
-                ),
-                TrialMemberReportEntry(
-                    "Unresolved.5678",
-                    warning_deadline=deadline,
-                ),
-            ],
-            header=TRIAL_WARNING_PENDING_HEADER,
-        )[0]
-
-        assert message.startswith(
-            "**Trial members within the 7-day warning window**"
-        )
-        expected = int(deadline.timestamp())
-        assert (
-            f"* Tracked.1234 - <@42> - Trial - kick <t:{expected}:R>" in message
-        )
-        assert f"* Unresolved.5678 - kick <t:{expected}:R>" in message
 
     def test_finds_the_accounts_still_holding_an_invite(self) -> None:
         members = [

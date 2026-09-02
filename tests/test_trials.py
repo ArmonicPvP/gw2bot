@@ -454,7 +454,9 @@ class TestTrialMemberReportMessages:
             "Promoted Warned.1234",
         ]
 
-    async def test_tracked_member_in_grace_window_shows_kick_countdown(self) -> None:
+    async def test_tracked_member_in_grace_window_is_left_off_every_report(
+        self,
+    ) -> None:
         now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         api = SimpleNamespace(
             get_guild_members=AsyncMock(
@@ -483,18 +485,60 @@ class TestTrialMemberReportMessages:
 
         messages = await Gw2Bot._build_trial_report_messages(cast(Gw2Bot, bot), now)
 
-        # Removed from the 14-day report when tracked, kept off the 7-day
-        # warning report, and shown with a Discord timestamp counting down to
-        # the end of the warning window.
-        assert len(messages) == 1
-        assert "Trial members within the 7-day warning window" in messages[0]
-        deadline = int((now + timedelta(days=5)).timestamp())
-        assert f"* Tracked.5678 - <@100> - Trial - kick <t:{deadline}:R>" in (
-            messages[0]
-        )
-        assert "to be kicked" not in messages[0]
-        assert "past the 14-day mark" not in messages[0]
+        # Removed from the 14-day report when tracked and not yet due for
+        # kicking, so the grace window is reported nowhere.
+        assert messages == []
         untrack.assert_not_called()
+
+    async def test_report_summary_logs_counts_without_member_values(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = SimpleNamespace(
+            get_guild_members=AsyncMock(
+                return_value=[
+                    {
+                        "name": "Tracked.5678",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=20)).isoformat(),
+                    },
+                    {
+                        "name": "Warned.9012",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=30)).isoformat(),
+                    },
+                ]
+            )
+        )
+        bot = SimpleNamespace(
+            _api=api,
+            _config=default_config(gw2_guild_id="guild-id"),
+            get_tracked_trial_member_times=MagicMock(
+                return_value={
+                    "Tracked.5678": now - timedelta(days=2),
+                    "Warned.9012": now - timedelta(days=8),
+                }
+            ),
+            untrack_trial_member=MagicMock(),
+            _resolve_trial_member_discord_statuses=_trial_status_resolver(
+                {"Tracked.5678": "Trial", "Warned.9012": "Trial"}
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.trials"):
+            await Gw2Bot._build_trial_report_messages(cast(Gw2Bot, bot), now)
+
+        # The summary traces the grace-window omission as a count, so an
+        # operator can tell it apart from the other tracked outcomes without
+        # any account name, guild id or Discord mention reaching the console.
+        assert (
+            "1 inside warning window and reported nowhere, 1 past 7-day warning"
+        ) in caplog.text
+        assert "Tracked.5678" not in caplog.text
+        assert "Warned.9012" not in caplog.text
+        assert "guild-id" not in caplog.text
+        assert "<@100>" not in caplog.text
 
 
 class TestTrialMemberNotification:

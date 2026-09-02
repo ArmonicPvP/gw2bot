@@ -1024,6 +1024,18 @@ class TestDashboardChartModes:
         )
 
 
+class TestRosterChart:
+    def test_hover_uses_both_pointer_coordinates(self) -> None:
+        # Joins and leaves recorded moments apart sit almost on top of each
+        # other horizontally, so picking by x alone made the dot a finger
+        # actually landed on unreachable.
+        assert "function nearestColumn(vbX, vbY)" in ROSTER_PAGE
+        assert "var dx = point.x - vbX;" in ROSTER_PAGE
+        assert "var dy = point.y - vbY;" in ROSTER_PAGE
+        assert "nearestColumn(at.x, at.y)" in ROSTER_PAGE
+        assert "nearestColumn(at.x)" not in ROSTER_PAGE
+
+
 class TestRosterTable:
     def test_a_long_account_name_wraps_instead_of_widening_the_table(
         self,
