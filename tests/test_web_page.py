@@ -173,6 +173,21 @@ class TestProfitPage:
         assert "load(!requested);" in PROFIT_PAGE
         assert "load(false);" in PROFIT_PAGE
 
+    def test_daily_profit_opens_with_the_most_recent_day_first(self) -> None:
+        # The first page of a 90-day window should be this week, not the
+        # start of the window, so the date column starts descending.
+        assert (
+            '<th aria-sort="descending"><button class="sort-button" '
+            'type="button" data-sort-index="0" data-sort-kind="text" '
+            'data-sort-key="date" data-sort-default="descending">Date</button>'
+        ) in PROFIT_PAGE
+        assert 'data-sort-key="date"' in PROFIT_PAGE
+        assert (
+            '<th aria-sort="ascending"><button class="sort-button" '
+            'type="button" data-sort-index="0" data-sort-kind="text" '
+            'data-sort-key="date"'
+        ) not in PROFIT_PAGE
+
     def test_daily_profit_has_adjustable_pagination(self) -> None:
         assert 'id="days-page-size" type="number" min="1" max="90" value="10"' in PROFIT_PAGE
         assert 'id="days-pages-top"' in PROFIT_PAGE

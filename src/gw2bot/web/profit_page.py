@@ -358,7 +358,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       </nav>
       <div class="table-scroll"><table id="days-table" data-sort-table="days">
         <thead><tr>
-          <th aria-sort="ascending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="net-revenue" data-sort-default="descending">Net Revenue</button></th>
