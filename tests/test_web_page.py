@@ -112,20 +112,57 @@ class TestProfitPage:
         )
         assert "percent(cost ? profit / cost * 100 : null)" in PROFIT_PAGE
 
-    def test_open_orders_exclusions_are_saved_and_restorable(self) -> None:
+    def test_open_orders_hiding_is_saved_and_restorable(self) -> None:
         assert 'fetch("/api/profit/exclusions", {' in PROFIT_PAGE
         assert 'method: "POST",' in PROFIT_PAGE
         assert (
             "JSON.stringify({ item_id: itemId, excluded: excluded })"
             in PROFIT_PAGE
         )
-        assert 'id="orders-excluded" hidden' in PROFIT_PAGE
-        assert 'id="orders-excluded-list"' in PROFIT_PAGE
-        assert "function renderExcludedOrders()" in PROFIT_PAGE
-        assert 'button.textContent = excluded ? "Restore" : "Exclude";' in (
+        assert "function renderHiddenOrders()" in PROFIT_PAGE
+        assert "function restoreButton(order)" in PROFIT_PAGE
+        assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
+
+    def test_hidden_items_live_behind_the_open_orders_menu(self) -> None:
+        assert 'id="orders-menu" class="icon-button"' in PROFIT_PAGE
+        assert 'aria-haspopup="dialog"' in PROFIT_PAGE
+        # Three dots, drawn rather than typed so they line up at any size.
+        assert PROFIT_PAGE.count('<circle cx="12" cy="5" r="2">') == 1
+        assert PROFIT_PAGE.count('<circle cx="12" cy="12" r="2">') == 1
+        assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 1
+        assert '<dialog id="hidden-dialog"' in PROFIT_PAGE
+        assert '<h2 id="hidden-title">Hidden items</h2>' in PROFIT_PAGE
+        assert "dialog.showModal();" in PROFIT_PAGE
+        assert "function openHiddenItems()" in PROFIT_PAGE
+        assert 'document.getElementById("hidden-dialog").close();' in (
             PROFIT_PAGE
         )
-        assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
+        # The old always-on chip list is gone, not merely hidden.
+        assert "Excluded items" not in PROFIT_PAGE
+        assert 'id="orders-excluded-list"' not in PROFIT_PAGE
+
+    def test_hidden_items_are_searchable_in_a_table(self) -> None:
+        assert 'id="hidden-search" type="search"' in PROFIT_PAGE
+        assert '<table id="hidden-table">' in PROFIT_PAGE
+        assert 'id="hidden-body"' in PROFIT_PAGE
+        assert "order.name.toLowerCase().indexOf(search) !== -1" in PROFIT_PAGE
+        assert '"No hidden items match that search."' in PROFIT_PAGE
+        assert '"You have not hidden any items yet."' in PROFIT_PAGE
+        assert 'addEventListener(\n    "input", renderHiddenOrders)' in (
+            PROFIT_PAGE
+        )
+
+    def test_hiding_a_row_uses_an_icon_rather_than_a_word(self) -> None:
+        assert "<th>Hide</th>" in PROFIT_PAGE
+        assert "<th>Exclude</th>" not in PROFIT_PAGE
+        assert "function hideButton(order)" in PROFIT_PAGE
+        assert 'button.title = "Hide " + order.name;' in PROFIT_PAGE
+        assert 'button.setAttribute("aria-label", "Hide " + order.name);' in (
+            PROFIT_PAGE
+        )
+        # An eye with a line struck through it, so the row keeps its width.
+        assert 'd: "M14.12 14.12a3 3 0 1 1-4.24-4.24"' in PROFIT_PAGE
+        assert 'svgNode("line", {x1: 2, y1: 2, x2: 22, y2: 22})' in PROFIT_PAGE
 
     def test_report_window_follows_the_remembered_choice(self) -> None:
         assert "daysInput.value = String(data.days);" in PROFIT_PAGE

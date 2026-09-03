@@ -1331,9 +1331,9 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   defaulting to 30 days until they pick one. If the web session has expired,
   Discord sign-in returns the member to that same profit window.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
-  data, remembered report window, and excluded Open Orders items. It cannot
+  data, remembered report window, and hidden Open Orders items. It cannot
   affect any other member's key, cache, or choices. Replacing a key with
-  `/profit setkey` keeps the window and the exclusions.
+  `/profit setkey` keeps the window and the hidden items.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
@@ -1376,14 +1376,19 @@ and ROI below the table always describe the same orders. Unlike **Your Picks**,
 a negative return is shown rather than hidden: it is an order the member is
 holding, not a suggestion.
 
-Each row has an **Exclude** button that drops that item from the table — useful
-for a long-term buy that is not a flip, or an item whose spread is not worth
-reading every visit. Excluded items are listed above the table with a **Restore**
-button, and both lists are remembered against the member's Discord account, so
-they survive a reload, a new sign-in, and a different browser. An item excluded
-while it had an order keeps its entry after the order fills or is cancelled, so
-it can always be restored. Excluding an item affects only that member's own
-dashboard.
+Each row ends with a crossed-out eye button that hides that item from the table
+— useful for a long-term buy that is not a flip, or an item whose spread is not
+worth reading every visit. Hidden items are remembered against the member's
+Discord account, so they survive a reload, a new sign-in, and a different
+browser, and hiding an item affects only that member's own dashboard.
+
+The three dots at the top right of the section open a **Hidden items** window
+listing them in a searchable table, each with a **Restore** button that puts the
+item back. A member may accumulate hundreds of them, so the list lives behind
+that button rather than above the table, and the search box filters it by name.
+The window closes with its × button, the Escape key, or a click outside it. An
+item hidden while it had an order keeps its entry there after the order fills or
+is cancelled, so it can always be restored.
 
 The **Unclaimed Trading Post** section shows the coins waiting for pickup and
 then one row per item waiting with it, with the total below them. An item

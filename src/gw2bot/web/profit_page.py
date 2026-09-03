@@ -76,25 +76,76 @@ main { width: 100%; margin: 0; padding: 1rem; }
 .pick-toggle button:last-child { border-radius: 0 6px 6px 0; }
 .pick-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; }
 .card h3.subheading { font-size: 0.92rem; padding: 0.85rem 1rem 0.15rem; }
-.row-action { padding: 0.25rem 0.55rem; font-size: 0.78rem; }
-.exclusions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  padding: 0 1rem 0.85rem;
-  list-style: none;
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
-.exclusions li {
+.icon-button {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.25rem 0.3rem 0.25rem 0.6rem;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.8rem;
+  justify-content: center;
+  padding: 0.3rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  line-height: 0;
 }
-.exclusions .exclusion-name { overflow-wrap: anywhere; }
+.icon-button:hover { color: var(--text); background: var(--panel-2); }
+.icon-button svg { pointer-events: none; }
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.4rem;
+  line-height: 0;
+  color: var(--muted);
+}
+.row-action:hover { color: var(--text); }
+.row-action svg { pointer-events: none; }
+td.actions { text-align: center; }
+#hidden-dialog {
+  /* The shared reset zeroes every margin, which takes the centring a modal
+     dialog normally gets from the user agent's `margin: auto` with it. */
+  margin: auto;
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: min(32rem, calc(100vh - 4rem));
+  padding: 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+#hidden-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+#hidden-dialog[open] { display: flex; flex-direction: column; }
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 0.7rem 0.25rem 1rem;
+}
+.modal-head h2 { flex: 1; font-size: 1rem; }
+#hidden-count { padding-bottom: 0.6rem; }
+.modal-search { display: block; padding: 0 1rem 0.85rem; }
+.modal-search input { width: 100%; }
+.modal-scroll { overflow: auto; border-top: 1px solid var(--border); }
+#hidden-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-top: 0;
+}
+#hidden-table th:last-child, #hidden-table td:last-child {
+  width: 1%;
+  text-align: right;
+}
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {
@@ -340,15 +391,21 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       </table></div>
     </section>
     <section class="card">
-      <h2>Open Orders</h2>
+      <div class="card-heading">
+        <h2>Open Orders</h2>
+        <button id="orders-menu" class="icon-button" type="button"
+          aria-haspopup="dialog" title="Hidden items">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+            aria-hidden="true">
+            <circle cx="12" cy="5" r="2"></circle>
+            <circle cx="12" cy="12" r="2"></circle>
+            <circle cx="12" cy="19" r="2"></circle>
+          </svg>
+        </button>
+      </div>
       <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling the whole order at the current lowest sell listing after the 5% listing and 10% exchange fees, and ROI is that profit over what the order costs you.</p>
       <p class="note" id="orders-unpriced" hidden>Rows with no current Trading Post price show dashes and are left out of every total below, so the totals cover the same orders throughout.</p>
       <p class="note" id="orders-key-help" hidden>Open orders are unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows <code>/v2/commerce/transactions/current/buys</code>.</p>
-      <div id="orders-excluded" hidden>
-        <h3 class="subheading">Excluded items</h3>
-        <p class="note">These items are left out of the table below. The list is remembered for your Discord account.</p>
-        <ul class="exclusions" id="orders-excluded-list"></ul>
-      </div>
       <div class="table-scroll"><table id="orders-table" data-sort-table="orders">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -360,7 +417,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="order-profit" data-sort-default="descending">Profit / Unit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="order-total-profit" data-sort-default="descending">Total Profit</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="order-roi" data-sort-default="descending">ROI</button></th>
-          <th>Exclude</th>
+          <th>Hide</th>
         </tr></thead>
         <tbody id="orders-body"></tbody>
         <tfoot id="orders-foot"></tfoot>
@@ -387,6 +444,30 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       </table></div>
     </section>
   </div>
+  <dialog id="hidden-dialog" aria-labelledby="hidden-title">
+    <div class="modal-head">
+      <h2 id="hidden-title">Hidden items</h2>
+      <button id="hidden-close" class="icon-button" type="button"
+        aria-label="Close hidden items">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <p class="note" id="hidden-count"></p>
+    <label class="modal-search" for="hidden-search">
+      <span class="visually-hidden">Search hidden items</span>
+      <input id="hidden-search" type="search" placeholder="Search hidden items"
+        autocomplete="off">
+    </label>
+    <div class="modal-scroll"><table id="hidden-table">
+      <thead><tr><th>Item</th><th>Restore</th></tr></thead>
+      <tbody id="hidden-body"></tbody>
+    </table></div>
+  </dialog>
 </main>
 <script>
 (function () {
@@ -1258,16 +1339,48 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var ordersRows = [];
   var ordersAvailable = true;
 
-  function exclusionButton(itemId, excluded) {
+  // "Hidden" is what the dashboard calls these items; the stored rows and the
+  // API keep calling them exclusions, so both words appear here.
+  function hideButton(order) {
     var button = document.createElement("button");
     button.type = "button";
     button.className = "row-action";
-    button.textContent = excluded ? "Restore" : "Exclude";
-    button.setAttribute(
-      "aria-label",
-      (excluded ? "Restore " : "Exclude ") + "item " + itemId);
+    button.title = "Hide " + order.name;
+    button.setAttribute("aria-label", "Hide " + order.name);
+    var icon = svgNode("svg", {
+      viewBox: "0 0 24 24",
+      width: 16,
+      height: 16,
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round"
+    });
+    // An eye with a line through it: hidden, not deleted.
+    icon.appendChild(svgNode("path", {
+      d: "M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19"
+        + "M6.61 6.61A18.4 18.4 0 0 0 2 12s3 8 10 8a9 9 0 0 0 5.39-1.61"
+    }));
+    icon.appendChild(svgNode("path", {
+      d: "M14.12 14.12a3 3 0 1 1-4.24-4.24"
+    }));
+    icon.appendChild(svgNode("line", {x1: 2, y1: 2, x2: 22, y2: 22}));
+    button.appendChild(icon);
     button.addEventListener("click", function () {
-      setOrderExclusion(itemId, !excluded, button);
+      setOrderExclusion(order.item_id, true, button);
+    });
+    return button;
+  }
+
+  function restoreButton(order) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "row-action";
+    button.textContent = "Restore";
+    button.setAttribute("aria-label", "Restore " + order.name);
+    button.addEventListener("click", function () {
+      setOrderExclusion(order.item_id, false, button);
     });
     return button;
   }
@@ -1299,45 +1412,74 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       }
       status.className = "";
       status.textContent = excluded
-        ? "Excluded that item from your open orders."
+        ? "Hid that item from your open orders."
         : "Restored that item to your open orders.";
       renderOrders();
-      trace(excluded ? "order-excluded" : "order-restored", 1);
+      trace(excluded ? "order-hidden" : "order-restored", 1);
     }).catch(function () {
       button.disabled = false;
       status.className = "error";
       status.textContent =
         "That change could not be saved. Try again in a moment.";
-      trace("exclusion-failure", 0);
+      trace("hidden-item-failure", 0);
     });
   }
 
-  function renderExcludedOrders() {
-    var panel = document.getElementById("orders-excluded");
-    var list = document.getElementById("orders-excluded-list");
-    list.replaceChildren();
+  function openHiddenItems() {
+    var dialog = document.getElementById("hidden-dialog");
+    var search = document.getElementById("hidden-search");
+    search.value = "";
+    renderHiddenOrders();
+    dialog.showModal();
+    search.focus();
+    trace("hidden-items-open", hiddenOrders().length);
+  }
+
+  function hiddenOrders() {
+    // One entry per item, however many order rows that item has.
     var seen = Object.create(null);
-    var excluded = [];
+    var hidden = [];
     ordersRows.forEach(function (row) {
       if (!row.excluded || seen[row.item_id]) { return; }
       seen[row.item_id] = true;
-      excluded.push(row);
+      hidden.push(row);
     });
-    excluded.sort(function (left, right) {
+    return hidden.sort(function (left, right) {
       return left.name.localeCompare(
         right.name, undefined, { sensitivity: "base", numeric: true });
     });
-    excluded.forEach(function (row) {
-      var entry = document.createElement("li");
-      var name = document.createElement("span");
-      name.className = "exclusion-name";
-      name.textContent = row.name;
-      entry.appendChild(name);
-      entry.appendChild(exclusionButton(row.item_id, true));
-      list.appendChild(entry);
+  }
+
+  function renderHiddenOrders() {
+    var body = document.getElementById("hidden-body");
+    var count = document.getElementById("hidden-count");
+    var search = document.getElementById("hidden-search").value
+      .trim().toLowerCase();
+    var hidden = hiddenOrders();
+    var shown = search
+      ? hidden.filter(function (order) {
+        return order.name.toLowerCase().indexOf(search) !== -1;
+      })
+      : hidden;
+    body.replaceChildren();
+    shown.forEach(function (order) {
+      var row = document.createElement("tr");
+      cell(row, order.name, "name");
+      cell(row, "", "actions").appendChild(restoreButton(order));
+      body.appendChild(row);
     });
-    panel.hidden = excluded.length === 0;
-    trace("open-orders-excluded", excluded.length);
+    if (!shown.length) {
+      emptyRow(body, 2, hidden.length
+        ? "No hidden items match that search."
+        : "You have not hidden any items yet.");
+    }
+    count.textContent = hidden.length === 1
+      ? "1 item is hidden from your open orders."
+      : hidden.length + " items are hidden from your open orders.";
+    document.getElementById("orders-menu").title = hidden.length
+      ? "Hidden items (" + hidden.length + ")"
+      : "Hidden items";
+    trace("open-orders-hidden", shown.length);
   }
 
   function renderOrders() {
@@ -1367,7 +1509,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       optionalProfitCell(row, order.profit);
       optionalProfitCell(row, order.total_profit);
       percentCell(row, order.roi_percent);
-      cell(row, "").appendChild(exclusionButton(order.item_id, false));
+      cell(row, "", "actions").appendChild(hideButton(order));
       body.appendChild(row);
       if (order.total_profit === null) {
         unpriced += 1;
@@ -1388,7 +1530,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       profit, percent(cost ? profit / cost * 100 : null), ""
     ], 7);
     applySort("orders-table");
-    renderExcludedOrders();
+    renderHiddenOrders();
     trace("open-orders", kept.length);
   }
 
@@ -1526,6 +1668,23 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       daysPage = 1;
       paginateDays();
       trace("days-page-size", value);
+    });
+  document.getElementById("orders-menu").addEventListener(
+    "click", openHiddenItems);
+  document.getElementById("hidden-close").addEventListener(
+    "click", function () {
+      document.getElementById("hidden-dialog").close();
+    });
+  document.getElementById("hidden-search").addEventListener(
+    "input", renderHiddenOrders);
+  document.getElementById("hidden-dialog").addEventListener(
+    "click", function (event) {
+      // A modal dialog's backdrop is part of the dialog element, so a click
+      // landing on it and not on the panel inside means "outside".
+      if (event.target === this) {
+        this.close();
+        trace("hidden-items-dismiss", 0);
+      }
     });
   document.getElementById("picks-roi").addEventListener("click", function () {
     picksMetric = "roi_percent";
