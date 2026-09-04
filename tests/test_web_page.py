@@ -134,6 +134,8 @@ class TestProfitPage:
         assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 1
         assert '<dialog id="hidden-dialog"' in PROFIT_PAGE
         assert '<h2 id="hidden-title">Hidden items</h2>' in PROFIT_PAGE
+        # The count line is outside any card, so it carries its own inset.
+        assert "#hidden-count { padding: 0 1rem 0.6rem; }" in PROFIT_PAGE
         assert "dialog.showModal();" in PROFIT_PAGE
         assert "function openHiddenItems()" in PROFIT_PAGE
         assert 'document.getElementById("hidden-dialog").close();' in (
@@ -155,7 +157,9 @@ class TestProfitPage:
         )
 
     def test_hiding_a_row_uses_an_icon_rather_than_a_word(self) -> None:
-        assert "<th>Hide</th>" in PROFIT_PAGE
+        assert '<th class="actions">Hide</th>' in PROFIT_PAGE
+        # The heading and the icon under it share an alignment.
+        assert "th.actions, td.actions { text-align: center; }" in PROFIT_PAGE
         assert "<th>Exclude</th>" not in PROFIT_PAGE
         assert "function hideButton(order)" in PROFIT_PAGE
         assert 'button.title = "Hide " + order.name;' in PROFIT_PAGE

@@ -143,7 +143,9 @@ main { width: 100%; margin: 0; padding: 1rem; }
 }
 .row-action:hover { color: var(--text); }
 .row-action svg { pointer-events: none; }
-td.actions { text-align: center; }
+/* The heading and the icon under it are centred together, or the icon reads
+   as sitting off to one side of a right-aligned label. */
+th.actions, td.actions { text-align: center; }
 #hidden-dialog {
   /* The shared reset zeroes every margin, which takes the centring a modal
      dialog normally gets from the user agent's `margin: auto` with it. */
@@ -166,7 +168,7 @@ td.actions { text-align: center; }
   padding: 0.85rem 0.7rem 0.25rem 1rem;
 }
 .modal-head h2 { flex: 1; font-size: 1rem; }
-#hidden-count { padding-bottom: 0.6rem; }
+#hidden-count { padding: 0 1rem 0.6rem; }
 .modal-search { display: block; padding: 0 1rem 0.85rem; }
 .modal-search input { width: 100%; }
 .modal-scroll { overflow: auto; border-top: 1px solid var(--border); }
@@ -457,7 +459,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="order-profit" data-sort-default="descending">Profit / Unit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="order-total-profit" data-sort-default="descending">Total Profit</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="order-roi" data-sort-default="descending">ROI</button></th>
-          <th>Hide</th>
+          <th class="actions">Hide</th>
         </tr></thead>
         <tbody id="orders-body"></tbody>
         <tfoot id="orders-foot"></tfoot>
