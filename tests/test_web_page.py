@@ -244,6 +244,34 @@ class TestProfitPage:
         assert "days <= maxDays" in PROFIT_PAGE
         assert "historyStart = data.history_start_date;" in PROFIT_PAGE
 
+    def test_dates_are_short_and_carry_a_year_only_across_years(self) -> None:
+        assert "function shortDate(iso, withYear)" in PROFIT_PAGE
+        assert "function spansYears(startIso, endIso)" in PROFIT_PAGE
+        # One decision for the whole report, taken from the window.
+        assert (
+            "showYear = spansYears(data.window.start_date, "
+            "data.window.end_date);"
+        ) in PROFIT_PAGE
+        # Every rendering site formats; sorting still uses the ISO value.
+        assert 'cell(row, shortDate(day.date, showYear), "", day.date);' in (
+            PROFIT_PAGE
+        )
+        assert 'tooltipNode("tip-date", shortDate(column.date, showYear))' in (
+            PROFIT_PAGE
+        )
+        assert "shortDate(points[0].date, showYear)" in PROFIT_PAGE
+        assert "shortDate(points[points.length - 1].date, showYear)" in (
+            PROFIT_PAGE
+        )
+        assert "shortDate(entry.date, showYear)" in PROFIT_PAGE
+        # The string is parsed directly: a Date round trip would print UTC
+        # midnight in the viewer's zone, a day early west of Greenwich.
+        assert 'String(iso).split("-")' in PROFIT_PAGE
+        # "Held since" pairs with the window end, not with the window start.
+        assert (
+            "spansYears(historyStart, data.window.end_date)" in PROFIT_PAGE
+        )
+
     def test_daily_profit_opens_with_the_most_recent_day_first(self) -> None:
         # The first page of a 90-day window should be this week, not the
         # start of the window, so the date column starts descending.
@@ -321,14 +349,14 @@ class TestProfitPage:
         assert "item.roi_percent" in PROFIT_PAGE
 
     def test_summary_contains_best_and_worst_highlights(self) -> None:
-        assert '["Best item", highlight(bestItem, "name")' in PROFIT_PAGE
-        assert '["Worst item", highlight(worstItem, "name")' in PROFIT_PAGE
+        assert '["Best item", highlight(bestItem, itemName)' in PROFIT_PAGE
+        assert '["Worst item", highlight(worstItem, itemName)' in PROFIT_PAGE
         assert (
-            '["Best trading day", highlight(bestDay, "date")'
+            '["Best trading day", highlight(bestDay, dayLabel)'
             in PROFIT_PAGE
         )
         assert (
-            '["Worst trading day", highlight(worstDay, "date")'
+            '["Worst trading day", highlight(worstDay, dayLabel)'
             in PROFIT_PAGE
         )
         assert '["Realized ROI", percent(summary.roi_percent)' in PROFIT_PAGE

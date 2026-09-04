@@ -1416,6 +1416,14 @@ The copy is tied to the API key it was saved under, so `/profit deletekey`
 really does forget the window: a key saved afterwards starts from the default
 again, while replacing a key with `/profit setkey` keeps it.
 
+Dates read as `Jun 13` throughout — the daily table, the summary's best and
+worst trading days, the chart axes and their hover readings. The year is added,
+everywhere at once, only when the selected window crosses one: a window inside
+a single year has nothing to disambiguate, and mixing the two forms in one
+table reads worse than either. The "held since" date in the status line decides
+its own year the same way, against the end of the window, because it can reach
+much further back than the window does.
+
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window

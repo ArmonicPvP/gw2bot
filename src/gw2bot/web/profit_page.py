@@ -526,6 +526,32 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var daysPageSize = 10;
   var maxDays = __MAX_DAYS__;
   var historyStart = null;
+  var historyStartLabel = null;
+  // Whether dates carry their year. Decided once per report from the window:
+  // a window inside one year drops it everywhere, one that crosses a year
+  // boundary shows it everywhere, so no table mixes the two forms.
+  var showYear = false;
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+    "Sep", "Oct", "Nov", "Dec"];
+
+  // Formats a UTC calendar date from the API ("2026-06-13") as "Jun 13" or
+  // "Jun 13, 2026". It works on the string rather than through Date, which
+  // would read that string as UTC midnight and then print it in the
+  // viewer's zone - a day early anywhere west of Greenwich.
+  function shortDate(iso, withYear) {
+    var parts = String(iso).split("-");
+    if (parts.length !== 3) { return String(iso); }
+    var month = MONTHS[Number(parts[1]) - 1];
+    var day = Number(parts[2]);
+    if (!month || !Number.isInteger(day)) { return String(iso); }
+    return withYear
+      ? month + " " + day + ", " + parts[0]
+      : month + " " + day;
+  }
+
+  function spansYears(startIso, endIso) {
+    return String(startIso).slice(0, 4) !== String(endIso).slice(0, 4);
+  }
   var missingKey = false;
   var restoredWindow = false;
   // How often the open orders follow the market. The GW2 API declares its
@@ -843,13 +869,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       x: left,
       y: height - 8,
       "class": "chart-label"
-    }, points[0].date));
+    }, shortDate(points[0].date, showYear)));
     svg.appendChild(svgNode("text", {
       x: width - right,
       y: height - 8,
       "text-anchor": "end",
       "class": "chart-label"
-    }, points[points.length - 1].date));
+    }, shortDate(points[points.length - 1].date, showYear)));
     return {
       width: width,
       height: height,
@@ -927,7 +953,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       crosshair.style.visibility = "visible";
       rings.replaceChildren();
       tooltip.replaceChildren();
-      tooltip.appendChild(tooltipNode("tip-date", column.date));
+      tooltip.appendChild(
+        tooltipNode("tip-date", shortDate(column.date, showYear)));
 
       var anchorY = column.rows[0].y;
       var anchorDistance = Infinity;
@@ -1086,7 +1113,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           ? "chart-bar-negative" : "chart-bar-positive"
       });
       bar.appendChild(svgNode(
-        "title", {}, point.date + ": " + coin(point.profit)));
+        "title", {},
+        shortDate(point.date, showYear) + ": " + coin(point.profit)));
       svg.appendChild(bar);
     });
     var averageLine = svgNode("line", {
@@ -1154,7 +1182,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         "class": pointClass
       });
       point.appendChild(svgNode(
-        "title", {}, entry.point.date + ": "
+        "title", {}, shortDate(entry.point.date, showYear) + ": "
         + coin(Math.round(entry.value))));
       svg.appendChild(point);
     });
@@ -1234,11 +1262,14 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     });
   }
 
-  function highlight(entry, labelKey) {
+  function highlight(entry, labelFor) {
     return entry === null
       ? "\u2014"
-      : entry[labelKey] + " (" + coin(entry.profit) + ")";
+      : labelFor(entry) + " (" + coin(entry.profit) + ")";
   }
+
+  function itemName(entry) { return entry.name; }
+  function dayLabel(entry) { return shortDate(entry.date, showYear); }
 
   function renderSummary(data) {
     var summary = data.summary;
@@ -1260,10 +1291,10 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       ["Average daily profit", coin(Math.round(summary.profit / data.days)), summary.profit],
       ["Unrealized profit", coin(unrealized.projected_profit), unrealized.projected_profit],
       ["Unrealized ROI", percent(unrealized.roi_percent), unrealized.roi_percent],
-      ["Best item", highlight(bestItem, "name"), bestItem && bestItem.profit],
-      ["Worst item", highlight(worstItem, "name"), worstItem && worstItem.profit],
-      ["Best trading day", highlight(bestDay, "date"), bestDay && bestDay.profit],
-      ["Worst trading day", highlight(worstDay, "date"), worstDay && worstDay.profit]
+      ["Best item", highlight(bestItem, itemName), bestItem && bestItem.profit],
+      ["Worst item", highlight(worstItem, itemName), worstItem && worstItem.profit],
+      ["Best trading day", highlight(bestDay, dayLabel), bestDay && bestDay.profit],
+      ["Worst trading day", highlight(worstDay, dayLabel), worstDay && worstDay.profit]
     ];
     var body = document.getElementById("summary-body");
     body.replaceChildren();
@@ -1339,7 +1370,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     body.replaceChildren();
     data.days_table.forEach(function (day, index) {
       var row = sortableRow(index);
-      cell(row, day.date, "", day.date);
+      cell(row, shortDate(day.date, showYear), "", day.date);
       cell(row, day.units, "", day.units);
       cell(row, coin(day.cost), "", day.cost);
       cell(row, coin(day.net_revenue), "", day.net_revenue);
@@ -1676,6 +1707,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       daysInput.max = String(maxDays);
     }
     historyStart = data.history_start_date;
+    showYear = spansYears(data.window.start_date, data.window.end_date);
+    // "Held since" is a single date whose range runs to the window's end,
+    // so it decides its year on its own rather than following the table.
+    historyStartLabel = historyStart
+      ? shortDate(
+        historyStart, spansYears(historyStart, data.window.end_date))
+      : null;
     history.replaceState(
       null, "", "/profit?days=" + encodeURIComponent(String(data.days)));
     renderSummary(data);
@@ -1797,9 +1835,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         status.textContent = "A Trading Post API key is required.";
       } else if (ready === loaded.length) {
         status.className = "";
-        status.textContent = historyStart
+        status.textContent = historyStartLabel
           ? "Updated from your private Trading Post data, held since "
-            + historyStart + "."
+            + historyStartLabel + "."
           : "Updated from your private Trading Post data.";
       } else {
         status.className = "error";
