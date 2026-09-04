@@ -538,6 +538,49 @@ class ProfitStore:
         )
         return earliest
 
+    def get_members_with_api_key(self) -> list[int]:
+        """Every member the background sync has a key to work with."""
+        with self._sessions() as session:
+            members = sorted(
+                session.scalars(select(ProfitApiKeyRecord.discord_user_id))
+            )
+        LOGGER.debug("Read profit key holders; members=%s", len(members))
+        return members
+
+    def get_known_item_ids(
+        self,
+        ttl_seconds: int,
+        *,
+        now: datetime | None = None,
+    ) -> set[int]:
+        """Item ids whose names are stored and still fresh."""
+        checked_at = datetime.now(UTC) if now is None else now
+        with self._sessions() as session:
+            records = list(
+                session.execute(
+                    select(
+                        ProfitItemRecord.item_id,
+                        ProfitItemRecord.updated_at,
+                    )
+                )
+            )
+        known: set[int] = set()
+        for item_id, updated_at in records:
+            try:
+                age = (
+                    checked_at - parse_gw2_time(updated_at)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if 0 <= age < ttl_seconds:
+                known.add(item_id)
+        LOGGER.debug(
+            "Read known profit item names; stored=%s fresh=%s",
+            len(records),
+            len(known),
+        )
+        return known
+
     def get_item_names(
         self,
         item_ids: set[int],

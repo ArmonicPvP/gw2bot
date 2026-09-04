@@ -740,7 +740,11 @@ class WebServer:
                 requested_days,
             )
             days = window.days
-            report = await service.load_report(session.user_id, days)
+            report = await service.load_report(
+                session.user_id,
+                days,
+                force=self._forced(request),
+            )
         except MissingProfitApiKey:
             LOGGER.debug(
                 "Rejected profit report; user_id=%s reason=api-key-unset",
@@ -774,6 +778,11 @@ class WebServer:
         )
         return self._json(payload)
 
+    @staticmethod
+    def _forced(request: web.Request) -> bool:
+        """Whether the reader asked for a refresh rather than a cached read."""
+        return request.query.get("refresh") == "1"
+
     async def _profit_section(
         self,
         request: web.Request,
@@ -796,7 +805,10 @@ class WebServer:
                 )
             else:
                 payload = serialize_open_orders(
-                    await service.load_open_orders(session.user_id)
+                    await service.load_open_orders(
+                        session.user_id,
+                        force=self._forced(request),
+                    )
                 )
         except MissingProfitApiKey:
             LOGGER.debug(

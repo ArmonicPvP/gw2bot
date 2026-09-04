@@ -74,9 +74,7 @@ class TestProfitPage:
         assert 'fetchSection("delivery", "/api/profit/delivery", renderDelivery)' in (
             PROFIT_PAGE
         )
-        assert 'fetchSection("report", "/api/profit" + (days === null' in (
-            PROFIT_PAGE
-        )
+        assert 'fetchSection("report", "/api/profit"' in PROFIT_PAGE
 
     def test_delivery_lists_each_waiting_item_instead_of_one_count(
         self,
@@ -191,6 +189,17 @@ class TestProfitPage:
         assert 'fetchSection("delivery", "/api/profit/delivery"' in PROFIT_PAGE
         assert "@keyframes profit-spin" in PROFIT_PAGE
         assert "prefers-reduced-motion" in PROFIT_PAGE
+
+    def test_prices_follow_the_market_without_a_reload(self) -> None:
+        assert "var PRICE_REFRESH_MS = 60000;" in PROFIT_PAGE
+        assert "setInterval(refreshPrices, PRICE_REFRESH_MS);" in PROFIT_PAGE
+        assert "function refreshPrices()" in PROFIT_PAGE
+        # A hidden tab costs nothing, and coming back catches up at once.
+        assert "if (missingKey || document.hidden) { return; }" in PROFIT_PAGE
+        assert 'addEventListener("visibilitychange"' in PROFIT_PAGE
+        # The beat rides the cache; only Load asks for a live read.
+        assert 'fetch("/api/profit/orders").then' in PROFIT_PAGE
+        assert 'var refresh = useRemembered ? "" : "refresh=1";' in PROFIT_PAGE
 
     def test_a_lost_window_is_restored_from_the_browser(self) -> None:
         assert 'STORED_DAYS_KEY = "gw2bot-profit-days"' in PROFIT_PAGE

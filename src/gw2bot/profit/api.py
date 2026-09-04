@@ -15,6 +15,7 @@ from gw2bot.profit.models import (
     Transaction,
     parse_gw2_time,
 )
+from gw2bot.profit.prices import MarketPriceCache
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,9 +59,11 @@ class ProfitApiClient:
         self,
         session: aiohttp.ClientSession,
         base_url: str,
+        prices: MarketPriceCache | None = None,
     ) -> None:
         self._session = session
         self._base_url = base_url.rstrip("/")
+        self._prices = MarketPriceCache() if prices is None else prices
 
     async def validate_key(self, api_key: str) -> bool:
         payload, _ = await self._get("/v2/tokeninfo", api_key=api_key)
@@ -264,73 +267,137 @@ class ProfitApiClient:
         )
         return coins, delivered
 
-    async def fetch_item_names(self, item_ids: set[int]) -> dict[int, str]:
+    async def fetch_all_item_ids(self) -> list[int]:
+        """Every tradeable item id the game knows about."""
+        payload, _ = await self._get("/v2/items")
+        if not isinstance(payload, list):
+            raise ProfitApiError("GW2 item id response was not a collection")
+        item_ids = [
+            item_id
+            for item_id in payload
+            if isinstance(item_id, int) and not isinstance(item_id, bool)
+        ]
+        LOGGER.debug("Fetched GW2 item id list; items=%s", len(item_ids))
+        return item_ids
+
+    async def _fetch_item_name_chunk(
+        self,
+        chunk: list[int],
+        gate: asyncio.Semaphore,
+    ) -> dict[int, str]:
         names: dict[int, str] = {}
-        ordered_ids = sorted(item_ids)
-        for offset in range(0, len(ordered_ids), ITEM_CHUNK_SIZE):
-            chunk = ordered_ids[offset : offset + ITEM_CHUNK_SIZE]
-            try:
+        try:
+            async with gate:
                 payload, _ = await self._get(
                     "/v2/items",
                     params={"ids": ",".join(str(item_id) for item_id in chunk)},
                 )
-                if not isinstance(payload, list):
-                    raise ProfitApiError(
-                        "GW2 item response was not a collection"
-                    )
-                for item in payload:
-                    if not isinstance(item, dict):
-                        continue
-                    item_id = item.get("id")
-                    name = item.get("name")
-                    if (
-                        isinstance(item_id, int)
-                        and not isinstance(item_id, bool)
-                        and isinstance(name, str)
-                    ):
-                        names[item_id] = name
-                LOGGER.debug(
-                    "Fetched GW2 profit item names; requested=%s found=%s",
-                    len(chunk),
-                    sum(1 for item_id in chunk if item_id in names),
-                )
-            except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
-                # Names are presentation only. One failed chunk falls back to
-                # item ids and must not hide the otherwise complete report or
-                # prevent later chunks from being attempted.
-                LOGGER.warning(
-                    "Could not fetch a profit item-name chunk; requested=%s "
-                    "error_type=%s",
-                    len(chunk),
-                    type(exc).__name__,
-                )
+            if not isinstance(payload, list):
+                raise ProfitApiError("GW2 item response was not a collection")
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                name = item.get("name")
+                if (
+                    isinstance(item_id, int)
+                    and not isinstance(item_id, bool)
+                    and isinstance(name, str)
+                ):
+                    names[item_id] = name
+            LOGGER.debug(
+                "Fetched GW2 profit item names; requested=%s found=%s",
+                len(chunk),
+                len(names),
+            )
+        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
+            # Names are presentation only. One failed chunk falls back to
+            # item ids and must not hide the otherwise complete report or
+            # prevent the other chunks from being attempted.
+            LOGGER.warning(
+                "Could not fetch a profit item-name chunk; requested=%s "
+                "error_type=%s",
+                len(chunk),
+                type(exc).__name__,
+            )
+        return names
+
+    async def fetch_item_names(self, item_ids: set[int]) -> dict[int, str]:
+        """Name the requested items, reading the chunks together.
+
+        The whole catalogue is nearly four hundred chunks. Read one after
+        another that is five minutes of the event loop; read eight at a time
+        it is well under one, and the ceiling keeps the burst polite.
+        """
+        ordered_ids = sorted(item_ids)
+        chunks = [
+            ordered_ids[offset : offset + ITEM_CHUNK_SIZE]
+            for offset in range(0, len(ordered_ids), ITEM_CHUNK_SIZE)
+        ]
+        gate = asyncio.Semaphore(PAGE_CONCURRENCY)
+        results = await asyncio.gather(
+            *(self._fetch_item_name_chunk(chunk, gate) for chunk in chunks)
+        )
+        names: dict[int, str] = {}
+        for found in results:
+            names.update(found)
         return names
 
     async def fetch_market_prices(
         self,
         item_ids: set[int],
+        *,
+        force: bool = False,
     ) -> dict[int, MarketPrice]:
-        """Return usable current buy-order and sell-listing prices."""
+        """Return usable current buy-order and sell-listing prices.
+
+        Readings are shared with every other member through the cache, so an
+        item several people are watching costs one lookup. ``force`` skips
+        the cache for a member who asked for a refresh by hand.
+        """
+        cached: dict[int, MarketPrice] = {}
+        wanted = set(item_ids)
+        if force:
+            self._prices.forget(wanted)
+        else:
+            cached, wanted = self._prices.read(item_ids)
         prices: dict[int, MarketPrice] = {}
-        ordered_ids = sorted(item_ids)
-        for offset in range(0, len(ordered_ids), ITEM_CHUNK_SIZE):
-            chunk = ordered_ids[offset : offset + ITEM_CHUNK_SIZE]
-            payload, _ = await self._get(
-                "/v2/commerce/prices",
-                params={"ids": ",".join(str(item_id) for item_id in chunk)},
+        ordered_ids = sorted(wanted)
+        # Chunks are independent lookups, so they go out together.
+        chunks = [
+            ordered_ids[offset : offset + ITEM_CHUNK_SIZE]
+            for offset in range(0, len(ordered_ids), ITEM_CHUNK_SIZE)
+        ]
+        payloads = await asyncio.gather(
+            *(
+                self._get(
+                    "/v2/commerce/prices",
+                    params={
+                        "ids": ",".join(str(item_id) for item_id in chunk)
+                    },
+                )
+                for chunk in chunks
             )
+        )
+        for payload, _headers in payloads:
             if not isinstance(payload, list):
                 raise ProfitApiError("GW2 price response was not a collection")
             for item in payload:
                 price = _market_price_from_payload(item)
                 if price is not None:
                     prices[price[0]] = price[1]
-            LOGGER.debug(
-                "Fetched GW2 market prices; requested=%s usable=%s",
-                len(chunk),
-                sum(1 for item_id in chunk if item_id in prices),
-            )
-        return prices
+        if prices:
+            self._prices.write(prices)
+        LOGGER.debug(
+            "Fetched GW2 market prices; requested=%s cached=%s fetched=%s "
+            "usable=%s forced=%s",
+            len(item_ids),
+            len(cached),
+            len(ordered_ids),
+            len(prices),
+            force,
+        )
+        return {**cached, **prices}
 
     async def _get(
         self,

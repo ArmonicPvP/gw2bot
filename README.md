@@ -1449,6 +1449,19 @@ history, and it reads eight pages at a time rather than one after another. In
 practice a first load takes a few seconds and later ones under a second, where
 walking every page one at a time took over a minute.
 
+Once a day the bot reads every member's Trading Post data in the background,
+so a dashboard opened between passes reads the database rather than the GW2
+API. The same pass stores the name of every item in the game — about 74,000 of
+them, in half a minute, and nothing at all on later passes — so no report ever
+waits on a name lookup. Pressing **Load** still forces a live read for a member
+who wants the last few minutes too.
+
+Market prices are shared: they are public, so the highest buy order for Wool
+Scrap is one lookup for the whole guild rather than one per member. **Open
+Orders** follows them on its own, re-reading every minute without a page
+reload, and pauses while the tab is in the background. Pressing **Load**
+bypasses that cache as well.
+
 The rest of the caching:
 
 | Data | Held for | Why |
@@ -1456,7 +1469,13 @@ The rest of the caching:
 | Transactions | Forever | The only copy of history older than GW2 serves |
 | Item names | 30 days | Fixed for the life of a game build |
 | Transaction snapshots | 5 minutes | How often a refresh is worth making |
-| Market prices | Not cached | A stale spread is worse than no spread |
+| Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
+
+The Guild Wars 2 API supports no conditional requests — no `ETag` and no
+`Last-Modified` on any endpoint the dashboard uses — so a cached read cannot be
+revalidated cheaply and every TTL above is a real one. It does declare how long
+each answer is good for, and none of these hold anything longer than it says:
+prices `max-age=120`, items `max-age=3600`, transactions `max-age=60`.
 
 Unclaimed coins and items are read when the delivery section is built. Keys
 saved before delivery reporting or Open Orders were added can still load their

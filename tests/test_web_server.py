@@ -1036,7 +1036,43 @@ class TestProfitPage:
         bot.profit_service.load_report.assert_awaited_once_with(
             other_user_id,
             60,
+            force=False,
         )
+
+    async def test_a_refresh_request_bypasses_the_snapshot(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.get(
+            "/api/profit",
+            params={"days": "30", "refresh": "1"},
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        bot.profit_service.load_report.assert_awaited_once_with(
+            SESSION_USER_ID,
+            30,
+            force=True,
+        )
+
+    async def test_the_price_beat_reads_orders_without_forcing(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        await client.get("/api/profit/orders", headers=self._headers())
+        await client.get(
+            "/api/profit/orders",
+            params={"refresh": "1"},
+            headers=self._headers(),
+        )
+
+        assert [
+            call.kwargs["force"]
+            for call in bot.profit_service.load_open_orders.await_args_list
+        ] == [False, True]
 
     async def test_delivery_is_served_without_the_history(
         self,
@@ -1106,7 +1142,8 @@ class TestProfitPage:
             }
         ]
         bot.profit_service.load_open_orders.assert_awaited_once_with(
-            SESSION_USER_ID
+            SESSION_USER_ID,
+            force=False,
         )
         bot.profit_service.load_report.assert_not_awaited()
 
@@ -1190,6 +1227,7 @@ class TestProfitPage:
         bot.profit_service.load_report.assert_awaited_once_with(
             SESSION_USER_ID,
             14,
+            force=False,
         )
 
     async def test_exclusion_is_stored_for_the_signed_in_member_only(

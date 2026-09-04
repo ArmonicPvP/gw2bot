@@ -526,6 +526,10 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var historyStart = null;
   var missingKey = false;
   var restoredWindow = false;
+  // How often the open orders follow the market. The GW2 API declares its
+  // prices good for two minutes, and the server holds each reading for one,
+  // so this is as live as the data can honestly be.
+  var PRICE_REFRESH_MS = 60000;
   // The chosen window lives against the Discord account. This copy is a
   // repair kit: if the account ever comes back without one - a rebuilt
   // database, or a release that overwrote it - the browser puts back what
@@ -1762,10 +1766,18 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     missingKey = false;
     // Three independent requests, in flight together. Each section draws as
     // soon as its own answer arrives instead of waiting for the slowest.
+    // A member who presses Load is asking for the current state, not the
+    // one the five-minute snapshot still holds.
+    var refresh = useRemembered ? "" : "refresh=1";
+    var reportQuery = [
+      days === null ? "" : "days=" + encodeURIComponent(String(days)),
+      refresh
+    ].filter(Boolean).join("&");
     Promise.all([
-      fetchSection("report", "/api/profit" + (days === null
-        ? "" : "?days=" + encodeURIComponent(String(days))), renderReport),
-      fetchSection("orders", "/api/profit/orders", renderOrdersSection),
+      fetchSection("report", "/api/profit"
+        + (reportQuery ? "?" + reportQuery : ""), renderReport),
+      fetchSection("orders", "/api/profit/orders"
+        + (refresh ? "?" + refresh : ""), renderOrdersSection),
       fetchSection("delivery", "/api/profit/delivery", renderDelivery)
     ]).then(function (loaded) {
       var ready = loaded.filter(Boolean).length;
@@ -1786,6 +1798,31 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       trace("load", ready);
     });
   }
+
+  function refreshPrices() {
+    // A quiet re-read on the cached path: the server holds each price for a
+    // minute and shares it between members, so this beat costs almost
+    // nothing and never forces a fetch of its own.
+    if (missingKey || document.hidden) { return; }
+    fetch("/api/profit/orders").then(function (response) {
+      return response.ok ? response.json() : null;
+    }).then(function (data) {
+      if (!data) { return; }
+      renderOrdersSection(data);
+      markSection("orders", "ready");
+      trace("prices-refreshed", data.orders.length);
+    }).catch(function () {
+      // A dropped beat is not worth telling the reader about; the next one
+      // is a minute away and the numbers on screen are still the last good
+      // ones.
+      trace("prices-refresh-failed", 0);
+    });
+  }
+
+  setInterval(refreshPrices, PRICE_REFRESH_MS);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { refreshPrices(); }
+  });
 
   rangeForm.addEventListener("submit", function (event) {
     event.preventDefault();

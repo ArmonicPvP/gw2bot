@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.profit.api import (
     TRANSACTION_PATHS,
@@ -167,6 +168,7 @@ class ProfitService:
         self,
         discord_user_id: int,
         *,
+        force: bool = False,
         now: datetime | None = None,
     ) -> OpenOrdersReport:
         """Load the member's outstanding buy orders and their current spread.
@@ -179,6 +181,7 @@ class ProfitService:
             discord_user_id,
             loaded_at,
             ("current_buys",),
+            force=force,
         )
         current_buys, excluded_items = await asyncio.to_thread(
             self._read_order_data,
@@ -188,7 +191,7 @@ class ProfitService:
         order_item_ids = {order.item_id for order in orders}
         # Prices and names are independent lookups, so they go out together.
         market_prices, item_names = await asyncio.gather(
-            self._api.fetch_market_prices(order_item_ids),
+            self._api.fetch_market_prices(order_item_ids, force=force),
             self._resolve_item_names(
                 # An item hidden with no open order left still needs its name,
                 # or the member cannot tell what they are restoring.
@@ -219,6 +222,7 @@ class ProfitService:
         discord_user_id: int,
         days: int,
         *,
+        force: bool = False,
         now: datetime | None = None,
     ) -> ProfitReport:
         if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
@@ -242,6 +246,7 @@ class ProfitService:
             discord_user_id,
             loaded_at,
             HISTORY_REPORT_KINDS,
+            force=force,
         )
 
         (
@@ -266,7 +271,7 @@ class ProfitService:
             current_sells,
         )
         market_prices, item_names = await asyncio.gather(
-            self._api.fetch_market_prices(set(realized.items)),
+            self._api.fetch_market_prices(set(realized.items), force=force),
             self._resolve_item_names(
                 set(realized.items) | set(unrealized.items),
                 loaded_at,
@@ -383,6 +388,109 @@ class ProfitService:
         )
 
 
+    async def warm_item_names(self) -> int:
+        """Store the name of every item the game has, ahead of any report.
+
+        Names are the one lookup a report cannot avoid and cannot guess, and
+        they never change within a game build. Reading the whole catalogue in
+        the background once a day means no member ever waits on /v2/items;
+        only ids that are missing or a month stale are asked for, so the run
+        after the first costs almost nothing.
+        """
+        try:
+            item_ids = await self._api.fetch_all_item_ids()
+        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
+            # Names are presentation only, and a report falls back to item
+            # ids. A failed warm must never take the bot down with it.
+            LOGGER.warning(
+                "Could not list GW2 items to warm names; error_type=%s",
+                type(exc).__name__,
+            )
+            return 0
+        known = await asyncio.to_thread(
+            self._store.get_known_item_ids,
+            ITEM_NAME_TTL_SECONDS,
+        )
+        missing = set(item_ids) - known
+        if not missing:
+            LOGGER.debug(
+                "Item name cache already warm; items=%s", len(item_ids)
+            )
+            return 0
+        LOGGER.info(
+            "Warming the profit item name cache; catalogue=%s missing=%s",
+            len(item_ids),
+            len(missing),
+        )
+        names = await self._api.fetch_item_names(missing)
+        if names:
+            await asyncio.to_thread(self._store.store_item_names, names)
+        LOGGER.info(
+            "Warmed the profit item name cache; stored=%s missing=%s",
+            len(names),
+            len(missing),
+        )
+        return len(names)
+
+    async def sync_member(self, discord_user_id: int) -> bool:
+        """Bring one member's stored collections up to date in the background.
+
+        A page load then reads the database rather than the GW2 API. Failures
+        are logged and swallowed: one member's expired key must not stop the
+        pass over everyone else.
+        """
+        try:
+            await self._refresh_transactions(
+                discord_user_id,
+                datetime.now(UTC),
+                tuple(TRANSACTION_PATHS),
+                force=True,
+            )
+        except MissingProfitApiKey:
+            LOGGER.debug(
+                "Skipped profit sync; user_id=%s reason=api-key-unset",
+                discord_user_id,
+            )
+            return False
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            ProfitApiError,
+            SQLAlchemyError,
+        ) as exc:
+            LOGGER.warning(
+                "Could not sync a member's Trading Post data; user_id=%s "
+                "error_type=%s",
+                discord_user_id,
+                type(exc).__name__,
+            )
+            return False
+        LOGGER.debug("Synced Trading Post data; user_id=%s", discord_user_id)
+        return True
+
+    async def sync_all_members(self) -> tuple[int, int]:
+        """Sync every member holding a key; return (synced, attempted)."""
+        try:
+            members = await asyncio.to_thread(
+                self._store.get_members_with_api_key
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not list profit key holders; error_type=%s",
+                type(exc).__name__,
+            )
+            return 0, 0
+        synced = 0
+        for discord_user_id in members:
+            if await self.sync_member(discord_user_id):
+                synced += 1
+        LOGGER.info(
+            "Completed the daily Trading Post sync; synced=%s members=%s",
+            synced,
+            len(members),
+        )
+        return synced, len(members)
+
     async def _require_api_key(self, discord_user_id: int):
         snapshot = await asyncio.to_thread(
             self._store.get_api_key_snapshot,
@@ -467,15 +575,27 @@ class ProfitService:
         discord_user_id: int,
         now: datetime,
         kinds: tuple[str, ...],
+        *,
+        force: bool = False,
     ) -> tuple[str, frozenset[str]]:
-        """Bring the named collections up to date; report what was refused."""
+        """Bring the named collections up to date; report what was refused.
+
+        ``force`` ignores the snapshot's five-minute life, which is what the
+        page's Load button asks for: a member who presses it wants the current
+        state, not the one from four minutes ago. The read is still
+        incremental, so forcing costs one page rather than sixty.
+        """
         for attempt in range(2):
             snapshot = await self._require_api_key(discord_user_id)
-            stale_kinds = await asyncio.to_thread(
-                self._stale_kinds,
-                discord_user_id,
-                kinds,
-                now,
+            stale_kinds = (
+                list(kinds)
+                if force
+                else await asyncio.to_thread(
+                    self._stale_kinds,
+                    discord_user_id,
+                    kinds,
+                    now,
+                )
             )
             LOGGER.debug(
                 "Resolved profit cache refresh; user_id=%s asked=%s stale=%s "

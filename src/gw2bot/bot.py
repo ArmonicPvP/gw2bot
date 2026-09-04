@@ -98,6 +98,13 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# How often every member's Trading Post data is read in the background, and
+# how long that pass waits after startup before its first run. Daily is the
+# right beat: the collections a report needs change slowly, and the page's
+# Load button covers a member who wants the last few minutes as well.
+PROFIT_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
+PROFIT_SYNC_STARTUP_DELAY_SECONDS = 60
+
 
 def _bootstrap_from(config: Config) -> BootstrapConfig:
     """Recover the bootstrap half of a Config that was handed over whole.
@@ -263,6 +270,10 @@ class Gw2Bot(discord.Client):
         wanted: dict[str, Callable[[], Coroutine[Any, Any, None]]] = {
             "gw2-raffle-contribution-poller": self._poll_raffle_contributions,
             "gw2-event-scheduler": self._poll_event_updates,
+            # Members supply their own Trading Post keys, so this runs
+            # whatever the guild-wide GW2 settings are. With nobody signed up
+            # it costs one query a day and does nothing.
+            "gw2-profit-sync": self._poll_profit_sync,
         }
         if gw2_api_enabled:
             # These read the GW2 API on every pass, so without a key and a
@@ -1026,6 +1037,37 @@ class Gw2Bot(discord.Client):
 
     async def _poll_raffle_contributions(self) -> None:
         await raffle_reports.poll_raffle_contributions(self)
+
+    async def _poll_profit_sync(self) -> None:
+        """Read every member's Trading Post data once a day, in the background.
+
+        A dashboard opened between passes reads the database instead of the
+        GW2 API. The page's Load button still forces a live read for a member
+        who wants the last few minutes as well.
+        """
+        # Nothing is waiting on this, and a restart should not have every
+        # member's history re-read before the bot has finished connecting.
+        await asyncio.sleep(PROFIT_SYNC_STARTUP_DELAY_SECONDS)
+        while not self.is_closed():
+            service = self.profit_service
+            if service is None:
+                LOGGER.debug(
+                    "Skipped the Trading Post sync; service=unavailable"
+                )
+            else:
+                try:
+                    await service.warm_item_names()
+                    await service.sync_all_members()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A background pass must survive anything one member's
+                    # data can do to it, or the daily sync stops for everyone.
+                    LOGGER.exception(
+                        "The Trading Post sync pass failed; error_type=%s",
+                        type(exc).__name__,
+                    )
+            await asyncio.sleep(PROFIT_SYNC_INTERVAL_SECONDS)
 
     async def _send_raffle_contribution_report(self, report_end: datetime) -> None:
         await raffle_reports.send_raffle_contribution_report(self, report_end)

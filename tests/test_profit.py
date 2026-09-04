@@ -23,6 +23,7 @@ from gw2bot.profit.api import (
     ProfitApiError,
 )
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
+from gw2bot.profit.prices import MarketPriceCache
 from gw2bot.profit.models import (
     BuyLot,
     DeliveryItem,
@@ -472,6 +473,42 @@ class TestOpenBuyOrders:
 
     def test_no_orders_group_to_nothing(self) -> None:
         assert group_open_buy_orders([]) == ()
+
+
+class TestMarketPriceCache:
+    def test_one_reading_serves_every_member_until_it_expires(self) -> None:
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+
+        assert cache.read({1, 2}, now=now) == ({}, {1, 2})
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+
+        fresh, stale = cache.read({1, 2}, now=now + timedelta(seconds=59))
+        assert fresh == {1: MarketPrice(10, 20)}
+        assert stale == {2}
+
+        # A minute on, the reading is no longer offered to anyone.
+        assert cache.read({1}, now=now + timedelta(seconds=61)) == ({}, {1})
+
+    def test_a_forced_reading_is_dropped_rather_than_served(self) -> None:
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+
+        cache.forget({1})
+
+        assert cache.read({1}, now=now) == ({}, {1})
+
+    def test_pruning_forgets_only_what_has_expired(self) -> None:
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+        cache.write({2: MarketPrice(30, 40)}, now=now + timedelta(seconds=30))
+
+        assert cache.prune(now=now + timedelta(seconds=61)) == 1
+
+        fresh, _stale = cache.read({1, 2}, now=now + timedelta(seconds=61))
+        assert set(fresh) == {2}
 
 
 class TestProfitStore:
@@ -1202,7 +1239,7 @@ class TestProfitService:
         report = await service.load_open_orders(101, now=now)
 
         assert report.excluded_items == frozenset({2, 3})
-        api.fetch_market_prices.assert_awaited_once_with({1, 2})
+        api.fetch_market_prices.assert_awaited_once_with({1, 2}, force=False)
         orders = cast(dict[str, Any], serialize_open_orders(report))
         assert [row["item_id"] for row in orders["orders"]] == [1]
         assert [row["item_id"] for row in orders["excluded"]] == [2, 3]
@@ -1438,6 +1475,134 @@ class TestProfitService:
         assert store.get_excluded_order_items(101) == frozenset({19_721})
         assert await service.set_order_exclusion(101, 19_721, False)
         assert store.get_excluded_order_items(101) == frozenset()
+
+
+class TestProfitBackgroundSync:
+    async def test_a_daily_pass_syncs_every_member_holding_a_key(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-member-secret")
+        store.set_api_key(202, "second-member-secret")
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(fetch_transactions=AsyncMock(return_value=[]))
+        service._api = api  # type: ignore[assignment]
+
+        assert await service.sync_all_members() == (2, 2)
+        # Every collection, for every member, and nothing else.
+        assert api.fetch_transactions.await_count == 8
+
+    async def test_one_members_failure_does_not_stop_the_pass(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        secret = "broken-member-secret"
+        store.set_api_key(101, secret)
+        store.set_api_key(202, "working-member-secret")
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if api_key == secret:
+                raise ProfitApiError("GW2 API request returned HTTP 500")
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            synced, members = await service.sync_all_members()
+
+        assert (synced, members) == (1, 2)
+        assert "Could not sync a member" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_warming_asks_only_for_names_it_does_not_have(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_item_names({1: "Known Item"})
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_all_item_ids=AsyncMock(return_value=[1, 2, 3]),
+            fetch_item_names=AsyncMock(
+                return_value={2: "New Item", 3: "Other Item"}
+            ),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        assert await service.warm_item_names() == 2
+
+        api.fetch_item_names.assert_awaited_once_with({2, 3})
+        assert store.get_item_names({1, 2, 3}, ITEM_NAME_TTL_SECONDS) == {
+            1: "Known Item",
+            2: "New Item",
+            3: "Other Item",
+        }
+
+    async def test_a_warm_cache_asks_for_nothing(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_item_names({1: "Known Item", 2: "Other Item"})
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_all_item_ids=AsyncMock(return_value=[1, 2]),
+            fetch_item_names=AsyncMock(),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        assert await service.warm_item_names() == 0
+        api.fetch_item_names.assert_not_awaited()
+
+    async def test_a_failed_catalogue_read_never_raises(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_all_item_ids=AsyncMock(
+                side_effect=ProfitApiError("GW2 API request returned HTTP 503")
+            ),
+            fetch_item_names=AsyncMock(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            assert await service.warm_item_names() == 0
+
+        assert "Could not list GW2 items" in caplog.text
 
 
 class _FakeResponse:

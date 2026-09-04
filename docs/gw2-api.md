@@ -119,17 +119,49 @@ Returns `buys.unit_price` (the highest standing buy order) and
 of 200 ids. The realized report reads it for the items flipped in the window
 and the Open Orders section for the items on order; neither waits on the other.
 An item whose response has a zero price on either side is skipped. It needs no
-API key, and prices are never cached, because a stale spread is worse than no
-spread.
+API key.
+
+Readings are held for one minute in a cache shared by every member, because a
+price is public: several people watching the same item pay for one lookup
+between them. The dashboard's Open Orders section re-reads on the same beat, so
+a number on screen is at most a minute old. A member pressing Load drops their
+items from the cache and reads live.
+
+### Conditional requests
+
+The API supports none. No endpoint the dashboard uses returns an `ETag` or a
+`Last-Modified`, so `If-None-Match` and `If-Modified-Since` have nothing to
+send and a cached copy cannot be revalidated for less than a full re-read.
+Verified against the live API; if that ever changes, the transaction pages are
+where it would pay off most.
+
+What the API does return is a lifetime for each answer, and nothing here is
+held longer than it says:
+
+| Endpoint | `Cache-Control` |
+| --- | --- |
+| `/v2/commerce/prices` | `public, max-age=120` |
+| `/v2/items` | `public, max-age=3600` |
+| `/v2/commerce/transactions/*` | `private, max-age=60` |
+| `/v2/commerce/delivery` | none sent |
+
+Because those are public CDN lifetimes, a forced re-read inside the window
+often costs a cached response upstream rather than a fresh query, which is
+part of why the Load button is cheap to press.
 
 ### `/v2/items`
 
-Names the requested items, in chunks of 200 ids, and needs no API key. Names
-are stored and re-used for a month rather than for the five minutes a
-transaction snapshot lasts: an item's name is fixed for the life of a game
-build, and re-reading a few thousand of them on every page load was one of the
-slower parts of a report. One failed chunk falls back to `Item <id>` for those
-ids and never fails the report.
+Names the requested items, in chunks of 200 ids read eight at a time, and needs
+no API key. Names are stored and re-used for a month rather than for the five
+minutes a transaction snapshot lasts: an item's name is fixed for the life of a
+game build, and re-reading a few thousand of them on every page load was one of
+the slower parts of a report. One failed chunk falls back to `Item <id>` for
+those ids and never fails the report.
+
+Called with no `ids`, it returns every item id in the game — about 74,000. The
+daily background pass reads that list and stores the names it does not already
+hold, which takes around half a minute the first time and nothing afterwards.
+No member then waits on a name.
 
 ### `/v2/commerce/delivery`
 
