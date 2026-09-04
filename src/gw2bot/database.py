@@ -204,6 +204,21 @@ class ProfitLotCheckpointRecord(Base):
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class ProfitLotCheckpointIndexRecord(Base):
+    """That a checkpoint exists at one boundary, whatever it holds.
+
+    A member holding nothing at a month end has a perfectly good checkpoint -
+    an empty one - but no lot rows to record it. Keeping the boundary itself
+    here means that state stays resumable instead of falling back to an older
+    checkpoint or a whole-history rematch.
+    """
+
+    __tablename__ = "gw2_profit_lot_checkpoint_index"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    checkpoint_at: Mapped[str] = mapped_column(String, primary_key=True)
+
+
 class ProfitRollupStateRecord(Base):
     """How current one member's rollups are."""
 

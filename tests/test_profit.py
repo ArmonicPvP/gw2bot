@@ -55,6 +55,8 @@ from gw2bot.profit.service import (
 from gw2bot.profit.store import (
     ITEM_NAME_TTL_SECONDS,
     MAX_LOT_CHECKPOINTS,
+    MAX_REPORT_DAYS,
+    MIN_REPORT_DAYS,
     ProfitStore,
 )
 from gw2bot.settings.crypto import SettingsCipher
@@ -709,6 +711,17 @@ class TestMarketPriceCache:
         cache.forget({1})
 
         assert cache.read({1}, now=now) == ({}, {1})
+
+    def test_reading_an_expired_entry_forgets_it(self) -> None:
+        # The cache lives as long as the bot does, so an expired reading has
+        # to leave rather than sit there for every item ever asked about.
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+
+        cache.read({1}, now=now + timedelta(seconds=61))
+
+        assert cache._entries == {}
 
     def test_pruning_forgets_only_what_has_expired(self) -> None:
         cache = MarketPriceCache(ttl_seconds=60)
@@ -2109,6 +2122,192 @@ class TestRollupRewind:
         ) is not None
 
 
+class TestRollupRefreshIsNotARewind:
+    async def test_re_reading_the_overlap_is_not_a_late_arrival(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        first = datetime(2026, 8, 1, tzinfo=UTC)
+        buy = transaction("b", price=100, quantity=10, occurred_at=first)
+        sell = transaction(
+            "s", price=200, quantity=6,
+            occurred_at=first + timedelta(days=1),
+        )
+        store.store_transactions(101, "history_buys", [buy], now=first)
+        store.store_transactions(101, "history_sells", [sell], now=first)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        await service._ensure_rollups(101, first + timedelta(days=2))
+        state = store.get_rollup_state(101)
+        assert state.computed_through is not None
+        assert state.computed_at is not None
+
+        # Every incremental fetch re-reads rows it already holds. Storing
+        # them again must leave no trace, or each refresh would look like
+        # history arriving late and rewind to a checkpoint.
+        later = first + timedelta(days=3)
+        store.store_transactions(101, "history_sells", [sell], now=later)
+
+        assert store.get_late_arrival(
+            101, state.computed_through, state.computed_at
+        ) is None
+        assert not await service._ensure_rollups(101, later)
+
+    async def test_a_corrected_row_is_still_a_late_arrival(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        first = datetime(2026, 8, 1, tzinfo=UTC)
+        sold_at = first + timedelta(days=1)
+        store.store_transactions(
+            101, "history_buys",
+            [transaction("b", price=100, quantity=10, occurred_at=first)],
+            now=first,
+        )
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("s", price=200, quantity=6, occurred_at=sold_at)],
+            now=first,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        await service._ensure_rollups(101, first + timedelta(days=2))
+        state = store.get_rollup_state(101)
+        assert state.computed_through is not None
+        assert state.computed_at is not None
+
+        # The same transaction id reporting a different price is a real
+        # change and has to be noticed.
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("s", price=205, quantity=6, occurred_at=sold_at)],
+            now=first + timedelta(days=3),
+        )
+
+        assert store.get_late_arrival(
+            101, state.computed_through, state.computed_at
+        ) == sold_at
+
+
+class TestCheckpointBoundaries:
+    @staticmethod
+    def _service(store: ProfitStore) -> ProfitService:
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+        )
+        return service
+
+    async def test_a_trade_exactly_at_a_boundary_survives_a_rewind(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        boundary = datetime(2026, 3, 1, tzinfo=UTC)
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101, "history_buys",
+            [transaction("b", price=100, quantity=20,
+                         occurred_at=datetime(2026, 1, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("s", price=200, quantity=5,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+
+        # Midnight on the first of the month is exactly where a checkpoint
+        # sits, which is the one instant a rewind could drop.
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("midnight", price=190, quantity=4,
+                         occurred_at=boundary)],
+            now=datetime(2026, 4, 11, tzinfo=UTC),
+        )
+        assert await service._ensure_rollups(
+            101, datetime(2026, 4, 11, tzinfo=UTC)
+        )
+
+        rebuilt = aggregate_rollups(
+            store.get_rollups(101, datetime(2020, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        )
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert rebuilt.total_matched_quantity == whole.total_matched_quantity
+        assert rebuilt.total_profit == whole.total_profit
+        assert "2026-03-01" in rebuilt.days
+
+    async def test_holding_nothing_is_still_a_resumable_checkpoint(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        # Everything bought in January is sold in January, so the member
+        # holds nothing at any later boundary.
+        store.store_transactions(
+            101, "history_buys",
+            [transaction("b", price=100, quantity=10,
+                         occurred_at=datetime(2026, 1, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101, "history_sells",
+            [
+                transaction("s1", price=200, quantity=10,
+                            occurred_at=datetime(2026, 1, 20, tzinfo=UTC)),
+                transaction("s2", price=200, quantity=0 + 1,
+                            occurred_at=datetime(2026, 4, 5, tzinfo=UTC)),
+            ],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+
+        # An empty state is a state, and has to be resumable.
+        found = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 3, 1, tzinfo=UTC)
+        )
+        assert found is not None
+        assert found[0] == datetime(2026, 3, 1, tzinfo=UTC)
+        assert found[1] == {}
+
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("late", price=190, quantity=1,
+                         occurred_at=datetime(2026, 3, 15, tzinfo=UTC))],
+            now=datetime(2026, 4, 11, tzinfo=UTC),
+        )
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(
+                101, datetime(2026, 4, 11, tzinfo=UTC)
+            )
+
+        # Rewound to March, not rebuilt from the beginning.
+        assert "reason=rewound" in caplog.text
+
+
 class TestProfitBackgroundSync:
     async def test_a_daily_pass_syncs_every_member_holding_a_key(
         self,
@@ -2122,7 +2321,10 @@ class TestProfitBackgroundSync:
             cast(aiohttp.ClientSession, None),
             "https://api.example",
         )
-        api = SimpleNamespace(fetch_transactions=AsyncMock(return_value=[]))
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(return_value=[]),
+            forget_stale_prices=MagicMock(return_value=0),
+        )
         service._api = api  # type: ignore[assignment]
 
         assert await service.sync_all_members() == (2, 2)
@@ -2156,6 +2358,7 @@ class TestProfitBackgroundSync:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(side_effect=fetched),
+            forget_stale_prices=MagicMock(return_value=0),
         )
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
@@ -2658,6 +2861,25 @@ class TestProfitCommands:
             "[Open your profit dashboard](https://guild.example/profit)",
             ephemeral=True,
         )
+
+    def test_view_accepts_every_window_the_report_will_serve(self) -> None:
+        group = ProfitCommands(cast(Any, SimpleNamespace()))
+        command = next(
+            command
+            for command in group.commands
+            if isinstance(command, discord.app_commands.Command)
+            and command.name == "view"
+        )
+        window = next(
+            parameter
+            for parameter in command.parameters
+            if parameter.name == "days"
+        )
+
+        # Discord rejects out-of-range values before the handler runs, so a
+        # narrower bound here refuses windows the page would have shown.
+        assert window.min_value == MIN_REPORT_DAYS
+        assert window.max_value == MAX_REPORT_DAYS
 
     def test_view_leaves_its_window_argument_optional(self) -> None:
         group = ProfitCommands(cast(Any, SimpleNamespace()))

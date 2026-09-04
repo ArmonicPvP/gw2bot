@@ -440,6 +440,10 @@ class ProfitService:
         late arrival older than every checkpoint kept, matches everything.
         """
         resume_from = computed_through
+        # A checkpoint holds what was held before its boundary, so a rewind
+        # replays that instant too; the watermark was already matched, so an
+        # ordinary refresh starts after it.
+        resume_inclusive = False
         opening_lots: dict[int, tuple[BuyLot, ...]] = {}
         reason = "incremental"
         if late is not None:
@@ -452,6 +456,7 @@ class ProfitService:
                 reason = "late-arrival-before-every-checkpoint"
             else:
                 resume_from, opening_lots = checkpoint
+                resume_inclusive = True
                 self._store.discard_rollups_from(discord_user_id, resume_from)
                 reason = "rewound"
         elif computed_through is None:
@@ -459,11 +464,12 @@ class ProfitService:
         else:
             opening_lots = self._store.get_open_lots(discord_user_id)
 
+        bound = {"at_or_after" if resume_inclusive else "after": resume_from}
         buys = self._store.get_transactions(
-            discord_user_id, "history_buys", after=resume_from
+            discord_user_id, "history_buys", **bound
         )
         sells = self._store.get_transactions(
-            discord_user_id, "history_sells", after=resume_from
+            discord_user_id, "history_sells", **bound
         )
         # No flip threshold here: it belongs to the window a member asked
         # for, not to their whole history, and is applied when the rollups
@@ -474,6 +480,7 @@ class ProfitService:
             sells,
             opening_lots,
             resume_from,
+            resume_inclusive,
             newest,
         )
         carried = prune_open_lots(
@@ -505,6 +512,7 @@ class ProfitService:
         sells: list[Transaction],
         opening_lots: dict[int, tuple[BuyLot, ...]],
         resume_from: datetime | None,
+        resume_inclusive: bool,
         newest: datetime,
     ) -> tuple[dict[tuple[int, str], ItemDayProfit], dict[int, tuple[BuyLot, ...]]]:
         """Match a stretch of history, pausing at each month boundary.
@@ -512,6 +520,12 @@ class ProfitService:
         Pausing costs nothing - matching a run of segments in order is the
         same arithmetic as matching the whole run - and each pause leaves a
         checkpoint a later rematch can resume from.
+
+        A checkpoint at a boundary holds what was held *before* that instant,
+        and a rewind to it replays from the instant itself. Keeping those two
+        halves on the same side of the boundary is what stops a trade
+        timestamped exactly at midnight from falling between them: the day it
+        lands on is discarded and rematched whole.
         """
         occurred = [transaction.occurred_at for transaction in (*buys, *sells)]
         first = min(occurred) if occurred else newest
@@ -521,24 +535,31 @@ class ProfitService:
         )
         item_days: dict[tuple[int, str], ItemDayProfit] = {}
         carried = opening_lots
-        # Exclusive lower bound. None on a first pass, where the oldest trade
-        # belongs to the first segment rather than to the pass before it.
         lower = resume_from
+        lower_inclusive = resume_inclusive
+
+        def within(transaction: Transaction, end: datetime, last: bool) -> bool:
+            if lower is not None:
+                if lower_inclusive:
+                    if transaction.occurred_at < lower:
+                        return False
+                elif transaction.occurred_at <= lower:
+                    return False
+            # A boundary belongs to the segment after it; the final segment
+            # takes the newest trade itself.
+            return (
+                transaction.occurred_at <= end
+                if last
+                else transaction.occurred_at < end
+            )
+
         for boundary in (*boundaries, None):
-            end = newest if boundary is None else boundary
+            last = boundary is None
+            end = newest if last else boundary
+            assert end is not None
             realized = calculate_realized_profit(
-                [
-                    transaction
-                    for transaction in buys
-                    if (lower is None or transaction.occurred_at > lower)
-                    and transaction.occurred_at <= end
-                ],
-                [
-                    transaction
-                    for transaction in sells
-                    if (lower is None or transaction.occurred_at > lower)
-                    and transaction.occurred_at <= end
-                ],
+                [row for row in buys if within(row, end, last)],
+                [row for row in sells if within(row, end, last)],
                 with_item_days=True,
                 opening_lots=carried,
             )
@@ -551,6 +572,7 @@ class ProfitService:
                     carried,
                 )
             lower = end
+            lower_inclusive = True
         LOGGER.debug(
             "Matched Trading Post history in segments; user_id=%s "
             "checkpoints=%s rows=%s",
@@ -698,6 +720,9 @@ class ProfitService:
         for discord_user_id in members:
             if await self.sync_member(discord_user_id):
                 synced += 1
+        # Items nobody has asked about since the last pass are dropped here;
+        # a read only clears what it happens to look at.
+        self._api.forget_stale_prices()
         LOGGER.info(
             "Completed the daily Trading Post sync; synced=%s members=%s",
             synced,

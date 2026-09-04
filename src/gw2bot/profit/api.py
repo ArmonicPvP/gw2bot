@@ -343,6 +343,10 @@ class ProfitApiClient:
             names.update(found)
         return names
 
+    def forget_stale_prices(self) -> int:
+        """Drop expired price readings the reads have not happened to touch."""
+        return self._prices.prune()
+
     async def fetch_market_prices(
         self,
         item_ids: set[int],

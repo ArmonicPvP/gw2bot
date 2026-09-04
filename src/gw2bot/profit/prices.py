@@ -45,6 +45,11 @@ class MarketPriceCache:
             entry = self._entries.get(item_id)
             if entry is None or entry[1] <= checked_at:
                 stale.add(item_id)
+                # An expired reading is of no use to anyone, and this cache
+                # outlives every request that touched it. Dropping it here
+                # keeps the cache the size of what is being watched now
+                # rather than of everything ever asked about.
+                self._entries.pop(item_id, None)
                 continue
             fresh[item_id] = entry[0]
         LOGGER.debug(

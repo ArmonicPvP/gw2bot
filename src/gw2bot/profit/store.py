@@ -12,6 +12,7 @@ from gw2bot.database import (
     ProfitApiKeyRecord,
     ProfitCacheSyncRecord,
     ProfitItemRecord,
+    ProfitLotCheckpointIndexRecord,
     ProfitLotCheckpointRecord,
     ProfitOpenLotRecord,
     ProfitOrderExclusionRecord,
@@ -493,6 +494,7 @@ class ProfitStore:
         cutoff: datetime | None = None,
         *,
         after: datetime | None = None,
+        at_or_after: datetime | None = None,
     ) -> list[Transaction]:
         _require_kind(transaction_kind)
         query = select(ProfitTransactionRecord).where(
@@ -506,6 +508,10 @@ class ProfitStore:
         if after is not None:
             query = query.where(
                 ProfitTransactionRecord.occurred_at > after.isoformat()
+            )
+        if at_or_after is not None:
+            query = query.where(
+                ProfitTransactionRecord.occurred_at >= at_or_after.isoformat()
             )
         query = query.order_by(ProfitTransactionRecord.occurred_at)
         with self._sessions() as session:
@@ -688,6 +694,19 @@ class ProfitStore:
                     ProfitLotCheckpointRecord.checkpoint_at == stamp,
                 )
             )
+            # Recorded whether or not there are lots: holding nothing is a
+            # state a rematch can resume from just as well as holding
+            # something.
+            session.execute(
+                sqlite_insert(ProfitLotCheckpointIndexRecord)
+                .values(
+                    discord_user_id=discord_user_id,
+                    checkpoint_at=stamp,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=("discord_user_id", "checkpoint_at")
+                )
+            )
             rows = [
                 {
                     "discord_user_id": discord_user_id,
@@ -719,11 +738,12 @@ class ProfitStore:
         stamp = moment.isoformat()
         with self._sessions() as session:
             chosen = session.scalar(
-                select(func.max(ProfitLotCheckpointRecord.checkpoint_at))
-                .where(
-                    ProfitLotCheckpointRecord.discord_user_id
+                select(
+                    func.max(ProfitLotCheckpointIndexRecord.checkpoint_at)
+                ).where(
+                    ProfitLotCheckpointIndexRecord.discord_user_id
                     == discord_user_id,
-                    ProfitLotCheckpointRecord.checkpoint_at <= stamp,
+                    ProfitLotCheckpointIndexRecord.checkpoint_at <= stamp,
                 )
             )
             if chosen is None:
@@ -780,13 +800,16 @@ class ProfitStore:
                     ProfitRollupRecord.sold_day >= boundary.date().isoformat(),
                 )
             )
-            session.execute(
-                delete(ProfitLotCheckpointRecord).where(
-                    ProfitLotCheckpointRecord.discord_user_id
-                    == discord_user_id,
-                    ProfitLotCheckpointRecord.checkpoint_at > stamp,
+            for record_type in (
+                ProfitLotCheckpointRecord,
+                ProfitLotCheckpointIndexRecord,
+            ):
+                session.execute(
+                    delete(record_type).where(
+                        record_type.discord_user_id == discord_user_id,
+                        record_type.checkpoint_at > stamp,
+                    )
                 )
-            )
         LOGGER.info(
             "Discarded profit rollups for a rematch; user_id=%s",
             discord_user_id,
@@ -1257,6 +1280,31 @@ def _store_transaction_records(
                     "occurred_at": statement.excluded.occurred_at,
                     "updated_at": statement.excluded.updated_at,
                 },
+                # Every incremental fetch deliberately re-reads rows it
+                # already has, and a completed transaction never changes.
+                # Touching updated_at for those would make each refresh look
+                # like history arriving late and send the rollups back to a
+                # checkpoint every time. So updated_at means "when this row's
+                # content was first seen", and an identical row is left
+                # exactly as it was.
+                where=(
+                    (
+                        ProfitTransactionRecord.item_id
+                        != statement.excluded.item_id
+                    )
+                    | (
+                        ProfitTransactionRecord.price
+                        != statement.excluded.price
+                    )
+                    | (
+                        ProfitTransactionRecord.quantity
+                        != statement.excluded.quantity
+                    )
+                    | (
+                        ProfitTransactionRecord.occurred_at
+                        != statement.excluded.occurred_at
+                    )
+                ),
             ),
             rows,
         )
@@ -1265,12 +1313,10 @@ def _store_transaction_records(
 def _trim_lot_checkpoints(session: Session, discord_user_id: int) -> None:
     """Keep only the newest checkpoints; older ones can never be rewound to."""
     stamps = sorted(
-        set(
-            session.scalars(
-                select(ProfitLotCheckpointRecord.checkpoint_at).where(
-                    ProfitLotCheckpointRecord.discord_user_id
-                    == discord_user_id
-                )
+        session.scalars(
+            select(ProfitLotCheckpointIndexRecord.checkpoint_at).where(
+                ProfitLotCheckpointIndexRecord.discord_user_id
+                == discord_user_id
             )
         ),
         reverse=True,
@@ -1278,12 +1324,16 @@ def _trim_lot_checkpoints(session: Session, discord_user_id: int) -> None:
     stale = stamps[MAX_LOT_CHECKPOINTS:]
     if not stale:
         return
-    session.execute(
-        delete(ProfitLotCheckpointRecord).where(
-            ProfitLotCheckpointRecord.discord_user_id == discord_user_id,
-            ProfitLotCheckpointRecord.checkpoint_at.in_(stale),
+    for record_type in (
+        ProfitLotCheckpointRecord,
+        ProfitLotCheckpointIndexRecord,
+    ):
+        session.execute(
+            delete(record_type).where(
+                record_type.discord_user_id == discord_user_id,
+                record_type.checkpoint_at.in_(stale),
+            )
         )
-    )
     LOGGER.debug(
         "Trimmed profit lot checkpoints; user_id=%s dropped=%s",
         discord_user_id,
@@ -1294,7 +1344,8 @@ def _trim_lot_checkpoints(session: Session, discord_user_id: int) -> None:
 def _clear_member_rollups(session: Session, discord_user_id: int) -> None:
     for record_type in (
         ProfitRollupRecord,
-        ProfitLotCheckpointRecord,
+        ProfitLotCheckpointIndexRecord,
+    ProfitLotCheckpointRecord,
         ProfitOpenLotRecord,
         ProfitRollupStateRecord,
     ):

@@ -99,6 +99,12 @@ backfill reaching further than the last did - and the newest-transaction
 watermark cannot see that. The bot instead looks for history stored since the
 last pass but dated before it, and rewinds to the boundary preceding it.
 
+Every incremental read deliberately returns rows already held, so a stored row
+is only rewritten when its content actually differs. A completed transaction
+never changes, so in practice the overlap writes nothing; without that, each
+refresh would look like history arriving late and send the rollups back to a
+checkpoint every time.
+
 ### `/v2/commerce/transactions/current/sells`
 
 Returns the member's current sale listings. The cached collection is replaced
