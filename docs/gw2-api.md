@@ -86,7 +86,10 @@ How much is read depends on what is already stored:
   can have appeared. A five-minute overlap covers entries that land either side
   of the boundary.
 
-Purchases and sales inside the requested window are matched FIFO per item.
+Purchases and sales are matched FIFO per item over everything stored, not over
+the requested window, and the result is kept as one row per item per sale date.
+A report is then addition over those rows, which is why a ten-year window costs
+what a thirty-day one does.
 
 ### `/v2/commerce/transactions/current/sells`
 

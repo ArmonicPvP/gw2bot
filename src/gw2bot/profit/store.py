@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -12,14 +12,22 @@ from gw2bot.database import (
     ProfitApiKeyRecord,
     ProfitCacheSyncRecord,
     ProfitItemRecord,
+    ProfitOpenLotRecord,
     ProfitOrderExclusionRecord,
     ProfitPreferenceRecord,
+    ProfitRollupRecord,
+    ProfitRollupStateRecord,
     ProfitTransactionRecord,
     create_database_engine,
     initialize_database,
 )
 from gw2bot.logging_setup import SecretRegistry
-from gw2bot.profit.models import Transaction, parse_gw2_time
+from gw2bot.profit.models import (
+    BuyLot,
+    ItemDayProfit,
+    Transaction,
+    parse_gw2_time,
+)
 from gw2bot.settings.crypto import SettingsCipher
 
 LOGGER = logging.getLogger(__name__)
@@ -581,6 +589,219 @@ class ProfitStore:
         )
         return known
 
+    def get_rollup_state(self, discord_user_id: int) -> datetime | None:
+        """The newest transaction the stored rollups account for."""
+        with self._sessions() as session:
+            record = session.get(ProfitRollupStateRecord, discord_user_id)
+        if record is None or record.computed_through is None:
+            return None
+        try:
+            return parse_gw2_time(record.computed_through)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Ignored a profit rollup watermark; user_id=%s "
+                "reason=invalid-timestamp",
+                discord_user_id,
+            )
+            return None
+
+    def get_newest_transaction_at(
+        self,
+        discord_user_id: int,
+    ) -> datetime | None:
+        """The newest trade held, which is what rollups must account for."""
+        with self._sessions() as session:
+            newest = session.scalar(
+                select(func.max(ProfitTransactionRecord.occurred_at)).where(
+                    ProfitTransactionRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitTransactionRecord.transaction_kind.in_(
+                        HISTORY_KINDS
+                    ),
+                )
+            )
+        if newest is None:
+            return None
+        try:
+            return parse_gw2_time(newest)
+        except (TypeError, ValueError):
+            return None
+
+    def store_rollups(
+        self,
+        discord_user_id: int,
+        rollups: dict[tuple[int, str], ItemDayProfit],
+        open_lots: dict[int, tuple[BuyLot, ...]],
+        computed_through: datetime | None,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Replace this member's rollups with a freshly matched set.
+
+        Written as one transaction: a half-replaced rollup would report
+        profit that never happened, which is worse than none at all.
+        """
+        computed_at = (datetime.now(UTC) if now is None else now).isoformat()
+        with self._sessions.begin() as session:
+            session.execute(
+                delete(ProfitRollupRecord).where(
+                    ProfitRollupRecord.discord_user_id == discord_user_id
+                )
+            )
+            session.execute(
+                delete(ProfitOpenLotRecord).where(
+                    ProfitOpenLotRecord.discord_user_id == discord_user_id
+                )
+            )
+            if rollups:
+                session.execute(
+                    insert(ProfitRollupRecord),
+                    [
+                        {
+                            "discord_user_id": discord_user_id,
+                            "sold_day": sold_day,
+                            "item_id": item_id,
+                            "matched_quantity": totals.matched_quantity,
+                            "cost": totals.cost,
+                            "net_revenue": totals.net_revenue,
+                            "profit": totals.profit,
+                            "hold_seconds": totals.hold_seconds,
+                        }
+                        for (item_id, sold_day), totals in rollups.items()
+                    ],
+                )
+            lot_rows = [
+                {
+                    "discord_user_id": discord_user_id,
+                    "item_id": item_id,
+                    "lot_index": index,
+                    "remaining": lot.remaining,
+                    "unit_price": lot.unit_price,
+                    "occurred_at": lot.occurred_at.isoformat(),
+                }
+                for item_id, lots in open_lots.items()
+                for index, lot in enumerate(lots)
+            ]
+            if lot_rows:
+                session.execute(insert(ProfitOpenLotRecord), lot_rows)
+            record = session.get(ProfitRollupStateRecord, discord_user_id)
+            through = (
+                None if computed_through is None
+                else computed_through.isoformat()
+            )
+            if record is None:
+                session.add(
+                    ProfitRollupStateRecord(
+                        discord_user_id=discord_user_id,
+                        computed_through=through,
+                        computed_at=computed_at,
+                    )
+                )
+            else:
+                record.computed_through = through
+                record.computed_at = computed_at
+        LOGGER.debug(
+            "Stored profit rollups; user_id=%s rows=%s open_lots=%s",
+            discord_user_id,
+            len(rollups),
+            len(lot_rows),
+        )
+
+    def get_rollups(
+        self,
+        discord_user_id: int,
+        cutoff: datetime,
+    ) -> list[tuple[int, str, ItemDayProfit]]:
+        """Read the precomputed results from ``cutoff`` onwards."""
+        with self._sessions() as session:
+            records = list(
+                session.scalars(
+                    select(ProfitRollupRecord)
+                    .where(
+                        ProfitRollupRecord.discord_user_id
+                        == discord_user_id,
+                        ProfitRollupRecord.sold_day
+                        >= cutoff.date().isoformat(),
+                    )
+                    .order_by(ProfitRollupRecord.sold_day)
+                )
+            )
+        rows = [
+            (
+                record.item_id,
+                record.sold_day,
+                ItemDayProfit(
+                    record.matched_quantity,
+                    record.cost,
+                    record.net_revenue,
+                    record.profit,
+                    record.hold_seconds,
+                ),
+            )
+            for record in records
+        ]
+        LOGGER.debug(
+            "Read profit rollups; user_id=%s rows=%s",
+            discord_user_id,
+            len(rows),
+        )
+        return rows
+
+    def get_open_lots(
+        self,
+        discord_user_id: int,
+    ) -> dict[int, tuple[BuyLot, ...]]:
+        """The unmatched purchases the member still holds."""
+        with self._sessions() as session:
+            records = list(
+                session.scalars(
+                    select(ProfitOpenLotRecord)
+                    .where(
+                        ProfitOpenLotRecord.discord_user_id
+                        == discord_user_id
+                    )
+                    .order_by(ProfitOpenLotRecord.lot_index)
+                )
+            )
+        lots: dict[int, list[BuyLot]] = {}
+        for record in records:
+            try:
+                occurred_at = parse_gw2_time(record.occurred_at)
+            except (TypeError, ValueError):
+                continue
+            lots.setdefault(record.item_id, []).append(
+                BuyLot(record.remaining, record.unit_price, occurred_at)
+            )
+        LOGGER.debug(
+            "Read profit open lots; user_id=%s items=%s",
+            discord_user_id,
+            len(lots),
+        )
+        return {item_id: tuple(rows) for item_id, rows in lots.items()}
+
+    def count_transactions(
+        self,
+        discord_user_id: int,
+        transaction_kind: str,
+        cutoff: datetime,
+    ) -> int:
+        """Count rows in a window without reading them into memory."""
+        _require_kind(transaction_kind)
+        with self._sessions() as session:
+            total = session.scalar(
+                select(func.count())
+                .select_from(ProfitTransactionRecord)
+                .where(
+                    ProfitTransactionRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitTransactionRecord.transaction_kind
+                    == transaction_kind,
+                    ProfitTransactionRecord.occurred_at
+                    >= cutoff.isoformat(),
+                )
+            )
+        return int(total or 0)
+
     def get_item_names(
         self,
         item_ids: set[int],
@@ -752,6 +973,19 @@ def _store_transaction_records(
         )
 
 
+def _clear_member_rollups(session: Session, discord_user_id: int) -> None:
+    for record_type in (
+        ProfitRollupRecord,
+        ProfitOpenLotRecord,
+        ProfitRollupStateRecord,
+    ):
+        session.execute(
+            delete(record_type).where(
+                record_type.discord_user_id == discord_user_id
+            )
+        )
+
+
 def _clear_member_preferences(session: Session, discord_user_id: int) -> None:
     session.execute(
         delete(ProfitPreferenceRecord).where(
@@ -776,3 +1010,5 @@ def _clear_member_cache(session: Session, discord_user_id: int) -> None:
             ProfitCacheSyncRecord.discord_user_id == discord_user_id
         )
     )
+    # The rollups were matched from the rows just dropped, so they go too.
+    _clear_member_rollups(session, discord_user_id)

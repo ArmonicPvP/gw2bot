@@ -1014,7 +1014,7 @@ class TestProfitPage:
             "end_date": "2026-08-21",
         }
         assert payload["items"][0]["name"] == "Realized Item"
-        assert payload["items"][0]["median_hold_seconds"] == 86_400
+        assert payload["items"][0]["hold_seconds"] == 86_400
         assert payload["items"][0]["profit_share_percent"] == 100
         assert payload["picks"][0]["name"] == "Realized Item"
         assert payload["picks"][0]["profit"] == 70

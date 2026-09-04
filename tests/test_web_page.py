@@ -289,12 +289,12 @@ class TestProfitPage:
     def test_profit_metrics_are_visible_and_sortable(self) -> None:
         for heading in (
             "ROI",
-            "Median Hold",
+            "Avg Hold",
             "Profit Share",
             "Projected ROI",
         ):
             assert f">{heading}</button>" in PROFIT_PAGE
-        assert "item.median_hold_seconds" in PROFIT_PAGE
+        assert "item.hold_seconds" in PROFIT_PAGE
         assert "item.profit_share_percent" in PROFIT_PAGE
         assert "item.roi_percent" in PROFIT_PAGE
 

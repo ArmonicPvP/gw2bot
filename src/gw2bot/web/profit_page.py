@@ -371,7 +371,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </section>
     <section class="card loading" data-source="report">
       <h2>Realized Profit by Item</h2>
-      <p class="note">Median Hold is weighted by matched units. Profit Share is signed item profit divided by total realized profit.</p>
+      <p class="note">Avg Hold is the mean time those units were held, weighted by units. Profit Share is signed item profit divided by total realized profit.</p>
       <div class="table-scroll"><table id="items-table" data-sort-table="items">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -381,7 +381,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="profit" data-sort-default="descending">Profit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="roi" data-sort-default="descending">ROI</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="profit-per-unit" data-sort-default="descending">Profit / Unit</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="median-hold" data-sort-default="ascending">Median Hold</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="avg-hold" data-sort-default="ascending">Avg Hold</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="profit-share" data-sort-default="descending">Profit Share</button></th>
         </tr></thead>
         <tbody id="items-body"></tbody>
@@ -1280,9 +1280,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       profitCell(row, item.profit);
       percentCell(row, item.roi_percent);
       profitCell(row, Math.round(item.profit / item.units));
-      cell(
-        row, duration(item.median_hold_seconds), "",
-        item.median_hold_seconds);
+      cell(row, duration(item.hold_seconds), "", item.hold_seconds);
       percentCell(row, item.profit_share_percent, item.profit);
       body.appendChild(row);
     });

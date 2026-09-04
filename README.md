@@ -1347,14 +1347,18 @@ control accepts page sizes from 1 through 90, and page links appear above and
 below the table. Coin amounts account for the
 Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
-the original profit bot. An item counts as a flip only after at least five units
-have been bought and then sold; items with fewer than five matched units and
-sales made before a purchase are excluded. Click any column heading in the
+the original profit bot. Matching runs over a member's whole stored history
+rather than over the chosen window, so a sale of stock bought before the window
+began is costed from the purchase that actually paid for it. It used to be
+dropped for having no match inside the window, which understated short windows
+— by around 13% on a week for a busy trader, and by little or nothing once the
+window covers most of the held history. An item counts as a flip only after at
+least five units have been matched inside the window. Click any column heading in the
 detail tables to sort it; click the same heading again to reverse the
 order. The totals remain
 pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
-unit-weighted median time from purchase to sale and its signed percentage of
+unit-weighted average time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
 The **Your Picks** table revisits items flipped in the selected window using
 their current highest buy order and lowest sell listing. It shows the ten best
@@ -1449,6 +1453,22 @@ history, and it reads eight pages at a time rather than one after another. In
 practice a first load takes a few seconds and later ones under a second, where
 walking every page one at a time took over a minute.
 
+#### Precomputed results
+
+Matching a member's history is the expensive half of a report, and it does not
+depend on which window they asked for. It runs once — in the daily pass, or on
+the first load after new trades land — and lands in a table of one row per item
+per UTC sale date. Every table on the page is then addition over those rows:
+the day table sums them across items, the item table across days, and the
+summary across both.
+
+That is what makes a long window cost the same as a short one. Measured on a
+real account, reading and summing a window takes about 16ms whether it asks for
+30 days or ten years, where matching the raw transactions took 131ms for 30
+days and 355ms for 90 and would grow with every month collected. The unmatched
+purchases are stored alongside, so the unrealized projection needs no
+transaction reads either.
+
 Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2
 API. The same pass stores the name of every item in the game — about 74,000 of
@@ -1468,6 +1488,7 @@ The rest of the caching:
 | --- | --- | --- |
 | Transactions | Forever | The only copy of history older than GW2 serves |
 | Item names | 30 days | Fixed for the life of a game build |
+| Matched rollups | Until new trades land | Matching does not depend on the window |
 | Transaction snapshots | 5 minutes | How often a refresh is worth making |
 | Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
 

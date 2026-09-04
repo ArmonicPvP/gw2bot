@@ -22,6 +22,8 @@ from gw2bot.profit.models import (
     OpenOrdersReport,
     ProfitReport,
     Transaction,
+    RealizedProfit,
+    aggregate_rollups,
     calculate_realized_profit,
     calculate_unrealized_profit,
     group_open_buy_orders,
@@ -249,21 +251,17 @@ class ProfitService:
             force=force,
         )
 
+        await self._ensure_rollups(discord_user_id, loaded_at)
         (
-            buys,
-            sells,
+            realized,
             current_sells,
             history_start,
+            buy_count,
+            sell_count,
         ) = await asyncio.to_thread(
-            self._read_history_data,
+            self._read_windowed_report,
             discord_user_id,
             window_start,
-        )
-        realized = await asyncio.to_thread(
-            calculate_realized_profit,
-            buys,
-            sells,
-            minimum_flip_quantity=MIN_FLIP_QUANTITY,
         )
         unrealized = await asyncio.to_thread(
             calculate_unrealized_profit,
@@ -282,8 +280,8 @@ class ProfitService:
             days=days,
             window_start=window_start,
             window_end=loaded_at,
-            buy_transaction_count=len(buys),
-            sell_transaction_count=len(sells),
+            buy_transaction_count=buy_count,
+            sell_transaction_count=sell_count,
             realized=realized,
             unrealized=unrealized,
             item_names=item_names,
@@ -362,29 +360,101 @@ class ProfitService:
             self._store.get_excluded_order_items(discord_user_id),
         )
 
-    def _read_history_data(
+    async def _ensure_rollups(
+        self,
+        discord_user_id: int,
+        now: datetime,
+    ) -> bool:
+        """Rebuild this member's rollups when new trades have landed."""
+        computed_through, newest = await asyncio.to_thread(
+            self._rollup_freshness,
+            discord_user_id,
+        )
+        if newest is None:
+            return False
+        if computed_through is not None and computed_through >= newest:
+            LOGGER.debug(
+                "Profit rollups are current; user_id=%s",
+                discord_user_id,
+            )
+            return False
+        await asyncio.to_thread(
+            self._rebuild_rollups,
+            discord_user_id,
+            newest,
+            now,
+        )
+        return True
+
+    def _rollup_freshness(
+        self,
+        discord_user_id: int,
+    ) -> tuple[datetime | None, datetime | None]:
+        return (
+            self._store.get_rollup_state(discord_user_id),
+            self._store.get_newest_transaction_at(discord_user_id),
+        )
+
+    def _rebuild_rollups(
+        self,
+        discord_user_id: int,
+        newest: datetime,
+        now: datetime,
+    ) -> None:
+        """Match a member's whole history once and store the result.
+
+        Matching runs over everything held rather than over one window, so a
+        sale of stock bought before the window is costed from the purchase
+        that actually paid for it instead of being dropped for having no
+        match inside the window.
+        """
+        buys = self._store.get_transactions(discord_user_id, "history_buys")
+        sells = self._store.get_transactions(discord_user_id, "history_sells")
+        # No flip threshold here: it belongs to the window a member asked
+        # for, not to their whole history, and is applied when the rollups
+        # are read back.
+        realized = calculate_realized_profit(buys, sells, with_item_days=True)
+        self._store.store_rollups(
+            discord_user_id,
+            realized.item_days,
+            realized.unmatched_buys,
+            newest,
+            now=now,
+        )
+        LOGGER.info(
+            "Rebuilt profit rollups; user_id=%s transactions=%s rows=%s",
+            discord_user_id,
+            len(buys) + len(sells),
+            len(realized.item_days),
+        )
+
+    def _read_windowed_report(
         self,
         discord_user_id: int,
         cutoff: datetime,
     ) -> tuple[
-        list[Transaction],
-        list[Transaction],
+        RealizedProfit,
         list[Transaction],
         datetime | None,
+        int,
+        int,
     ]:
+        rollups = self._store.get_rollups(discord_user_id, cutoff)
+        realized = aggregate_rollups(
+            rollups,
+            self._store.get_open_lots(discord_user_id),
+            minimum_flip_quantity=MIN_FLIP_QUANTITY,
+        )
         return (
-            self._store.get_transactions(
-                discord_user_id,
-                "history_buys",
-                cutoff,
-            ),
-            self._store.get_transactions(
-                discord_user_id,
-                "history_sells",
-                cutoff,
-            ),
+            realized,
             self._store.get_transactions(discord_user_id, "current_sells"),
             self._store.get_earliest_transaction_at(discord_user_id),
+            self._store.count_transactions(
+                discord_user_id, "history_buys", cutoff
+            ),
+            self._store.count_transactions(
+                discord_user_id, "history_sells", cutoff
+            ),
         )
 
 
@@ -460,6 +530,18 @@ class ProfitService:
         ) as exc:
             LOGGER.warning(
                 "Could not sync a member's Trading Post data; user_id=%s "
+                "error_type=%s",
+                discord_user_id,
+                type(exc).__name__,
+            )
+            return False
+        try:
+            # Matching the whole history is the expensive half of a report.
+            # Doing it here means a page load finds it already done.
+            await self._ensure_rollups(discord_user_id, datetime.now(UTC))
+        except SQLAlchemyError as exc:
+            LOGGER.warning(
+                "Could not rebuild a member's profit rollups; user_id=%s "
                 "error_type=%s",
                 discord_user_id,
                 type(exc).__name__,
@@ -679,7 +761,7 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "net_revenue": totals.net_revenue,
             "profit": totals.profit,
             "roi_percent": percentage(totals.profit, totals.cost),
-            "median_hold_seconds": totals.median_hold_seconds,
+            "hold_seconds": totals.hold_seconds,
             "profit_share_percent": percentage(
                 totals.profit,
                 realized.total_profit,

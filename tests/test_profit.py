@@ -26,6 +26,8 @@ from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.prices import MarketPriceCache
 from gw2bot.profit.models import (
     BuyLot,
+    ItemDayProfit,
+    aggregate_rollups,
     DeliveryItem,
     ItemProfit,
     MarketPrice,
@@ -121,7 +123,7 @@ class TestProfitCalculation:
         assert result.items[1].cost == 700
         assert result.items[1].net_revenue == 1_317
         assert result.items[1].profit == 617
-        assert result.items[1].median_hold_seconds == 2 * 86_400
+        assert result.items[1].hold_seconds == 2 * 86_400
         assert result.days["2026-08-03"].profit == 280
         assert result.days["2026-08-04"].profit == 337
         assert result.unmatched_buys[1][0].remaining == 3
@@ -206,7 +208,7 @@ class TestProfitCalculation:
 
         result = calculate_realized_profit(buys, sells)
 
-        assert result.items[1].median_hold_seconds == 86_400
+        assert result.items[1].hold_seconds == 86_400
 
     def test_profit_share_is_each_items_signed_part_of_net_profit(
         self,
@@ -473,6 +475,82 @@ class TestOpenBuyOrders:
 
     def test_no_orders_group_to_nothing(self) -> None:
         assert group_open_buy_orders([]) == ()
+
+
+class TestRollups:
+    def test_a_window_is_summed_from_stored_rows(self) -> None:
+        rollups = [
+            (1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 432_000.0)),
+            (1, "2026-08-02", ItemDayProfit(5, 500, 900, 400, 864_000.0)),
+            (2, "2026-08-02", ItemDayProfit(10, 100, 90, -10, 86_400.0)),
+        ]
+
+        realized = aggregate_rollups(rollups, {})
+
+        assert realized.total_matched_quantity == 20
+        assert realized.total_cost == 1_100
+        assert realized.total_profit == 740
+        assert realized.days["2026-08-02"].profit == 390
+        # Hold time is the units-weighted mean across the window.
+        assert realized.items[1].hold_seconds == (432_000 + 864_000) / 10
+
+    def test_the_flip_threshold_applies_to_the_window_not_the_history(
+        self,
+    ) -> None:
+        # Four units of item 2 in this window is not a flip, however many
+        # were traded before it.
+        rollups = [
+            (1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 0.0)),
+            (2, "2026-08-01", ItemDayProfit(4, 40, 80, 40, 0.0)),
+        ]
+
+        realized = aggregate_rollups(rollups, {}, minimum_flip_quantity=5)
+
+        assert set(realized.items) == {1}
+        assert realized.total_profit == 350
+        # The excluded item leaves the day totals as well, so the tables and
+        # the footer keep describing the same trades.
+        assert realized.days["2026-08-01"].profit == 350
+
+    def test_rollups_reproduce_a_direct_match_of_the_same_trades(self) -> None:
+        buys = [
+            transaction("b1", item_id=1, price=100, quantity=10,
+                        occurred_at=datetime(2026, 8, 1, tzinfo=UTC)),
+            transaction("b2", item_id=1, price=120, quantity=10,
+                        occurred_at=datetime(2026, 8, 2, tzinfo=UTC)),
+        ]
+        sells = [
+            transaction("s1", item_id=1, price=200, quantity=8,
+                        occurred_at=datetime(2026, 8, 3, tzinfo=UTC)),
+            transaction("s2", item_id=1, price=210, quantity=7,
+                        occurred_at=datetime(2026, 8, 4, tzinfo=UTC)),
+        ]
+        direct = calculate_realized_profit(buys, sells, with_item_days=True)
+
+        summed = aggregate_rollups(
+            [
+                (item_id, sold_day, totals)
+                for (item_id, sold_day), totals in direct.item_days.items()
+            ],
+            direct.unmatched_buys,
+        )
+
+        assert summed.total_profit == direct.total_profit
+        assert summed.total_cost == direct.total_cost
+        assert summed.total_matched_quantity == direct.total_matched_quantity
+        assert summed.days.keys() == direct.days.keys()
+        assert summed.unmatched_buys == direct.unmatched_buys
+
+    def test_an_empty_window_sums_to_nothing(self) -> None:
+        realized = aggregate_rollups([], {})
+
+        assert realized.total_profit == 0
+        assert realized.items == {}
+        assert realized.days == {}
+
+    def test_a_zero_flip_threshold_is_refused(self) -> None:
+        with pytest.raises(ValueError):
+            aggregate_rollups([], {}, minimum_flip_quantity=0)
 
 
 class TestMarketPriceCache:
@@ -931,7 +1009,7 @@ class TestProfitService:
         payload = cast(dict[str, Any], serialize_profit_report(first))
         assert payload["summary"]["roi_percent"] == 70
         assert payload["items"][0]["roi_percent"] == 70
-        assert payload["items"][0]["median_hold_seconds"] == 86_400
+        assert payload["items"][0]["hold_seconds"] == 86_400
         assert payload["items"][0]["profit_share_percent"] == 100
         assert payload["picks"] == [
             {
@@ -1475,6 +1553,132 @@ class TestProfitService:
         assert store.get_excluded_order_items(101) == frozenset({19_721})
         assert await service.set_order_exclusion(101, 19_721, False)
         assert store.get_excluded_order_items(101) == frozenset()
+
+
+class TestRollupStore:
+    async def test_rollups_are_built_once_and_reused_until_trades_land(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", price=100, quantity=10,
+                         occurred_at=datetime(2026, 8, 1, tzinfo=UTC))],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell", price=200, quantity=10,
+                         occurred_at=datetime(2026, 8, 2, tzinfo=UTC))],
+            now=now,
+        )
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        first = await service.load_report(101, 30, now=now)
+        assert store.get_rollup_state(101) == datetime(2026, 8, 2, tzinfo=UTC)
+        assert [row[1] for row in store.get_rollups(101, datetime(
+            2026, 7, 1, tzinfo=UTC))] == ["2026-08-02"]
+
+        # Nothing new arrived, so nothing is matched again.
+        rebuilt = await service._ensure_rollups(101, now)
+        assert not rebuilt
+        second = await service.load_report(101, 30, now=now)
+        assert second.realized.total_profit == first.realized.total_profit
+
+        # A later sale moves the watermark and the rollups follow it.
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy-2", price=100, quantity=10,
+                         occurred_at=datetime(2026, 8, 3, tzinfo=UTC))],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell-2", price=300, quantity=10,
+                         occurred_at=datetime(2026, 8, 4, tzinfo=UTC))],
+            now=now,
+        )
+        assert await service._ensure_rollups(101, now)
+        third = await service.load_report(101, 30, now=now)
+        assert third.realized.total_profit > first.realized.total_profit
+        assert sorted(
+            row[1]
+            for row in store.get_rollups(101, datetime(2026, 7, 1, tzinfo=UTC))
+        ) == ["2026-08-02", "2026-08-04"]
+
+    async def test_a_window_reads_only_the_days_inside_it(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101,
+            {
+                (1, "2026-08-01"): ItemDayProfit(5, 500, 850, 350, 0.0),
+                (1, "2026-08-20"): ItemDayProfit(5, 500, 900, 400, 0.0),
+            },
+            {},
+            datetime(2026, 8, 20, tzinfo=UTC),
+        )
+
+        assert len(store.get_rollups(101, datetime(2026, 8, 10, tzinfo=UTC))) == 1
+        assert len(store.get_rollups(101, datetime(2026, 7, 1, tzinfo=UTC))) == 2
+
+    def test_open_lots_survive_a_rebuild_for_the_unrealized_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        lots = {
+            7: (
+                BuyLot(3, 100, datetime(2026, 8, 1, tzinfo=UTC)),
+                BuyLot(2, 110, datetime(2026, 8, 2, tzinfo=UTC)),
+            )
+        }
+
+        store.store_rollups(101, {}, lots, None)
+
+        assert store.get_open_lots(101) == lots
+        # Replacing them leaves nothing of the previous set behind.
+        store.store_rollups(101, {}, {}, None)
+        assert store.get_open_lots(101) == {}
+
+    def test_a_new_key_drops_the_rollups_matched_from_the_old_data(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-member-secret")
+        store.store_rollups(
+            101,
+            {(1, "2026-08-01"): ItemDayProfit(5, 500, 850, 350, 0.0)},
+            {7: (BuyLot(3, 100, datetime(2026, 8, 1, tzinfo=UTC)),)},
+            datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+        store.set_api_key(101, "replacement-member-secret")
+
+        assert store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)) == []
+        assert store.get_open_lots(101) == {}
+        assert store.get_rollup_state(101) is None
 
 
 class TestProfitBackgroundSync:

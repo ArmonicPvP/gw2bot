@@ -130,6 +130,64 @@ class ProfitItemRecord(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class ProfitRollupRecord(Base):
+    """One item's realized result on one UTC sale date, precomputed.
+
+    A ten-year window is otherwise three-quarters of a million transaction
+    rows read into memory and matched on every page load. Matching happens
+    once, in the background, and lands here at a grain every table on the
+    dashboard can be summed from - roughly one row per item per trading day.
+    """
+
+    __tablename__ = "gw2_profit_rollups"
+    __table_args__ = (
+        Index(
+            "idx_gw2_profit_rollups_window",
+            "discord_user_id",
+            "sold_day",
+        ),
+    )
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sold_day: Mapped[str] = mapped_column(String, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    matched_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False)
+    net_revenue: Mapped[int] = mapped_column(Integer, nullable=False)
+    profit: Mapped[int] = mapped_column(Integer, nullable=False)
+    hold_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class ProfitOpenLotRecord(Base):
+    """A purchase the FIFO pass never matched to a sale.
+
+    These are what the member still holds, and the only part of the matching
+    state a later pass needs, so keeping them beside the rollups means the
+    unrealized projection costs no transaction reads either.
+    """
+
+    __tablename__ = "gw2_profit_open_lots"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lot_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    remaining: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitRollupStateRecord(Base):
+    """How current one member's rollups are."""
+
+    __tablename__ = "gw2_profit_rollup_state"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # The newest transaction the rollups account for. Anything stored after
+    # it means they need rebuilding.
+    computed_through: Mapped[str | None] = mapped_column(String, nullable=True)
+    computed_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class ProfitPreferenceRecord(Base):
     """One member's remembered choices on the profit dashboard.
 

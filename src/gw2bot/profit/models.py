@@ -26,7 +26,10 @@ class ItemProfit:
     cost: int
     net_revenue: int
     profit: int
-    median_hold_seconds: float
+    # The units-weighted mean time from purchase to sale. It was a median
+    # until the results were precomputed per day; a median cannot be summed
+    # back out of stored day rows, and a mean can.
+    hold_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,24 @@ class DayProfit:
     cost: int
     net_revenue: int
     profit: int
+
+
+@dataclass(frozen=True, slots=True)
+class ItemDayProfit:
+    """One item's realized result on one UTC sale date.
+
+    This is the grain the stored rollups keep, because it is the smallest
+    thing every table on the dashboard can be added up from: the day table
+    sums it across items, the item table across days, and the summary across
+    both. ``hold_seconds`` is weighted by units, so dividing it by the matched
+    quantity gives the average time those units were held.
+    """
+
+    matched_quantity: int
+    cost: int
+    net_revenue: int
+    profit: int
+    hold_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +74,11 @@ class RealizedProfit:
     total_net_revenue: int
     total_profit: int
     total_matched_quantity: int
+    # Every match, kept at the grain the stored rollups use. Empty unless the
+    # caller asked for it, because only the rollup builder needs it.
+    item_days: dict[tuple[int, str], ItemDayProfit] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +210,7 @@ class _Totals:
     cost: int = 0
     net_revenue: int = 0
     profit: int = 0
+    hold_seconds: float = 0.0
 
 
 def _weighted_median_seconds(
@@ -254,8 +281,13 @@ def calculate_realized_profit(
     sells: list[Transaction],
     *,
     minimum_flip_quantity: int = 1,
+    with_item_days: bool = False,
 ) -> RealizedProfit:
-    """Match sales to earlier purchases FIFO, mirroring the original bot."""
+    """Match sales to earlier purchases FIFO, mirroring the original bot.
+
+    ``with_item_days`` also returns every match at item-and-date grain, which
+    is what the stored rollups are built from.
+    """
     if minimum_flip_quantity <= 0:
         raise ValueError("minimum_flip_quantity must be positive")
     events_by_item: dict[int, list[_Event]] = defaultdict(list)
@@ -279,6 +311,7 @@ def calculate_realized_profit(
         )
 
     item_totals: dict[int, ItemProfit] = {}
+    item_day_totals: dict[tuple[int, str], ItemDayProfit] = {}
     day_totals: dict[str, _Totals] = defaultdict(_Totals)
     unmatched: dict[int, tuple[BuyLot, ...]] = {}
     total_cost = 0
@@ -347,6 +380,7 @@ def calculate_realized_profit(
                 day.cost += cost
                 day.net_revenue += net_revenue
                 day.profit += profit
+                day.hold_seconds += holding_seconds * matched
 
                 buy_lot.remaining -= matched
                 sell_remaining -= matched
@@ -384,6 +418,14 @@ def calculate_realized_profit(
             day.cost += item_day.cost
             day.net_revenue += item_day.net_revenue
             day.profit += item_day.profit
+            if with_item_days:
+                item_day_totals[(item_id, sold_day)] = ItemDayProfit(
+                    item_day.matched_quantity,
+                    item_day.cost,
+                    item_day.net_revenue,
+                    item_day.profit,
+                    item_day.hold_seconds,
+                )
 
     result = RealizedProfit(
         items=item_totals,
@@ -401,6 +443,7 @@ def calculate_realized_profit(
         total_net_revenue=total_net_revenue,
         total_profit=total_profit,
         total_matched_quantity=total_matched_quantity,
+        item_days=item_day_totals,
     )
     LOGGER.debug(
         "Calculated realized Trading Post profit; buys=%s sells=%s "
@@ -554,3 +597,90 @@ def group_open_buy_orders(
         sum(row.quantity for row in collapsed),
     )
     return collapsed
+
+
+def aggregate_rollups(
+    rollups: list[tuple[int, str, ItemDayProfit]],
+    open_lots: dict[int, tuple[BuyLot, ...]],
+    *,
+    minimum_flip_quantity: int = 1,
+) -> RealizedProfit:
+    """Sum stored rollup rows into the report for one window.
+
+    The rows are already matched, so this is addition rather than matching:
+    across days for the item table, across items for the day table, and
+    across both for the summary. The flip threshold is applied here rather
+    than when the rows were built, because five units is a question about the
+    window a member asked for and not about their whole history.
+    """
+    if minimum_flip_quantity <= 0:
+        raise ValueError("minimum_flip_quantity must be positive")
+    per_item: dict[int, _Totals] = defaultdict(_Totals)
+    for item_id, _sold_day, totals in rollups:
+        item = per_item[item_id]
+        item.matched_quantity += totals.matched_quantity
+        item.cost += totals.cost
+        item.net_revenue += totals.net_revenue
+        item.profit += totals.profit
+        item.hold_seconds += totals.hold_seconds
+
+    kept = {
+        item_id
+        for item_id, totals in per_item.items()
+        if totals.matched_quantity >= minimum_flip_quantity
+    }
+    day_totals: dict[str, _Totals] = defaultdict(_Totals)
+    for item_id, sold_day, totals in rollups:
+        if item_id not in kept:
+            continue
+        day = day_totals[sold_day]
+        day.matched_quantity += totals.matched_quantity
+        day.cost += totals.cost
+        day.net_revenue += totals.net_revenue
+        day.profit += totals.profit
+
+    items = {
+        item_id: ItemProfit(
+            totals.matched_quantity,
+            totals.cost,
+            totals.net_revenue,
+            totals.profit,
+            (
+                totals.hold_seconds / totals.matched_quantity
+                if totals.matched_quantity
+                else 0.0
+            ),
+        )
+        for item_id, totals in per_item.items()
+        if item_id in kept
+    }
+    result = RealizedProfit(
+        items=items,
+        days={
+            sold_day: DayProfit(
+                totals.matched_quantity,
+                totals.cost,
+                totals.net_revenue,
+                totals.profit,
+            )
+            for sold_day, totals in day_totals.items()
+        },
+        unmatched_buys=open_lots,
+        total_cost=sum(totals.cost for totals in items.values()),
+        total_net_revenue=sum(
+            totals.net_revenue for totals in items.values()
+        ),
+        total_profit=sum(totals.profit for totals in items.values()),
+        total_matched_quantity=sum(
+            totals.matched_quantity for totals in items.values()
+        ),
+    )
+    LOGGER.debug(
+        "Aggregated Trading Post rollups; rows=%s items=%s days=%s "
+        "excluded_items=%s",
+        len(rollups),
+        len(result.items),
+        len(result.days),
+        len(per_item) - len(kept),
+    )
+    return result
