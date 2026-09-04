@@ -72,13 +72,29 @@ class ProfitApiKeyRecord(Base):
 
 
 class ProfitCacheSyncRecord(Base):
-    """Freshness marker for one member's cached Trading Post collection."""
+    """How far one member's cached Trading Post collection has been read.
+
+    ``synced_at`` is the freshness marker: how recently the collection was
+    asked about at all. ``synced_through`` is the newest transaction the
+    collection has ever yielded, and ``backfilled`` records that every page
+    behind it was read once. Together they turn a refresh into a walk of the
+    one or two newest pages instead of all sixty: history is append-only and
+    returned newest first, so once a page reaches behind the watermark there
+    is nothing new left to find.
+    """
 
     __tablename__ = "gw2_profit_cache_syncs"
 
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     cache_kind: Mapped[str] = mapped_column(String, primary_key=True)
     synced_at: Mapped[str] = mapped_column(String, nullable=False)
+    synced_through: Mapped[str | None] = mapped_column(String, nullable=True)
+    backfilled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
 
 
 class ProfitTransactionRecord(Base):
@@ -112,6 +128,107 @@ class ProfitItemRecord(Base):
     item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitRollupRecord(Base):
+    """One item's realized result on one UTC sale date, precomputed.
+
+    A ten-year window is otherwise three-quarters of a million transaction
+    rows read into memory and matched on every page load. Matching happens
+    once, in the background, and lands here at a grain every table on the
+    dashboard can be summed from - roughly one row per item per trading day.
+    """
+
+    __tablename__ = "gw2_profit_rollups"
+    __table_args__ = (
+        Index(
+            "idx_gw2_profit_rollups_window",
+            "discord_user_id",
+            "sold_day",
+        ),
+    )
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sold_day: Mapped[str] = mapped_column(String, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    matched_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False)
+    net_revenue: Mapped[int] = mapped_column(Integer, nullable=False)
+    profit: Mapped[int] = mapped_column(Integer, nullable=False)
+    hold_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class ProfitOpenLotRecord(Base):
+    """A purchase the FIFO pass never matched to a sale.
+
+    These are what the member still holds, and the only part of the matching
+    state a later pass needs, so keeping them beside the rollups means the
+    unrealized projection costs no transaction reads either.
+    """
+
+    __tablename__ = "gw2_profit_open_lots"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lot_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    remaining: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitLotCheckpointRecord(Base):
+    """What a member was holding at one month boundary.
+
+    The FIFO pass carries one thing forward - the queue of purchases it has
+    not yet sold - so a copy of that queue is a place a later pass can start
+    from. Keeping one per month means a trade that arrives late costs a
+    rematch back to the start of its own month instead of back to the start
+    of the member's history.
+    """
+
+    __tablename__ = "gw2_profit_lot_checkpoints"
+    __table_args__ = (
+        Index(
+            "idx_gw2_profit_lot_checkpoints_lookup",
+            "discord_user_id",
+            "checkpoint_at",
+        ),
+    )
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    checkpoint_at: Mapped[str] = mapped_column(String, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lot_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    remaining: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitLotCheckpointIndexRecord(Base):
+    """That a checkpoint exists at one boundary, whatever it holds.
+
+    A member holding nothing at a month end has a perfectly good checkpoint -
+    an empty one - but no lot rows to record it. Keeping the boundary itself
+    here means that state stays resumable instead of falling back to an older
+    checkpoint or a whole-history rematch.
+    """
+
+    __tablename__ = "gw2_profit_lot_checkpoint_index"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    checkpoint_at: Mapped[str] = mapped_column(String, primary_key=True)
+
+
+class ProfitRollupStateRecord(Base):
+    """How current one member's rollups are."""
+
+    __tablename__ = "gw2_profit_rollup_state"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # The newest transaction the rollups account for. Anything stored after
+    # it means they need rebuilding.
+    computed_through: Mapped[str | None] = mapped_column(String, nullable=True)
+    computed_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class ProfitPreferenceRecord(Base):
@@ -681,6 +798,34 @@ def initialize_database(engine: Engine) -> set[str]:
                 "notification_sent = 1"
             )
             added_columns.add("audit_notification_sent")
+
+        sync_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                ProfitCacheSyncRecord.__tablename__
+            )
+        }
+        if "synced_through" not in sync_columns:
+            operations.add_column(
+                ProfitCacheSyncRecord.__tablename__,
+                Column("synced_through", String, nullable=True),
+            )
+            added_columns.add("synced_through")
+        if "backfilled" not in sync_columns:
+            operations.add_column(
+                ProfitCacheSyncRecord.__tablename__,
+                Column(
+                    "backfilled",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            # A database written before the watermark existed kept only the
+            # last 92 days and never recorded how far back it read, so its
+            # rows stay marked un-backfilled and the next report walks the
+            # whole history once to fill in what retention had dropped.
+            added_columns.add("backfilled")
 
         occurrence_columns = {
             column["name"]

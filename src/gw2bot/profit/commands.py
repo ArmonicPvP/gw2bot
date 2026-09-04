@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.discord_utils import send_interaction_notice
 from gw2bot.profit.api import DELIVERY_PATH, ProfitApiError
+from gw2bot.profit.store import MAX_REPORT_DAYS, MIN_REPORT_DAYS
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -185,14 +186,19 @@ class ProfitCommands(app_commands.Group):
     )
     @app_commands.describe(
         days=(
-            "Days to report, from 1 through 90; leave empty to reopen your "
-            "last window"
+            f"Days to report, from {MIN_REPORT_DAYS} through "
+            f"{MAX_REPORT_DAYS}; leave empty to reopen your last window"
         )
     )
     async def view(
         self,
         interaction: discord.Interaction,
-        days: app_commands.Range[int, 1, 90] | None = None,
+        # Discord validates this itself, so it has to be the same bound the
+        # report and the page accept or the command refuses windows they
+        # would have served.
+        days: (
+            app_commands.Range[int, MIN_REPORT_DAYS, MAX_REPORT_DAYS] | None
+        ) = None,
     ) -> None:
         LOGGER.debug(
             "Profit dashboard command invoked; user_id=%s days=%s",

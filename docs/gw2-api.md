@@ -68,18 +68,51 @@ that Discord user ID.
 
 ### `/v2/commerce/transactions/history/sells`
 
-These `tradingpost`-permission endpoints return completed purchases and sales.
-The client reads every page with `page` and `page_size=200`, caches the fields
-needed for matching, and retains 92 days so the dashboard can serve its maximum
-90-day window. Purchases and sales inside that window are matched FIFO per
-item.
+These `tradingpost`-permission endpoints return completed purchases and sales,
+newest first, and reach about ninety days back. The client reads them with
+`page` and `page_size=200` and keeps every row it has ever seen, so a member's
+history grows past what GW2 itself still serves.
+
+How much is read depends on what is already stored:
+
+- **First sync, or a store written before the watermark existed.** Page 0 is
+  read to learn `X-Page-Total`, then the remaining pages are read together,
+  eight at a time. An active trader has around sixty pages; reading them one
+  after another took about forty seconds, and reading them this way takes
+  about three.
+- **Every later refresh.** Reading resumes at the newest transaction already
+  stored and stops at the first page that reaches behind it, which is normally
+  page 0. History is append-only and ordered newest first, so nothing older
+  can have appeared. A five-minute overlap covers entries that land either side
+  of the boundary.
+
+Purchases and sales are matched FIFO per item over everything stored, not over
+the requested window, and the result is kept as one row per item per sale date.
+A report is then addition over those rows, which is why a ten-year window costs
+what a thirty-day one does.
+
+The pass pauses at each month boundary and records the purchases it has not yet
+sold. That queue is the whole of its carried state, so those snapshots are
+places a later pass can resume from. It matters here because these endpoints do
+occasionally yield a trade older than the newest one already stored - a
+backfill reaching further than the last did - and the newest-transaction
+watermark cannot see that. The bot instead looks for history stored since the
+last pass but dated before it, and rewinds to the boundary preceding it.
+
+Every incremental read deliberately returns rows already held, so a stored row
+is only rewritten when its content actually differs. A completed transaction
+never changes, so in practice the overlap writes nothing; without that, each
+refresh would look like history arriving late and send the rollups back to a
+checkpoint every time.
 
 ### `/v2/commerce/transactions/current/sells`
 
 Returns the member's current sale listings. The cached collection is replaced
 as a snapshot rather than merged, so cancelled or completed listings disappear
-from the next unrealized-profit report. All four transaction collections are
-refreshed after five minutes.
+from the next unrealized-profit report. It is one page, so it is always read
+whole. All four transaction collections are refreshed after five minutes, and
+the collections one dashboard section needs are read without waiting on
+another section's.
 
 ### `/v2/commerce/transactions/current/buys`
 
@@ -100,9 +133,52 @@ authorization still fails the report.
 
 Returns `buys.unit_price` (the highest standing buy order) and
 `sells.unit_price` (the lowest sell listing) for each requested item, in chunks
-of 200 ids. The dashboard reads it for the items already flipped in the window
-and for every open buy order, and skips an item whose response has a zero price
-on either side. It needs no API key.
+of 200 ids. The realized report reads it for the items flipped in the window
+and the Open Orders section for the items on order; neither waits on the other.
+An item whose response has a zero price on either side is skipped. It needs no
+API key.
+
+Readings are held for one minute in a cache shared by every member, because a
+price is public: several people watching the same item pay for one lookup
+between them. The dashboard's Open Orders section re-reads on the same beat, so
+a number on screen is at most a minute old. A member pressing Load drops their
+items from the cache and reads live.
+
+### Conditional requests
+
+The API supports none. No endpoint the dashboard uses returns an `ETag` or a
+`Last-Modified`, so `If-None-Match` and `If-Modified-Since` have nothing to
+send and a cached copy cannot be revalidated for less than a full re-read.
+Verified against the live API; if that ever changes, the transaction pages are
+where it would pay off most.
+
+What the API does return is a lifetime for each answer, and nothing here is
+held longer than it says:
+
+| Endpoint | `Cache-Control` |
+| --- | --- |
+| `/v2/commerce/prices` | `public, max-age=120` |
+| `/v2/items` | `public, max-age=3600` |
+| `/v2/commerce/transactions/*` | `private, max-age=60` |
+| `/v2/commerce/delivery` | none sent |
+
+Because those are public CDN lifetimes, a forced re-read inside the window
+often costs a cached response upstream rather than a fresh query, which is
+part of why the Load button is cheap to press.
+
+### `/v2/items`
+
+Names the requested items, in chunks of 200 ids read eight at a time, and needs
+no API key. Names are stored and re-used for a month rather than for the five
+minutes a transaction snapshot lasts: an item's name is fixed for the life of a
+game build, and re-reading a few thousand of them on every page load was one of
+the slower parts of a report. One failed chunk falls back to `Item <id>` for
+those ids and never fails the report.
+
+Called with no `ids`, it returns every item id in the game — about 74,000. The
+daily background pass reads that list and stores the names it does not already
+hold, which takes around half a minute the first time and nothing afterwards.
+No member then waits on a name.
 
 ### `/v2/commerce/delivery`
 

@@ -26,7 +26,10 @@ class ItemProfit:
     cost: int
     net_revenue: int
     profit: int
-    median_hold_seconds: float
+    # The units-weighted mean time from purchase to sale. It was a median
+    # until the results were precomputed per day; a median cannot be summed
+    # back out of stored day rows, and a mean can.
+    hold_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,24 @@ class DayProfit:
     cost: int
     net_revenue: int
     profit: int
+
+
+@dataclass(frozen=True, slots=True)
+class ItemDayProfit:
+    """One item's realized result on one UTC sale date.
+
+    This is the grain the stored rollups keep, because it is the smallest
+    thing every table on the dashboard can be added up from: the day table
+    sums it across items, the item table across days, and the summary across
+    both. ``hold_seconds`` is weighted by units, so dividing it by the matched
+    quantity gives the average time those units were held.
+    """
+
+    matched_quantity: int
+    cost: int
+    net_revenue: int
+    profit: int
+    hold_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +74,11 @@ class RealizedProfit:
     total_net_revenue: int
     total_profit: int
     total_matched_quantity: int
+    # Every match, kept at the grain the stored rollups use. Empty unless the
+    # caller asked for it, because only the rollup builder needs it.
+    item_days: dict[tuple[int, str], ItemDayProfit] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +134,12 @@ class OpenBuyOrder:
 
 @dataclass(frozen=True, slots=True)
 class ProfitReport:
+    """The parts of the dashboard built from a member's trade history.
+
+    Delivery and open orders are loaded apart from this, because neither
+    depends on the history and both are ready long before it is.
+    """
+
     days: int
     window_start: datetime
     window_end: datetime
@@ -115,13 +147,34 @@ class ProfitReport:
     sell_transaction_count: int
     realized: RealizedProfit
     unrealized: UnrealizedProfit
-    unclaimed_coins: int | None
-    unclaimed_items: tuple[DeliveryItem, ...] | None
     item_names: dict[int, str]
     market_prices: dict[int, MarketPrice] = field(default_factory=dict)
-    open_buy_orders: tuple[OpenBuyOrder, ...] = ()
-    open_orders_available: bool = True
-    excluded_order_items: frozenset[int] = frozenset()
+    # The oldest purchase or sale held for this member, which is how far back
+    # a window can usefully be asked to reach.
+    history_start: datetime | None = None
+    # Identifies the API key this report was built for, so a member's
+    # remembered window does not survive that key being deleted.
+    key_generation: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryReport:
+    """What is waiting for pickup, with the names to render it."""
+
+    coins: int | None
+    items: tuple[DeliveryItem, ...] | None
+    item_names: dict[int, str]
+
+
+@dataclass(frozen=True, slots=True)
+class OpenOrdersReport:
+    """The member's outstanding buy orders and what they are worth now."""
+
+    orders: tuple[OpenBuyOrder, ...]
+    available: bool
+    excluded_items: frozenset[int]
+    market_prices: dict[int, MarketPrice]
+    item_names: dict[int, str]
 
 
 @dataclass(slots=True)
@@ -160,6 +213,7 @@ class _Totals:
     cost: int = 0
     net_revenue: int = 0
     profit: int = 0
+    hold_seconds: float = 0.0
 
 
 def _weighted_median_seconds(
@@ -230,11 +284,27 @@ def calculate_realized_profit(
     sells: list[Transaction],
     *,
     minimum_flip_quantity: int = 1,
+    with_item_days: bool = False,
+    opening_lots: dict[int, tuple[BuyLot, ...]] | None = None,
 ) -> RealizedProfit:
-    """Match sales to earlier purchases FIFO, mirroring the original bot."""
+    """Match sales to earlier purchases FIFO, mirroring the original bot.
+
+    ``with_item_days`` also returns every match at item-and-date grain, which
+    is what the stored rollups are built from.
+
+    ``opening_lots`` seeds each item's queue with purchases carried in from an
+    earlier pass. That is what lets a day's new sales be matched against the
+    stock a member was already holding, without re-reading the years of
+    history that established it.
+    """
     if minimum_flip_quantity <= 0:
         raise ValueError("minimum_flip_quantity must be positive")
     events_by_item: dict[int, list[_Event]] = defaultdict(list)
+    carried = {} if opening_lots is None else opening_lots
+    for item_id in carried:
+        # Seed the item so it is visited even when this pass brings no
+        # transactions of its own; its lots may still be sold into.
+        events_by_item.setdefault(item_id, [])
     for transaction in buys:
         events_by_item[transaction.item_id].append(
             _Event(
@@ -255,6 +325,7 @@ def calculate_realized_profit(
         )
 
     item_totals: dict[int, ItemProfit] = {}
+    item_day_totals: dict[tuple[int, str], ItemDayProfit] = {}
     day_totals: dict[str, _Totals] = defaultdict(_Totals)
     unmatched: dict[int, tuple[BuyLot, ...]] = {}
     total_cost = 0
@@ -270,7 +341,13 @@ def calculate_realized_profit(
                 0 if event.kind == "buy" else 1,
             )
         )
-        buy_lots: deque[_MutableLot] = deque()
+        buy_lots: deque[_MutableLot] = deque(
+            _MutableLot(lot.remaining, lot.unit_price, lot.occurred_at)
+            for lot in sorted(
+                carried.get(item_id, ()),
+                key=lambda lot: lot.occurred_at,
+            )
+        )
         item = _Totals()
         item_days: dict[str, _Totals] = defaultdict(_Totals)
         holding_durations: list[tuple[float, int]] = []
@@ -323,6 +400,7 @@ def calculate_realized_profit(
                 day.cost += cost
                 day.net_revenue += net_revenue
                 day.profit += profit
+                day.hold_seconds += holding_seconds * matched
 
                 buy_lot.remaining -= matched
                 sell_remaining -= matched
@@ -340,6 +418,10 @@ def calculate_realized_profit(
         # rejects sales which happened before the first available purchase.
         if item.matched_quantity < minimum_flip_quantity:
             excluded_items += 1
+            # The item is not reported, but what is still held is not lost:
+            # an incremental pass has to carry those lots on to the next one.
+            if remaining_lots:
+                unmatched[item_id] = remaining_lots
             continue
         if remaining_lots:
             unmatched[item_id] = remaining_lots
@@ -360,6 +442,14 @@ def calculate_realized_profit(
             day.cost += item_day.cost
             day.net_revenue += item_day.net_revenue
             day.profit += item_day.profit
+            if with_item_days:
+                item_day_totals[(item_id, sold_day)] = ItemDayProfit(
+                    item_day.matched_quantity,
+                    item_day.cost,
+                    item_day.net_revenue,
+                    item_day.profit,
+                    item_day.hold_seconds,
+                )
 
     result = RealizedProfit(
         items=item_totals,
@@ -377,6 +467,7 @@ def calculate_realized_profit(
         total_net_revenue=total_net_revenue,
         total_profit=total_profit,
         total_matched_quantity=total_matched_quantity,
+        item_days=item_day_totals,
     )
     LOGGER.debug(
         "Calculated realized Trading Post profit; buys=%s sells=%s "
@@ -530,3 +621,164 @@ def group_open_buy_orders(
         sum(row.quantity for row in collapsed),
     )
     return collapsed
+
+
+def aggregate_rollups(
+    rollups: list[tuple[int, str, ItemDayProfit]],
+    open_lots: dict[int, tuple[BuyLot, ...]],
+    *,
+    minimum_flip_quantity: int = 1,
+) -> RealizedProfit:
+    """Sum stored rollup rows into the report for one window.
+
+    The rows are already matched, so this is addition rather than matching:
+    across days for the item table, across items for the day table, and
+    across both for the summary. The flip threshold is applied here rather
+    than when the rows were built, because five units is a question about the
+    window a member asked for and not about their whole history.
+    """
+    if minimum_flip_quantity <= 0:
+        raise ValueError("minimum_flip_quantity must be positive")
+    per_item: dict[int, _Totals] = defaultdict(_Totals)
+    for item_id, _sold_day, totals in rollups:
+        item = per_item[item_id]
+        item.matched_quantity += totals.matched_quantity
+        item.cost += totals.cost
+        item.net_revenue += totals.net_revenue
+        item.profit += totals.profit
+        item.hold_seconds += totals.hold_seconds
+
+    kept = {
+        item_id
+        for item_id, totals in per_item.items()
+        if totals.matched_quantity >= minimum_flip_quantity
+    }
+    day_totals: dict[str, _Totals] = defaultdict(_Totals)
+    for item_id, sold_day, totals in rollups:
+        if item_id not in kept:
+            continue
+        day = day_totals[sold_day]
+        day.matched_quantity += totals.matched_quantity
+        day.cost += totals.cost
+        day.net_revenue += totals.net_revenue
+        day.profit += totals.profit
+
+    items = {
+        item_id: ItemProfit(
+            totals.matched_quantity,
+            totals.cost,
+            totals.net_revenue,
+            totals.profit,
+            (
+                totals.hold_seconds / totals.matched_quantity
+                if totals.matched_quantity
+                else 0.0
+            ),
+        )
+        for item_id, totals in per_item.items()
+        if item_id in kept
+    }
+    result = RealizedProfit(
+        items=items,
+        days={
+            sold_day: DayProfit(
+                totals.matched_quantity,
+                totals.cost,
+                totals.net_revenue,
+                totals.profit,
+            )
+            for sold_day, totals in day_totals.items()
+        },
+        unmatched_buys=open_lots,
+        total_cost=sum(totals.cost for totals in items.values()),
+        total_net_revenue=sum(
+            totals.net_revenue for totals in items.values()
+        ),
+        total_profit=sum(totals.profit for totals in items.values()),
+        total_matched_quantity=sum(
+            totals.matched_quantity for totals in items.values()
+        ),
+    )
+    LOGGER.debug(
+        "Aggregated Trading Post rollups; rows=%s items=%s days=%s "
+        "excluded_items=%s",
+        len(rollups),
+        len(result.items),
+        len(result.days),
+        len(per_item) - len(kept),
+    )
+    return result
+
+
+def month_boundaries(after: datetime, through: datetime) -> list[datetime]:
+    """The UTC month starts strictly after ``after`` and at or before ``through``.
+
+    These are where the FIFO pass pauses to record what the member was
+    holding. A boundary is a place a later pass can resume from, so anything
+    that arrives late only costs a rematch back to the start of its month
+    rather than back to the start of everything.
+    """
+    if through <= after:
+        return []
+    boundaries: list[datetime] = []
+    year, month = after.year, after.month
+    while True:
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+        boundary = datetime(year, month, 1, tzinfo=UTC)
+        if boundary > through:
+            break
+        if boundary > after:
+            boundaries.append(boundary)
+    return boundaries
+
+
+def prune_open_lots(
+    lots: dict[int, tuple[BuyLot, ...]],
+    *,
+    older_than: datetime,
+) -> dict[int, tuple[BuyLot, ...]]:
+    """Collapse an item's long-held lots into one averaged lot.
+
+    A purchase that is never sold is carried by every later pass forever, so
+    an item bought years ago and sat on grows the queue without bound. Lots
+    older than the cutoff are merged into a single lot priced at their
+    unit-weighted average and dated at the oldest of them, which keeps its
+    place in the FIFO order and keeps the total cost exact. What is lost is
+    the split between those old purchases - a distinction that only shows in
+    the cost basis of stock held longer than the cutoff.
+    """
+    pruned: dict[int, tuple[BuyLot, ...]] = {}
+    collapsed_items = 0
+    collapsed_lots = 0
+    for item_id, item_lots in lots.items():
+        old = [lot for lot in item_lots if lot.occurred_at < older_than]
+        if len(old) < 2:
+            pruned[item_id] = item_lots
+            continue
+        recent = [lot for lot in item_lots if lot.occurred_at >= older_than]
+        remaining = sum(lot.remaining for lot in old)
+        if remaining <= 0:
+            pruned[item_id] = tuple(recent)
+            continue
+        # Round the averaged price up: a cost basis that is a copper high
+        # understates profit, which is the safer way to be wrong.
+        total_cost = sum(lot.remaining * lot.unit_price for lot in old)
+        merged = BuyLot(
+            remaining,
+            -(-total_cost // remaining),
+            min(lot.occurred_at for lot in old),
+        )
+        pruned[item_id] = (merged, *sorted(
+            recent, key=lambda lot: lot.occurred_at
+        ))
+        collapsed_items += 1
+        collapsed_lots += len(old)
+    if collapsed_items:
+        LOGGER.debug(
+            "Pruned held Trading Post lots; items=%s lots=%s",
+            collapsed_items,
+            collapsed_lots,
+        )
+    return pruned

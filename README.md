@@ -1326,19 +1326,20 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   route-restricted subtoken must allow the history buys, history sells, current
   sells, current buys, and `/v2/commerce/delivery` endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window accepts 1 through 90 UTC calendar dates, including today. Left empty,
-  the link names no window and the page reopens the one the member last used,
-  defaulting to 30 days until they pick one. If the web session has expired,
-  Discord sign-in returns the member to that same profit window.
+  window accepts 1 through 3650 UTC calendar dates, including today, though it
+  can only show what has been collected so far. Left empty, the link names no
+  window and the page reopens the one the member last used, defaulting to 30
+  days until they pick one. If the web session has expired, Discord sign-in
+  returns the member to that same profit window.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
-  data, remembered report window, and excluded Open Orders items. It cannot
+  data, remembered report window, and hidden Open Orders items. It cannot
   affect any other member's key, cache, or choices. Replacing a key with
-  `/profit setkey` keeps the window and the exclusions.
+  `/profit setkey` keeps the window and the hidden items.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
 summary, realized profit grouped by item, realized profit grouped by sale date,
-projected profit for unmatched buys currently listed for sale, the items the
+projected profit for held purchases currently listed for sale, the items the
 member is currently buying, and the coins and each item awaiting pickup from the
 Trading Post. The
 daily realized-profit table is paginated with 10 rows by default; its bottom-left
@@ -1346,14 +1347,18 @@ control accepts page sizes from 1 through 90, and page links appear above and
 below the table. Coin amounts account for the
 Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
-the original profit bot. An item counts as a flip only after at least five units
-have been bought and then sold; items with fewer than five matched units and
-sales made before a purchase are excluded. Click any column heading in the
+the original profit bot. Matching runs over a member's whole stored history
+rather than over the chosen window, so a sale of stock bought before the window
+began is costed from the purchase that actually paid for it. It used to be
+dropped for having no match inside the window, which understated short windows
+— by around 13% on a week for a busy trader, and by little or nothing once the
+window covers most of the held history. An item counts as a flip only after at
+least five units have been matched inside the window. Click any column heading in the
 detail tables to sort it; click the same heading again to reverse the
 order. The totals remain
 pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
-unit-weighted median time from purchase to sale and its signed percentage of
+unit-weighted average time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
 The **Your Picks** table revisits items flipped in the selected window using
 their current highest buy order and lowest sell listing. It shows the ten best
@@ -1376,14 +1381,19 @@ and ROI below the table always describe the same orders. Unlike **Your Picks**,
 a negative return is shown rather than hidden: it is an order the member is
 holding, not a suggestion.
 
-Each row has an **Exclude** button that drops that item from the table — useful
-for a long-term buy that is not a flip, or an item whose spread is not worth
-reading every visit. Excluded items are listed above the table with a **Restore**
-button, and both lists are remembered against the member's Discord account, so
-they survive a reload, a new sign-in, and a different browser. An item excluded
-while it had an order keeps its entry after the order fills or is cancelled, so
-it can always be restored. Excluding an item affects only that member's own
-dashboard.
+Each row ends with a crossed-out eye button that hides that item from the table
+— useful for a long-term buy that is not a flip, or an item whose spread is not
+worth reading every visit. Hidden items are remembered against the member's
+Discord account, so they survive a reload, a new sign-in, and a different
+browser, and hiding an item affects only that member's own dashboard.
+
+The three dots at the top right of the section open a **Hidden items** window
+listing them in a searchable table, each with a **Restore** button that puts the
+item back. A member may accumulate hundreds of them, so the list lives behind
+that button rather than above the table, and the search box filters it by name.
+The window closes with its × button, the Escape key, or a click outside it. An
+item hidden while it had an order keeps its entry there after the order fills or
+is cancelled, so it can always be restored.
 
 The **Unclaimed Trading Post** section shows the coins waiting for pickup and
 then one row per item waiting with it, with the total below them. An item
@@ -1397,6 +1407,15 @@ links to — still wins and becomes the new remembered window, while
 `/profit view` with no argument links without one and leaves the saved window
 alone.
 
+The browser keeps a copy of that choice as a repair kit. If the account comes
+back without a stored window — a database restored from before the choice, say
+— the page notices it was served the default rather than a remembered value,
+puts back what that browser last used, and saves it again. It does this at most
+once per load, so a browser that refuses storage cannot put the page in a loop.
+The copy is tied to the API key it was saved under, so `/profit deletekey`
+really does forget the window: a key saved afterwards starts from the default
+again, while replacing a key with `/profit setkey` keeps it.
+
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window
@@ -1407,13 +1426,117 @@ applicable). On a touch screen, tap a bar or dot to pin the same reading; it
 stays open until another reading is tapped, the page is tapped elsewhere, the
 page scrolls, the window loses focus, or Escape is pressed.
 
-History, current listings, current buy orders, and item names are cached for
-five minutes in rows keyed by Discord user ID; unclaimed coins and items are read
-when each report is built. Keys saved before delivery reporting or Open Orders
-were added can still load their existing reports if a route restriction blocks
-one of those newer endpoints: that section alone is marked unavailable and the
-page directs the member to run `/profit setkey` again. Other API failures
-continue to fail the report instead of presenting partial data.
+#### How the dashboard loads
+
+The page asks for its three parts separately and at the same time, and each
+section draws as soon as its own answer arrives rather than waiting for the
+slowest. Until then the section shows its heading over a centred spinner, and
+a section that fails says so in place of its table without taking the rest of
+the page down with it. **Unclaimed Trading Post** needs one request and is
+usually first; **Open Orders** needs one short collection; the realized report
+needs the whole trade history and is last.
+
+Everything the GW2 API is asked for goes out in parallel wherever one answer
+does not depend on another — the four transaction collections together, then
+prices and names together.
+
+#### What is stored, and for how long
+
+Every transaction the bot has ever read is kept, keyed by Discord user ID.
+This matters because GW2 itself only serves about ninety days of history: past
+that point the dashboard is reading from what it collected while the member was
+using it, so a window keeps reaching further back the longer the bot runs. The
+summary line under the header names the oldest trade held.
+
+Refreshes are incremental. History arrives newest first and never changes, so a
+refresh resumes at the newest transaction already stored and stops at the first
+page that reaches behind it — normally one page instead of sixty. Only a first
+sync, or a database written before this was recorded, reads a member's whole
+history, and it reads eight pages at a time rather than one after another. In
+practice a first load takes a few seconds and later ones under a second, where
+walking every page one at a time took over a minute.
+
+#### Precomputed results
+
+Matching a member's history is the expensive half of a report, and it does not
+depend on which window they asked for. It runs once — in the daily pass, or on
+the first load after new trades land — and lands in a table of one row per item
+per UTC sale date. Every table on the page is then addition over those rows:
+the day table sums them across items, the item table across days, and the
+summary across both.
+
+That is what makes a long window cost the same as a short one. Measured on a
+real account, reading and summing a window takes about 16ms whether it asks for
+30 days or ten years, where matching the raw transactions took 131ms for 30
+days and 355ms for 90 and would grow with every month collected.
+
+The purchases the matching pass never sold are stored alongside, and they are
+the whole of the state a later pass needs. So when new trades land, only the
+new ones are matched — against the stock the member was already holding —
+rather than the years of history that established it. On a real account that
+is 82ms instead of 330ms today, and the gap widens with every month kept,
+because the incremental cost depends on how much is new and the full one on
+how much there is. The same stored lots are what the unrealized projection
+reads, so it needs no transaction reads either.
+
+The pass also pauses at each month boundary to record what was held at that
+moment, keeping the last two years of those. They are places a rematch can
+start from. Trades do occasionally land behind the watermark — a backfill
+reaching further than the last one did — and because the newest transaction
+has not moved, the watermark alone would never notice; the bot looks for
+history stored since the last pass but dated before it. When it finds some,
+it rewinds to the month boundary before the oldest of them, throws away what
+was computed after it, and matches forward again. Only a first pass, or an
+arrival older than every checkpoint kept, matches a whole history.
+
+Lots older than a year are merged, per item, into one lot priced at their
+unit-weighted average and dated at the oldest of them, so it keeps its place
+in the queue and the total cost stays exact. Without this an item bought once
+and never sold is carried by every pass forever. What is given up is the split
+between those old purchases, which only shows in the cost basis of stock held
+longer than a year.
+
+**Unrealized Profit** covers everything the member still holds that is listed
+for sale, drawn from all their stored history rather than from the selected
+window: a purchase made before the window began is still stock they are holding
+now. The window bounds the realized tables, not this one.
+
+Once a day the bot reads every member's Trading Post data in the background,
+so a dashboard opened between passes reads the database rather than the GW2
+API. The same pass stores the name of every item in the game — about 74,000 of
+them, in half a minute, and nothing at all on later passes — so no report ever
+waits on a name lookup. Pressing **Load** still forces a live read for a member
+who wants the last few minutes too.
+
+Market prices are shared: they are public, so the highest buy order for Wool
+Scrap is one lookup for the whole guild rather than one per member. **Open
+Orders** follows them on its own, re-reading every minute without a page
+reload, and pauses while the tab is in the background. Pressing **Load**
+bypasses that cache as well.
+
+The rest of the caching:
+
+| Data | Held for | Why |
+| --- | --- | --- |
+| Transactions | Forever | The only copy of history older than GW2 serves |
+| Item names | 30 days | Fixed for the life of a game build |
+| Matched rollups | Until new trades land | Matching does not depend on the window |
+| Month-end lot snapshots | 24 months | Where a late arrival rematches from |
+| Transaction snapshots | 5 minutes | How often a refresh is worth making |
+| Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
+
+The Guild Wars 2 API supports no conditional requests — no `ETag` and no
+`Last-Modified` on any endpoint the dashboard uses — so a cached read cannot be
+revalidated cheaply and every TTL above is a real one. It does declare how long
+each answer is good for, and none of these hold anything longer than it says:
+prices `max-age=120`, items `max-age=3600`, transactions `max-age=60`.
+
+Unclaimed coins and items are read when the delivery section is built. Keys
+saved before delivery reporting or Open Orders were added can still load their
+existing reports if a route restriction blocks one of those newer endpoints:
+that section alone is marked unavailable and the page directs the member to run
+`/profit setkey` again. Other API failures fail that one section instead of
+presenting partial data.
 The signed web session supplies that same ID; the API key never appears in the
 page, a URL, or a browser response. Access uses the site's normal Discord OAuth
 guild-membership check and needs the four web settings plus `WEB_ENABLED=true`

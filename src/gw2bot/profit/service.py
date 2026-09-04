@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.profit.api import (
     TRANSACTION_PATHS,
@@ -15,15 +17,26 @@ from gw2bot.profit.api import (
 from gw2bot.profit.models import (
     MIN_FLIP_QUANTITY,
     DeliveryItem,
+    DeliveryReport,
     OpenBuyOrder,
+    OpenOrdersReport,
     ProfitReport,
     Transaction,
+    BuyLot,
+    ItemDayProfit,
+    RealizedProfit,
+    aggregate_rollups,
     calculate_realized_profit,
     calculate_unrealized_profit,
     group_open_buy_orders,
+    month_boundaries,
+    prune_open_lots,
     sale_fee_total,
 )
 from gw2bot.profit.store import (
+    HISTORY_KINDS,
+    RollupState,
+    ITEM_NAME_TTL_SECONDS,
     MAX_REPORT_DAYS,
     MIN_REPORT_DAYS,
     ProfitStore,
@@ -38,6 +51,24 @@ DEFAULT_REPORT_DAYS = 30
 # may not reach. Every other collection failing authorization still fails the
 # report, because without them there is nothing to show.
 OPTIONAL_TRANSACTION_KIND = "current_buys"
+
+# The collections the realized report is built from. Open orders and delivery
+# are loaded on their own so neither waits on this one.
+HISTORY_REPORT_KINDS = ("history_buys", "history_sells", "current_sells")
+
+# How long a purchase stays its own lot before being merged with the other
+# long-held lots for that item. A year is well past any flip; what is still
+# held after it is a position, and the split between the purchases that built
+# it costs more to carry than it tells anyone.
+LOT_PRUNE_AFTER_DAYS = 365
+
+
+@dataclass(frozen=True, slots=True)
+class ReportWindow:
+    """The window a request resolved to, and whether it was a stored choice."""
+
+    days: int
+    remembered: bool
 
 
 class MissingProfitApiKey(RuntimeError):
@@ -64,7 +95,7 @@ class ProfitService:
         self,
         discord_user_id: int,
         requested_days: int | None,
-    ) -> int:
+    ) -> ReportWindow:
         """Return the window to report, remembering an explicit choice.
 
         A member who picks a window keeps it: the page opens on it again on
@@ -73,13 +104,16 @@ class ProfitService:
         """
         if requested_days is not None:
             if not MIN_REPORT_DAYS <= requested_days <= MAX_REPORT_DAYS:
-                raise ValueError("Profit report days must be between 1 and 90")
+                raise ValueError(
+                    "Profit report days must be between "
+                    f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
+                )
             await asyncio.to_thread(
                 self._store.set_report_days,
                 discord_user_id,
                 requested_days,
             )
-            return requested_days
+            return ReportWindow(requested_days, True)
         stored = await asyncio.to_thread(
             self._store.get_report_days,
             discord_user_id,
@@ -89,7 +123,12 @@ class ProfitService:
             discord_user_id,
             stored is not None,
         )
-        return DEFAULT_REPORT_DAYS if stored is None else stored
+        # Saying which answer this is lets the page tell a member's stored
+        # window from the fallback, and put a lost one back from the copy the
+        # browser keeps.
+        if stored is None:
+            return ReportWindow(DEFAULT_REPORT_DAYS, False)
+        return ReportWindow(stored, True)
 
     async def set_order_exclusion(
         self,
@@ -105,15 +144,105 @@ class ProfitService:
             excluded,
         )
 
+    async def load_delivery(
+        self,
+        discord_user_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> DeliveryReport:
+        """Load what is waiting for pickup, and nothing else.
+
+        Delivery depends on no transaction collection, so this answers in one
+        request while the history sections are still being read.
+        """
+        loaded_at = datetime.now(UTC) if now is None else now
+        snapshot = await self._require_api_key(discord_user_id)
+        coins, items = await self._fetch_delivery(
+            discord_user_id,
+            snapshot.api_key,
+        )
+        item_names = await self._resolve_item_names(
+            {row.item_id for row in items or ()},
+            loaded_at,
+        )
+        LOGGER.debug(
+            "Loaded Trading Post delivery; user_id=%s coins=%s items=%s",
+            discord_user_id,
+            (
+                "unavailable"
+                if coins is None
+                else "available" if coins > 0 else "empty"
+            ),
+            "unavailable" if items is None else len(items),
+        )
+        return DeliveryReport(coins=coins, items=items, item_names=item_names)
+
+    async def load_open_orders(
+        self,
+        discord_user_id: int,
+        *,
+        force: bool = False,
+        now: datetime | None = None,
+    ) -> OpenOrdersReport:
+        """Load the member's outstanding buy orders and their current spread.
+
+        This needs one short collection rather than the whole trade history,
+        so it lands long before the realized report does.
+        """
+        loaded_at = datetime.now(UTC) if now is None else now
+        _key, unavailable = await self._refresh_transactions(
+            discord_user_id,
+            loaded_at,
+            ("current_buys",),
+            force=force,
+        )
+        current_buys, excluded_items = await asyncio.to_thread(
+            self._read_order_data,
+            discord_user_id,
+        )
+        orders = await asyncio.to_thread(group_open_buy_orders, current_buys)
+        order_item_ids = {order.item_id for order in orders}
+        # Prices and names are independent lookups, so they go out together.
+        market_prices, item_names = await asyncio.gather(
+            self._api.fetch_market_prices(order_item_ids, force=force),
+            self._resolve_item_names(
+                # An item hidden with no open order left still needs its name,
+                # or the member cannot tell what they are restoring.
+                order_item_ids | set(excluded_items),
+                loaded_at,
+            ),
+        )
+        available = "current_buys" not in unavailable
+        LOGGER.debug(
+            "Loaded open Trading Post orders; user_id=%s rows=%s prices=%s "
+            "hidden=%s availability=%s",
+            discord_user_id,
+            len(orders),
+            len(market_prices),
+            len(excluded_items),
+            "available" if available else "unavailable",
+        )
+        return OpenOrdersReport(
+            orders=orders,
+            available=available,
+            excluded_items=excluded_items,
+            market_prices=market_prices,
+            item_names=item_names,
+        )
+
     async def load_report(
         self,
         discord_user_id: int,
         days: int,
         *,
+        force: bool = False,
         now: datetime | None = None,
     ) -> ProfitReport:
         if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
-            raise ValueError("Profit report days must be between 1 and 90")
+            raise ValueError(
+                "Profit report days must be between "
+                f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
+            )
         loaded_at = datetime.now(UTC) if now is None else now
         window_start = loaded_at.replace(
             hour=0,
@@ -126,62 +255,77 @@ class ProfitService:
             discord_user_id,
             days,
         )
-        api_key, orders_available = await self._refresh_transactions(
+        snapshot = await self._require_api_key(discord_user_id)
+        await self._refresh_transactions(
             discord_user_id,
             loaded_at,
-        )
-        unclaimed_coins, unclaimed_items = await self._load_delivery(
-            discord_user_id,
-            api_key,
+            HISTORY_REPORT_KINDS,
+            force=force,
         )
 
-        cutoff = window_start
+        await self._ensure_rollups(discord_user_id, loaded_at)
         (
-            buys,
-            sells,
+            realized,
             current_sells,
-            current_buys,
-            excluded_order_items,
+            history_start,
+            buy_count,
+            sell_count,
         ) = await asyncio.to_thread(
-            self._read_member_data,
+            self._read_windowed_report,
             discord_user_id,
-            cutoff,
-        )
-        realized = await asyncio.to_thread(
-            calculate_realized_profit,
-            buys,
-            sells,
-            minimum_flip_quantity=MIN_FLIP_QUANTITY,
+            window_start,
         )
         unrealized = await asyncio.to_thread(
             calculate_unrealized_profit,
             realized.unmatched_buys,
             current_sells,
         )
-        open_buy_orders = await asyncio.to_thread(
-            group_open_buy_orders,
-            current_buys,
+        market_prices, item_names = await asyncio.gather(
+            self._api.fetch_market_prices(set(realized.items), force=force),
+            self._resolve_item_names(
+                set(realized.items) | set(unrealized.items),
+                loaded_at,
+            ),
         )
-        order_item_ids = {order.item_id for order in open_buy_orders}
-        # One price lookup covers both readers of it: the picks built from
-        # items already flipped, and every open buy order's current spread.
-        market_prices = await self._api.fetch_market_prices(
-            set(realized.items) | order_item_ids
+
+        report = ProfitReport(
+            days=days,
+            window_start=window_start,
+            window_end=loaded_at,
+            buy_transaction_count=buy_count,
+            sell_transaction_count=sell_count,
+            realized=realized,
+            unrealized=unrealized,
+            item_names=item_names,
+            market_prices=market_prices,
+            history_start=history_start,
+            key_generation=snapshot.origin,
         )
-        item_ids = (
-            set(realized.items)
-            | set(unrealized.items)
-            | order_item_ids
-            # An excluded item with no open order still needs its name, or the
-            # member cannot tell what they are restoring.
-            | set(excluded_order_items)
-            | {row.item_id for row in unclaimed_items or ()}
+        LOGGER.debug(
+            "Loaded profit report; user_id=%s days=%s realized_items=%s "
+            "unrealized_items=%s market_prices=%s history_start=%s",
+            discord_user_id,
+            days,
+            len(realized.items),
+            len(unrealized.items),
+            len(market_prices),
+            history_start is not None,
         )
+        return report
+
+    async def _resolve_item_names(
+        self,
+        item_ids: set[int],
+        now: datetime,
+    ) -> dict[int, str]:
+        """Name every item, asking GW2 only about ones not already stored."""
+        if not item_ids:
+            return {}
         item_names = await asyncio.to_thread(
             self._store.get_item_names,
             item_ids,
-            CACHE_TTL_SECONDS,
-            now=loaded_at,
+            ITEM_NAME_TTL_SECONDS,
+            now=now,
         )
         missing_ids = item_ids - set(item_names)
         if missing_ids:
@@ -190,51 +334,19 @@ class ProfitService:
                 await asyncio.to_thread(
                     self._store.store_item_names,
                     fetched_names,
-                    now=loaded_at,
+                    now=now,
                 )
                 item_names.update(fetched_names)
         for item_id in item_ids:
             item_names.setdefault(item_id, f"Item {item_id}")
-
-        report = ProfitReport(
-            days=days,
-            window_start=window_start,
-            window_end=loaded_at,
-            buy_transaction_count=len(buys),
-            sell_transaction_count=len(sells),
-            realized=realized,
-            unrealized=unrealized,
-            unclaimed_coins=unclaimed_coins,
-            unclaimed_items=unclaimed_items,
-            item_names=item_names,
-            market_prices=market_prices,
-            open_buy_orders=open_buy_orders,
-            open_orders_available=orders_available,
-            excluded_order_items=excluded_order_items,
-        )
         LOGGER.debug(
-            "Loaded profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s market_prices=%s unclaimed_delivery=%s "
-            "delivery_items=%s open_order_rows=%s open_orders=%s "
-            "excluded_order_items=%s",
-            discord_user_id,
-            days,
-            len(realized.items),
-            len(unrealized.items),
-            len(market_prices),
-            (
-                "unavailable"
-                if unclaimed_coins is None
-                else "available" if unclaimed_coins > 0 else "empty"
-            ),
-            "unavailable" if unclaimed_items is None else len(unclaimed_items),
-            len(open_buy_orders),
-            "available" if orders_available else "unavailable",
-            len(excluded_order_items),
+            "Resolved profit item names; requested=%s fetched=%s",
+            len(item_ids),
+            len(missing_ids),
         )
-        return report
+        return item_names
 
-    async def _load_delivery(
+    async def _fetch_delivery(
         self,
         discord_user_id: int,
         api_key: str,
@@ -252,32 +364,442 @@ class ProfitService:
             )
             return None, None
 
-    def _cache_freshness(
+    def _read_order_data(
+        self,
+        discord_user_id: int,
+    ) -> tuple[list[Transaction], frozenset[int]]:
+        return (
+            self._store.get_transactions(discord_user_id, "current_buys"),
+            self._store.get_excluded_order_items(discord_user_id),
+        )
+
+    async def _ensure_rollups(
         self,
         discord_user_id: int,
         now: datetime,
-    ) -> dict[str, bool]:
-        return {
-            kind: self._store.is_cache_fresh(
+    ) -> bool:
+        """Bring this member's rollups up to date, reading as little as can be."""
+        state, newest, late = await asyncio.to_thread(
+            self._rollup_freshness,
+            discord_user_id,
+        )
+        if newest is None:
+            return False
+        if late is None and (
+            state.computed_through is not None
+            and state.computed_through >= newest
+        ):
+            LOGGER.debug(
+                "Profit rollups are current; user_id=%s",
+                discord_user_id,
+            )
+            return False
+        await asyncio.to_thread(
+            self._advance_rollups,
+            discord_user_id,
+            state.computed_through,
+            newest,
+            late,
+            now,
+        )
+        return True
+
+    def _rollup_freshness(
+        self,
+        discord_user_id: int,
+    ) -> tuple[RollupState, datetime | None, datetime | None]:
+        state = self._store.get_rollup_state(discord_user_id)
+        late = (
+            None
+            if state.computed_through is None or state.computed_at is None
+            else self._store.get_late_arrival(
+                discord_user_id,
+                state.computed_through,
+                state.computed_at,
+            )
+        )
+        return (
+            state,
+            self._store.get_newest_transaction_at(discord_user_id),
+            late,
+        )
+
+    def _advance_rollups(
+        self,
+        discord_user_id: int,
+        computed_through: datetime | None,
+        newest: datetime,
+        late: datetime | None,
+        now: datetime,
+    ) -> None:
+        """Bring the rollups up to the newest trade, reading as little as can be.
+
+        There are three ways in. Normally only the trades newer than the
+        watermark need matching, resumed from the lots the last pass left, so
+        a member who sold something five minutes ago costs a handful of rows.
+        A trade that arrived behind the watermark rewinds to the last month
+        boundary before it and rematches from there. Only a first pass, or a
+        late arrival older than every checkpoint kept, matches everything.
+        """
+        resume_from = computed_through
+        # A checkpoint holds what was held before its boundary, so a rewind
+        # replays that instant too; the watermark was already matched, so an
+        # ordinary refresh starts after it.
+        resume_inclusive = False
+        opening_lots: dict[int, tuple[BuyLot, ...]] = {}
+        reason = "incremental"
+        if late is not None:
+            checkpoint = self._store.get_lot_checkpoint_at_or_before(
+                discord_user_id,
+                late,
+            )
+            if checkpoint is None:
+                resume_from = None
+                reason = "late-arrival-before-every-checkpoint"
+            else:
+                resume_from, opening_lots = checkpoint
+                resume_inclusive = True
+                self._store.discard_rollups_from(discord_user_id, resume_from)
+                reason = "rewound"
+        elif computed_through is None:
+            reason = "first-pass"
+        else:
+            opening_lots = self._store.get_open_lots(discord_user_id)
+
+        bound = {"at_or_after" if resume_inclusive else "after": resume_from}
+        buys = self._store.get_transactions(
+            discord_user_id, "history_buys", **bound
+        )
+        sells = self._store.get_transactions(
+            discord_user_id, "history_sells", **bound
+        )
+        # No flip threshold here: it belongs to the window a member asked
+        # for, not to their whole history, and is applied when the rollups
+        # are read back.
+        item_days, carried = self._match_in_segments(
+            discord_user_id,
+            buys,
+            sells,
+            opening_lots,
+            resume_from,
+            resume_inclusive,
+            newest,
+        )
+        carried = prune_open_lots(
+            carried,
+            older_than=now - timedelta(days=LOT_PRUNE_AFTER_DAYS),
+        )
+        if resume_from is None:
+            self._store.store_rollups(
+                discord_user_id, item_days, carried, newest, now=now
+            )
+        else:
+            self._store.merge_rollups(
+                discord_user_id, item_days, carried, newest, now=now
+            )
+        LOGGER.info(
+            "Advanced profit rollups; user_id=%s reason=%s transactions=%s "
+            "rows=%s carried_items=%s",
+            discord_user_id,
+            reason,
+            len(buys) + len(sells),
+            len(item_days),
+            len(carried),
+        )
+
+    def _match_in_segments(
+        self,
+        discord_user_id: int,
+        buys: list[Transaction],
+        sells: list[Transaction],
+        opening_lots: dict[int, tuple[BuyLot, ...]],
+        resume_from: datetime | None,
+        resume_inclusive: bool,
+        newest: datetime,
+    ) -> tuple[dict[tuple[int, str], ItemDayProfit], dict[int, tuple[BuyLot, ...]]]:
+        """Match a stretch of history, pausing at each month boundary.
+
+        Pausing costs nothing - matching a run of segments in order is the
+        same arithmetic as matching the whole run - and each pause leaves a
+        checkpoint a later rematch can resume from.
+
+        A checkpoint at a boundary holds what was held *before* that instant,
+        and a rewind to it replays from the instant itself. Keeping those two
+        halves on the same side of the boundary is what stops a trade
+        timestamped exactly at midnight from falling between them: the day it
+        lands on is discarded and rematched whole.
+        """
+        occurred = [transaction.occurred_at for transaction in (*buys, *sells)]
+        first = min(occurred) if occurred else newest
+        boundaries = month_boundaries(
+            resume_from if resume_from is not None else first,
+            newest,
+        )
+        item_days: dict[tuple[int, str], ItemDayProfit] = {}
+        carried = opening_lots
+        lower = resume_from
+        lower_inclusive = resume_inclusive
+
+        def within(transaction: Transaction, end: datetime, last: bool) -> bool:
+            if lower is not None:
+                if lower_inclusive:
+                    if transaction.occurred_at < lower:
+                        return False
+                elif transaction.occurred_at <= lower:
+                    return False
+            # A boundary belongs to the segment after it; the final segment
+            # takes the newest trade itself.
+            return (
+                transaction.occurred_at <= end
+                if last
+                else transaction.occurred_at < end
+            )
+
+        for boundary in (*boundaries, None):
+            last = boundary is None
+            end = newest if last else boundary
+            assert end is not None
+            realized = calculate_realized_profit(
+                [row for row in buys if within(row, end, last)],
+                [row for row in sells if within(row, end, last)],
+                with_item_days=True,
+                opening_lots=carried,
+            )
+            item_days.update(realized.item_days)
+            carried = realized.unmatched_buys
+            if boundary is not None:
+                self._store.store_lot_checkpoint(
+                    discord_user_id,
+                    boundary,
+                    carried,
+                )
+            lower = end
+            lower_inclusive = True
+        LOGGER.debug(
+            "Matched Trading Post history in segments; user_id=%s "
+            "checkpoints=%s rows=%s",
+            discord_user_id,
+            len(boundaries),
+            len(item_days),
+        )
+        return item_days, carried
+
+    def _read_windowed_report(
+        self,
+        discord_user_id: int,
+        cutoff: datetime,
+    ) -> tuple[
+        RealizedProfit,
+        list[Transaction],
+        datetime | None,
+        int,
+        int,
+    ]:
+        rollups = self._store.get_rollups(discord_user_id, cutoff)
+        realized = aggregate_rollups(
+            rollups,
+            self._store.get_open_lots(discord_user_id),
+            minimum_flip_quantity=MIN_FLIP_QUANTITY,
+        )
+        return (
+            realized,
+            self._store.get_transactions(discord_user_id, "current_sells"),
+            self._store.get_earliest_transaction_at(discord_user_id),
+            self._store.count_transactions(
+                discord_user_id, "history_buys", cutoff
+            ),
+            self._store.count_transactions(
+                discord_user_id, "history_sells", cutoff
+            ),
+        )
+
+
+    async def warm_item_names(self) -> int:
+        """Store the name of every item the game has, ahead of any report.
+
+        Names are the one lookup a report cannot avoid and cannot guess, and
+        they never change within a game build. Reading the whole catalogue in
+        the background once a day means no member ever waits on /v2/items;
+        only ids that are missing or a month stale are asked for, so the run
+        after the first costs almost nothing.
+        """
+        try:
+            item_ids = await self._api.fetch_all_item_ids()
+        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
+            # Names are presentation only, and a report falls back to item
+            # ids. A failed warm must never take the bot down with it.
+            LOGGER.warning(
+                "Could not list GW2 items to warm names; error_type=%s",
+                type(exc).__name__,
+            )
+            return 0
+        known = await asyncio.to_thread(
+            self._store.get_known_item_ids,
+            ITEM_NAME_TTL_SECONDS,
+        )
+        missing = set(item_ids) - known
+        if not missing:
+            LOGGER.debug(
+                "Item name cache already warm; items=%s", len(item_ids)
+            )
+            return 0
+        LOGGER.info(
+            "Warming the profit item name cache; catalogue=%s missing=%s",
+            len(item_ids),
+            len(missing),
+        )
+        names = await self._api.fetch_item_names(missing)
+        if names:
+            await asyncio.to_thread(self._store.store_item_names, names)
+        LOGGER.info(
+            "Warmed the profit item name cache; stored=%s missing=%s",
+            len(names),
+            len(missing),
+        )
+        return len(names)
+
+    async def sync_member(self, discord_user_id: int) -> bool:
+        """Bring one member's stored collections up to date in the background.
+
+        A page load then reads the database rather than the GW2 API. Failures
+        are logged and swallowed: one member's expired key must not stop the
+        pass over everyone else.
+        """
+        try:
+            await self._refresh_transactions(
+                discord_user_id,
+                datetime.now(UTC),
+                tuple(TRANSACTION_PATHS),
+                force=True,
+            )
+        except MissingProfitApiKey:
+            LOGGER.debug(
+                "Skipped profit sync; user_id=%s reason=api-key-unset",
+                discord_user_id,
+            )
+            return False
+        except (
+            aiohttp.ClientError,
+            TimeoutError,
+            ProfitApiError,
+            SQLAlchemyError,
+        ) as exc:
+            LOGGER.warning(
+                "Could not sync a member's Trading Post data; user_id=%s "
+                "error_type=%s",
+                discord_user_id,
+                type(exc).__name__,
+            )
+            return False
+        try:
+            # Matching the whole history is the expensive half of a report.
+            # Doing it here means a page load finds it already done.
+            await self._ensure_rollups(discord_user_id, datetime.now(UTC))
+        except SQLAlchemyError as exc:
+            LOGGER.warning(
+                "Could not rebuild a member's profit rollups; user_id=%s "
+                "error_type=%s",
+                discord_user_id,
+                type(exc).__name__,
+            )
+            return False
+        LOGGER.debug("Synced Trading Post data; user_id=%s", discord_user_id)
+        return True
+
+    async def sync_all_members(self) -> tuple[int, int]:
+        """Sync every member holding a key; return (synced, attempted)."""
+        try:
+            members = await asyncio.to_thread(
+                self._store.get_members_with_api_key
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not list profit key holders; error_type=%s",
+                type(exc).__name__,
+            )
+            return 0, 0
+        synced = 0
+        for discord_user_id in members:
+            if await self.sync_member(discord_user_id):
+                synced += 1
+        # Items nobody has asked about since the last pass are dropped here;
+        # a read only clears what it happens to look at.
+        self._api.forget_stale_prices()
+        LOGGER.info(
+            "Completed the daily Trading Post sync; synced=%s members=%s",
+            synced,
+            len(members),
+        )
+        return synced, len(members)
+
+    async def _require_api_key(self, discord_user_id: int):
+        snapshot = await asyncio.to_thread(
+            self._store.get_api_key_snapshot,
+            discord_user_id,
+        )
+        if snapshot is None:
+            LOGGER.debug(
+                "Skipped profit request; user_id=%s reason=api-key-unset",
+                discord_user_id,
+            )
+            raise MissingProfitApiKey
+        return snapshot
+
+    def _stale_kinds(
+        self,
+        discord_user_id: int,
+        kinds: tuple[str, ...],
+        now: datetime,
+    ) -> list[str]:
+        return [
+            kind
+            for kind in kinds
+            if not self._store.is_cache_fresh(
                 discord_user_id,
                 kind,
                 CACHE_TTL_SECONDS,
                 now=now,
             )
-            for kind in TRANSACTION_PATHS
-        }
+        ]
+
+    def _sync_plan(
+        self,
+        discord_user_id: int,
+        kinds: list[str],
+    ) -> dict[str, datetime | None]:
+        """Say where each collection should resume reading from.
+
+        A history collection that has been walked end to end resumes at its
+        watermark, which normally makes the refresh one page instead of sixty.
+        Anything else - a first sync, or a store written before the watermark
+        existed - is read in full, once, and marked so it need not be again.
+        The current collections are replacing snapshots of a single page, so
+        they are always read whole.
+        """
+        plan: dict[str, datetime | None] = {}
+        for kind in kinds:
+            if kind not in HISTORY_KINDS:
+                plan[kind] = None
+                continue
+            state = self._store.get_sync_state(discord_user_id, kind)
+            plan[kind] = (
+                state.synced_through if state.backfilled else None
+            )
+        return plan
 
     async def _fetch_collection(
         self,
         transaction_kind: str,
         api_key: str,
         discord_user_id: int,
+        since: datetime | None,
     ) -> list[Transaction] | None:
         """Fetch one collection; None when only Open Orders is out of reach."""
         try:
             return await self._api.fetch_transactions(
                 TRANSACTION_PATHS[transaction_kind],
                 api_key,
+                since=since,
             )
         except ProfitApiAuthorizationError:
             if transaction_kind != OPTIONAL_TRANSACTION_KIND:
@@ -293,42 +815,53 @@ class ProfitService:
         self,
         discord_user_id: int,
         now: datetime,
-    ) -> tuple[str, bool]:
+        kinds: tuple[str, ...],
+        *,
+        force: bool = False,
+    ) -> tuple[str, frozenset[str]]:
+        """Bring the named collections up to date; report what was refused.
+
+        ``force`` ignores the snapshot's five-minute life, which is what the
+        page's Load button asks for: a member who presses it wants the current
+        state, not the one from four minutes ago. The read is still
+        incremental, so forcing costs one page rather than sixty.
+        """
         for attempt in range(2):
-            snapshot = await asyncio.to_thread(
-                self._store.get_api_key_snapshot,
-                discord_user_id,
-            )
-            if snapshot is None:
-                LOGGER.debug(
-                    "Skipped profit report; user_id=%s reason=api-key-unset",
+            snapshot = await self._require_api_key(discord_user_id)
+            stale_kinds = (
+                list(kinds)
+                if force
+                else await asyncio.to_thread(
+                    self._stale_kinds,
                     discord_user_id,
+                    kinds,
+                    now,
                 )
-                raise MissingProfitApiKey
-            fresh = await asyncio.to_thread(
-                self._cache_freshness,
-                discord_user_id,
-                now,
             )
-            stale_kinds = [
-                kind for kind, is_fresh in fresh.items() if not is_fresh
-            ]
             LOGGER.debug(
-                "Resolved profit cache refresh; user_id=%s stale=%s fresh=%s "
+                "Resolved profit cache refresh; user_id=%s asked=%s stale=%s "
                 "attempt=%s",
                 discord_user_id,
+                len(kinds),
                 len(stale_kinds),
-                len(fresh) - len(stale_kinds),
                 attempt + 1,
             )
             if not stale_kinds:
-                return snapshot.api_key, True
+                return snapshot.api_key, frozenset()
+            plan = await asyncio.to_thread(
+                self._sync_plan,
+                discord_user_id,
+                stale_kinds,
+            )
+            # Every stale collection is read at the same time; nothing here
+            # depends on anything else here.
             fetched = await asyncio.gather(
                 *(
                     self._fetch_collection(
                         kind,
                         snapshot.api_key,
                         discord_user_id,
+                        plan[kind],
                     )
                     for kind in stale_kinds
                 )
@@ -341,16 +874,26 @@ class ProfitService:
                 for kind, transactions in zip(stale_kinds, fetched, strict=True)
                 if transactions is not None
             ]
-            orders_available = len(collections) == len(stale_kinds)
+            unavailable = frozenset(
+                kind
+                for kind, transactions in zip(stale_kinds, fetched, strict=True)
+                if transactions is None
+            )
+            # A collection read from page zero to the end is complete now,
+            # whatever it was before.
+            backfilled = {
+                kind: plan[kind] is None for kind, _ in collections
+            }
             accepted = await asyncio.to_thread(
                 self._store.store_transaction_snapshot,
                 discord_user_id,
                 snapshot.generation,
                 collections,
+                backfilled=backfilled,
                 now=now,
             )
             if accepted:
-                return snapshot.api_key, orders_available
+                return snapshot.api_key, unavailable
             LOGGER.info(
                 "Discarded stale profit transaction snapshot; user_id=%s "
                 "attempt=%s retry=%s",
@@ -359,33 +902,6 @@ class ProfitService:
                 attempt == 0,
             )
         raise ProfitApiError("GW2 API key changed during profit refresh")
-
-    def _read_member_data(
-        self,
-        discord_user_id: int,
-        cutoff: datetime,
-    ) -> tuple[
-        list[Transaction],
-        list[Transaction],
-        list[Transaction],
-        list[Transaction],
-        frozenset[int],
-    ]:
-        return (
-            self._store.get_transactions(
-                discord_user_id,
-                "history_buys",
-                cutoff,
-            ),
-            self._store.get_transactions(
-                discord_user_id,
-                "history_sells",
-                cutoff,
-            ),
-            self._store.get_transactions(discord_user_id, "current_sells"),
-            self._store.get_transactions(discord_user_id, "current_buys"),
-            self._store.get_excluded_order_items(discord_user_id),
-        )
 
 
 def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
@@ -404,7 +920,7 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "net_revenue": totals.net_revenue,
             "profit": totals.profit,
             "roi_percent": percentage(totals.profit, totals.cost),
-            "median_hold_seconds": totals.median_hold_seconds,
+            "hold_seconds": totals.hold_seconds,
             "profit_share_percent": percentage(
                 totals.profit,
                 realized.total_profit,
@@ -478,7 +994,6 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
         len(picks),
         skipped_picks,
     )
-    open_orders, excluded_orders = _open_order_rows(report)
     return {
         "days": report.days,
         "window": {
@@ -511,31 +1026,51 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
                 unrealized.total_cost,
             ),
         },
-        "open_orders": {
-            "available": report.open_orders_available,
-            "orders": open_orders,
-            "excluded": excluded_orders,
-        },
-        "delivery": {
-            "coins": report.unclaimed_coins,
-            "items": (
-                None
-                if report.unclaimed_items is None
-                else [
-                    {
-                        "item_id": row.item_id,
-                        "name": report.item_names[row.item_id],
-                        "quantity": row.quantity,
-                    }
-                    for row in report.unclaimed_items
-                ]
-            ),
-        },
+        "history_start_date": (
+            None
+            if report.history_start is None
+            else report.history_start.date().isoformat()
+        ),
+        "max_days": MAX_REPORT_DAYS,
+        # Opaque to the page: it only ever compares it with the one it saved,
+        # so a window kept in a browser is dropped once the key it belonged
+        # to is deleted rather than outliving it.
+        "key_generation": report.key_generation,
+    }
+
+
+def serialize_delivery(report: DeliveryReport) -> dict[str, object]:
+    return {
+        "coins": report.coins,
+        "items": (
+            None
+            if report.items is None
+            else [
+                {
+                    "item_id": row.item_id,
+                    "name": report.item_names.get(
+                        row.item_id,
+                        f"Item {row.item_id}",
+                    ),
+                    "quantity": row.quantity,
+                }
+                for row in report.items
+            ]
+        ),
+    }
+
+
+def serialize_open_orders(report: OpenOrdersReport) -> dict[str, object]:
+    orders, excluded = _open_order_rows(report)
+    return {
+        "available": report.available,
+        "orders": orders,
+        "excluded": excluded,
     }
 
 
 def _open_order_rows(
-    report: ProfitReport,
+    report: OpenOrdersReport,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Split the member's open buy orders into kept and excluded rows.
 
@@ -544,16 +1079,16 @@ def _open_order_rows(
     """
     orders: list[dict[str, object]] = []
     excluded: list[dict[str, object]] = []
-    for order in report.open_buy_orders:
+    for order in report.orders:
         row = _open_order_row(report, order)
-        if order.item_id in report.excluded_order_items:
+        if order.item_id in report.excluded_items:
             excluded.append(row)
         else:
             orders.append(row)
     # An item excluded while it had an order keeps its entry after the order
     # fills or is cancelled; without it the member has no way to restore it.
-    listed = {order.item_id for order in report.open_buy_orders}
-    for item_id in sorted(report.excluded_order_items - listed):
+    listed = {order.item_id for order in report.orders}
+    for item_id in sorted(report.excluded_items - listed):
         excluded.append(
             {
                 "item_id": item_id,
@@ -581,7 +1116,7 @@ def _open_order_rows(
 
 
 def _open_order_row(
-    report: ProfitReport,
+    report: OpenOrdersReport,
     order: OpenBuyOrder,
 ) -> dict[str, object]:
     price = report.market_prices.get(order.item_id)

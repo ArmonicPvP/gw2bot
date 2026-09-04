@@ -1,8 +1,9 @@
 """Static browser dashboard for a member's Trading Post profit reports."""
 
+from gw2bot.profit.store import MAX_REPORT_DAYS
 from gw2bot.web.page import _DASHBOARD_HEADER_STYLE, _SHARED_STYLE
 
-PROFIT_PAGE = (
+_PROFIT_PAGE_TEMPLATE = (
     """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -76,25 +77,109 @@ main { width: 100%; margin: 0; padding: 1rem; }
 .pick-toggle button:last-child { border-radius: 0 6px 6px 0; }
 .pick-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; }
 .card h3.subheading { font-size: 0.92rem; padding: 0.85rem 1rem 0.15rem; }
-.row-action { padding: 0.25rem 0.55rem; font-size: 0.78rem; }
-.exclusions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  padding: 0 1rem 0.85rem;
-  list-style: none;
+/* A loading card keeps its heading and shows a spinner where its body will
+   be, so the page reads as a list of named sections filling in rather than a
+   blank screen that appears all at once. */
+.card.loading { min-height: 7.5rem; }
+.card.loading > :not(.section-spinner):not(h2):not(.card-heading) {
+  display: none;
 }
-.exclusions li {
+.section-spinner { display: none; }
+.card.loading .section-spinner, .card.failed .section-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 2rem 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.card.failed > :not(.section-spinner):not(h2):not(.card-heading) {
+  display: none;
+}
+.card.failed .spinner { display: none; }
+.spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: profit-spin 0.8s linear infinite;
+}
+@keyframes profit-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.icon-button {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.25rem 0.3rem 0.25rem 0.6rem;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.8rem;
+  justify-content: center;
+  padding: 0.3rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  line-height: 0;
 }
-.exclusions .exclusion-name { overflow-wrap: anywhere; }
+.icon-button:hover { color: var(--text); background: var(--panel-2); }
+.icon-button svg { pointer-events: none; }
+.row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.4rem;
+  line-height: 0;
+  color: var(--muted);
+}
+.row-action:hover { color: var(--text); }
+.row-action svg { pointer-events: none; }
+td.actions { text-align: center; }
+#hidden-dialog {
+  /* The shared reset zeroes every margin, which takes the centring a modal
+     dialog normally gets from the user agent's `margin: auto` with it. */
+  margin: auto;
+  width: min(30rem, calc(100vw - 2rem));
+  max-height: min(32rem, calc(100vh - 4rem));
+  padding: 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+#hidden-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+#hidden-dialog[open] { display: flex; flex-direction: column; }
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 0.7rem 0.25rem 1rem;
+}
+.modal-head h2 { flex: 1; font-size: 1rem; }
+#hidden-count { padding-bottom: 0.6rem; }
+.modal-search { display: block; padding: 0 1rem 0.85rem; }
+.modal-search input { width: 100%; }
+.modal-scroll { overflow: auto; border-top: 1px solid var(--border); }
+#hidden-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-top: 0;
+}
+#hidden-table th:last-child, #hidden-table td:last-child {
+  width: 1%;
+  text-align: right;
+}
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {
@@ -212,7 +297,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   <h1 id="brand">Trading Post Profit</h1>
   <form id="range-form">
     <label for="days">Days</label>
-    <input id="days" name="days" type="number" min="1" max="90" value="30" required>
+    <input id="days" name="days" type="number" min="1" max="__MAX_DAYS__" value="30" required>
     <button class="primary" type="submit">Load</button>
   </form>
   <span class="spacer"></span>
@@ -238,15 +323,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     <code>/profit setkey</code> in the guild server, then reload this page.
   </div>
   <div class="cards" id="reports" hidden>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Summary</h2>
       <p class="note">FIFO-matched realized results and current-listing projections for the selected window.</p>
       <div class="table-scroll"><table>
         <thead><tr><th>Measure</th><th>Value</th></tr></thead>
         <tbody id="summary-body"></tbody>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Daily Profit Trends</h2>
       <p class="note">UTC sale dates; days without matched sales count as zero profit.</p>
       <div class="chart-grid">
@@ -266,8 +352,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <div class="profit-chart"><svg id="cumulative-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Cumulative realized profit"></svg></div>
         </figure>
       </div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <div class="card-heading">
         <h2>Your Picks</h2>
         <div class="pick-toggle" aria-label="Rank picks by">
@@ -280,10 +367,11 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <thead><tr><th>Item</th><th>Buy Order</th><th>Sell Price</th><th>Profit / Unit</th><th>ROI</th></tr></thead>
         <tbody id="picks-body"></tbody>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Realized Profit by Item</h2>
-      <p class="note">Median Hold is weighted by matched units. Profit Share is signed item profit divided by total realized profit.</p>
+      <p class="note">Avg Hold is the mean time those units were held, weighted by units. Profit Share is signed item profit divided by total realized profit.</p>
       <div class="table-scroll"><table id="items-table" data-sort-table="items">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -293,21 +381,22 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="profit" data-sort-default="descending">Profit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="roi" data-sort-default="descending">ROI</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="profit-per-unit" data-sort-default="descending">Profit / Unit</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="median-hold" data-sort-default="ascending">Median Hold</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="avg-hold" data-sort-default="ascending">Avg Hold</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="profit-share" data-sort-default="descending">Profit Share</button></th>
         </tr></thead>
         <tbody id="items-body"></tbody>
         <tfoot id="items-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Realized Profit by Day</h2>
       <nav class="pagination" aria-label="Daily profit pages">
         <span class="pagination-pages" id="days-pages-top"></span>
       </nav>
       <div class="table-scroll"><table id="days-table" data-sort-table="days">
         <thead><tr>
-          <th aria-sort="ascending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="net-revenue" data-sort-default="descending">Net Revenue</button></th>
@@ -322,10 +411,11 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         </label>
         <span class="pagination-pages" id="days-pages-bottom"></span>
       </nav>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
-      <p class="note">Unmatched purchases from the selected window that are currently listed for sale. Projected ROI is projected profit divided by their matched cost.</p>
+      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Projected ROI is projected profit divided by their matched cost.</p>
       <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -338,17 +428,24 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="unrealized-body"></tbody>
         <tfoot id="unrealized-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
-      <h2>Open Orders</h2>
+    <section class="card loading" data-source="orders">
+      <div class="card-heading">
+        <h2>Open Orders</h2>
+        <button id="orders-menu" class="icon-button" type="button"
+          aria-haspopup="dialog" title="Hidden items">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+            aria-hidden="true">
+            <circle cx="12" cy="5" r="2"></circle>
+            <circle cx="12" cy="12" r="2"></circle>
+            <circle cx="12" cy="19" r="2"></circle>
+          </svg>
+        </button>
+      </div>
       <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling the whole order at the current lowest sell listing after the 5% listing and 10% exchange fees, and ROI is that profit over what the order costs you.</p>
       <p class="note" id="orders-unpriced" hidden>Rows with no current Trading Post price show dashes and are left out of every total below, so the totals cover the same orders throughout.</p>
       <p class="note" id="orders-key-help" hidden>Open orders are unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows <code>/v2/commerce/transactions/current/buys</code>.</p>
-      <div id="orders-excluded" hidden>
-        <h3 class="subheading">Excluded items</h3>
-        <p class="note">These items are left out of the table below. The list is remembered for your Discord account.</p>
-        <ul class="exclusions" id="orders-excluded-list"></ul>
-      </div>
       <div class="table-scroll"><table id="orders-table" data-sort-table="orders">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -360,13 +457,14 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="order-profit" data-sort-default="descending">Profit / Unit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="order-total-profit" data-sort-default="descending">Total Profit</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="order-roi" data-sort-default="descending">ROI</button></th>
-          <th>Exclude</th>
+          <th>Hide</th>
         </tr></thead>
         <tbody id="orders-body"></tbody>
         <tfoot id="orders-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="delivery">
       <h2>Unclaimed Trading Post</h2>
       <p class="note">Coins and items waiting for pickup in your Trading Post delivery box.</p>
       <p class="note" id="delivery-key-help" hidden>Delivery access is unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows the Trading Post delivery endpoint.</p>
@@ -385,8 +483,33 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="delivery-body"></tbody>
         <tfoot id="delivery-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
   </div>
+  <dialog id="hidden-dialog" aria-labelledby="hidden-title">
+    <div class="modal-head">
+      <h2 id="hidden-title">Hidden items</h2>
+      <button id="hidden-close" class="icon-button" type="button"
+        aria-label="Close hidden items">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <p class="note" id="hidden-count"></p>
+    <label class="modal-search" for="hidden-search">
+      <span class="visually-hidden">Search hidden items</span>
+      <input id="hidden-search" type="search" placeholder="Search hidden items"
+        autocomplete="off">
+    </label>
+    <div class="modal-scroll"><table id="hidden-table">
+      <thead><tr><th>Item</th><th>Restore</th></tr></thead>
+      <tbody id="hidden-body"></tbody>
+    </table></div>
+  </dialog>
 </main>
 <script>
 (function () {
@@ -399,6 +522,45 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var sortStates = {};
   var daysPage = 1;
   var daysPageSize = 10;
+  var maxDays = __MAX_DAYS__;
+  var historyStart = null;
+  var missingKey = false;
+  var restoredWindow = false;
+  // How often the open orders follow the market. The GW2 API declares its
+  // prices good for two minutes, and the server holds each reading for one,
+  // so this is as live as the data can honestly be.
+  var PRICE_REFRESH_MS = 60000;
+  // The chosen window lives against the Discord account. This copy is a
+  // repair kit: if the account ever comes back without one - a rebuilt
+  // database, or a release that overwrote it - the browser puts back what
+  // the member last picked instead of dropping them on the default.
+  var STORED_DAYS_KEY = "gw2bot-profit-days";
+
+  function readStoredDays(keyGeneration) {
+    try {
+      var saved = JSON.parse(localStorage.getItem(STORED_DAYS_KEY) || "null");
+      if (!saved || saved.key !== keyGeneration) {
+        // Saved under a key this member has since deleted. /profit deletekey
+        // clears the window on purpose, so the copy must not put it back.
+        return null;
+      }
+      var stored = Number(saved.days);
+      return Number.isInteger(stored) && stored >= 1 && stored <= maxDays
+        ? stored : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeStoredDays(days, keyGeneration) {
+    try {
+      localStorage.setItem(
+        STORED_DAYS_KEY,
+        JSON.stringify({ days: days, key: keyGeneration }));
+    } catch (error) {
+      trace("window-not-stored", 0);
+    }
+  }
 
   function trace(action, rows) {
     console.debug("Profit dashboard", action, "rows=" + rows);
@@ -1126,9 +1288,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       profitCell(row, item.profit);
       percentCell(row, item.roi_percent);
       profitCell(row, Math.round(item.profit / item.units));
-      cell(
-        row, duration(item.median_hold_seconds), "",
-        item.median_hold_seconds);
+      cell(row, duration(item.hold_seconds), "", item.hold_seconds);
       percentCell(row, item.profit_share_percent, item.profit);
       body.appendChild(row);
     });
@@ -1258,16 +1418,48 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var ordersRows = [];
   var ordersAvailable = true;
 
-  function exclusionButton(itemId, excluded) {
+  // "Hidden" is what the dashboard calls these items; the stored rows and the
+  // API keep calling them exclusions, so both words appear here.
+  function hideButton(order) {
     var button = document.createElement("button");
     button.type = "button";
     button.className = "row-action";
-    button.textContent = excluded ? "Restore" : "Exclude";
-    button.setAttribute(
-      "aria-label",
-      (excluded ? "Restore " : "Exclude ") + "item " + itemId);
+    button.title = "Hide " + order.name;
+    button.setAttribute("aria-label", "Hide " + order.name);
+    var icon = svgNode("svg", {
+      viewBox: "0 0 24 24",
+      width: 16,
+      height: 16,
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round"
+    });
+    // An eye with a line through it: hidden, not deleted.
+    icon.appendChild(svgNode("path", {
+      d: "M9.9 4.24A9.1 9.1 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19"
+        + "M6.61 6.61A18.4 18.4 0 0 0 2 12s3 8 10 8a9 9 0 0 0 5.39-1.61"
+    }));
+    icon.appendChild(svgNode("path", {
+      d: "M14.12 14.12a3 3 0 1 1-4.24-4.24"
+    }));
+    icon.appendChild(svgNode("line", {x1: 2, y1: 2, x2: 22, y2: 22}));
+    button.appendChild(icon);
     button.addEventListener("click", function () {
-      setOrderExclusion(itemId, !excluded, button);
+      setOrderExclusion(order.item_id, true, button);
+    });
+    return button;
+  }
+
+  function restoreButton(order) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "row-action";
+    button.textContent = "Restore";
+    button.setAttribute("aria-label", "Restore " + order.name);
+    button.addEventListener("click", function () {
+      setOrderExclusion(order.item_id, false, button);
     });
     return button;
   }
@@ -1299,45 +1491,74 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       }
       status.className = "";
       status.textContent = excluded
-        ? "Excluded that item from your open orders."
+        ? "Hid that item from your open orders."
         : "Restored that item to your open orders.";
       renderOrders();
-      trace(excluded ? "order-excluded" : "order-restored", 1);
+      trace(excluded ? "order-hidden" : "order-restored", 1);
     }).catch(function () {
       button.disabled = false;
       status.className = "error";
       status.textContent =
         "That change could not be saved. Try again in a moment.";
-      trace("exclusion-failure", 0);
+      trace("hidden-item-failure", 0);
     });
   }
 
-  function renderExcludedOrders() {
-    var panel = document.getElementById("orders-excluded");
-    var list = document.getElementById("orders-excluded-list");
-    list.replaceChildren();
+  function openHiddenItems() {
+    var dialog = document.getElementById("hidden-dialog");
+    var search = document.getElementById("hidden-search");
+    search.value = "";
+    renderHiddenOrders();
+    dialog.showModal();
+    search.focus();
+    trace("hidden-items-open", hiddenOrders().length);
+  }
+
+  function hiddenOrders() {
+    // One entry per item, however many order rows that item has.
     var seen = Object.create(null);
-    var excluded = [];
+    var hidden = [];
     ordersRows.forEach(function (row) {
       if (!row.excluded || seen[row.item_id]) { return; }
       seen[row.item_id] = true;
-      excluded.push(row);
+      hidden.push(row);
     });
-    excluded.sort(function (left, right) {
+    return hidden.sort(function (left, right) {
       return left.name.localeCompare(
         right.name, undefined, { sensitivity: "base", numeric: true });
     });
-    excluded.forEach(function (row) {
-      var entry = document.createElement("li");
-      var name = document.createElement("span");
-      name.className = "exclusion-name";
-      name.textContent = row.name;
-      entry.appendChild(name);
-      entry.appendChild(exclusionButton(row.item_id, true));
-      list.appendChild(entry);
+  }
+
+  function renderHiddenOrders() {
+    var body = document.getElementById("hidden-body");
+    var count = document.getElementById("hidden-count");
+    var search = document.getElementById("hidden-search").value
+      .trim().toLowerCase();
+    var hidden = hiddenOrders();
+    var shown = search
+      ? hidden.filter(function (order) {
+        return order.name.toLowerCase().indexOf(search) !== -1;
+      })
+      : hidden;
+    body.replaceChildren();
+    shown.forEach(function (order) {
+      var row = document.createElement("tr");
+      cell(row, order.name, "name");
+      cell(row, "", "actions").appendChild(restoreButton(order));
+      body.appendChild(row);
     });
-    panel.hidden = excluded.length === 0;
-    trace("open-orders-excluded", excluded.length);
+    if (!shown.length) {
+      emptyRow(body, 2, hidden.length
+        ? "No hidden items match that search."
+        : "You have not hidden any items yet.");
+    }
+    count.textContent = hidden.length === 1
+      ? "1 item is hidden from your open orders."
+      : hidden.length + " items are hidden from your open orders.";
+    document.getElementById("orders-menu").title = hidden.length
+      ? "Hidden items (" + hidden.length + ")"
+      : "Hidden items";
+    trace("open-orders-hidden", shown.length);
   }
 
   function renderOrders() {
@@ -1367,7 +1588,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       optionalProfitCell(row, order.profit);
       optionalProfitCell(row, order.total_profit);
       percentCell(row, order.roi_percent);
-      cell(row, "").appendChild(exclusionButton(order.item_id, false));
+      cell(row, "", "actions").appendChild(hideButton(order));
       body.appendChild(row);
       if (order.total_profit === null) {
         unpriced += 1;
@@ -1388,16 +1609,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       profit, percent(cost ? profit / cost * 100 : null), ""
     ], 7);
     applySort("orders-table");
-    renderExcludedOrders();
+    renderHiddenOrders();
     trace("open-orders", kept.length);
   }
 
-  function renderDelivery(data) {
+  function renderDelivery(delivery) {
     var coins = document.getElementById("unclaimed-coins");
     var body = document.getElementById("delivery-body");
     var help = document.getElementById("delivery-key-help");
     body.replaceChildren();
-    if (data.delivery.coins === null) {
+    if (delivery.coins === null) {
       coins.textContent = "Unavailable";
       coins.className = "";
       emptyRow(body, 2, "Delivery is unavailable for this saved key.");
@@ -1408,10 +1629,10 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       trace("delivery-unavailable", 0);
       return;
     }
-    coins.textContent = coin(data.delivery.coins);
-    coins.className = data.delivery.coins > 0 ? "positive" : "";
+    coins.textContent = coin(delivery.coins);
+    coins.className = delivery.coins > 0 ? "positive" : "";
     help.hidden = true;
-    var items = data.delivery.items;
+    var items = delivery.items;
     var quantity = 0;
     items.forEach(function (item, index) {
       var row = sortableRow(index);
@@ -1429,10 +1650,30 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     trace("delivery", items.length);
   }
 
-  function render(data) {
+  function renderReport(data) {
     // The window the server served is the one it remembered, so the control
     // and the address bar follow it rather than the other way round.
     daysInput.value = String(data.days);
+    if (data.remembered_days) {
+      writeStoredDays(data.days, data.key_generation);
+    } else if (!restoredWindow) {
+      var local = readStoredDays(data.key_generation);
+      if (local !== null && local !== data.days) {
+        restoredWindow = true;
+        daysInput.value = String(local);
+        trace("window-restored", local);
+        // Putting a window back is the page correcting itself, not the
+        // member asking for fresh data.
+        load(false, false);
+        return;
+      }
+      writeStoredDays(data.days, data.key_generation);
+    }
+    if (data.max_days) {
+      maxDays = data.max_days;
+      daysInput.max = String(maxDays);
+    }
+    historyStart = data.history_start_date;
     history.replaceState(
       null, "", "/profit?days=" + encodeURIComponent(String(data.days)));
     renderSummary(data);
@@ -1442,32 +1683,77 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     renderItems(data);
     renderDays(data);
     renderUnrealized(data);
-    ordersAvailable = data.open_orders.available;
-    ordersRows = data.open_orders.orders.map(function (order) {
+    trace(
+      "render-report",
+      data.items.length + data.days_table.length
+        + data.unrealized.items.length);
+  }
+
+  function renderOrdersSection(data) {
+    ordersAvailable = data.available;
+    ordersRows = data.orders.map(function (order) {
       order.excluded = false;
       return order;
-    }).concat(data.open_orders.excluded.map(function (order) {
+    }).concat(data.excluded.map(function (order) {
       order.excluded = true;
       return order;
     }));
     renderOrders();
-    renderDelivery(data);
-    reports.hidden = false;
-    keyHelp.classList.remove("open");
-    status.className = "";
-    status.textContent = "Updated from your private Trading Post data.";
-    trace(
-      "render",
-      data.items.length + data.days_table.length
-        + data.unrealized.items.length + ordersRows.length + 1);
+  }
+
+  function sectionCards(source) {
+    return document.querySelectorAll(
+      '.card[data-source="' + source + '"]');
+  }
+
+  function markSection(source, state, message) {
+    sectionCards(source).forEach(function (card) {
+      card.classList.toggle("loading", state === "loading");
+      card.classList.toggle("failed", state === "failed");
+      var note = card.querySelector(".section-message");
+      if (note) {
+        note.textContent = message || "Loading\u2026";
+      }
+    });
+    trace("section-" + source, state === "ready" ? 1 : 0);
   }
 
   function selectedDays() {
     var days = Number(daysInput.value);
-    return Number.isInteger(days) && days >= 1 && days <= 90 ? days : null;
+    return Number.isInteger(days) && days >= 1 && days <= maxDays
+      ? days : null;
   }
 
-  function load(useRemembered) {
+  function fetchSection(source, url, render) {
+    markSection(source, "loading");
+    return fetch(url).then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login?next=" + encodeURIComponent(
+          location.pathname + location.search);
+        return null;
+      }
+      if (response.status === 409) {
+        keyHelp.classList.add("open");
+        markSection(source, "failed", "A Trading Post API key is required.");
+        missingKey = true;
+        return null;
+      }
+      if (!response.ok) { throw new Error(source + " request failed"); }
+      return response.json();
+    }).then(function (data) {
+      if (!data) { return false; }
+      render(data);
+      markSection(source, "ready");
+      return true;
+    }).catch(function () {
+      markSection(
+        source, "failed",
+        "This section could not be loaded. Try again in a moment.");
+      return false;
+    });
+  }
+
+  function load(useRemembered, forced) {
     // Asking without a window lets the server answer with the one this member
     // last chose; the page only names a window when they just picked one.
     var days = null;
@@ -1475,44 +1761,81 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       days = selectedDays();
       if (days === null) {
         status.className = "error";
-        status.textContent = "Choose a number of days from 1 through 90.";
+        status.textContent =
+          "Choose a number of days from 1 through " + maxDays + ".";
         trace("refuse-range", 0);
         return;
       }
     }
     status.className = "";
     status.textContent = "Loading\u2026";
-    reports.hidden = true;
+    reports.hidden = false;
     keyHelp.classList.remove("open");
-    fetch("/api/profit" + (days === null
-      ? "" : "?days=" + encodeURIComponent(String(days))))
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login?next=" + encodeURIComponent(
-            location.pathname + location.search);
-          return null;
-        }
-        if (response.status === 409) {
-          keyHelp.classList.add("open");
-          status.className = "error";
-          status.textContent = "A Trading Post API key is required.";
-          trace("missing-key", 0);
-          return null;
-        }
-        if (!response.ok) { throw new Error("profit request failed"); }
-        return response.json();
-      })
-      .then(function (data) { if (data) { render(data); } })
-      .catch(function () {
+    missingKey = false;
+    // Three independent requests, in flight together. Each section draws as
+    // soon as its own answer arrives instead of waiting for the slowest.
+    // Only pressing Load asks for a live read. Naming a window does not:
+    // the address bar carries one after every render, so treating that as a
+    // forced refresh would make each ordinary reload bypass every cache.
+    var refresh = forced ? "refresh=1" : "";
+    var reportQuery = [
+      days === null ? "" : "days=" + encodeURIComponent(String(days)),
+      refresh
+    ].filter(Boolean).join("&");
+    Promise.all([
+      fetchSection("report", "/api/profit"
+        + (reportQuery ? "?" + reportQuery : ""), renderReport),
+      fetchSection("orders", "/api/profit/orders"
+        + (refresh ? "?" + refresh : ""), renderOrdersSection),
+      fetchSection("delivery", "/api/profit/delivery", renderDelivery)
+    ]).then(function (loaded) {
+      var ready = loaded.filter(Boolean).length;
+      if (missingKey) {
         status.className = "error";
-        status.textContent = "The profit report could not be loaded. Try again in a moment.";
-        trace("failure", 0);
-      });
+        status.textContent = "A Trading Post API key is required.";
+      } else if (ready === loaded.length) {
+        status.className = "";
+        status.textContent = historyStart
+          ? "Updated from your private Trading Post data, held since "
+            + historyStart + "."
+          : "Updated from your private Trading Post data.";
+      } else {
+        status.className = "error";
+        status.textContent =
+          "Some sections could not be loaded. Try again in a moment.";
+      }
+      trace("load", ready);
+    });
   }
+
+  function refreshPrices() {
+    // A quiet re-read on the cached path: the server holds each price for a
+    // minute and shares it between members, so this beat costs almost
+    // nothing and never forces a fetch of its own.
+    if (missingKey || document.hidden) { return; }
+    fetch("/api/profit/orders").then(function (response) {
+      return response.ok ? response.json() : null;
+    }).then(function (data) {
+      if (!data) { return; }
+      renderOrdersSection(data);
+      markSection("orders", "ready");
+      trace("prices-refreshed", data.orders.length);
+    }).catch(function () {
+      // A dropped beat is not worth telling the reader about; the next one
+      // is a minute away and the numbers on screen are still the last good
+      // ones.
+      trace("prices-refresh-failed", 0);
+    });
+  }
+
+  setInterval(refreshPrices, PRICE_REFRESH_MS);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { refreshPrices(); }
+  });
 
   rangeForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    load(false);
+    load(false, true);
   });
   document.getElementById("days-page-size").addEventListener(
     "change", function (event) {
@@ -1526,6 +1849,23 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       daysPage = 1;
       paginateDays();
       trace("days-page-size", value);
+    });
+  document.getElementById("orders-menu").addEventListener(
+    "click", openHiddenItems);
+  document.getElementById("hidden-close").addEventListener(
+    "click", function () {
+      document.getElementById("hidden-dialog").close();
+    });
+  document.getElementById("hidden-search").addEventListener(
+    "input", renderHiddenOrders);
+  document.getElementById("hidden-dialog").addEventListener(
+    "click", function (event) {
+      // A modal dialog's backdrop is part of the dialog element, so a click
+      // landing on it and not on the panel inside means "outside".
+      if (event.target === this) {
+        this.close();
+        trace("hidden-items-dismiss", 0);
+      }
     });
   document.getElementById("picks-roi").addEventListener("click", function () {
     picksMetric = "roi_percent";
@@ -1541,7 +1881,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   });
   initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
-  var requested = Number.isInteger(initial) && initial >= 1 && initial <= 90;
+  var requested = Number.isInteger(initial)
+    && initial >= 1 && initial <= maxDays;
   if (requested) {
     daysInput.value = String(initial);
   }
@@ -1550,10 +1891,17 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     .then(function (identity) {
       if (identity) { document.getElementById("whoami").textContent = identity.name; }
     });
-  load(!requested);
+  load(!requested, false);
 }());
 </script>
 </body>
 </html>
 """
+)
+
+# The window the page offers has to match the one the API will accept, so the
+# bound is written once, in the store, and stamped into the page here.
+PROFIT_PAGE = _PROFIT_PAGE_TEMPLATE.replace(
+    "__MAX_DAYS__",
+    str(MAX_REPORT_DAYS),
 )

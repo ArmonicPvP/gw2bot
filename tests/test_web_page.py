@@ -67,12 +67,14 @@ class TestProfitPage:
         assert "Unclaimed Trading Post Gold" not in PROFIT_PAGE
         assert 'id="unclaimed-coins"' in PROFIT_PAGE
         assert 'id="delivery-key-help" hidden' in PROFIT_PAGE
-        assert "coin(data.delivery.coins)" in PROFIT_PAGE
-        assert "data.delivery.coins === null" in PROFIT_PAGE
+        assert "coin(delivery.coins)" in PROFIT_PAGE
+        assert "delivery.coins === null" in PROFIT_PAGE
         assert 'coins.textContent = "Unavailable";' in PROFIT_PAGE
         assert "help.hidden = false;" in PROFIT_PAGE
-        assert "renderDelivery(data);" in PROFIT_PAGE
-        assert 'fetch("/api/profit" + (days === null' in PROFIT_PAGE
+        assert 'fetchSection("delivery", "/api/profit/delivery", renderDelivery)' in (
+            PROFIT_PAGE
+        )
+        assert 'fetchSection("report", "/api/profit"' in PROFIT_PAGE
 
     def test_delivery_lists_each_waiting_item_instead_of_one_count(
         self,
@@ -81,7 +83,7 @@ class TestProfitPage:
         assert 'id="delivery-table" data-sort-table="delivery"' in PROFIT_PAGE
         assert 'id="delivery-body"' in PROFIT_PAGE
         assert 'id="delivery-foot"' in PROFIT_PAGE
-        assert "var items = data.delivery.items;" in PROFIT_PAGE
+        assert "var items = delivery.items;" in PROFIT_PAGE
         assert "quantity += item.quantity;" in PROFIT_PAGE
         assert '"No items are waiting for pickup."' in PROFIT_PAGE
         # The old single-count row is gone rather than kept alongside it.
@@ -112,29 +114,146 @@ class TestProfitPage:
         )
         assert "percent(cost ? profit / cost * 100 : null)" in PROFIT_PAGE
 
-    def test_open_orders_exclusions_are_saved_and_restorable(self) -> None:
+    def test_open_orders_hiding_is_saved_and_restorable(self) -> None:
         assert 'fetch("/api/profit/exclusions", {' in PROFIT_PAGE
         assert 'method: "POST",' in PROFIT_PAGE
         assert (
             "JSON.stringify({ item_id: itemId, excluded: excluded })"
             in PROFIT_PAGE
         )
-        assert 'id="orders-excluded" hidden' in PROFIT_PAGE
-        assert 'id="orders-excluded-list"' in PROFIT_PAGE
-        assert "function renderExcludedOrders()" in PROFIT_PAGE
-        assert 'button.textContent = excluded ? "Restore" : "Exclude";' in (
+        assert "function renderHiddenOrders()" in PROFIT_PAGE
+        assert "function restoreButton(order)" in PROFIT_PAGE
+        assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
+
+    def test_hidden_items_live_behind_the_open_orders_menu(self) -> None:
+        assert 'id="orders-menu" class="icon-button"' in PROFIT_PAGE
+        assert 'aria-haspopup="dialog"' in PROFIT_PAGE
+        # Three dots, drawn rather than typed so they line up at any size.
+        assert PROFIT_PAGE.count('<circle cx="12" cy="5" r="2">') == 1
+        assert PROFIT_PAGE.count('<circle cx="12" cy="12" r="2">') == 1
+        assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 1
+        assert '<dialog id="hidden-dialog"' in PROFIT_PAGE
+        assert '<h2 id="hidden-title">Hidden items</h2>' in PROFIT_PAGE
+        assert "dialog.showModal();" in PROFIT_PAGE
+        assert "function openHiddenItems()" in PROFIT_PAGE
+        assert 'document.getElementById("hidden-dialog").close();' in (
             PROFIT_PAGE
         )
-        assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
+        # The old always-on chip list is gone, not merely hidden.
+        assert "Excluded items" not in PROFIT_PAGE
+        assert 'id="orders-excluded-list"' not in PROFIT_PAGE
+
+    def test_hidden_items_are_searchable_in_a_table(self) -> None:
+        assert 'id="hidden-search" type="search"' in PROFIT_PAGE
+        assert '<table id="hidden-table">' in PROFIT_PAGE
+        assert 'id="hidden-body"' in PROFIT_PAGE
+        assert "order.name.toLowerCase().indexOf(search) !== -1" in PROFIT_PAGE
+        assert '"No hidden items match that search."' in PROFIT_PAGE
+        assert '"You have not hidden any items yet."' in PROFIT_PAGE
+        assert 'addEventListener(\n    "input", renderHiddenOrders)' in (
+            PROFIT_PAGE
+        )
+
+    def test_hiding_a_row_uses_an_icon_rather_than_a_word(self) -> None:
+        assert "<th>Hide</th>" in PROFIT_PAGE
+        assert "<th>Exclude</th>" not in PROFIT_PAGE
+        assert "function hideButton(order)" in PROFIT_PAGE
+        assert 'button.title = "Hide " + order.name;' in PROFIT_PAGE
+        assert 'button.setAttribute("aria-label", "Hide " + order.name);' in (
+            PROFIT_PAGE
+        )
+        # An eye with a line struck through it, so the row keeps its width.
+        assert 'd: "M14.12 14.12a3 3 0 1 1-4.24-4.24"' in PROFIT_PAGE
+        assert 'svgNode("line", {x1: 2, y1: 2, x2: 22, y2: 22})' in PROFIT_PAGE
 
     def test_report_window_follows_the_remembered_choice(self) -> None:
         assert "daysInput.value = String(data.days);" in PROFIT_PAGE
         assert 'history.replaceState(\n      null, "", "/profit?days=" +' in (
             PROFIT_PAGE
         )
-        assert "function load(useRemembered)" in PROFIT_PAGE
-        assert "load(!requested);" in PROFIT_PAGE
-        assert "load(false);" in PROFIT_PAGE
+        assert "function load(useRemembered, forced)" in PROFIT_PAGE
+        assert "load(!requested, false);" in PROFIT_PAGE
+        assert "load(false, true);" in PROFIT_PAGE
+
+    def test_each_section_loads_on_its_own_with_a_spinner(self) -> None:
+        assert PROFIT_PAGE.count('class="section-spinner"') == 8
+        assert PROFIT_PAGE.count('data-source="report"') == 6
+        assert PROFIT_PAGE.count('data-source="orders"') == 1
+        assert PROFIT_PAGE.count('data-source="delivery"') == 1
+        assert '<section class="card loading"' in PROFIT_PAGE
+        assert "function markSection(source, state, message)" in PROFIT_PAGE
+        assert "function fetchSection(source, url, render)" in PROFIT_PAGE
+        # All three requests go out together rather than one after another.
+        assert "Promise.all([" in PROFIT_PAGE
+        assert 'fetchSection("orders", "/api/profit/orders"' in PROFIT_PAGE
+        assert 'fetchSection("delivery", "/api/profit/delivery"' in PROFIT_PAGE
+        assert "@keyframes profit-spin" in PROFIT_PAGE
+        assert "prefers-reduced-motion" in PROFIT_PAGE
+
+    def test_prices_follow_the_market_without_a_reload(self) -> None:
+        assert "var PRICE_REFRESH_MS = 60000;" in PROFIT_PAGE
+        assert "setInterval(refreshPrices, PRICE_REFRESH_MS);" in PROFIT_PAGE
+        assert "function refreshPrices()" in PROFIT_PAGE
+        # A hidden tab costs nothing, and coming back catches up at once.
+        assert "if (missingKey || document.hidden) { return; }" in PROFIT_PAGE
+        assert 'addEventListener("visibilitychange"' in PROFIT_PAGE
+        # The beat rides the cache; only Load asks for a live read.
+        assert 'fetch("/api/profit/orders").then' in PROFIT_PAGE
+        assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
+
+    def test_only_the_load_button_asks_for_a_live_read(self) -> None:
+        # The address bar carries a window after every render, so naming one
+        # must not be what decides a forced refresh.
+        assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
+        assert "function load(useRemembered, forced)" in PROFIT_PAGE
+        assert "load(false, true);" in PROFIT_PAGE
+        assert "load(!requested, false);" in PROFIT_PAGE
+        assert "load(false, false);" in PROFIT_PAGE
+
+    def test_unrealized_profit_is_not_described_as_windowed(self) -> None:
+        assert "from all your stored history" in PROFIT_PAGE
+        assert "Unmatched purchases from the selected window" not in (
+            PROFIT_PAGE
+        )
+
+    def test_a_lost_window_is_restored_from_the_browser(self) -> None:
+        assert 'STORED_DAYS_KEY = "gw2bot-profit-days"' in PROFIT_PAGE
+        assert "function readStoredDays(keyGeneration)" in PROFIT_PAGE
+        assert "function writeStoredDays(days, keyGeneration)" in PROFIT_PAGE
+        # A window saved under a deleted key is not put back: deletekey is
+        # documented to forget it.
+        assert "saved.key !== keyGeneration" in PROFIT_PAGE
+        assert "if (data.remembered_days) {" in PROFIT_PAGE
+        # One repair per page load, so a storage write that silently fails
+        # cannot put the page in a loop.
+        assert "restoredWindow = true;" in PROFIT_PAGE
+        assert "} else if (!restoredWindow) {" in PROFIT_PAGE
+        # Reading and writing both survive a browser that refuses storage.
+        assert PROFIT_PAGE.count("} catch (error) {") >= 2
+
+    def test_the_window_reaches_past_the_gw2_history_limit(self) -> None:
+        # The page and the API have to agree, so the bound is stamped in from
+        # the store rather than written twice.
+        assert 'max="3650"' in PROFIT_PAGE
+        assert "var maxDays = 3650;" in PROFIT_PAGE
+        assert "__MAX_DAYS__" not in PROFIT_PAGE
+        assert "days <= maxDays" in PROFIT_PAGE
+        assert "historyStart = data.history_start_date;" in PROFIT_PAGE
+
+    def test_daily_profit_opens_with_the_most_recent_day_first(self) -> None:
+        # The first page of a 90-day window should be this week, not the
+        # start of the window, so the date column starts descending.
+        assert (
+            '<th aria-sort="descending"><button class="sort-button" '
+            'type="button" data-sort-index="0" data-sort-kind="text" '
+            'data-sort-key="date" data-sort-default="descending">Date</button>'
+        ) in PROFIT_PAGE
+        assert 'data-sort-key="date"' in PROFIT_PAGE
+        assert (
+            '<th aria-sort="ascending"><button class="sort-button" '
+            'type="button" data-sort-index="0" data-sort-kind="text" '
+            'data-sort-key="date"'
+        ) not in PROFIT_PAGE
 
     def test_daily_profit_has_adjustable_pagination(self) -> None:
         assert 'id="days-page-size" type="number" min="1" max="90" value="10"' in PROFIT_PAGE
@@ -188,12 +307,12 @@ class TestProfitPage:
     def test_profit_metrics_are_visible_and_sortable(self) -> None:
         for heading in (
             "ROI",
-            "Median Hold",
+            "Avg Hold",
             "Profit Share",
             "Projected ROI",
         ):
             assert f">{heading}</button>" in PROFIT_PAGE
-        assert "item.median_hold_seconds" in PROFIT_PAGE
+        assert "item.hold_seconds" in PROFIT_PAGE
         assert "item.profit_share_percent" in PROFIT_PAGE
         assert "item.roi_percent" in PROFIT_PAGE
 

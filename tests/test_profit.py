@@ -23,8 +23,13 @@ from gw2bot.profit.api import (
     ProfitApiError,
 )
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
+from gw2bot.profit.prices import MarketPriceCache
 from gw2bot.profit.models import (
     BuyLot,
+    ItemDayProfit,
+    aggregate_rollups,
+    month_boundaries,
+    prune_open_lots,
     DeliveryItem,
     ItemProfit,
     MarketPrice,
@@ -42,9 +47,18 @@ from gw2bot.profit.models import (
 from gw2bot.profit.service import (
     MissingProfitApiKey,
     ProfitService,
+    ReportWindow,
+    serialize_delivery,
+    serialize_open_orders,
     serialize_profit_report,
 )
-from gw2bot.profit.store import ProfitStore
+from gw2bot.profit.store import (
+    ITEM_NAME_TTL_SECONDS,
+    MAX_LOT_CHECKPOINTS,
+    MAX_REPORT_DAYS,
+    MIN_REPORT_DAYS,
+    ProfitStore,
+)
 from gw2bot.settings.crypto import SettingsCipher
 
 
@@ -117,7 +131,7 @@ class TestProfitCalculation:
         assert result.items[1].cost == 700
         assert result.items[1].net_revenue == 1_317
         assert result.items[1].profit == 617
-        assert result.items[1].median_hold_seconds == 2 * 86_400
+        assert result.items[1].hold_seconds == 2 * 86_400
         assert result.days["2026-08-03"].profit == 280
         assert result.days["2026-08-04"].profit == 337
         assert result.unmatched_buys[1][0].remaining == 3
@@ -146,8 +160,43 @@ class TestProfitCalculation:
 
         assert result.items == {}
         assert result.days == {}
-        assert result.unmatched_buys == {}
         assert result.total_matched_quantity == 0
+        # What is still held is reported even when the item is not a flip:
+        # those units are unmatched purchases whatever the threshold says,
+        # and a later pass has to carry them forward to stay correct.
+        held = sum(lot.remaining for lot in result.unmatched_buys.get(1, ()))
+        assert held == max(0, buy_quantity - min(buy_quantity, sell_quantity))
+
+    def test_a_second_pass_resumes_from_the_lots_the_first_left(self) -> None:
+        buys = [transaction("buy", quantity=10, price=100)]
+        early = transaction(
+            "sell-1",
+            quantity=4,
+            price=200,
+            occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+        )
+        late = transaction(
+            "sell-2",
+            quantity=6,
+            price=210,
+            occurred_at=datetime(2026, 8, 3, tzinfo=UTC),
+        )
+
+        whole = calculate_realized_profit(buys, [early, late], with_item_days=True)
+        first = calculate_realized_profit(buys, [early], with_item_days=True)
+        second = calculate_realized_profit(
+            [],
+            [late],
+            with_item_days=True,
+            opening_lots=first.unmatched_buys,
+        )
+
+        # Matching in two passes with the lots carried between them is the
+        # same arithmetic as matching everything at once, which is what lets
+        # a refresh cost only the trades that are new.
+        assert first.total_profit + second.total_profit == whole.total_profit
+        assert {**first.item_days, **second.item_days} == whole.item_days
+        assert second.unmatched_buys == whole.unmatched_buys
 
     def test_excludes_sales_that_happened_before_any_purchase(self) -> None:
         result = calculate_realized_profit(
@@ -202,7 +251,7 @@ class TestProfitCalculation:
 
         result = calculate_realized_profit(buys, sells)
 
-        assert result.items[1].median_hold_seconds == 86_400
+        assert result.items[1].hold_seconds == 86_400
 
     def test_profit_share_is_each_items_signed_part_of_net_profit(
         self,
@@ -234,8 +283,6 @@ class TestProfitCalculation:
             sell_transaction_count=2,
             realized=realized,
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
-            unclaimed_coins=0,
-            unclaimed_items=(),
             item_names={1: "Winner", 2: "Loser"},
         )
 
@@ -394,8 +441,6 @@ class TestProfitCalculation:
                 total_matched_quantity=15,
             ),
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
-            unclaimed_coins=0,
-            unclaimed_items=(),
             item_names={
                 1: kept_name,
                 2: skipped_name,
@@ -473,6 +518,221 @@ class TestOpenBuyOrders:
 
     def test_no_orders_group_to_nothing(self) -> None:
         assert group_open_buy_orders([]) == ()
+
+
+class TestRollups:
+    def test_a_window_is_summed_from_stored_rows(self) -> None:
+        rollups = [
+            (1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 432_000.0)),
+            (1, "2026-08-02", ItemDayProfit(5, 500, 900, 400, 864_000.0)),
+            (2, "2026-08-02", ItemDayProfit(10, 100, 90, -10, 86_400.0)),
+        ]
+
+        realized = aggregate_rollups(rollups, {})
+
+        assert realized.total_matched_quantity == 20
+        assert realized.total_cost == 1_100
+        assert realized.total_profit == 740
+        assert realized.days["2026-08-02"].profit == 390
+        # Hold time is the units-weighted mean across the window.
+        assert realized.items[1].hold_seconds == (432_000 + 864_000) / 10
+
+    def test_the_flip_threshold_applies_to_the_window_not_the_history(
+        self,
+    ) -> None:
+        # Four units of item 2 in this window is not a flip, however many
+        # were traded before it.
+        rollups = [
+            (1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 0.0)),
+            (2, "2026-08-01", ItemDayProfit(4, 40, 80, 40, 0.0)),
+        ]
+
+        realized = aggregate_rollups(rollups, {}, minimum_flip_quantity=5)
+
+        assert set(realized.items) == {1}
+        assert realized.total_profit == 350
+        # The excluded item leaves the day totals as well, so the tables and
+        # the footer keep describing the same trades.
+        assert realized.days["2026-08-01"].profit == 350
+
+    def test_rollups_reproduce_a_direct_match_of_the_same_trades(self) -> None:
+        buys = [
+            transaction("b1", item_id=1, price=100, quantity=10,
+                        occurred_at=datetime(2026, 8, 1, tzinfo=UTC)),
+            transaction("b2", item_id=1, price=120, quantity=10,
+                        occurred_at=datetime(2026, 8, 2, tzinfo=UTC)),
+        ]
+        sells = [
+            transaction("s1", item_id=1, price=200, quantity=8,
+                        occurred_at=datetime(2026, 8, 3, tzinfo=UTC)),
+            transaction("s2", item_id=1, price=210, quantity=7,
+                        occurred_at=datetime(2026, 8, 4, tzinfo=UTC)),
+        ]
+        direct = calculate_realized_profit(buys, sells, with_item_days=True)
+
+        summed = aggregate_rollups(
+            [
+                (item_id, sold_day, totals)
+                for (item_id, sold_day), totals in direct.item_days.items()
+            ],
+            direct.unmatched_buys,
+        )
+
+        assert summed.total_profit == direct.total_profit
+        assert summed.total_cost == direct.total_cost
+        assert summed.total_matched_quantity == direct.total_matched_quantity
+        assert summed.days.keys() == direct.days.keys()
+        assert summed.unmatched_buys == direct.unmatched_buys
+
+    def test_an_empty_window_sums_to_nothing(self) -> None:
+        realized = aggregate_rollups([], {})
+
+        assert realized.total_profit == 0
+        assert realized.items == {}
+        assert realized.days == {}
+
+    def test_a_zero_flip_threshold_is_refused(self) -> None:
+        with pytest.raises(ValueError):
+            aggregate_rollups([], {}, minimum_flip_quantity=0)
+
+
+class TestLotCheckpointHelpers:
+    def test_boundaries_are_the_month_starts_in_between(self) -> None:
+        assert [
+            boundary.date().isoformat()
+            for boundary in month_boundaries(
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 4, 10, tzinfo=UTC),
+            )
+        ] == ["2026-02-01", "2026-03-01", "2026-04-01"]
+
+    def test_a_stretch_inside_one_month_has_no_boundary(self) -> None:
+        assert month_boundaries(
+            datetime(2026, 1, 15, tzinfo=UTC),
+            datetime(2026, 1, 20, tzinfo=UTC),
+        ) == []
+
+    def test_a_boundary_the_stretch_starts_on_is_not_repeated(self) -> None:
+        # Resuming from a checkpoint must not immediately write it again.
+        assert month_boundaries(
+            datetime(2026, 2, 1, tzinfo=UTC),
+            datetime(2026, 2, 20, tzinfo=UTC),
+        ) == []
+
+    def test_a_year_end_rolls_over(self) -> None:
+        assert [
+            boundary.date().isoformat()
+            for boundary in month_boundaries(
+                datetime(2026, 11, 5, tzinfo=UTC),
+                datetime(2027, 1, 5, tzinfo=UTC),
+            )
+        ] == ["2026-12-01", "2027-01-01"]
+
+    def test_pruning_merges_long_held_lots_without_losing_their_cost(
+        self,
+    ) -> None:
+        lots = {
+            1: (
+                BuyLot(3, 100, datetime(2024, 1, 1, tzinfo=UTC)),
+                BuyLot(2, 150, datetime(2024, 2, 1, tzinfo=UTC)),
+                BuyLot(5, 90, datetime(2026, 8, 1, tzinfo=UTC)),
+            )
+        }
+
+        pruned = prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        )
+
+        merged, recent = pruned[1]
+        assert merged.remaining == 5
+        # 3 at 100 and 2 at 150 is 600 held across 5 units.
+        assert merged.remaining * merged.unit_price == 600
+        # It keeps the oldest date, so it still sells first.
+        assert merged.occurred_at == datetime(2024, 1, 1, tzinfo=UTC)
+        assert recent == lots[1][2]
+
+    def test_pruning_leaves_a_single_old_lot_alone(self) -> None:
+        lots = {1: (BuyLot(3, 100, datetime(2024, 1, 1, tzinfo=UTC)),)}
+
+        assert prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        ) == lots
+
+    def test_pruning_leaves_recent_lots_apart(self) -> None:
+        lots = {
+            1: (
+                BuyLot(3, 100, datetime(2026, 8, 1, tzinfo=UTC)),
+                BuyLot(2, 150, datetime(2026, 8, 2, tzinfo=UTC)),
+            )
+        }
+
+        assert prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        ) == lots
+
+    def test_a_pruned_lot_is_priced_no_lower_than_it_cost(self) -> None:
+        # Three units costing 100 in total does not divide evenly. Rounding
+        # the basis up understates profit, which is the safer way to be out.
+        lots = {
+            1: (
+                BuyLot(1, 34, datetime(2024, 1, 1, tzinfo=UTC)),
+                BuyLot(2, 33, datetime(2024, 1, 2, tzinfo=UTC)),
+            )
+        }
+
+        merged = prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        )[1][0]
+
+        assert merged.remaining == 3
+        assert merged.unit_price * merged.remaining >= 34 + 66
+
+
+class TestMarketPriceCache:
+    def test_one_reading_serves_every_member_until_it_expires(self) -> None:
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+
+        assert cache.read({1, 2}, now=now) == ({}, {1, 2})
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+
+        fresh, stale = cache.read({1, 2}, now=now + timedelta(seconds=59))
+        assert fresh == {1: MarketPrice(10, 20)}
+        assert stale == {2}
+
+        # A minute on, the reading is no longer offered to anyone.
+        assert cache.read({1}, now=now + timedelta(seconds=61)) == ({}, {1})
+
+    def test_a_forced_reading_is_dropped_rather_than_served(self) -> None:
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+
+        cache.forget({1})
+
+        assert cache.read({1}, now=now) == ({}, {1})
+
+    def test_reading_an_expired_entry_forgets_it(self) -> None:
+        # The cache lives as long as the bot does, so an expired reading has
+        # to leave rather than sit there for every item ever asked about.
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+
+        cache.read({1}, now=now + timedelta(seconds=61))
+
+        assert cache._entries == {}
+
+    def test_pruning_forgets_only_what_has_expired(self) -> None:
+        cache = MarketPriceCache(ttl_seconds=60)
+        now = datetime(2026, 9, 4, tzinfo=UTC)
+        cache.write({1: MarketPrice(10, 20)}, now=now)
+        cache.write({2: MarketPrice(30, 40)}, now=now + timedelta(seconds=30))
+
+        assert cache.prune(now=now + timedelta(seconds=61)) == 1
+
+        fresh, _stale = cache.read({1, 2}, now=now + timedelta(seconds=61))
+        assert set(fresh) == {2}
 
 
 class TestProfitStore:
@@ -722,7 +982,7 @@ class TestProfitStore:
         assert store.get_report_days(101) == 14
         assert store.get_report_days(202) == 7
 
-    @pytest.mark.parametrize("days", [0, 91, -1])
+    @pytest.mark.parametrize("days", [0, 3651, -1])
     def test_refuses_a_report_window_outside_the_served_range(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -744,7 +1004,7 @@ class TestProfitStore:
         engine = create_database_engine(str(database))
         with engine.begin() as connection:
             connection.exec_driver_sql(
-                "UPDATE gw2_profit_preferences SET report_days = 365"
+                "UPDATE gw2_profit_preferences SET report_days = 5000"
             )
         engine.dispose()
 
@@ -850,23 +1110,19 @@ class TestProfitService:
             )
         ]
 
-        orders = [
-            transaction(
-                "order",
-                price=90,
-                quantity=20,
-                occurred_at=now,
-            )
-        ]
-
-        async def fetched(path: str, api_key: str) -> list[Transaction]:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
             assert api_key == "member-secret"
             if path.endswith("history/buys"):
                 return buys
             if path.endswith("history/sells"):
                 return sells
             if path.endswith("current/buys"):
-                return orders
+                return []
             return current
 
         service = ProfitService(
@@ -880,7 +1136,9 @@ class TestProfitService:
                 return_value=(12_345, (DeliveryItem(1, 7),))
             ),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
-            fetch_market_prices=AsyncMock(return_value={1: MarketPrice(100, 200)}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -893,22 +1151,11 @@ class TestProfitService:
         assert first.item_names == {1: "Test Item"}
         assert first.realized.total_profit == 350
         assert first.unrealized.total_projected_profit == 775
-        assert first.unclaimed_coins == 12_345
-        assert first.unclaimed_items == (DeliveryItem(1, 7),)
-        assert first.open_buy_orders == (
-            OpenBuyOrder(
-                item_id=1,
-                unit_price=90,
-                quantity=20,
-                order_count=1,
-                placed_at=now,
-            ),
-        )
-        assert first.open_orders_available
+        assert first.history_start == now - timedelta(days=2)
         payload = cast(dict[str, Any], serialize_profit_report(first))
         assert payload["summary"]["roi_percent"] == 70
         assert payload["items"][0]["roi_percent"] == 70
-        assert payload["items"][0]["median_hold_seconds"] == 86_400
+        assert payload["items"][0]["hold_seconds"] == 86_400
         assert payload["items"][0]["profit_share_percent"] == 100
         assert payload["picks"] == [
             {
@@ -922,37 +1169,48 @@ class TestProfitService:
             }
         ]
         assert payload["unrealized"]["roi_percent"] == 155
-        assert payload["unrealized"]["items"][0]["roi_percent"] == 155
-        assert payload["delivery"]["coins"] == 12_345
-        assert payload["delivery"]["items"] == [
-            {"item_id": 1, "name": "Test Item", "quantity": 7}
-        ]
-        assert payload["open_orders"]["available"]
-        assert payload["open_orders"]["excluded"] == []
-        assert payload["open_orders"]["orders"] == [
-            {
-                "item_id": 1,
-                "name": "Test Item",
-                "quantity": 20,
-                "order_count": 1,
-                "unit_price": 90,
-                "cost": 1_800,
-                "buy_price": 100,
-                "sell_price": 200,
-                "net_revenue": 3_400,
-                "profit": 80,
-                "total_profit": 1_600,
-                "roi_percent": pytest.approx(88.888, rel=1e-3),
-                "has_order": True,
-            }
-        ]
-        assert api.fetch_transactions.await_count == 4
-        assert api.fetch_delivery.await_count == 2
-        api.fetch_delivery.assert_awaited_with("member-secret")
+        assert payload["history_start_date"] == "2026-08-19"
+        # The report reads three collections and never the delivery route, so
+        # a slow history no longer holds up the sections that do not need it.
+        assert api.fetch_transactions.await_count == 3
+        api.fetch_delivery.assert_not_awaited()
         api.fetch_item_names.assert_awaited_once_with({1})
         assert api.fetch_market_prices.await_count == 2
 
-    async def test_legacy_restricted_key_keeps_its_cached_report(
+    async def test_delivery_loads_without_touching_the_history(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(12_345, (DeliveryItem(1, 7),))
+            ),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        report = await service.load_delivery(101, now=now)
+
+        assert report.coins == 12_345
+        assert report.items == (DeliveryItem(1, 7),)
+        assert serialize_delivery(report) == {
+            "coins": 12_345,
+            "items": [{"item_id": 1, "name": "Test Item", "quantity": 7}],
+        }
+        api.fetch_transactions.assert_not_awaited()
+        api.fetch_delivery.assert_awaited_once_with("member-secret")
+
+    async def test_legacy_restricted_key_still_reports_its_delivery_box(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
         caplog: pytest.LogCaptureFixture,
@@ -961,8 +1219,6 @@ class TestProfitService:
         secret = "legacy-route-restricted-secret"
         store.set_api_key(101, secret)
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        for transaction_kind in TRANSACTION_PATHS:
-            store.touch_cache(101, transaction_kind, now=now)
         service = ProfitService(
             store,
             cast(aiohttp.ClientSession, None),
@@ -981,37 +1237,27 @@ class TestProfitService:
         service._api = api  # type: ignore[assignment]
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
-            report = await service.load_report(101, 30, now=now)
+            report = await service.load_delivery(101, now=now)
 
-        assert report.unclaimed_coins is None
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        assert payload["delivery"] == {"coins": None, "items": None}
-        assert payload["open_orders"] == {
-            "available": True,
-            "orders": [],
-            "excluded": [],
-        }
-        api.fetch_transactions.assert_not_awaited()
+        assert report.coins is None
+        assert serialize_delivery(report) == {"coins": None, "items": None}
         api.fetch_delivery.assert_awaited_once_with(secret)
         assert "reason=unauthorized" in caplog.text
-        assert "unclaimed_delivery=unavailable" in caplog.text
         assert secret not in caplog.text
 
-    async def test_non_authorization_delivery_failure_still_fails_report(
+    async def test_non_authorization_delivery_failure_still_fails(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, _ = profit_store
         store.set_api_key(101, "member-secret")
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        for transaction_kind in TRANSACTION_PATHS:
-            store.touch_cache(101, transaction_kind, now=now)
         service = ProfitService(
             store,
             cast(aiohttp.ClientSession, None),
             "https://api.example",
         )
-        api = SimpleNamespace(
+        service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
             fetch_delivery=AsyncMock(
                 side_effect=ProfitApiError("GW2 API request returned HTTP 500")
@@ -1019,10 +1265,9 @@ class TestProfitService:
             fetch_item_names=AsyncMock(),
             fetch_market_prices=AsyncMock(return_value={}),
         )
-        service._api = api  # type: ignore[assignment]
 
         with pytest.raises(ProfitApiError):
-            await service.load_report(101, 30, now=now)
+            await service.load_delivery(101, now=now)
 
     async def test_discards_an_old_key_snapshot_and_retries_replacement(
         self,
@@ -1036,7 +1281,12 @@ class TestProfitService:
         now = datetime(2026, 8, 21, tzinfo=UTC)
         replaced = False
 
-        async def fetched(path: str, api_key: str) -> list[Transaction]:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
             nonlocal replaced
             if api_key == old_key:
                 prefix = "old"
@@ -1083,8 +1333,7 @@ class TestProfitService:
             report = await service.load_report(101, 30, now=now)
 
         assert report.realized.total_profit == 350
-        assert api.fetch_transactions.await_count == 8
-        api.fetch_delivery.assert_awaited_once_with(replacement_key)
+        assert api.fetch_transactions.await_count == 6
         assert [
             row.transaction_id
             for row in store.get_transactions(101, "history_buys")
@@ -1096,7 +1345,8 @@ class TestProfitService:
         assert store.get_transactions(101, "current_sells") == []
         assert all(
             store.is_cache_fresh(101, transaction_kind, 300, now=now)
-            for transaction_kind in TRANSACTION_PATHS
+            for transaction_kind in ("history_buys", "history_sells",
+                                     "current_sells")
         )
         assert "Discarded stale profit transaction snapshot" in caplog.text
         assert old_key not in caplog.text
@@ -1148,7 +1398,7 @@ class TestProfitService:
             store.touch_cache(101, transaction_kind, now=now)
         store.store_item_names(
             {1: "Old Name"},
-            now=now - timedelta(seconds=300),
+            now=now - timedelta(seconds=ITEM_NAME_TTL_SECONDS + 1),
         )
         service = ProfitService(
             store,
@@ -1210,12 +1460,11 @@ class TestProfitService:
         )
         service._api = api  # type: ignore[assignment]
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_open_orders(101, now=now)
 
-        assert report.excluded_order_items == frozenset({2, 3})
-        api.fetch_market_prices.assert_awaited_once_with({1, 2})
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        orders = payload["open_orders"]
+        assert report.excluded_items == frozenset({2, 3})
+        api.fetch_market_prices.assert_awaited_once_with({1, 2}, force=False)
+        orders = cast(dict[str, Any], serialize_open_orders(report))
         assert [row["item_id"] for row in orders["orders"]] == [1]
         assert [row["item_id"] for row in orders["excluded"]] == [2, 3]
         assert orders["excluded"][0]["has_order"] is True
@@ -1265,10 +1514,10 @@ class TestProfitService:
             ),
         )
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_open_orders(101, now=now)
 
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        order = payload["open_orders"]["orders"][0]
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        order = payload["orders"][0]
         # Both fees round up against the order's gross value, exactly as a
         # realized sale of three units at 101 would be charged. Rounding each
         # unit alone would take 51 instead of 47 and understate the return.
@@ -1305,10 +1554,10 @@ class TestProfitService:
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_open_orders(101, now=now)
 
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        order = payload["open_orders"]["orders"][0]
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        order = payload["orders"][0]
         assert order["name"] == "Item 1"
         assert order["quantity"] == 10
         assert order["cost"] == 900
@@ -1317,7 +1566,7 @@ class TestProfitService:
         assert order["profit"] is None
         assert order["roi_percent"] is None
 
-    async def test_legacy_key_without_buy_orders_keeps_the_rest_of_the_report(
+    async def test_legacy_key_without_buy_orders_reports_them_unavailable(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
         caplog: pytest.LogCaptureFixture,
@@ -1330,7 +1579,12 @@ class TestProfitService:
             if transaction_kind != "current_buys":
                 store.touch_cache(101, transaction_kind, now=now)
 
-        async def fetched(path: str, api_key: str) -> list[Transaction]:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
             assert api_key == secret
             raise ProfitApiAuthorizationError(
                 "GW2 API request returned HTTP 403"
@@ -1350,16 +1604,16 @@ class TestProfitService:
         service._api = api  # type: ignore[assignment]
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
-            report = await service.load_report(101, 30, now=now)
+            report = await service.load_open_orders(101, now=now)
 
-        assert not report.open_orders_available
-        assert report.open_buy_orders == ()
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        assert payload["open_orders"]["available"] is False
+        assert not report.available
+        assert report.orders == ()
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        assert payload["available"] is False
         # The collection was not stored as an empty snapshot, so a replacement
         # key picks the buy orders up on the next report.
         assert not store.is_cache_fresh(101, "current_buys", 300, now=now)
-        assert "open_orders=unavailable" in caplog.text
+        assert "availability=unavailable" in caplog.text
         assert secret not in caplog.text
 
     async def test_an_unauthorized_sale_history_still_fails_the_report(
@@ -1399,10 +1653,20 @@ class TestProfitService:
             "https://api.example",
         )
 
-        assert await service.resolve_report_days(101, None) == 30
-        assert await service.resolve_report_days(101, 60) == 60
-        assert await service.resolve_report_days(101, None) == 60
-        assert await service.resolve_report_days(202, None) == 30
+        # An unremembered window is served as the default and says so, which
+        # is what lets the page put a lost choice back from the browser.
+        assert await service.resolve_report_days(101, None) == ReportWindow(
+            30, False
+        )
+        assert await service.resolve_report_days(101, 60) == ReportWindow(
+            60, True
+        )
+        assert await service.resolve_report_days(101, None) == ReportWindow(
+            60, True
+        )
+        assert await service.resolve_report_days(202, None) == ReportWindow(
+            30, False
+        )
 
     async def test_report_window_refuses_a_value_outside_the_range(
         self,
@@ -1416,7 +1680,7 @@ class TestProfitService:
         )
 
         with pytest.raises(ValueError):
-            await service.resolve_report_days(101, 91)
+            await service.resolve_report_days(101, 3651)
 
         assert store.get_report_days(101) is None
 
@@ -1435,6 +1699,783 @@ class TestProfitService:
         assert store.get_excluded_order_items(101) == frozenset({19_721})
         assert await service.set_order_exclusion(101, 19_721, False)
         assert store.get_excluded_order_items(101) == frozenset()
+
+
+class TestRollupStore:
+    async def test_rollups_are_built_once_and_reused_until_trades_land(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", price=100, quantity=10,
+                         occurred_at=datetime(2026, 8, 1, tzinfo=UTC))],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell", price=200, quantity=10,
+                         occurred_at=datetime(2026, 8, 2, tzinfo=UTC))],
+            now=now,
+        )
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        first = await service.load_report(101, 30, now=now)
+        assert store.get_rollup_state(101).computed_through == datetime(
+            2026, 8, 2, tzinfo=UTC
+        )
+        assert [row[1] for row in store.get_rollups(101, datetime(
+            2026, 7, 1, tzinfo=UTC))] == ["2026-08-02"]
+
+        # Nothing new arrived, so nothing is matched again.
+        rebuilt = await service._ensure_rollups(101, now)
+        assert not rebuilt
+        second = await service.load_report(101, 30, now=now)
+        assert second.realized.total_profit == first.realized.total_profit
+
+        # A later sale moves the watermark and the rollups follow it.
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy-2", price=100, quantity=10,
+                         occurred_at=datetime(2026, 8, 3, tzinfo=UTC))],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell-2", price=300, quantity=10,
+                         occurred_at=datetime(2026, 8, 4, tzinfo=UTC))],
+            now=now,
+        )
+        assert await service._ensure_rollups(101, now)
+        third = await service.load_report(101, 30, now=now)
+        assert third.realized.total_profit > first.realized.total_profit
+        assert sorted(
+            row[1]
+            for row in store.get_rollups(101, datetime(2026, 7, 1, tzinfo=UTC))
+        ) == ["2026-08-02", "2026-08-04"]
+
+    async def test_a_refresh_matches_only_the_trades_that_are_new(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", price=100, quantity=10,
+                         occurred_at=datetime(2026, 8, 1, tzinfo=UTC))],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell", price=200, quantity=4,
+                         occurred_at=datetime(2026, 8, 2, tzinfo=UTC))],
+            now=now,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        await service._ensure_rollups(101, now)
+        first_profit = aggregate_rollups(
+            store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        ).total_profit
+
+        # A later sale of the stock the first pass left behind.
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell-2", price=210, quantity=6,
+                         occurred_at=datetime(2026, 8, 3, tzinfo=UTC))],
+            now=now,
+        )
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(101, now)
+
+        assert "Advanced profit rollups" in caplog.text
+        # One new sale read, not the whole history over again.
+        assert "transactions=1" in caplog.text
+        merged = aggregate_rollups(
+            store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        )
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        # Advancing pass by pass lands exactly where matching it all at once
+        # would have, which is the only reason it is safe to do.
+        assert merged.total_profit > first_profit
+        assert merged.total_profit == whole.total_profit
+        assert merged.total_matched_quantity == whole.total_matched_quantity
+        assert store.get_open_lots(101) == whole.unmatched_buys
+
+    async def test_a_window_reads_only_the_days_inside_it(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101,
+            {
+                (1, "2026-08-01"): ItemDayProfit(5, 500, 850, 350, 0.0),
+                (1, "2026-08-20"): ItemDayProfit(5, 500, 900, 400, 0.0),
+            },
+            {},
+            datetime(2026, 8, 20, tzinfo=UTC),
+        )
+
+        assert len(store.get_rollups(101, datetime(2026, 8, 10, tzinfo=UTC))) == 1
+        assert len(store.get_rollups(101, datetime(2026, 7, 1, tzinfo=UTC))) == 2
+
+    def test_open_lots_survive_a_rebuild_for_the_unrealized_report(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        lots = {
+            7: (
+                BuyLot(3, 100, datetime(2026, 8, 1, tzinfo=UTC)),
+                BuyLot(2, 110, datetime(2026, 8, 2, tzinfo=UTC)),
+            )
+        }
+
+        store.store_rollups(101, {}, lots, None)
+
+        assert store.get_open_lots(101) == lots
+        # Replacing them leaves nothing of the previous set behind.
+        store.store_rollups(101, {}, {}, None)
+        assert store.get_open_lots(101) == {}
+
+    def test_a_new_key_drops_the_rollups_matched_from_the_old_data(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-member-secret")
+        store.store_rollups(
+            101,
+            {(1, "2026-08-01"): ItemDayProfit(5, 500, 850, 350, 0.0)},
+            {7: (BuyLot(3, 100, datetime(2026, 8, 1, tzinfo=UTC)),)},
+            datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+        store.set_api_key(101, "replacement-member-secret")
+
+        assert store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)) == []
+        assert store.get_open_lots(101) == {}
+        assert store.get_rollup_state(101).computed_through is None
+
+
+class TestRollupRewind:
+    @staticmethod
+    def _service(store: ProfitStore) -> ProfitService:
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        return service
+
+    @staticmethod
+    def _totals(store: ProfitStore) -> tuple[int, int]:
+        realized = aggregate_rollups(
+            store.get_rollups(101, datetime(2020, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        )
+        return realized.total_profit, realized.total_matched_quantity
+
+    async def test_months_are_checkpointed_as_the_pass_crosses_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction("b1", price=100, quantity=10,
+                            occurred_at=datetime(2026, 1, 10, tzinfo=UTC)),
+                transaction("b2", price=120, quantity=10,
+                            occurred_at=datetime(2026, 3, 10, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [
+                transaction("s1", price=200, quantity=6,
+                            occurred_at=datetime(2026, 2, 10, tzinfo=UTC)),
+                transaction("s2", price=210, quantity=6,
+                            occurred_at=datetime(2026, 4, 5, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        service = self._service(store)
+
+        await service._ensure_rollups(101, now)
+
+        # February, March and April starts all fall inside the stretch.
+        for boundary in (
+            datetime(2026, 2, 1, tzinfo=UTC),
+            datetime(2026, 3, 1, tzinfo=UTC),
+            datetime(2026, 4, 1, tzinfo=UTC),
+        ):
+            found = store.get_lot_checkpoint_at_or_before(101, boundary)
+            assert found is not None
+            assert found[0] == boundary
+        # The February checkpoint predates the first sale, so it still holds
+        # everything the January purchase bought.
+        february = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 2, 1, tzinfo=UTC)
+        )
+        assert february is not None
+        assert sum(lot.remaining for lot in february[1][1]) == 10
+
+    async def test_a_late_trade_rewinds_to_its_month_and_rematches(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b1", price=100, quantity=10,
+                         occurred_at=datetime(2026, 1, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s1", price=200, quantity=6,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+        before = self._totals(store)
+
+        # A March sale turns up after the fact: older than the watermark, so
+        # the newest transaction has not moved and only the arrival check
+        # can notice it.
+        later = datetime(2026, 4, 11, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s0", price=190, quantity=4,
+                         occurred_at=datetime(2026, 3, 15, tzinfo=UTC))],
+            now=later,
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(101, later)
+
+        assert "reason=rewound" in caplog.text
+        after = self._totals(store)
+        assert after[1] == before[1] + 4
+        # And it lands exactly where matching the lot from scratch would.
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert after == (whole.total_profit, whole.total_matched_quantity)
+        assert store.get_open_lots(101) == whole.unmatched_buys
+
+    async def test_a_late_trade_older_than_every_checkpoint_rebuilds(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b1", price=100, quantity=10,
+                         occurred_at=datetime(2026, 3, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s1", price=200, quantity=6,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+
+        later = datetime(2026, 4, 11, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b0", price=80, quantity=10,
+                         occurred_at=datetime(2025, 6, 1, tzinfo=UTC))],
+            now=later,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s0", price=150, quantity=5,
+                         occurred_at=datetime(2025, 7, 1, tzinfo=UTC))],
+            now=later,
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(101, later)
+
+        assert "reason=late-arrival-before-every-checkpoint" in caplog.text
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert self._totals(store) == (
+            whole.total_profit,
+            whole.total_matched_quantity,
+        )
+
+    async def test_long_held_lots_are_merged_once_they_age_out(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction("old-1", price=100, quantity=3,
+                            occurred_at=datetime(2024, 1, 1, tzinfo=UTC)),
+                transaction("old-2", price=150, quantity=2,
+                            occurred_at=datetime(2024, 2, 1, tzinfo=UTC)),
+                transaction("recent", price=90, quantity=5,
+                            occurred_at=datetime(2026, 4, 1, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        store.store_transactions(101, "history_sells", [], now=now)
+        service = self._service(store)
+
+        await service._ensure_rollups(101, now)
+
+        lots = store.get_open_lots(101)[1]
+        # Two purchases from 2024 became one; the recent one stayed its own.
+        assert len(lots) == 2
+        assert lots[0].remaining == 5
+        assert lots[0].remaining * lots[0].unit_price == 600
+        assert lots[1].remaining == 5
+        assert lots[1].unit_price == 90
+
+    def test_only_the_newest_checkpoints_are_kept(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        lots = {1: (BuyLot(1, 100, datetime(2024, 1, 1, tzinfo=UTC)),)}
+        for month in range(1, MAX_LOT_CHECKPOINTS + 4):
+            store.store_lot_checkpoint(
+                101,
+                datetime(2024, 1, 1, tzinfo=UTC)
+                + timedelta(days=31 * (month - 1)),
+                lots,
+            )
+
+        # The oldest fall away; the newest are the ones a rewind can use.
+        assert store.get_lot_checkpoint_at_or_before(
+            101, datetime(2024, 1, 1, tzinfo=UTC)
+        ) is None
+        assert store.get_lot_checkpoint_at_or_before(
+            101, datetime(2030, 1, 1, tzinfo=UTC)
+        ) is not None
+
+
+class TestRollupRefreshIsNotARewind:
+    async def test_re_reading_the_overlap_is_not_a_late_arrival(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        first = datetime(2026, 8, 1, tzinfo=UTC)
+        buy = transaction("b", price=100, quantity=10, occurred_at=first)
+        sell = transaction(
+            "s", price=200, quantity=6,
+            occurred_at=first + timedelta(days=1),
+        )
+        store.store_transactions(101, "history_buys", [buy], now=first)
+        store.store_transactions(101, "history_sells", [sell], now=first)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        await service._ensure_rollups(101, first + timedelta(days=2))
+        state = store.get_rollup_state(101)
+        assert state.computed_through is not None
+        assert state.computed_at is not None
+
+        # Every incremental fetch re-reads rows it already holds. Storing
+        # them again must leave no trace, or each refresh would look like
+        # history arriving late and rewind to a checkpoint.
+        later = first + timedelta(days=3)
+        store.store_transactions(101, "history_sells", [sell], now=later)
+
+        assert store.get_late_arrival(
+            101, state.computed_through, state.computed_at
+        ) is None
+        assert not await service._ensure_rollups(101, later)
+
+    async def test_a_report_names_the_key_it_was_built_for(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        original = await service.load_report(101, 30, now=now)
+        assert original.key_generation
+
+        # Replacing a key keeps the member's settings, so the token holds.
+        store.set_api_key(101, "replacement-member-secret")
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        replaced = await service.load_report(101, 30, now=now)
+        assert replaced.key_generation == original.key_generation
+
+        # Deleting one throws them away, so the token must not survive it.
+        store.delete_api_key(101)
+        store.set_api_key(101, "a-fresh-start-secret")
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        fresh = await service.load_report(101, 30, now=now)
+        assert fresh.key_generation != original.key_generation
+
+    async def test_a_corrected_row_is_still_a_late_arrival(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        first = datetime(2026, 8, 1, tzinfo=UTC)
+        sold_at = first + timedelta(days=1)
+        store.store_transactions(
+            101, "history_buys",
+            [transaction("b", price=100, quantity=10, occurred_at=first)],
+            now=first,
+        )
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("s", price=200, quantity=6, occurred_at=sold_at)],
+            now=first,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        await service._ensure_rollups(101, first + timedelta(days=2))
+        state = store.get_rollup_state(101)
+        assert state.computed_through is not None
+        assert state.computed_at is not None
+
+        # The same transaction id reporting a different price is a real
+        # change and has to be noticed.
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("s", price=205, quantity=6, occurred_at=sold_at)],
+            now=first + timedelta(days=3),
+        )
+
+        assert store.get_late_arrival(
+            101, state.computed_through, state.computed_at
+        ) == sold_at
+
+
+class TestCheckpointBoundaries:
+    @staticmethod
+    def _service(store: ProfitStore) -> ProfitService:
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+        )
+        return service
+
+    async def test_a_trade_exactly_at_a_boundary_survives_a_rewind(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        boundary = datetime(2026, 3, 1, tzinfo=UTC)
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101, "history_buys",
+            [transaction("b", price=100, quantity=20,
+                         occurred_at=datetime(2026, 1, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("s", price=200, quantity=5,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+
+        # Midnight on the first of the month is exactly where a checkpoint
+        # sits, which is the one instant a rewind could drop.
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("midnight", price=190, quantity=4,
+                         occurred_at=boundary)],
+            now=datetime(2026, 4, 11, tzinfo=UTC),
+        )
+        assert await service._ensure_rollups(
+            101, datetime(2026, 4, 11, tzinfo=UTC)
+        )
+
+        rebuilt = aggregate_rollups(
+            store.get_rollups(101, datetime(2020, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        )
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert rebuilt.total_matched_quantity == whole.total_matched_quantity
+        assert rebuilt.total_profit == whole.total_profit
+        assert "2026-03-01" in rebuilt.days
+
+    async def test_holding_nothing_is_still_a_resumable_checkpoint(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        # Everything bought in January is sold in January, so the member
+        # holds nothing at any later boundary.
+        store.store_transactions(
+            101, "history_buys",
+            [transaction("b", price=100, quantity=10,
+                         occurred_at=datetime(2026, 1, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101, "history_sells",
+            [
+                transaction("s1", price=200, quantity=10,
+                            occurred_at=datetime(2026, 1, 20, tzinfo=UTC)),
+                transaction("s2", price=200, quantity=0 + 1,
+                            occurred_at=datetime(2026, 4, 5, tzinfo=UTC)),
+            ],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+
+        # An empty state is a state, and has to be resumable.
+        found = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 3, 1, tzinfo=UTC)
+        )
+        assert found is not None
+        assert found[0] == datetime(2026, 3, 1, tzinfo=UTC)
+        assert found[1] == {}
+
+        store.store_transactions(
+            101, "history_sells",
+            [transaction("late", price=190, quantity=1,
+                         occurred_at=datetime(2026, 3, 15, tzinfo=UTC))],
+            now=datetime(2026, 4, 11, tzinfo=UTC),
+        )
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(
+                101, datetime(2026, 4, 11, tzinfo=UTC)
+            )
+
+        # Rewound to March, not rebuilt from the beginning.
+        assert "reason=rewound" in caplog.text
+
+
+class TestProfitBackgroundSync:
+    async def test_a_daily_pass_syncs_every_member_holding_a_key(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-member-secret")
+        store.set_api_key(202, "second-member-secret")
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(return_value=[]),
+            forget_stale_prices=MagicMock(return_value=0),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        assert await service.sync_all_members() == (2, 2)
+        # Every collection, for every member, and nothing else.
+        assert api.fetch_transactions.await_count == 8
+
+    async def test_one_members_failure_does_not_stop_the_pass(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        secret = "broken-member-secret"
+        store.set_api_key(101, secret)
+        store.set_api_key(202, "working-member-secret")
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if api_key == secret:
+                raise ProfitApiError("GW2 API request returned HTTP 500")
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            forget_stale_prices=MagicMock(return_value=0),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            synced, members = await service.sync_all_members()
+
+        assert (synced, members) == (1, 2)
+        assert "Could not sync a member" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_warming_asks_only_for_names_it_does_not_have(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_item_names({1: "Known Item"})
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_all_item_ids=AsyncMock(return_value=[1, 2, 3]),
+            fetch_item_names=AsyncMock(
+                return_value={2: "New Item", 3: "Other Item"}
+            ),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        assert await service.warm_item_names() == 2
+
+        api.fetch_item_names.assert_awaited_once_with({2, 3})
+        assert store.get_item_names({1, 2, 3}, ITEM_NAME_TTL_SECONDS) == {
+            1: "Known Item",
+            2: "New Item",
+            3: "Other Item",
+        }
+
+    async def test_a_warm_cache_asks_for_nothing(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_item_names({1: "Known Item", 2: "Other Item"})
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_all_item_ids=AsyncMock(return_value=[1, 2]),
+            fetch_item_names=AsyncMock(),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        assert await service.warm_item_names() == 0
+        api.fetch_item_names.assert_not_awaited()
+
+    async def test_a_failed_catalogue_read_never_raises(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_all_item_ids=AsyncMock(
+                side_effect=ProfitApiError("GW2 API request returned HTTP 503")
+            ),
+            fetch_item_names=AsyncMock(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            assert await service.warm_item_names() == 0
+
+        assert "Could not list GW2 items" in caplog.text
 
 
 class _FakeResponse:
@@ -1858,6 +2899,25 @@ class TestProfitCommands:
             "[Open your profit dashboard](https://guild.example/profit)",
             ephemeral=True,
         )
+
+    def test_view_accepts_every_window_the_report_will_serve(self) -> None:
+        group = ProfitCommands(cast(Any, SimpleNamespace()))
+        command = next(
+            command
+            for command in group.commands
+            if isinstance(command, discord.app_commands.Command)
+            and command.name == "view"
+        )
+        window = next(
+            parameter
+            for parameter in command.parameters
+            if parameter.name == "days"
+        )
+
+        # Discord rejects out-of-range values before the handler runs, so a
+        # narrower bound here refuses windows the page would have shown.
+        assert window.min_value == MIN_REPORT_DAYS
+        assert window.max_value == MAX_REPORT_DAYS
 
     def test_view_leaves_its_window_argument_optional(self) -> None:
         group = ProfitCommands(cast(Any, SimpleNamespace()))

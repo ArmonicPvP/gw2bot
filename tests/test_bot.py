@@ -438,6 +438,9 @@ class TestOptionalConfiguration:
     ALWAYS_RUNNING = {
         "gw2-raffle-contribution-poller",
         "gw2-event-scheduler",
+        # Members bring their own Trading Post keys, so this one does not
+        # depend on the guild-wide GW2 settings.
+        "gw2-profit-sync",
     }
     GW2_POLLERS = {
         "gw2-guild-storage-poller",
@@ -832,7 +835,11 @@ class TestSettingsHotApply:
     whether a feature is configured.
     """
 
-    ALWAYS_RUNNING = {"gw2-raffle-contribution-poller", "gw2-event-scheduler"}
+    ALWAYS_RUNNING = {
+        "gw2-raffle-contribution-poller",
+        "gw2-event-scheduler",
+        "gw2-profit-sync",
+    }
     GW2_POLLERS = {
         "gw2-guild-storage-poller",
         "gw2-guild-stash-poller",
