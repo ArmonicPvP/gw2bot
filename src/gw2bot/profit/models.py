@@ -108,6 +108,12 @@ class OpenBuyOrder:
 
 @dataclass(frozen=True, slots=True)
 class ProfitReport:
+    """The parts of the dashboard built from a member's trade history.
+
+    Delivery and open orders are loaded apart from this, because neither
+    depends on the history and both are ready long before it is.
+    """
+
     days: int
     window_start: datetime
     window_end: datetime
@@ -115,13 +121,31 @@ class ProfitReport:
     sell_transaction_count: int
     realized: RealizedProfit
     unrealized: UnrealizedProfit
-    unclaimed_coins: int | None
-    unclaimed_items: tuple[DeliveryItem, ...] | None
     item_names: dict[int, str]
     market_prices: dict[int, MarketPrice] = field(default_factory=dict)
-    open_buy_orders: tuple[OpenBuyOrder, ...] = ()
-    open_orders_available: bool = True
-    excluded_order_items: frozenset[int] = frozenset()
+    # The oldest purchase or sale held for this member, which is how far back
+    # a window can usefully be asked to reach.
+    history_start: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryReport:
+    """What is waiting for pickup, with the names to render it."""
+
+    coins: int | None
+    items: tuple[DeliveryItem, ...] | None
+    item_names: dict[int, str]
+
+
+@dataclass(frozen=True, slots=True)
+class OpenOrdersReport:
+    """The member's outstanding buy orders and what they are worth now."""
+
+    orders: tuple[OpenBuyOrder, ...]
+    available: bool
+    excluded_items: frozenset[int]
+    market_prices: dict[int, MarketPrice]
+    item_names: dict[int, str]
 
 
 @dataclass(slots=True)

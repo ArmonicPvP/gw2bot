@@ -25,8 +25,11 @@ from gw2bot.feast_stock import (
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
 from gw2bot.profit.api import ProfitApiError
+from gw2bot.profit.store import MAX_REPORT_DAYS, MIN_REPORT_DAYS
 from gw2bot.profit.service import (
     MissingProfitApiKey,
+    serialize_delivery,
+    serialize_open_orders,
     serialize_profit_report,
 )
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
@@ -193,6 +196,12 @@ class WebServer:
                 web.get("/api/gold", self._gold_data),
                 web.get("/profit", self._profit),
                 web.get("/api/profit", self._profit_data),
+                # Delivery and open orders are served apart from the realized
+                # report so the page can draw each section the moment its own
+                # data lands, rather than holding all three behind the
+                # slowest.
+                web.get("/api/profit/delivery", self._profit_delivery),
+                web.get("/api/profit/orders", self._profit_orders),
                 # POST, not GET: it changes stored member state, and the
                 # SameSite=Lax session cookie is withheld from a cross-site
                 # POST, so no third-party page can fire it.
@@ -717,7 +726,7 @@ class WebServer:
             except ValueError:
                 LOGGER.debug("Rejected profit report; reason=days-malformed")
                 return self._json({"error": "invalid days"}, status=400)
-            if not 1 <= requested_days <= 90:
+            if not MIN_REPORT_DAYS <= requested_days <= MAX_REPORT_DAYS:
                 LOGGER.debug("Rejected profit report; reason=days-range")
                 return self._json({"error": "invalid days"}, status=400)
         service = self._bot.profit_service
@@ -726,10 +735,11 @@ class WebServer:
             return self._json({"error": "unavailable"}, status=503)
         session = request[SESSION_KEY]
         try:
-            days = await service.resolve_report_days(
+            window = await service.resolve_report_days(
                 session.user_id,
                 requested_days,
             )
+            days = window.days
             report = await service.load_report(session.user_id, days)
         except MissingProfitApiKey:
             LOGGER.debug(
@@ -752,17 +762,86 @@ class WebServer:
             )
             return self._json({"error": "report unavailable"}, status=500)
         payload = serialize_profit_report(report)
+        payload["remembered_days"] = window.remembered
         LOGGER.debug(
             "Served profit report; user_id=%s days=%s remembered_window=%s "
-            "realized_items=%s unrealized_items=%s open_order_rows=%s",
+            "realized_items=%s unrealized_items=%s",
             session.user_id,
             days,
             requested_days is None,
             len(report.realized.items),
             len(report.unrealized.items),
-            len(report.open_buy_orders),
         )
         return self._json(payload)
+
+    async def _profit_section(
+        self,
+        request: web.Request,
+        section: str,
+    ) -> web.StreamResponse:
+        """Serve one independently loadable piece of the profit dashboard."""
+        service = self._bot.profit_service
+        if service is None:
+            LOGGER.error(
+                "Could not serve profit section; section=%s "
+                "service=unavailable",
+                section,
+            )
+            return self._json({"error": "unavailable"}, status=503)
+        session = request[SESSION_KEY]
+        try:
+            if section == "delivery":
+                payload = serialize_delivery(
+                    await service.load_delivery(session.user_id)
+                )
+            else:
+                payload = serialize_open_orders(
+                    await service.load_open_orders(session.user_id)
+                )
+        except MissingProfitApiKey:
+            LOGGER.debug(
+                "Rejected profit section; user_id=%s section=%s "
+                "reason=api-key-unset",
+                session.user_id,
+                section,
+            )
+            return self._json({"error": "api_key_missing"}, status=409)
+        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
+            LOGGER.warning(
+                "Could not serve profit section; user_id=%s section=%s "
+                "error_type=%s",
+                session.user_id,
+                section,
+                type(exc).__name__,
+            )
+            return self._json({"error": "upstream unavailable"}, status=502)
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not build profit section; user_id=%s section=%s "
+                "error_type=%s",
+                session.user_id,
+                section,
+                type(exc).__name__,
+            )
+            return self._json({"error": "section unavailable"}, status=500)
+        LOGGER.debug(
+            "Served profit section; user_id=%s section=%s",
+            session.user_id,
+            section,
+        )
+        return self._json(payload)
+
+    async def _profit_delivery(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        return await self._profit_section(request, "delivery")
+
+    async def _profit_orders(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        return await self._profit_section(request, "orders")
 
     async def _profit_exclusion(
         self,

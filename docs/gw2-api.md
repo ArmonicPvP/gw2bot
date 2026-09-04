@@ -68,18 +68,34 @@ that Discord user ID.
 
 ### `/v2/commerce/transactions/history/sells`
 
-These `tradingpost`-permission endpoints return completed purchases and sales.
-The client reads every page with `page` and `page_size=200`, caches the fields
-needed for matching, and retains 92 days so the dashboard can serve its maximum
-90-day window. Purchases and sales inside that window are matched FIFO per
-item.
+These `tradingpost`-permission endpoints return completed purchases and sales,
+newest first, and reach about ninety days back. The client reads them with
+`page` and `page_size=200` and keeps every row it has ever seen, so a member's
+history grows past what GW2 itself still serves.
+
+How much is read depends on what is already stored:
+
+- **First sync, or a store written before the watermark existed.** Page 0 is
+  read to learn `X-Page-Total`, then the remaining pages are read together,
+  eight at a time. An active trader has around sixty pages; reading them one
+  after another took about forty seconds, and reading them this way takes
+  about three.
+- **Every later refresh.** Reading resumes at the newest transaction already
+  stored and stops at the first page that reaches behind it, which is normally
+  page 0. History is append-only and ordered newest first, so nothing older
+  can have appeared. A five-minute overlap covers entries that land either side
+  of the boundary.
+
+Purchases and sales inside the requested window are matched FIFO per item.
 
 ### `/v2/commerce/transactions/current/sells`
 
 Returns the member's current sale listings. The cached collection is replaced
 as a snapshot rather than merged, so cancelled or completed listings disappear
-from the next unrealized-profit report. All four transaction collections are
-refreshed after five minutes.
+from the next unrealized-profit report. It is one page, so it is always read
+whole. All four transaction collections are refreshed after five minutes, and
+the collections one dashboard section needs are read without waiting on
+another section's.
 
 ### `/v2/commerce/transactions/current/buys`
 
@@ -100,9 +116,20 @@ authorization still fails the report.
 
 Returns `buys.unit_price` (the highest standing buy order) and
 `sells.unit_price` (the lowest sell listing) for each requested item, in chunks
-of 200 ids. The dashboard reads it for the items already flipped in the window
-and for every open buy order, and skips an item whose response has a zero price
-on either side. It needs no API key.
+of 200 ids. The realized report reads it for the items flipped in the window
+and the Open Orders section for the items on order; neither waits on the other.
+An item whose response has a zero price on either side is skipped. It needs no
+API key, and prices are never cached, because a stale spread is worse than no
+spread.
+
+### `/v2/items`
+
+Names the requested items, in chunks of 200 ids, and needs no API key. Names
+are stored and re-used for a month rather than for the five minutes a
+transaction snapshot lasts: an item's name is fixed for the life of a game
+build, and re-reading a few thousand of them on every page load was one of the
+slower parts of a report. One failed chunk falls back to `Item <id>` for those
+ids and never fails the report.
 
 ### `/v2/commerce/delivery`
 

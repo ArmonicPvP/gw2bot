@@ -72,13 +72,29 @@ class ProfitApiKeyRecord(Base):
 
 
 class ProfitCacheSyncRecord(Base):
-    """Freshness marker for one member's cached Trading Post collection."""
+    """How far one member's cached Trading Post collection has been read.
+
+    ``synced_at`` is the freshness marker: how recently the collection was
+    asked about at all. ``synced_through`` is the newest transaction the
+    collection has ever yielded, and ``backfilled`` records that every page
+    behind it was read once. Together they turn a refresh into a walk of the
+    one or two newest pages instead of all sixty: history is append-only and
+    returned newest first, so once a page reaches behind the watermark there
+    is nothing new left to find.
+    """
 
     __tablename__ = "gw2_profit_cache_syncs"
 
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     cache_kind: Mapped[str] = mapped_column(String, primary_key=True)
     synced_at: Mapped[str] = mapped_column(String, nullable=False)
+    synced_through: Mapped[str | None] = mapped_column(String, nullable=True)
+    backfilled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
 
 
 class ProfitTransactionRecord(Base):
@@ -681,6 +697,34 @@ def initialize_database(engine: Engine) -> set[str]:
                 "notification_sent = 1"
             )
             added_columns.add("audit_notification_sent")
+
+        sync_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                ProfitCacheSyncRecord.__tablename__
+            )
+        }
+        if "synced_through" not in sync_columns:
+            operations.add_column(
+                ProfitCacheSyncRecord.__tablename__,
+                Column("synced_through", String, nullable=True),
+            )
+            added_columns.add("synced_through")
+        if "backfilled" not in sync_columns:
+            operations.add_column(
+                ProfitCacheSyncRecord.__tablename__,
+                Column(
+                    "backfilled",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            # A database written before the watermark existed kept only the
+            # last 92 days and never recorded how far back it read, so its
+            # rows stay marked un-backfilled and the next report walks the
+            # whole history once to fill in what retention had dropped.
+            added_columns.add("backfilled")
 
         occurrence_columns = {
             column["name"]

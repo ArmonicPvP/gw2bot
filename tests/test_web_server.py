@@ -27,16 +27,18 @@ from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
 from gw2bot.profit import (
     DayProfit,
     DeliveryItem,
+    DeliveryReport,
     ItemProfit,
     MarketPrice,
     OpenBuyOrder,
+    OpenOrdersReport,
     ProfitReport,
     RealizedProfit,
     UnrealizedItemProfit,
     UnrealizedProfit,
 )
 from gw2bot.profit.api import ProfitApiError
-from gw2bot.profit.service import MissingProfitApiKey
+from gw2bot.profit.service import MissingProfitApiKey, ReportWindow
 from gw2bot.guild_members import TrialMemberReportEntry
 from gw2bot.pending_invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
@@ -77,26 +79,35 @@ def profit_report(days: int = 30) -> ProfitReport:
             total_projected_net_revenue=255,
             total_projected_profit=155,
         ),
-        unclaimed_coins=12_345,
-        unclaimed_items=(DeliveryItem(3, 7),),
-        item_names={
-            1: "Realized Item",
-            2: "Listed Item",
-            3: "Delivered Item",
-            4: "Ordered Item",
-            5: "Excluded Item",
-        },
-        market_prices={1: MarketPrice(100, 200), 4: MarketPrice(80, 160)},
-        open_buy_orders=(
+        item_names={1: "Realized Item", 2: "Listed Item"},
+        market_prices={1: MarketPrice(100, 200)},
+        history_start=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+
+
+def delivery_report() -> DeliveryReport:
+    return DeliveryReport(
+        coins=12_345,
+        items=(DeliveryItem(3, 7),),
+        item_names={3: "Delivered Item"},
+    )
+
+
+def orders_report() -> OpenOrdersReport:
+    return OpenOrdersReport(
+        orders=(
             OpenBuyOrder(
                 item_id=4,
                 unit_price=70,
                 quantity=10,
                 order_count=2,
-                placed_at=window_end,
+                placed_at=datetime(2026, 8, 21, 18, 30, tzinfo=UTC),
             ),
         ),
-        excluded_order_items=frozenset({5}),
+        available=True,
+        excluded_items=frozenset({5}),
+        market_prices={4: MarketPrice(80, 160)},
+        item_names={4: "Ordered Item", 5: "Excluded Item"},
     )
 
 
@@ -160,8 +171,12 @@ class FakeBot:
         self.raffle_store = raffle_store
         self.profit_service = SimpleNamespace(
             load_report=AsyncMock(return_value=profit_report()),
+            load_delivery=AsyncMock(return_value=delivery_report()),
+            load_open_orders=AsyncMock(return_value=orders_report()),
             resolve_report_days=AsyncMock(
-                side_effect=lambda user_id, days: 30 if days is None else days
+                side_effect=lambda user_id, days: ReportWindow(
+                    30 if days is None else days, days is not None
+                )
             ),
             set_order_exclusion=AsyncMock(return_value=True),
         )
@@ -1006,12 +1021,57 @@ class TestProfitPage:
         assert payload["days_table"][0]["date"] == "2026-08-20"
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
         assert payload["unrealized"]["roi_percent"] == 155
-        assert payload["delivery"]["coins"] == 12_345
-        assert payload["delivery"]["items"] == [
-            {"item_id": 3, "name": "Delivered Item", "quantity": 7}
-        ]
-        assert payload["open_orders"]["available"] is True
-        assert payload["open_orders"]["orders"] == [
+        # Delivery and open orders are their own requests now, so the report
+        # carries neither and does not wait on either.
+        assert "delivery" not in payload
+        assert "open_orders" not in payload
+        assert payload["history_start_date"] == "2026-05-01"
+        assert payload["max_days"] == 3650
+        bot.profit_service.load_delivery.assert_not_awaited()
+        bot.profit_service.load_open_orders.assert_not_awaited()
+        bot.profit_service.resolve_report_days.assert_awaited_once_with(
+            other_user_id,
+            60,
+        )
+        bot.profit_service.load_report.assert_awaited_once_with(
+            other_user_id,
+            60,
+        )
+
+    async def test_delivery_is_served_without_the_history(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.get(
+            "/api/profit/delivery",
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        assert await response.json() == {
+            "coins": 12_345,
+            "items": [{"item_id": 3, "name": "Delivered Item", "quantity": 7}],
+        }
+        bot.profit_service.load_delivery.assert_awaited_once_with(
+            SESSION_USER_ID
+        )
+        bot.profit_service.load_report.assert_not_awaited()
+
+    async def test_open_orders_are_served_without_the_history(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.get(
+            "/api/profit/orders",
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["available"] is True
+        assert payload["orders"] == [
             {
                 "item_id": 4,
                 "name": "Ordered Item",
@@ -1028,7 +1088,7 @@ class TestProfitPage:
                 "has_order": True,
             }
         ]
-        assert payload["open_orders"]["excluded"] == [
+        assert payload["excluded"] == [
             {
                 "item_id": 5,
                 "name": "Excluded Item",
@@ -1045,16 +1105,66 @@ class TestProfitPage:
                 "has_order": False,
             }
         ]
-        # An item priced only because it has an open order is not a pick.
-        assert [row["item_id"] for row in payload["picks"]] == [1]
-        bot.profit_service.resolve_report_days.assert_awaited_once_with(
-            other_user_id,
-            60,
+        bot.profit_service.load_open_orders.assert_awaited_once_with(
+            SESSION_USER_ID
         )
-        bot.profit_service.load_report.assert_awaited_once_with(
-            other_user_id,
-            60,
+        bot.profit_service.load_report.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "path", ["/api/profit/delivery", "/api/profit/orders"]
+    )
+    async def test_a_section_prompts_for_a_missing_key(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        path: str,
+    ) -> None:
+        bot.profit_service.load_delivery.side_effect = MissingProfitApiKey
+        bot.profit_service.load_open_orders.side_effect = MissingProfitApiKey
+
+        response = await client.get(path, headers=self._headers())
+
+        assert response.status == 409
+        assert await response.json() == {"error": "api_key_missing"}
+
+    @pytest.mark.parametrize(
+        "path", ["/api/profit/delivery", "/api/profit/orders"]
+    )
+    async def test_a_section_failure_hides_its_upstream_detail(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+        path: str,
+    ) -> None:
+        secret = "section-response-secret"
+        bot.profit_service.load_delivery.side_effect = ProfitApiError(secret)
+        bot.profit_service.load_open_orders.side_effect = ProfitApiError(
+            secret
         )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.get(path, headers=self._headers())
+        body = await response.text()
+
+        assert response.status == 502
+        assert secret not in caplog.text
+        assert secret not in body
+
+    @pytest.mark.parametrize(
+        "path", ["/api/profit/delivery", "/api/profit/orders"]
+    )
+    async def test_a_section_needs_a_session(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        path: str,
+    ) -> None:
+        response = await client.get(path)
+
+        assert response.status == 401
+        bot.profit_service.load_delivery.assert_not_awaited()
+        bot.profit_service.load_open_orders.assert_not_awaited()
 
     async def test_api_without_a_window_serves_the_remembered_one(
         self,
@@ -1062,13 +1172,17 @@ class TestProfitPage:
         bot: FakeBot,
     ) -> None:
         bot.profit_service.resolve_report_days.side_effect = None
-        bot.profit_service.resolve_report_days.return_value = 14
+        bot.profit_service.resolve_report_days.return_value = ReportWindow(
+            14, True
+        )
         bot.profit_service.load_report.return_value = profit_report(14)
 
         response = await client.get("/api/profit", headers=self._headers())
 
         assert response.status == 200
-        assert (await response.json())["days"] == 14
+        payload = await response.json()
+        assert payload["days"] == 14
+        assert payload["remembered_days"] is True
         bot.profit_service.resolve_report_days.assert_awaited_once_with(
             SESSION_USER_ID,
             None,
@@ -1194,7 +1308,7 @@ class TestProfitPage:
         assert secret not in caplog.text
         assert secret not in body
 
-    @pytest.mark.parametrize("days", ["0", "91", "abc", "1.5"])
+    @pytest.mark.parametrize("days", ["0", "3651", "abc", "1.5"])
     async def test_api_rejects_invalid_days_without_loading_data(
         self,
         client: TestClient,

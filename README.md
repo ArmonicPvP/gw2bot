@@ -1326,10 +1326,11 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   route-restricted subtoken must allow the history buys, history sells, current
   sells, current buys, and `/v2/commerce/delivery` endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window accepts 1 through 90 UTC calendar dates, including today. Left empty,
-  the link names no window and the page reopens the one the member last used,
-  defaulting to 30 days until they pick one. If the web session has expired,
-  Discord sign-in returns the member to that same profit window.
+  window accepts 1 through 3650 UTC calendar dates, including today, though it
+  can only show what has been collected so far. Left empty, the link names no
+  window and the page reopens the one the member last used, defaulting to 30
+  days until they pick one. If the web session has expired, Discord sign-in
+  returns the member to that same profit window.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
   data, remembered report window, and hidden Open Orders items. It cannot
   affect any other member's key, cache, or choices. Replacing a key with
@@ -1402,6 +1403,12 @@ links to — still wins and becomes the new remembered window, while
 `/profit view` with no argument links without one and leaves the saved window
 alone.
 
+The browser keeps a copy of that choice as a repair kit. If the account comes
+back without a stored window — a database restored from before the choice, say
+— the page notices it was served the default rather than a remembered value,
+puts back what that browser last used, and saves it again. It does this at most
+once per load, so a browser that refuses storage cannot put the page in a loop.
+
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window
@@ -1412,13 +1419,51 @@ applicable). On a touch screen, tap a bar or dot to pin the same reading; it
 stays open until another reading is tapped, the page is tapped elsewhere, the
 page scrolls, the window loses focus, or Escape is pressed.
 
-History, current listings, current buy orders, and item names are cached for
-five minutes in rows keyed by Discord user ID; unclaimed coins and items are read
-when each report is built. Keys saved before delivery reporting or Open Orders
-were added can still load their existing reports if a route restriction blocks
-one of those newer endpoints: that section alone is marked unavailable and the
-page directs the member to run `/profit setkey` again. Other API failures
-continue to fail the report instead of presenting partial data.
+#### How the dashboard loads
+
+The page asks for its three parts separately and at the same time, and each
+section draws as soon as its own answer arrives rather than waiting for the
+slowest. Until then the section shows its heading over a centred spinner, and
+a section that fails says so in place of its table without taking the rest of
+the page down with it. **Unclaimed Trading Post** needs one request and is
+usually first; **Open Orders** needs one short collection; the realized report
+needs the whole trade history and is last.
+
+Everything the GW2 API is asked for goes out in parallel wherever one answer
+does not depend on another — the four transaction collections together, then
+prices and names together.
+
+#### What is stored, and for how long
+
+Every transaction the bot has ever read is kept, keyed by Discord user ID.
+This matters because GW2 itself only serves about ninety days of history: past
+that point the dashboard is reading from what it collected while the member was
+using it, so a window keeps reaching further back the longer the bot runs. The
+summary line under the header names the oldest trade held.
+
+Refreshes are incremental. History arrives newest first and never changes, so a
+refresh resumes at the newest transaction already stored and stops at the first
+page that reaches behind it — normally one page instead of sixty. Only a first
+sync, or a database written before this was recorded, reads a member's whole
+history, and it reads eight pages at a time rather than one after another. In
+practice a first load takes a few seconds and later ones under a second, where
+walking every page one at a time took over a minute.
+
+The rest of the caching:
+
+| Data | Held for | Why |
+| --- | --- | --- |
+| Transactions | Forever | The only copy of history older than GW2 serves |
+| Item names | 30 days | Fixed for the life of a game build |
+| Transaction snapshots | 5 minutes | How often a refresh is worth making |
+| Market prices | Not cached | A stale spread is worse than no spread |
+
+Unclaimed coins and items are read when the delivery section is built. Keys
+saved before delivery reporting or Open Orders were added can still load their
+existing reports if a route restriction blocks one of those newer endpoints:
+that section alone is marked unavailable and the page directs the member to run
+`/profit setkey` again. Other API failures fail that one section instead of
+presenting partial data.
 The signed web session supplies that same ID; the API key never appears in the
 page, a URL, or a browser response. Access uses the site's normal Discord OAuth
 guild-membership check and needs the four web settings plus `WEB_ENABLED=true`

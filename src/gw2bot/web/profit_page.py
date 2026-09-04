@@ -1,8 +1,9 @@
 """Static browser dashboard for a member's Trading Post profit reports."""
 
+from gw2bot.profit.store import MAX_REPORT_DAYS
 from gw2bot.web.page import _DASHBOARD_HEADER_STYLE, _SHARED_STYLE
 
-PROFIT_PAGE = (
+_PROFIT_PAGE_TEMPLATE = (
     """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -76,6 +77,39 @@ main { width: 100%; margin: 0; padding: 1rem; }
 .pick-toggle button:last-child { border-radius: 0 6px 6px 0; }
 .pick-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; }
 .card h3.subheading { font-size: 0.92rem; padding: 0.85rem 1rem 0.15rem; }
+/* A loading card keeps its heading and shows a spinner where its body will
+   be, so the page reads as a list of named sections filling in rather than a
+   blank screen that appears all at once. */
+.card.loading { min-height: 7.5rem; }
+.card.loading > :not(.section-spinner):not(h2):not(.card-heading) {
+  display: none;
+}
+.section-spinner { display: none; }
+.card.loading .section-spinner, .card.failed .section-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 2rem 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.card.failed > :not(.section-spinner):not(h2):not(.card-heading) {
+  display: none;
+}
+.card.failed .spinner { display: none; }
+.spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: profit-spin 0.8s linear infinite;
+}
+@keyframes profit-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -263,7 +297,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   <h1 id="brand">Trading Post Profit</h1>
   <form id="range-form">
     <label for="days">Days</label>
-    <input id="days" name="days" type="number" min="1" max="90" value="30" required>
+    <input id="days" name="days" type="number" min="1" max="__MAX_DAYS__" value="30" required>
     <button class="primary" type="submit">Load</button>
   </form>
   <span class="spacer"></span>
@@ -289,15 +323,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     <code>/profit setkey</code> in the guild server, then reload this page.
   </div>
   <div class="cards" id="reports" hidden>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Summary</h2>
       <p class="note">FIFO-matched realized results and current-listing projections for the selected window.</p>
       <div class="table-scroll"><table>
         <thead><tr><th>Measure</th><th>Value</th></tr></thead>
         <tbody id="summary-body"></tbody>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Daily Profit Trends</h2>
       <p class="note">UTC sale dates; days without matched sales count as zero profit.</p>
       <div class="chart-grid">
@@ -317,8 +352,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <div class="profit-chart"><svg id="cumulative-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Cumulative realized profit"></svg></div>
         </figure>
       </div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <div class="card-heading">
         <h2>Your Picks</h2>
         <div class="pick-toggle" aria-label="Rank picks by">
@@ -331,8 +367,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <thead><tr><th>Item</th><th>Buy Order</th><th>Sell Price</th><th>Profit / Unit</th><th>ROI</th></tr></thead>
         <tbody id="picks-body"></tbody>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Realized Profit by Item</h2>
       <p class="note">Median Hold is weighted by matched units. Profit Share is signed item profit divided by total realized profit.</p>
       <div class="table-scroll"><table id="items-table" data-sort-table="items">
@@ -350,8 +387,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="items-body"></tbody>
         <tfoot id="items-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Realized Profit by Day</h2>
       <nav class="pagination" aria-label="Daily profit pages">
         <span class="pagination-pages" id="days-pages-top"></span>
@@ -373,8 +411,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         </label>
         <span class="pagination-pages" id="days-pages-bottom"></span>
       </nav>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
       <p class="note">Unmatched purchases from the selected window that are currently listed for sale. Projected ROI is projected profit divided by their matched cost.</p>
       <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
@@ -389,8 +428,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="unrealized-body"></tbody>
         <tfoot id="unrealized-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="orders">
       <div class="card-heading">
         <h2>Open Orders</h2>
         <button id="orders-menu" class="icon-button" type="button"
@@ -422,8 +462,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="orders-body"></tbody>
         <tfoot id="orders-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
-    <section class="card">
+    <section class="card loading" data-source="delivery">
       <h2>Unclaimed Trading Post</h2>
       <p class="note">Coins and items waiting for pickup in your Trading Post delivery box.</p>
       <p class="note" id="delivery-key-help" hidden>Delivery access is unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows the Trading Post delivery endpoint.</p>
@@ -442,6 +483,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="delivery-body"></tbody>
         <tfoot id="delivery-foot"></tfoot>
       </table></div>
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
   </div>
   <dialog id="hidden-dialog" aria-labelledby="hidden-title">
@@ -480,6 +522,33 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var sortStates = {};
   var daysPage = 1;
   var daysPageSize = 10;
+  var maxDays = __MAX_DAYS__;
+  var historyStart = null;
+  var missingKey = false;
+  var restoredWindow = false;
+  // The chosen window lives against the Discord account. This copy is a
+  // repair kit: if the account ever comes back without one - a rebuilt
+  // database, or a release that overwrote it - the browser puts back what
+  // the member last picked instead of dropping them on the default.
+  var STORED_DAYS_KEY = "gw2bot-profit-days";
+
+  function readStoredDays() {
+    try {
+      var stored = Number(localStorage.getItem(STORED_DAYS_KEY));
+      return Number.isInteger(stored) && stored >= 1 && stored <= maxDays
+        ? stored : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function writeStoredDays(days) {
+    try {
+      localStorage.setItem(STORED_DAYS_KEY, String(days));
+    } catch (error) {
+      trace("window-not-stored", 0);
+    }
+  }
 
   function trace(action, rows) {
     console.debug("Profit dashboard", action, "rows=" + rows);
@@ -1534,12 +1603,12 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     trace("open-orders", kept.length);
   }
 
-  function renderDelivery(data) {
+  function renderDelivery(delivery) {
     var coins = document.getElementById("unclaimed-coins");
     var body = document.getElementById("delivery-body");
     var help = document.getElementById("delivery-key-help");
     body.replaceChildren();
-    if (data.delivery.coins === null) {
+    if (delivery.coins === null) {
       coins.textContent = "Unavailable";
       coins.className = "";
       emptyRow(body, 2, "Delivery is unavailable for this saved key.");
@@ -1550,10 +1619,10 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       trace("delivery-unavailable", 0);
       return;
     }
-    coins.textContent = coin(data.delivery.coins);
-    coins.className = data.delivery.coins > 0 ? "positive" : "";
+    coins.textContent = coin(delivery.coins);
+    coins.className = delivery.coins > 0 ? "positive" : "";
     help.hidden = true;
-    var items = data.delivery.items;
+    var items = delivery.items;
     var quantity = 0;
     items.forEach(function (item, index) {
       var row = sortableRow(index);
@@ -1571,10 +1640,28 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     trace("delivery", items.length);
   }
 
-  function render(data) {
+  function renderReport(data) {
     // The window the server served is the one it remembered, so the control
     // and the address bar follow it rather than the other way round.
     daysInput.value = String(data.days);
+    if (data.remembered_days) {
+      writeStoredDays(data.days);
+    } else if (!restoredWindow) {
+      var local = readStoredDays();
+      if (local !== null && local !== data.days) {
+        restoredWindow = true;
+        daysInput.value = String(local);
+        trace("window-restored", local);
+        load(false);
+        return;
+      }
+      writeStoredDays(data.days);
+    }
+    if (data.max_days) {
+      maxDays = data.max_days;
+      daysInput.max = String(maxDays);
+    }
+    historyStart = data.history_start_date;
     history.replaceState(
       null, "", "/profit?days=" + encodeURIComponent(String(data.days)));
     renderSummary(data);
@@ -1584,29 +1671,74 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     renderItems(data);
     renderDays(data);
     renderUnrealized(data);
-    ordersAvailable = data.open_orders.available;
-    ordersRows = data.open_orders.orders.map(function (order) {
+    trace(
+      "render-report",
+      data.items.length + data.days_table.length
+        + data.unrealized.items.length);
+  }
+
+  function renderOrdersSection(data) {
+    ordersAvailable = data.available;
+    ordersRows = data.orders.map(function (order) {
       order.excluded = false;
       return order;
-    }).concat(data.open_orders.excluded.map(function (order) {
+    }).concat(data.excluded.map(function (order) {
       order.excluded = true;
       return order;
     }));
     renderOrders();
-    renderDelivery(data);
-    reports.hidden = false;
-    keyHelp.classList.remove("open");
-    status.className = "";
-    status.textContent = "Updated from your private Trading Post data.";
-    trace(
-      "render",
-      data.items.length + data.days_table.length
-        + data.unrealized.items.length + ordersRows.length + 1);
+  }
+
+  function sectionCards(source) {
+    return document.querySelectorAll(
+      '.card[data-source="' + source + '"]');
+  }
+
+  function markSection(source, state, message) {
+    sectionCards(source).forEach(function (card) {
+      card.classList.toggle("loading", state === "loading");
+      card.classList.toggle("failed", state === "failed");
+      var note = card.querySelector(".section-message");
+      if (note) {
+        note.textContent = message || "Loading\u2026";
+      }
+    });
+    trace("section-" + source, state === "ready" ? 1 : 0);
   }
 
   function selectedDays() {
     var days = Number(daysInput.value);
-    return Number.isInteger(days) && days >= 1 && days <= 90 ? days : null;
+    return Number.isInteger(days) && days >= 1 && days <= maxDays
+      ? days : null;
+  }
+
+  function fetchSection(source, url, render) {
+    markSection(source, "loading");
+    return fetch(url).then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login?next=" + encodeURIComponent(
+          location.pathname + location.search);
+        return null;
+      }
+      if (response.status === 409) {
+        keyHelp.classList.add("open");
+        markSection(source, "failed", "A Trading Post API key is required.");
+        missingKey = true;
+        return null;
+      }
+      if (!response.ok) { throw new Error(source + " request failed"); }
+      return response.json();
+    }).then(function (data) {
+      if (!data) { return false; }
+      render(data);
+      markSection(source, "ready");
+      return true;
+    }).catch(function () {
+      markSection(
+        source, "failed",
+        "This section could not be loaded. Try again in a moment.");
+      return false;
+    });
   }
 
   function load(useRemembered) {
@@ -1617,39 +1749,42 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       days = selectedDays();
       if (days === null) {
         status.className = "error";
-        status.textContent = "Choose a number of days from 1 through 90.";
+        status.textContent =
+          "Choose a number of days from 1 through " + maxDays + ".";
         trace("refuse-range", 0);
         return;
       }
     }
     status.className = "";
     status.textContent = "Loading\u2026";
-    reports.hidden = true;
+    reports.hidden = false;
     keyHelp.classList.remove("open");
-    fetch("/api/profit" + (days === null
-      ? "" : "?days=" + encodeURIComponent(String(days))))
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login?next=" + encodeURIComponent(
-            location.pathname + location.search);
-          return null;
-        }
-        if (response.status === 409) {
-          keyHelp.classList.add("open");
-          status.className = "error";
-          status.textContent = "A Trading Post API key is required.";
-          trace("missing-key", 0);
-          return null;
-        }
-        if (!response.ok) { throw new Error("profit request failed"); }
-        return response.json();
-      })
-      .then(function (data) { if (data) { render(data); } })
-      .catch(function () {
+    missingKey = false;
+    // Three independent requests, in flight together. Each section draws as
+    // soon as its own answer arrives instead of waiting for the slowest.
+    Promise.all([
+      fetchSection("report", "/api/profit" + (days === null
+        ? "" : "?days=" + encodeURIComponent(String(days))), renderReport),
+      fetchSection("orders", "/api/profit/orders", renderOrdersSection),
+      fetchSection("delivery", "/api/profit/delivery", renderDelivery)
+    ]).then(function (loaded) {
+      var ready = loaded.filter(Boolean).length;
+      if (missingKey) {
         status.className = "error";
-        status.textContent = "The profit report could not be loaded. Try again in a moment.";
-        trace("failure", 0);
-      });
+        status.textContent = "A Trading Post API key is required.";
+      } else if (ready === loaded.length) {
+        status.className = "";
+        status.textContent = historyStart
+          ? "Updated from your private Trading Post data, held since "
+            + historyStart + "."
+          : "Updated from your private Trading Post data.";
+      } else {
+        status.className = "error";
+        status.textContent =
+          "Some sections could not be loaded. Try again in a moment.";
+      }
+      trace("load", ready);
+    });
   }
 
   rangeForm.addEventListener("submit", function (event) {
@@ -1700,7 +1835,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   });
   initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
-  var requested = Number.isInteger(initial) && initial >= 1 && initial <= 90;
+  var requested = Number.isInteger(initial)
+    && initial >= 1 && initial <= maxDays;
   if (requested) {
     daysInput.value = String(initial);
   }
@@ -1715,4 +1851,11 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 </body>
 </html>
 """
+)
+
+# The window the page offers has to match the one the API will accept, so the
+# bound is written once, in the store, and stamped into the page here.
+PROFIT_PAGE = _PROFIT_PAGE_TEMPLATE.replace(
+    "__MAX_DAYS__",
+    str(MAX_REPORT_DAYS),
 )

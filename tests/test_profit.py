@@ -42,9 +42,12 @@ from gw2bot.profit.models import (
 from gw2bot.profit.service import (
     MissingProfitApiKey,
     ProfitService,
+    ReportWindow,
+    serialize_delivery,
+    serialize_open_orders,
     serialize_profit_report,
 )
-from gw2bot.profit.store import ProfitStore
+from gw2bot.profit.store import ITEM_NAME_TTL_SECONDS, ProfitStore
 from gw2bot.settings.crypto import SettingsCipher
 
 
@@ -234,8 +237,6 @@ class TestProfitCalculation:
             sell_transaction_count=2,
             realized=realized,
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
-            unclaimed_coins=0,
-            unclaimed_items=(),
             item_names={1: "Winner", 2: "Loser"},
         )
 
@@ -394,8 +395,6 @@ class TestProfitCalculation:
                 total_matched_quantity=15,
             ),
             unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
-            unclaimed_coins=0,
-            unclaimed_items=(),
             item_names={
                 1: kept_name,
                 2: skipped_name,
@@ -722,7 +721,7 @@ class TestProfitStore:
         assert store.get_report_days(101) == 14
         assert store.get_report_days(202) == 7
 
-    @pytest.mark.parametrize("days", [0, 91, -1])
+    @pytest.mark.parametrize("days", [0, 3651, -1])
     def test_refuses_a_report_window_outside_the_served_range(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -744,7 +743,7 @@ class TestProfitStore:
         engine = create_database_engine(str(database))
         with engine.begin() as connection:
             connection.exec_driver_sql(
-                "UPDATE gw2_profit_preferences SET report_days = 365"
+                "UPDATE gw2_profit_preferences SET report_days = 5000"
             )
         engine.dispose()
 
@@ -850,23 +849,19 @@ class TestProfitService:
             )
         ]
 
-        orders = [
-            transaction(
-                "order",
-                price=90,
-                quantity=20,
-                occurred_at=now,
-            )
-        ]
-
-        async def fetched(path: str, api_key: str) -> list[Transaction]:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
             assert api_key == "member-secret"
             if path.endswith("history/buys"):
                 return buys
             if path.endswith("history/sells"):
                 return sells
             if path.endswith("current/buys"):
-                return orders
+                return []
             return current
 
         service = ProfitService(
@@ -880,7 +875,9 @@ class TestProfitService:
                 return_value=(12_345, (DeliveryItem(1, 7),))
             ),
             fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
-            fetch_market_prices=AsyncMock(return_value={1: MarketPrice(100, 200)}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
         )
         service._api = api  # type: ignore[assignment]
 
@@ -893,18 +890,7 @@ class TestProfitService:
         assert first.item_names == {1: "Test Item"}
         assert first.realized.total_profit == 350
         assert first.unrealized.total_projected_profit == 775
-        assert first.unclaimed_coins == 12_345
-        assert first.unclaimed_items == (DeliveryItem(1, 7),)
-        assert first.open_buy_orders == (
-            OpenBuyOrder(
-                item_id=1,
-                unit_price=90,
-                quantity=20,
-                order_count=1,
-                placed_at=now,
-            ),
-        )
-        assert first.open_orders_available
+        assert first.history_start == now - timedelta(days=2)
         payload = cast(dict[str, Any], serialize_profit_report(first))
         assert payload["summary"]["roi_percent"] == 70
         assert payload["items"][0]["roi_percent"] == 70
@@ -922,37 +908,48 @@ class TestProfitService:
             }
         ]
         assert payload["unrealized"]["roi_percent"] == 155
-        assert payload["unrealized"]["items"][0]["roi_percent"] == 155
-        assert payload["delivery"]["coins"] == 12_345
-        assert payload["delivery"]["items"] == [
-            {"item_id": 1, "name": "Test Item", "quantity": 7}
-        ]
-        assert payload["open_orders"]["available"]
-        assert payload["open_orders"]["excluded"] == []
-        assert payload["open_orders"]["orders"] == [
-            {
-                "item_id": 1,
-                "name": "Test Item",
-                "quantity": 20,
-                "order_count": 1,
-                "unit_price": 90,
-                "cost": 1_800,
-                "buy_price": 100,
-                "sell_price": 200,
-                "net_revenue": 3_400,
-                "profit": 80,
-                "total_profit": 1_600,
-                "roi_percent": pytest.approx(88.888, rel=1e-3),
-                "has_order": True,
-            }
-        ]
-        assert api.fetch_transactions.await_count == 4
-        assert api.fetch_delivery.await_count == 2
-        api.fetch_delivery.assert_awaited_with("member-secret")
+        assert payload["history_start_date"] == "2026-08-19"
+        # The report reads three collections and never the delivery route, so
+        # a slow history no longer holds up the sections that do not need it.
+        assert api.fetch_transactions.await_count == 3
+        api.fetch_delivery.assert_not_awaited()
         api.fetch_item_names.assert_awaited_once_with({1})
         assert api.fetch_market_prices.await_count == 2
 
-    async def test_legacy_restricted_key_keeps_its_cached_report(
+    async def test_delivery_loads_without_touching_the_history(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(12_345, (DeliveryItem(1, 7),))
+            ),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        report = await service.load_delivery(101, now=now)
+
+        assert report.coins == 12_345
+        assert report.items == (DeliveryItem(1, 7),)
+        assert serialize_delivery(report) == {
+            "coins": 12_345,
+            "items": [{"item_id": 1, "name": "Test Item", "quantity": 7}],
+        }
+        api.fetch_transactions.assert_not_awaited()
+        api.fetch_delivery.assert_awaited_once_with("member-secret")
+
+    async def test_legacy_restricted_key_still_reports_its_delivery_box(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
         caplog: pytest.LogCaptureFixture,
@@ -961,8 +958,6 @@ class TestProfitService:
         secret = "legacy-route-restricted-secret"
         store.set_api_key(101, secret)
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        for transaction_kind in TRANSACTION_PATHS:
-            store.touch_cache(101, transaction_kind, now=now)
         service = ProfitService(
             store,
             cast(aiohttp.ClientSession, None),
@@ -981,37 +976,27 @@ class TestProfitService:
         service._api = api  # type: ignore[assignment]
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
-            report = await service.load_report(101, 30, now=now)
+            report = await service.load_delivery(101, now=now)
 
-        assert report.unclaimed_coins is None
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        assert payload["delivery"] == {"coins": None, "items": None}
-        assert payload["open_orders"] == {
-            "available": True,
-            "orders": [],
-            "excluded": [],
-        }
-        api.fetch_transactions.assert_not_awaited()
+        assert report.coins is None
+        assert serialize_delivery(report) == {"coins": None, "items": None}
         api.fetch_delivery.assert_awaited_once_with(secret)
         assert "reason=unauthorized" in caplog.text
-        assert "unclaimed_delivery=unavailable" in caplog.text
         assert secret not in caplog.text
 
-    async def test_non_authorization_delivery_failure_still_fails_report(
+    async def test_non_authorization_delivery_failure_still_fails(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, _ = profit_store
         store.set_api_key(101, "member-secret")
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        for transaction_kind in TRANSACTION_PATHS:
-            store.touch_cache(101, transaction_kind, now=now)
         service = ProfitService(
             store,
             cast(aiohttp.ClientSession, None),
             "https://api.example",
         )
-        api = SimpleNamespace(
+        service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
             fetch_delivery=AsyncMock(
                 side_effect=ProfitApiError("GW2 API request returned HTTP 500")
@@ -1019,10 +1004,9 @@ class TestProfitService:
             fetch_item_names=AsyncMock(),
             fetch_market_prices=AsyncMock(return_value={}),
         )
-        service._api = api  # type: ignore[assignment]
 
         with pytest.raises(ProfitApiError):
-            await service.load_report(101, 30, now=now)
+            await service.load_delivery(101, now=now)
 
     async def test_discards_an_old_key_snapshot_and_retries_replacement(
         self,
@@ -1036,7 +1020,12 @@ class TestProfitService:
         now = datetime(2026, 8, 21, tzinfo=UTC)
         replaced = False
 
-        async def fetched(path: str, api_key: str) -> list[Transaction]:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
             nonlocal replaced
             if api_key == old_key:
                 prefix = "old"
@@ -1083,8 +1072,7 @@ class TestProfitService:
             report = await service.load_report(101, 30, now=now)
 
         assert report.realized.total_profit == 350
-        assert api.fetch_transactions.await_count == 8
-        api.fetch_delivery.assert_awaited_once_with(replacement_key)
+        assert api.fetch_transactions.await_count == 6
         assert [
             row.transaction_id
             for row in store.get_transactions(101, "history_buys")
@@ -1096,7 +1084,8 @@ class TestProfitService:
         assert store.get_transactions(101, "current_sells") == []
         assert all(
             store.is_cache_fresh(101, transaction_kind, 300, now=now)
-            for transaction_kind in TRANSACTION_PATHS
+            for transaction_kind in ("history_buys", "history_sells",
+                                     "current_sells")
         )
         assert "Discarded stale profit transaction snapshot" in caplog.text
         assert old_key not in caplog.text
@@ -1148,7 +1137,7 @@ class TestProfitService:
             store.touch_cache(101, transaction_kind, now=now)
         store.store_item_names(
             {1: "Old Name"},
-            now=now - timedelta(seconds=300),
+            now=now - timedelta(seconds=ITEM_NAME_TTL_SECONDS + 1),
         )
         service = ProfitService(
             store,
@@ -1210,12 +1199,11 @@ class TestProfitService:
         )
         service._api = api  # type: ignore[assignment]
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_open_orders(101, now=now)
 
-        assert report.excluded_order_items == frozenset({2, 3})
+        assert report.excluded_items == frozenset({2, 3})
         api.fetch_market_prices.assert_awaited_once_with({1, 2})
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        orders = payload["open_orders"]
+        orders = cast(dict[str, Any], serialize_open_orders(report))
         assert [row["item_id"] for row in orders["orders"]] == [1]
         assert [row["item_id"] for row in orders["excluded"]] == [2, 3]
         assert orders["excluded"][0]["has_order"] is True
@@ -1265,10 +1253,10 @@ class TestProfitService:
             ),
         )
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_open_orders(101, now=now)
 
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        order = payload["open_orders"]["orders"][0]
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        order = payload["orders"][0]
         # Both fees round up against the order's gross value, exactly as a
         # realized sale of three units at 101 would be charged. Rounding each
         # unit alone would take 51 instead of 47 and understate the return.
@@ -1305,10 +1293,10 @@ class TestProfitService:
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_open_orders(101, now=now)
 
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        order = payload["open_orders"]["orders"][0]
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        order = payload["orders"][0]
         assert order["name"] == "Item 1"
         assert order["quantity"] == 10
         assert order["cost"] == 900
@@ -1317,7 +1305,7 @@ class TestProfitService:
         assert order["profit"] is None
         assert order["roi_percent"] is None
 
-    async def test_legacy_key_without_buy_orders_keeps_the_rest_of_the_report(
+    async def test_legacy_key_without_buy_orders_reports_them_unavailable(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
         caplog: pytest.LogCaptureFixture,
@@ -1330,7 +1318,12 @@ class TestProfitService:
             if transaction_kind != "current_buys":
                 store.touch_cache(101, transaction_kind, now=now)
 
-        async def fetched(path: str, api_key: str) -> list[Transaction]:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
             assert api_key == secret
             raise ProfitApiAuthorizationError(
                 "GW2 API request returned HTTP 403"
@@ -1350,16 +1343,16 @@ class TestProfitService:
         service._api = api  # type: ignore[assignment]
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
-            report = await service.load_report(101, 30, now=now)
+            report = await service.load_open_orders(101, now=now)
 
-        assert not report.open_orders_available
-        assert report.open_buy_orders == ()
-        payload = cast(dict[str, Any], serialize_profit_report(report))
-        assert payload["open_orders"]["available"] is False
+        assert not report.available
+        assert report.orders == ()
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        assert payload["available"] is False
         # The collection was not stored as an empty snapshot, so a replacement
         # key picks the buy orders up on the next report.
         assert not store.is_cache_fresh(101, "current_buys", 300, now=now)
-        assert "open_orders=unavailable" in caplog.text
+        assert "availability=unavailable" in caplog.text
         assert secret not in caplog.text
 
     async def test_an_unauthorized_sale_history_still_fails_the_report(
@@ -1399,10 +1392,20 @@ class TestProfitService:
             "https://api.example",
         )
 
-        assert await service.resolve_report_days(101, None) == 30
-        assert await service.resolve_report_days(101, 60) == 60
-        assert await service.resolve_report_days(101, None) == 60
-        assert await service.resolve_report_days(202, None) == 30
+        # An unremembered window is served as the default and says so, which
+        # is what lets the page put a lost choice back from the browser.
+        assert await service.resolve_report_days(101, None) == ReportWindow(
+            30, False
+        )
+        assert await service.resolve_report_days(101, 60) == ReportWindow(
+            60, True
+        )
+        assert await service.resolve_report_days(101, None) == ReportWindow(
+            60, True
+        )
+        assert await service.resolve_report_days(202, None) == ReportWindow(
+            30, False
+        )
 
     async def test_report_window_refuses_a_value_outside_the_range(
         self,
@@ -1416,7 +1419,7 @@ class TestProfitService:
         )
 
         with pytest.raises(ValueError):
-            await service.resolve_report_days(101, 91)
+            await service.resolve_report_days(101, 3651)
 
         assert store.get_report_days(101) is None
 

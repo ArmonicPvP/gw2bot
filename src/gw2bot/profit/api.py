@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 
 import aiohttp
 
@@ -18,6 +20,19 @@ LOGGER = logging.getLogger(__name__)
 
 PAGE_SIZE = 200
 ITEM_CHUNK_SIZE = 200
+
+# How many pages of one collection are read at once during a backfill. The
+# whole history is sixty pages for an active trader, and reading them one after
+# another cost about forty seconds of a page load; reading them together costs
+# about three. The ceiling keeps a single member's backfill from opening sixty
+# sockets against the GW2 API at once.
+PAGE_CONCURRENCY = 8
+
+# How far behind the stored watermark an incremental walk keeps reading before
+# it stops. Transactions arrive newest first, so one page reaching behind the
+# watermark already means there is nothing newer left; the overlap only guards
+# against entries that landed out of order around the boundary.
+SYNC_OVERLAP = timedelta(minutes=5)
 TRANSACTION_PATHS = {
     "history_buys": "/v2/commerce/transactions/history/buys",
     "history_sells": "/v2/commerce/transactions/history/sells",
@@ -80,50 +95,125 @@ class ProfitApiClient:
         )
         return valid
 
+    async def _fetch_transaction_page(
+        self,
+        path: str,
+        api_key: str,
+        page: int,
+    ) -> tuple[list[Transaction], int | None]:
+        payload, headers = await self._get(
+            path,
+            api_key=api_key,
+            params={"page": str(page), "page_size": str(PAGE_SIZE)},
+        )
+        if not isinstance(payload, list):
+            raise ProfitApiError(
+                "GW2 transaction response was not a collection"
+            )
+        transactions = [_transaction_from_payload(item) for item in payload]
+        raw_page_total = headers.get("X-Page-Total")
+        page_total: int | None = None
+        if raw_page_total is not None:
+            try:
+                page_total = int(raw_page_total)
+            except ValueError as exc:
+                raise ProfitApiError(
+                    "GW2 pagination metadata was invalid"
+                ) from exc
+            if page_total < 0:
+                raise ProfitApiError("GW2 pagination metadata was invalid")
+        return transactions, page_total
+
     async def fetch_transactions(
         self,
         path: str,
         api_key: str,
+        *,
+        since: datetime | None = None,
     ) -> list[Transaction]:
-        transactions: list[Transaction] = []
-        page = 0
-        page_total: int | None = None
-        while True:
-            payload, headers = await self._get(
+        """Read one collection, stopping early once it reaches ``since``.
+
+        Without a watermark every page is read, and the pages behind the first
+        are read together rather than one after another. With one, the walk is
+        sequential and normally ends on the first page, because a member's
+        newest page is the only one that can hold anything new.
+        """
+        first, page_total = await self._fetch_transaction_page(path, api_key, 0)
+        transactions = list(first)
+        pages_read = 1
+        if page_total is not None and page_total <= 1:
+            LOGGER.debug(
+                "Fetched GW2 profit transactions; path=%s mode=single-page "
+                "pages=%s records=%s",
                 path,
-                api_key=api_key,
-                params={"page": str(page), "page_size": str(PAGE_SIZE)},
+                pages_read,
+                len(transactions),
             )
-            if not isinstance(payload, list):
-                raise ProfitApiError(
-                    "GW2 transaction response was not a collection"
+            return transactions
+        if since is not None:
+            cutoff = since - SYNC_OVERLAP
+            if _reaches_behind(first, cutoff):
+                LOGGER.debug(
+                    "Fetched GW2 profit transactions; path=%s "
+                    "mode=incremental pages=%s records=%s",
+                    path,
+                    pages_read,
+                    len(transactions),
                 )
-            transactions.extend(
-                _transaction_from_payload(item) for item in payload
-            )
-            if page_total is None:
-                raw_page_total = headers.get("X-Page-Total")
-                if raw_page_total is not None:
-                    try:
-                        page_total = int(raw_page_total)
-                    except ValueError as exc:
-                        raise ProfitApiError(
-                            "GW2 pagination metadata was invalid"
-                        ) from exc
-                    if page_total < 0:
-                        raise ProfitApiError(
-                            "GW2 pagination metadata was invalid"
-                        )
-            page += 1
-            if page_total is not None:
-                if page >= page_total:
+                return transactions
+            page = 1
+            while page_total is None or page < page_total:
+                rows, _ = await self._fetch_transaction_page(
+                    path, api_key, page
+                )
+                transactions.extend(rows)
+                pages_read += 1
+                page += 1
+                if not rows or len(rows) < PAGE_SIZE:
                     break
-            elif len(payload) < PAGE_SIZE:
-                break
+                if _reaches_behind(rows, cutoff):
+                    break
+            LOGGER.debug(
+                "Fetched GW2 profit transactions; path=%s mode=incremental "
+                "pages=%s records=%s",
+                path,
+                pages_read,
+                len(transactions),
+            )
+            return transactions
+
+        if page_total is None:
+            # No pagination metadata to plan around, so fall back to walking
+            # until a short page ends the collection.
+            page = 1
+            while len(first) == PAGE_SIZE:
+                first, _ = await self._fetch_transaction_page(
+                    path, api_key, page
+                )
+                transactions.extend(first)
+                pages_read += 1
+                page += 1
+        else:
+            gate = asyncio.Semaphore(PAGE_CONCURRENCY)
+
+            async def page_rows(number: int) -> list[Transaction]:
+                async with gate:
+                    rows, _ = await self._fetch_transaction_page(
+                        path, api_key, number
+                    )
+                    return rows
+
+            remaining = await asyncio.gather(
+                *(page_rows(number) for number in range(1, page_total))
+            )
+            for rows in remaining:
+                transactions.extend(rows)
+            pages_read = page_total
         LOGGER.debug(
-            "Fetched GW2 profit transactions; path=%s pages=%s records=%s",
+            "Fetched GW2 profit transactions; path=%s mode=backfill "
+            "pages=%s records=%s",
             path,
-            page,
+            pages_read,
             len(transactions),
         )
         return transactions
@@ -285,6 +375,16 @@ class ProfitApiClient:
                 len(payload) if isinstance(payload, (dict, list)) else "n/a",
             )
             return payload, response.headers
+
+
+def _reaches_behind(
+    transactions: list[Transaction],
+    cutoff: datetime,
+) -> bool:
+    """Whether a page has run past the point the store already knows."""
+    return bool(transactions) and min(
+        transaction.occurred_at for transaction in transactions
+    ) <= cutoff
 
 
 def _transaction_from_payload(payload: object) -> Transaction:

@@ -67,12 +67,16 @@ class TestProfitPage:
         assert "Unclaimed Trading Post Gold" not in PROFIT_PAGE
         assert 'id="unclaimed-coins"' in PROFIT_PAGE
         assert 'id="delivery-key-help" hidden' in PROFIT_PAGE
-        assert "coin(data.delivery.coins)" in PROFIT_PAGE
-        assert "data.delivery.coins === null" in PROFIT_PAGE
+        assert "coin(delivery.coins)" in PROFIT_PAGE
+        assert "delivery.coins === null" in PROFIT_PAGE
         assert 'coins.textContent = "Unavailable";' in PROFIT_PAGE
         assert "help.hidden = false;" in PROFIT_PAGE
-        assert "renderDelivery(data);" in PROFIT_PAGE
-        assert 'fetch("/api/profit" + (days === null' in PROFIT_PAGE
+        assert 'fetchSection("delivery", "/api/profit/delivery", renderDelivery)' in (
+            PROFIT_PAGE
+        )
+        assert 'fetchSection("report", "/api/profit" + (days === null' in (
+            PROFIT_PAGE
+        )
 
     def test_delivery_lists_each_waiting_item_instead_of_one_count(
         self,
@@ -81,7 +85,7 @@ class TestProfitPage:
         assert 'id="delivery-table" data-sort-table="delivery"' in PROFIT_PAGE
         assert 'id="delivery-body"' in PROFIT_PAGE
         assert 'id="delivery-foot"' in PROFIT_PAGE
-        assert "var items = data.delivery.items;" in PROFIT_PAGE
+        assert "var items = delivery.items;" in PROFIT_PAGE
         assert "quantity += item.quantity;" in PROFIT_PAGE
         assert '"No items are waiting for pickup."' in PROFIT_PAGE
         # The old single-count row is gone rather than kept alongside it.
@@ -172,6 +176,42 @@ class TestProfitPage:
         assert "function load(useRemembered)" in PROFIT_PAGE
         assert "load(!requested);" in PROFIT_PAGE
         assert "load(false);" in PROFIT_PAGE
+
+    def test_each_section_loads_on_its_own_with_a_spinner(self) -> None:
+        assert PROFIT_PAGE.count('class="section-spinner"') == 8
+        assert PROFIT_PAGE.count('data-source="report"') == 6
+        assert PROFIT_PAGE.count('data-source="orders"') == 1
+        assert PROFIT_PAGE.count('data-source="delivery"') == 1
+        assert '<section class="card loading"' in PROFIT_PAGE
+        assert "function markSection(source, state, message)" in PROFIT_PAGE
+        assert "function fetchSection(source, url, render)" in PROFIT_PAGE
+        # All three requests go out together rather than one after another.
+        assert "Promise.all([" in PROFIT_PAGE
+        assert 'fetchSection("orders", "/api/profit/orders"' in PROFIT_PAGE
+        assert 'fetchSection("delivery", "/api/profit/delivery"' in PROFIT_PAGE
+        assert "@keyframes profit-spin" in PROFIT_PAGE
+        assert "prefers-reduced-motion" in PROFIT_PAGE
+
+    def test_a_lost_window_is_restored_from_the_browser(self) -> None:
+        assert 'STORED_DAYS_KEY = "gw2bot-profit-days"' in PROFIT_PAGE
+        assert "function readStoredDays()" in PROFIT_PAGE
+        assert "function writeStoredDays(days)" in PROFIT_PAGE
+        assert "if (data.remembered_days) {" in PROFIT_PAGE
+        # One repair per page load, so a storage write that silently fails
+        # cannot put the page in a loop.
+        assert "restoredWindow = true;" in PROFIT_PAGE
+        assert "} else if (!restoredWindow) {" in PROFIT_PAGE
+        # Reading and writing both survive a browser that refuses storage.
+        assert PROFIT_PAGE.count("} catch (error) {") >= 2
+
+    def test_the_window_reaches_past_the_gw2_history_limit(self) -> None:
+        # The page and the API have to agree, so the bound is stamped in from
+        # the store rather than written twice.
+        assert 'max="3650"' in PROFIT_PAGE
+        assert "var maxDays = 3650;" in PROFIT_PAGE
+        assert "__MAX_DAYS__" not in PROFIT_PAGE
+        assert "days <= maxDays" in PROFIT_PAGE
+        assert "historyStart = data.history_start_date;" in PROFIT_PAGE
 
     def test_daily_profit_opens_with_the_most_recent_day_first(self) -> None:
         # The first page of a 90-day window should be this week, not the

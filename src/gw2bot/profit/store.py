@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -27,15 +27,39 @@ LOGGER = logging.getLogger(__name__)
 HISTORY_KINDS = frozenset({"history_buys", "history_sells"})
 CURRENT_KINDS = frozenset({"current_sells", "current_buys"})
 TRANSACTION_KINDS = HISTORY_KINDS | CURRENT_KINDS
-HISTORY_RETENTION_DAYS = 92
 MIN_REPORT_DAYS = 1
-MAX_REPORT_DAYS = 90
+
+# An item's name is fixed for the life of the game build, so it is cached for
+# a month rather than for the five minutes a transaction snapshot lasts. This
+# is what keeps a report from asking /v2/items about the same few thousand
+# items every single time it is opened.
+ITEM_NAME_TTL_SECONDS = 30 * 24 * 60 * 60
+
+# The GW2 history endpoints only reach about ninety days back, so everything
+# older than that exists solely because this store kept it. Nothing is dropped
+# any more, and the window a member may ask for is bounded only by how long the
+# bot has been collecting for them.
+MAX_REPORT_DAYS = 3650
 
 
 @dataclass(frozen=True, slots=True)
 class ProfitApiKeySnapshot:
     api_key: str
     generation: str
+
+
+@dataclass(frozen=True, slots=True)
+class SyncState:
+    """How far one collection has been read for one member.
+
+    ``synced_through`` is the newest transaction ever stored, and is what an
+    incremental refresh stops at. ``backfilled`` says the pages behind it were
+    read too, so a member whose store predates the watermark is filled in once
+    rather than being left with only the history the old retention kept.
+    """
+
+    synced_through: datetime | None
+    backfilled: bool
 
 
 class ProfitStore:
@@ -300,6 +324,42 @@ class ProfitStore:
         )
         return fresh
 
+    def get_sync_state(
+        self,
+        discord_user_id: int,
+        cache_kind: str,
+    ) -> SyncState:
+        """Return how far this collection has been read, if at all."""
+        _require_kind(cache_kind)
+        with self._sessions() as session:
+            record = session.get(
+                ProfitCacheSyncRecord,
+                (discord_user_id, cache_kind),
+            )
+        if record is None:
+            return SyncState(None, False)
+        synced_through: datetime | None = None
+        if record.synced_through is not None:
+            try:
+                synced_through = parse_gw2_time(record.synced_through)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignored a profit sync watermark; user_id=%s kind=%s "
+                    "reason=invalid-timestamp",
+                    discord_user_id,
+                    cache_kind,
+                )
+        state = SyncState(synced_through, record.backfilled)
+        LOGGER.debug(
+            "Read profit sync state; user_id=%s kind=%s watermark=%s "
+            "backfilled=%s",
+            discord_user_id,
+            cache_kind,
+            synced_through is not None,
+            state.backfilled,
+        )
+        return state
+
     def touch_cache(
         self,
         discord_user_id: int,
@@ -355,10 +415,12 @@ class ProfitStore:
         key_generation: str,
         collections: list[tuple[str, list[Transaction]]],
         *,
+        backfilled: dict[str, bool] | None = None,
         now: datetime | None = None,
     ) -> bool:
         for transaction_kind, _ in collections:
             _require_kind(transaction_kind)
+        backfilled = {} if backfilled is None else backfilled
         stored_at = datetime.now(UTC) if now is None else now
         accepted = False
         with self._sessions.begin() as session:
@@ -380,6 +442,15 @@ class ProfitStore:
                         discord_user_id,
                         transaction_kind,
                         stored_at.isoformat(),
+                        newest=(
+                            max(
+                                transaction.occurred_at
+                                for transaction in transactions
+                            )
+                            if transactions
+                            else None
+                        ),
+                        backfilled=backfilled.get(transaction_kind, False),
                     )
                 accepted = True
         LOGGER.debug(
@@ -430,6 +501,42 @@ class ProfitStore:
             cutoff is not None,
         )
         return transactions
+
+    def get_earliest_transaction_at(
+        self,
+        discord_user_id: int,
+    ) -> datetime | None:
+        """Return the oldest trade held, which bounds a useful window."""
+        with self._sessions() as session:
+            oldest = session.scalar(
+                select(func.min(ProfitTransactionRecord.occurred_at)).where(
+                    ProfitTransactionRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitTransactionRecord.transaction_kind.in_(
+                        HISTORY_KINDS
+                    ),
+                )
+            )
+        if oldest is None:
+            LOGGER.debug(
+                "Read profit history start; user_id=%s present=false",
+                discord_user_id,
+            )
+            return None
+        try:
+            earliest = parse_gw2_time(oldest)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Ignored a profit history start; user_id=%s "
+                "reason=invalid-timestamp",
+                discord_user_id,
+            )
+            return None
+        LOGGER.debug(
+            "Read profit history start; user_id=%s present=true",
+            discord_user_id,
+        )
+        return earliest
 
     def get_item_names(
         self,
@@ -518,6 +625,9 @@ def _touch_cache_record(
     discord_user_id: int,
     cache_kind: str,
     synced_at: str,
+    *,
+    newest: datetime | None = None,
+    backfilled: bool = False,
 ) -> None:
     record = session.get(
         ProfitCacheSyncRecord,
@@ -529,10 +639,26 @@ def _touch_cache_record(
                 discord_user_id=discord_user_id,
                 cache_kind=cache_kind,
                 synced_at=synced_at,
+                synced_through=None if newest is None else newest.isoformat(),
+                backfilled=backfilled,
             )
         )
-    else:
-        record.synced_at = synced_at
+        return
+    record.synced_at = synced_at
+    # The watermark only ever moves forward. An empty refresh, or one that
+    # raced a older snapshot in, must not walk it back and make the next
+    # refresh re-read pages this one already stored.
+    if newest is not None:
+        current: datetime | None = None
+        if record.synced_through is not None:
+            try:
+                current = parse_gw2_time(record.synced_through)
+            except (TypeError, ValueError):
+                current = None
+        if current is None or newest > current:
+            record.synced_through = newest.isoformat()
+    if backfilled:
+        record.backfilled = True
 
 
 def _store_transaction_records(
@@ -580,15 +706,6 @@ def _store_transaction_records(
                 },
             ),
             rows,
-        )
-    if transaction_kind in HISTORY_KINDS:
-        cutoff = stored_at - timedelta(days=HISTORY_RETENTION_DAYS)
-        session.execute(
-            delete(ProfitTransactionRecord).where(
-                ProfitTransactionRecord.discord_user_id == discord_user_id,
-                ProfitTransactionRecord.transaction_kind.in_(HISTORY_KINDS),
-                ProfitTransactionRecord.occurred_at < cutoff.isoformat(),
-            )
         )
 
 
