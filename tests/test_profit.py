@@ -152,8 +152,43 @@ class TestProfitCalculation:
 
         assert result.items == {}
         assert result.days == {}
-        assert result.unmatched_buys == {}
         assert result.total_matched_quantity == 0
+        # What is still held is reported even when the item is not a flip:
+        # those units are unmatched purchases whatever the threshold says,
+        # and a later pass has to carry them forward to stay correct.
+        held = sum(lot.remaining for lot in result.unmatched_buys.get(1, ()))
+        assert held == max(0, buy_quantity - min(buy_quantity, sell_quantity))
+
+    def test_a_second_pass_resumes_from_the_lots_the_first_left(self) -> None:
+        buys = [transaction("buy", quantity=10, price=100)]
+        early = transaction(
+            "sell-1",
+            quantity=4,
+            price=200,
+            occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+        )
+        late = transaction(
+            "sell-2",
+            quantity=6,
+            price=210,
+            occurred_at=datetime(2026, 8, 3, tzinfo=UTC),
+        )
+
+        whole = calculate_realized_profit(buys, [early, late], with_item_days=True)
+        first = calculate_realized_profit(buys, [early], with_item_days=True)
+        second = calculate_realized_profit(
+            [],
+            [late],
+            with_item_days=True,
+            opening_lots=first.unmatched_buys,
+        )
+
+        # Matching in two passes with the lots carried between them is the
+        # same arithmetic as matching everything at once, which is what lets
+        # a refresh cost only the trades that are new.
+        assert first.total_profit + second.total_profit == whole.total_profit
+        assert {**first.item_days, **second.item_days} == whole.item_days
+        assert second.unmatched_buys == whole.unmatched_buys
 
     def test_excludes_sales_that_happened_before_any_purchase(self) -> None:
         result = calculate_realized_profit(
@@ -1623,6 +1658,68 @@ class TestRollupStore:
             row[1]
             for row in store.get_rollups(101, datetime(2026, 7, 1, tzinfo=UTC))
         ) == ["2026-08-02", "2026-08-04"]
+
+    async def test_a_refresh_matches_only_the_trades_that_are_new(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", price=100, quantity=10,
+                         occurred_at=datetime(2026, 8, 1, tzinfo=UTC))],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell", price=200, quantity=4,
+                         occurred_at=datetime(2026, 8, 2, tzinfo=UTC))],
+            now=now,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        await service._ensure_rollups(101, now)
+        first_profit = aggregate_rollups(
+            store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        ).total_profit
+
+        # A later sale of the stock the first pass left behind.
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sell-2", price=210, quantity=6,
+                         occurred_at=datetime(2026, 8, 3, tzinfo=UTC))],
+            now=now,
+        )
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(101, now)
+
+        assert "Advanced profit rollups" in caplog.text
+        # One new sale read, not the whole history over again.
+        assert "transactions=1" in caplog.text
+        merged = aggregate_rollups(
+            store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        )
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        # Advancing pass by pass lands exactly where matching it all at once
+        # would have, which is the only reason it is safe to do.
+        assert merged.total_profit > first_profit
+        assert merged.total_profit == whole.total_profit
+        assert merged.total_matched_quantity == whole.total_matched_quantity
+        assert store.get_open_lots(101) == whole.unmatched_buys
 
     async def test_a_window_reads_only_the_days_inside_it(
         self,

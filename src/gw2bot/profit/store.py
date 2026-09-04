@@ -477,6 +477,8 @@ class ProfitStore:
         discord_user_id: int,
         transaction_kind: str,
         cutoff: datetime | None = None,
+        *,
+        after: datetime | None = None,
     ) -> list[Transaction]:
         _require_kind(transaction_kind)
         query = select(ProfitTransactionRecord).where(
@@ -486,6 +488,10 @@ class ProfitStore:
         if cutoff is not None:
             query = query.where(
                 ProfitTransactionRecord.occurred_at >= cutoff.isoformat()
+            )
+        if after is not None:
+            query = query.where(
+                ProfitTransactionRecord.occurred_at > after.isoformat()
             )
         query = query.order_by(ProfitTransactionRecord.occurred_at)
         with self._sessions() as session:
@@ -702,6 +708,108 @@ class ProfitStore:
                 record.computed_at = computed_at
         LOGGER.debug(
             "Stored profit rollups; user_id=%s rows=%s open_lots=%s",
+            discord_user_id,
+            len(rollups),
+            len(lot_rows),
+        )
+
+    def merge_rollups(
+        self,
+        discord_user_id: int,
+        rollups: dict[tuple[int, str], ItemDayProfit],
+        open_lots: dict[int, tuple[BuyLot, ...]],
+        computed_through: datetime,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Add one pass's matches to what is already stored.
+
+        Days the pass touched are added to rather than replaced, because a
+        sale today does not change what a sale last week realized. Open lots
+        are replaced outright: they are the state carried to the next pass,
+        and this pass has just recomputed it.
+        """
+        computed_at = (datetime.now(UTC) if now is None else now).isoformat()
+        with self._sessions.begin() as session:
+            if rollups:
+                statement = sqlite_insert(ProfitRollupRecord)
+                session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=(
+                            "discord_user_id",
+                            "sold_day",
+                            "item_id",
+                        ),
+                        set_={
+                            "matched_quantity": (
+                                ProfitRollupRecord.matched_quantity
+                                + statement.excluded.matched_quantity
+                            ),
+                            "cost": (
+                                ProfitRollupRecord.cost
+                                + statement.excluded.cost
+                            ),
+                            "net_revenue": (
+                                ProfitRollupRecord.net_revenue
+                                + statement.excluded.net_revenue
+                            ),
+                            "profit": (
+                                ProfitRollupRecord.profit
+                                + statement.excluded.profit
+                            ),
+                            "hold_seconds": (
+                                ProfitRollupRecord.hold_seconds
+                                + statement.excluded.hold_seconds
+                            ),
+                        },
+                    ),
+                    [
+                        {
+                            "discord_user_id": discord_user_id,
+                            "sold_day": sold_day,
+                            "item_id": item_id,
+                            "matched_quantity": totals.matched_quantity,
+                            "cost": totals.cost,
+                            "net_revenue": totals.net_revenue,
+                            "profit": totals.profit,
+                            "hold_seconds": totals.hold_seconds,
+                        }
+                        for (item_id, sold_day), totals in rollups.items()
+                    ],
+                )
+            session.execute(
+                delete(ProfitOpenLotRecord).where(
+                    ProfitOpenLotRecord.discord_user_id == discord_user_id
+                )
+            )
+            lot_rows = [
+                {
+                    "discord_user_id": discord_user_id,
+                    "item_id": item_id,
+                    "lot_index": index,
+                    "remaining": lot.remaining,
+                    "unit_price": lot.unit_price,
+                    "occurred_at": lot.occurred_at.isoformat(),
+                }
+                for item_id, lots in open_lots.items()
+                for index, lot in enumerate(lots)
+            ]
+            if lot_rows:
+                session.execute(insert(ProfitOpenLotRecord), lot_rows)
+            record = session.get(ProfitRollupStateRecord, discord_user_id)
+            if record is None:
+                session.add(
+                    ProfitRollupStateRecord(
+                        discord_user_id=discord_user_id,
+                        computed_through=computed_through.isoformat(),
+                        computed_at=computed_at,
+                    )
+                )
+            else:
+                record.computed_through = computed_through.isoformat()
+                record.computed_at = computed_at
+        LOGGER.debug(
+            "Merged profit rollups; user_id=%s rows=%s open_lots=%s",
             discord_user_id,
             len(rollups),
             len(lot_rows),

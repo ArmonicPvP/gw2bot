@@ -282,15 +282,26 @@ def calculate_realized_profit(
     *,
     minimum_flip_quantity: int = 1,
     with_item_days: bool = False,
+    opening_lots: dict[int, tuple[BuyLot, ...]] | None = None,
 ) -> RealizedProfit:
     """Match sales to earlier purchases FIFO, mirroring the original bot.
 
     ``with_item_days`` also returns every match at item-and-date grain, which
     is what the stored rollups are built from.
+
+    ``opening_lots`` seeds each item's queue with purchases carried in from an
+    earlier pass. That is what lets a day's new sales be matched against the
+    stock a member was already holding, without re-reading the years of
+    history that established it.
     """
     if minimum_flip_quantity <= 0:
         raise ValueError("minimum_flip_quantity must be positive")
     events_by_item: dict[int, list[_Event]] = defaultdict(list)
+    carried = {} if opening_lots is None else opening_lots
+    for item_id in carried:
+        # Seed the item so it is visited even when this pass brings no
+        # transactions of its own; its lots may still be sold into.
+        events_by_item.setdefault(item_id, [])
     for transaction in buys:
         events_by_item[transaction.item_id].append(
             _Event(
@@ -327,7 +338,13 @@ def calculate_realized_profit(
                 0 if event.kind == "buy" else 1,
             )
         )
-        buy_lots: deque[_MutableLot] = deque()
+        buy_lots: deque[_MutableLot] = deque(
+            _MutableLot(lot.remaining, lot.unit_price, lot.occurred_at)
+            for lot in sorted(
+                carried.get(item_id, ()),
+                key=lambda lot: lot.occurred_at,
+            )
+        )
         item = _Totals()
         item_days: dict[str, _Totals] = defaultdict(_Totals)
         holding_durations: list[tuple[float, int]] = []
@@ -398,6 +415,10 @@ def calculate_realized_profit(
         # rejects sales which happened before the first available purchase.
         if item.matched_quantity < minimum_flip_quantity:
             excluded_items += 1
+            # The item is not reported, but what is still held is not lost:
+            # an incremental pass has to carry those lots on to the next one.
+            if remaining_lots:
+                unmatched[item_id] = remaining_lots
             continue
         if remaining_lots:
             unmatched[item_id] = remaining_lots

@@ -379,8 +379,9 @@ class ProfitService:
             )
             return False
         await asyncio.to_thread(
-            self._rebuild_rollups,
+            self._advance_rollups,
             discord_user_id,
+            computed_through,
             newest,
             now,
         )
@@ -393,6 +394,53 @@ class ProfitService:
         return (
             self._store.get_rollup_state(discord_user_id),
             self._store.get_newest_transaction_at(discord_user_id),
+        )
+
+    def _advance_rollups(
+        self,
+        discord_user_id: int,
+        computed_through: datetime | None,
+        newest: datetime,
+        now: datetime,
+    ) -> None:
+        """Bring the rollups up to the newest trade, reading as little as can be.
+
+        With a watermark and the lots carried from the last pass, only trades
+        newer than the watermark need matching, so a member who sold something
+        five minutes ago costs a handful of rows rather than their whole
+        history. Without one - a first pass, or trades that arrived out of
+        order behind the watermark - everything is matched again.
+        """
+        if computed_through is None:
+            self._rebuild_rollups(discord_user_id, newest, now)
+            return
+        buys = self._store.get_transactions(
+            discord_user_id, "history_buys", after=computed_through
+        )
+        sells = self._store.get_transactions(
+            discord_user_id, "history_sells", after=computed_through
+        )
+        opening_lots = self._store.get_open_lots(discord_user_id)
+        realized = calculate_realized_profit(
+            buys,
+            sells,
+            with_item_days=True,
+            opening_lots=opening_lots,
+        )
+        self._store.merge_rollups(
+            discord_user_id,
+            realized.item_days,
+            realized.unmatched_buys,
+            newest,
+            now=now,
+        )
+        LOGGER.debug(
+            "Advanced profit rollups; user_id=%s transactions=%s rows=%s "
+            "carried_items=%s",
+            discord_user_id,
+            len(buys) + len(sells),
+            len(realized.item_days),
+            len(opening_lots),
         )
 
     def _rebuild_rollups(

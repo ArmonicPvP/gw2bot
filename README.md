@@ -1465,9 +1465,17 @@ summary across both.
 That is what makes a long window cost the same as a short one. Measured on a
 real account, reading and summing a window takes about 16ms whether it asks for
 30 days or ten years, where matching the raw transactions took 131ms for 30
-days and 355ms for 90 and would grow with every month collected. The unmatched
-purchases are stored alongside, so the unrealized projection needs no
-transaction reads either.
+days and 355ms for 90 and would grow with every month collected.
+
+The purchases the matching pass never sold are stored alongside, and they are
+the whole of the state a later pass needs. So when new trades land, only the
+new ones are matched — against the stock the member was already holding —
+rather than the years of history that established it. On a real account that
+is 82ms instead of 330ms today, and the gap widens with every month kept,
+because the incremental cost depends on how much is new and the full one on
+how much there is. A first pass, or trades that somehow arrive behind the
+watermark, still matches everything. The same stored lots are what the
+unrealized projection reads, so it needs no transaction reads either.
 
 Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2
