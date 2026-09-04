@@ -1339,7 +1339,7 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
 summary, realized profit grouped by item, realized profit grouped by sale date,
-projected profit for unmatched buys currently listed for sale, the items the
+projected profit for held purchases currently listed for sale, the items the
 member is currently buying, and the coins and each item awaiting pickup from the
 Trading Post. The
 daily realized-profit table is paginated with 10 rows by default; its bottom-left
@@ -1412,6 +1412,9 @@ back without a stored window — a database restored from before the choice, say
 — the page notices it was served the default rather than a remembered value,
 puts back what that browser last used, and saves it again. It does this at most
 once per load, so a browser that refuses storage cannot put the page in a loop.
+The copy is tied to the API key it was saved under, so `/profit deletekey`
+really does forget the window: a key saved afterwards starts from the default
+again, while replacing a key with `/profit setkey` keeps it.
 
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
@@ -1492,6 +1495,11 @@ in the queue and the total cost stays exact. Without this an item bought once
 and never sold is carried by every pass forever. What is given up is the split
 between those old purchases, which only shows in the cost basis of stock held
 longer than a year.
+
+**Unrealized Profit** covers everything the member still holds that is listed
+for sale, drawn from all their stored history rather than from the selected
+window: a purchase made before the window began is still stock they are holding
+now. The window bounds the realized tables, not this one.
 
 Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2

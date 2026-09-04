@@ -2158,6 +2158,44 @@ class TestRollupRefreshIsNotARewind:
         ) is None
         assert not await service._ensure_rollups(101, later)
 
+    async def test_a_report_names_the_key_it_was_built_for(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        original = await service.load_report(101, 30, now=now)
+        assert original.key_generation
+
+        # Replacing a key keeps the member's settings, so the token holds.
+        store.set_api_key(101, "replacement-member-secret")
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        replaced = await service.load_report(101, 30, now=now)
+        assert replaced.key_generation == original.key_generation
+
+        # Deleting one throws them away, so the token must not survive it.
+        store.delete_api_key(101)
+        store.set_api_key(101, "a-fresh-start-secret")
+        for kind in TRANSACTION_PATHS:
+            store.touch_cache(101, kind, now=now)
+        fresh = await service.load_report(101, 30, now=now)
+        assert fresh.key_generation != original.key_generation
+
     async def test_a_corrected_row_is_still_a_late_arrival(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],

@@ -415,7 +415,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </section>
     <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
-      <p class="note">Unmatched purchases from the selected window that are currently listed for sale. Projected ROI is projected profit divided by their matched cost.</p>
+      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Projected ROI is projected profit divided by their matched cost.</p>
       <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -536,9 +536,15 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   // the member last picked instead of dropping them on the default.
   var STORED_DAYS_KEY = "gw2bot-profit-days";
 
-  function readStoredDays() {
+  function readStoredDays(keyGeneration) {
     try {
-      var stored = Number(localStorage.getItem(STORED_DAYS_KEY));
+      var saved = JSON.parse(localStorage.getItem(STORED_DAYS_KEY) || "null");
+      if (!saved || saved.key !== keyGeneration) {
+        // Saved under a key this member has since deleted. /profit deletekey
+        // clears the window on purpose, so the copy must not put it back.
+        return null;
+      }
+      var stored = Number(saved.days);
       return Number.isInteger(stored) && stored >= 1 && stored <= maxDays
         ? stored : null;
     } catch (error) {
@@ -546,9 +552,11 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     }
   }
 
-  function writeStoredDays(days) {
+  function writeStoredDays(days, keyGeneration) {
     try {
-      localStorage.setItem(STORED_DAYS_KEY, String(days));
+      localStorage.setItem(
+        STORED_DAYS_KEY,
+        JSON.stringify({ days: days, key: keyGeneration }));
     } catch (error) {
       trace("window-not-stored", 0);
     }
@@ -1647,17 +1655,19 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     // and the address bar follow it rather than the other way round.
     daysInput.value = String(data.days);
     if (data.remembered_days) {
-      writeStoredDays(data.days);
+      writeStoredDays(data.days, data.key_generation);
     } else if (!restoredWindow) {
-      var local = readStoredDays();
+      var local = readStoredDays(data.key_generation);
       if (local !== null && local !== data.days) {
         restoredWindow = true;
         daysInput.value = String(local);
         trace("window-restored", local);
-        load(false);
+        // Putting a window back is the page correcting itself, not the
+        // member asking for fresh data.
+        load(false, false);
         return;
       }
-      writeStoredDays(data.days);
+      writeStoredDays(data.days, data.key_generation);
     }
     if (data.max_days) {
       maxDays = data.max_days;
@@ -1743,7 +1753,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     });
   }
 
-  function load(useRemembered) {
+  function load(useRemembered, forced) {
     // Asking without a window lets the server answer with the one this member
     // last chose; the page only names a window when they just picked one.
     var days = null;
@@ -1764,9 +1774,10 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     missingKey = false;
     // Three independent requests, in flight together. Each section draws as
     // soon as its own answer arrives instead of waiting for the slowest.
-    // A member who presses Load is asking for the current state, not the
-    // one the five-minute snapshot still holds.
-    var refresh = useRemembered ? "" : "refresh=1";
+    // Only pressing Load asks for a live read. Naming a window does not:
+    // the address bar carries one after every render, so treating that as a
+    // forced refresh would make each ordinary reload bypass every cache.
+    var refresh = forced ? "refresh=1" : "";
     var reportQuery = [
       days === null ? "" : "days=" + encodeURIComponent(String(days)),
       refresh
@@ -1824,7 +1835,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   rangeForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    load(false);
+    load(false, true);
   });
   document.getElementById("days-page-size").addEventListener(
     "change", function (event) {
@@ -1880,7 +1891,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     .then(function (identity) {
       if (identity) { document.getElementById("whoami").textContent = identity.name; }
     });
-  load(!requested);
+  load(!requested, false);
 }());
 </script>
 </body>

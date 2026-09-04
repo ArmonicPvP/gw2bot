@@ -171,9 +171,9 @@ class TestProfitPage:
         assert 'history.replaceState(\n      null, "", "/profit?days=" +' in (
             PROFIT_PAGE
         )
-        assert "function load(useRemembered)" in PROFIT_PAGE
-        assert "load(!requested);" in PROFIT_PAGE
-        assert "load(false);" in PROFIT_PAGE
+        assert "function load(useRemembered, forced)" in PROFIT_PAGE
+        assert "load(!requested, false);" in PROFIT_PAGE
+        assert "load(false, true);" in PROFIT_PAGE
 
     def test_each_section_loads_on_its_own_with_a_spinner(self) -> None:
         assert PROFIT_PAGE.count('class="section-spinner"') == 8
@@ -199,12 +199,30 @@ class TestProfitPage:
         assert 'addEventListener("visibilitychange"' in PROFIT_PAGE
         # The beat rides the cache; only Load asks for a live read.
         assert 'fetch("/api/profit/orders").then' in PROFIT_PAGE
-        assert 'var refresh = useRemembered ? "" : "refresh=1";' in PROFIT_PAGE
+        assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
+
+    def test_only_the_load_button_asks_for_a_live_read(self) -> None:
+        # The address bar carries a window after every render, so naming one
+        # must not be what decides a forced refresh.
+        assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
+        assert "function load(useRemembered, forced)" in PROFIT_PAGE
+        assert "load(false, true);" in PROFIT_PAGE
+        assert "load(!requested, false);" in PROFIT_PAGE
+        assert "load(false, false);" in PROFIT_PAGE
+
+    def test_unrealized_profit_is_not_described_as_windowed(self) -> None:
+        assert "from all your stored history" in PROFIT_PAGE
+        assert "Unmatched purchases from the selected window" not in (
+            PROFIT_PAGE
+        )
 
     def test_a_lost_window_is_restored_from_the_browser(self) -> None:
         assert 'STORED_DAYS_KEY = "gw2bot-profit-days"' in PROFIT_PAGE
-        assert "function readStoredDays()" in PROFIT_PAGE
-        assert "function writeStoredDays(days)" in PROFIT_PAGE
+        assert "function readStoredDays(keyGeneration)" in PROFIT_PAGE
+        assert "function writeStoredDays(days, keyGeneration)" in PROFIT_PAGE
+        # A window saved under a deleted key is not put back: deletekey is
+        # documented to forget it.
+        assert "saved.key !== keyGeneration" in PROFIT_PAGE
         assert "if (data.remembered_days) {" in PROFIT_PAGE
         # One repair per page load, so a storage write that silently fails
         # cannot put the page in a loop.

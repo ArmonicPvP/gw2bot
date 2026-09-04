@@ -152,6 +152,9 @@ class ProfitReport:
     # The oldest purchase or sale held for this member, which is how far back
     # a window can usefully be asked to reach.
     history_start: datetime | None = None
+    # Identifies the API key this report was built for, so a member's
+    # remembered window does not survive that key being deleted.
+    key_generation: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -61,6 +61,10 @@ MAX_REPORT_DAYS = 3650
 class ProfitApiKeySnapshot:
     api_key: str
     generation: str
+    # When this key was first saved. It survives a replacement but not a
+    # deletion, which is what tells a browser copy of a member's settings
+    # apart from one saved under a key they have since deleted.
+    origin: str = "" 
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +179,7 @@ class ProfitStore:
         return ProfitApiKeySnapshot(
             api_key=api_key,
             generation=record.updated_at,
+            origin=record.created_at,
         )
 
     def delete_api_key(self, discord_user_id: int) -> bool:

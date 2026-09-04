@@ -255,6 +255,7 @@ class ProfitService:
             discord_user_id,
             days,
         )
+        snapshot = await self._require_api_key(discord_user_id)
         await self._refresh_transactions(
             discord_user_id,
             loaded_at,
@@ -298,6 +299,7 @@ class ProfitService:
             item_names=item_names,
             market_prices=market_prices,
             history_start=history_start,
+            key_generation=snapshot.origin,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
@@ -1030,6 +1032,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             else report.history_start.date().isoformat()
         ),
         "max_days": MAX_REPORT_DAYS,
+        # Opaque to the page: it only ever compares it with the one it saved,
+        # so a window kept in a browser is dropped once the key it belonged
+        # to is deleted rather than outliving it.
+        "key_generation": report.key_generation,
     }
 
 
