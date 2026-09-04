@@ -705,3 +705,77 @@ def aggregate_rollups(
         len(per_item) - len(kept),
     )
     return result
+
+
+def month_boundaries(after: datetime, through: datetime) -> list[datetime]:
+    """The UTC month starts strictly after ``after`` and at or before ``through``.
+
+    These are where the FIFO pass pauses to record what the member was
+    holding. A boundary is a place a later pass can resume from, so anything
+    that arrives late only costs a rematch back to the start of its month
+    rather than back to the start of everything.
+    """
+    if through <= after:
+        return []
+    boundaries: list[datetime] = []
+    year, month = after.year, after.month
+    while True:
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+        boundary = datetime(year, month, 1, tzinfo=UTC)
+        if boundary > through:
+            break
+        if boundary > after:
+            boundaries.append(boundary)
+    return boundaries
+
+
+def prune_open_lots(
+    lots: dict[int, tuple[BuyLot, ...]],
+    *,
+    older_than: datetime,
+) -> dict[int, tuple[BuyLot, ...]]:
+    """Collapse an item's long-held lots into one averaged lot.
+
+    A purchase that is never sold is carried by every later pass forever, so
+    an item bought years ago and sat on grows the queue without bound. Lots
+    older than the cutoff are merged into a single lot priced at their
+    unit-weighted average and dated at the oldest of them, which keeps its
+    place in the FIFO order and keeps the total cost exact. What is lost is
+    the split between those old purchases - a distinction that only shows in
+    the cost basis of stock held longer than the cutoff.
+    """
+    pruned: dict[int, tuple[BuyLot, ...]] = {}
+    collapsed_items = 0
+    collapsed_lots = 0
+    for item_id, item_lots in lots.items():
+        old = [lot for lot in item_lots if lot.occurred_at < older_than]
+        if len(old) < 2:
+            pruned[item_id] = item_lots
+            continue
+        recent = [lot for lot in item_lots if lot.occurred_at >= older_than]
+        remaining = sum(lot.remaining for lot in old)
+        if remaining <= 0:
+            pruned[item_id] = tuple(recent)
+            continue
+        # Round the averaged price up: a cost basis that is a copper high
+        # understates profit, which is the safer way to be wrong.
+        total_cost = sum(lot.remaining * lot.unit_price for lot in old)
+        merged = BuyLot(
+            remaining,
+            -(-total_cost // remaining),
+            min(lot.occurred_at for lot in old),
+        )
+        pruned[item_id] = (merged, *sorted(
+            recent, key=lambda lot: lot.occurred_at
+        ))
+        collapsed_items += 1
+        collapsed_lots += len(old)
+    if collapsed_items:
+        LOGGER.debug(
+            "Pruned held Trading Post lots; items=%s lots=%s",
+            collapsed_items,
+            collapsed_lots,
+        )
+    return pruned

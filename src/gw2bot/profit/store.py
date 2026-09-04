@@ -12,6 +12,7 @@ from gw2bot.database import (
     ProfitApiKeyRecord,
     ProfitCacheSyncRecord,
     ProfitItemRecord,
+    ProfitLotCheckpointRecord,
     ProfitOpenLotRecord,
     ProfitOrderExclusionRecord,
     ProfitPreferenceRecord,
@@ -37,6 +38,11 @@ CURRENT_KINDS = frozenset({"current_sells", "current_buys"})
 TRANSACTION_KINDS = HISTORY_KINDS | CURRENT_KINDS
 MIN_REPORT_DAYS = 1
 
+# How many month-boundary lot snapshots one member keeps. Two years of them
+# is enough to rewind any late arrival the GW2 API can still be reporting,
+# and bounds what an inactive account costs to store.
+MAX_LOT_CHECKPOINTS = 24
+
 # An item's name is fixed for the life of the game build, so it is cached for
 # a month rather than for the five minutes a transaction snapshot lasts. This
 # is what keeps a report from asking /v2/items about the same few thousand
@@ -54,6 +60,14 @@ MAX_REPORT_DAYS = 3650
 class ProfitApiKeySnapshot:
     api_key: str
     generation: str
+
+
+@dataclass(frozen=True, slots=True)
+class RollupState:
+    """How far the stored rollups reach, and when they were last computed."""
+
+    computed_through: datetime | None
+    computed_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,21 +609,188 @@ class ProfitStore:
         )
         return known
 
-    def get_rollup_state(self, discord_user_id: int) -> datetime | None:
-        """The newest transaction the stored rollups account for."""
+    def get_rollup_state(self, discord_user_id: int) -> RollupState:
+        """How far the stored rollups reach, and when they were computed."""
         with self._sessions() as session:
             record = session.get(ProfitRollupStateRecord, discord_user_id)
-        if record is None or record.computed_through is None:
+        if record is None:
+            return RollupState(None, None)
+        computed_through: datetime | None = None
+        if record.computed_through is not None:
+            try:
+                computed_through = parse_gw2_time(record.computed_through)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignored a profit rollup watermark; user_id=%s "
+                    "reason=invalid-timestamp",
+                    discord_user_id,
+                )
+        computed_at: datetime | None = None
+        try:
+            computed_at = parse_gw2_time(record.computed_at)
+        except (TypeError, ValueError):
+            computed_at = None
+        return RollupState(computed_through, computed_at)
+
+    def get_late_arrival(
+        self,
+        discord_user_id: int,
+        computed_through: datetime,
+        computed_at: datetime,
+    ) -> datetime | None:
+        """The oldest trade stored since the last pass that predates it.
+
+        History normally only grows at the newest end, and the watermark
+        alone catches that. A trade that lands behind the watermark - a
+        backfill reaching further than before, or a correction - would
+        otherwise never be matched at all, because the newest transaction
+        has not moved. This is what notices.
+        """
+        with self._sessions() as session:
+            oldest = session.scalar(
+                select(func.min(ProfitTransactionRecord.occurred_at)).where(
+                    ProfitTransactionRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitTransactionRecord.transaction_kind.in_(
+                        HISTORY_KINDS
+                    ),
+                    ProfitTransactionRecord.occurred_at
+                    <= computed_through.isoformat(),
+                    ProfitTransactionRecord.updated_at
+                    > computed_at.isoformat(),
+                )
+            )
+        if oldest is None:
             return None
         try:
-            return parse_gw2_time(record.computed_through)
+            arrival = parse_gw2_time(oldest)
         except (TypeError, ValueError):
-            LOGGER.warning(
-                "Ignored a profit rollup watermark; user_id=%s "
-                "reason=invalid-timestamp",
-                discord_user_id,
-            )
             return None
+        LOGGER.info(
+            "Found a late Trading Post arrival; user_id=%s",
+            discord_user_id,
+        )
+        return arrival
+
+    def store_lot_checkpoint(
+        self,
+        discord_user_id: int,
+        checkpoint_at: datetime,
+        lots: dict[int, tuple[BuyLot, ...]],
+    ) -> None:
+        """Record what the member held at one boundary, replacing any there."""
+        stamp = checkpoint_at.isoformat()
+        with self._sessions.begin() as session:
+            session.execute(
+                delete(ProfitLotCheckpointRecord).where(
+                    ProfitLotCheckpointRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitLotCheckpointRecord.checkpoint_at == stamp,
+                )
+            )
+            rows = [
+                {
+                    "discord_user_id": discord_user_id,
+                    "checkpoint_at": stamp,
+                    "item_id": item_id,
+                    "lot_index": index,
+                    "remaining": lot.remaining,
+                    "unit_price": lot.unit_price,
+                    "occurred_at": lot.occurred_at.isoformat(),
+                }
+                for item_id, item_lots in lots.items()
+                for index, lot in enumerate(item_lots)
+            ]
+            if rows:
+                session.execute(insert(ProfitLotCheckpointRecord), rows)
+            _trim_lot_checkpoints(session, discord_user_id)
+        LOGGER.debug(
+            "Stored a profit lot checkpoint; user_id=%s items=%s",
+            discord_user_id,
+            len(lots),
+        )
+
+    def get_lot_checkpoint_at_or_before(
+        self,
+        discord_user_id: int,
+        moment: datetime,
+    ) -> tuple[datetime, dict[int, tuple[BuyLot, ...]]] | None:
+        """The latest checkpoint a rematch from ``moment`` can start at."""
+        stamp = moment.isoformat()
+        with self._sessions() as session:
+            chosen = session.scalar(
+                select(func.max(ProfitLotCheckpointRecord.checkpoint_at))
+                .where(
+                    ProfitLotCheckpointRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitLotCheckpointRecord.checkpoint_at <= stamp,
+                )
+            )
+            if chosen is None:
+                LOGGER.debug(
+                    "No profit lot checkpoint reaches back far enough; "
+                    "user_id=%s",
+                    discord_user_id,
+                )
+                return None
+            records = list(
+                session.scalars(
+                    select(ProfitLotCheckpointRecord)
+                    .where(
+                        ProfitLotCheckpointRecord.discord_user_id
+                        == discord_user_id,
+                        ProfitLotCheckpointRecord.checkpoint_at == chosen,
+                    )
+                    .order_by(ProfitLotCheckpointRecord.lot_index)
+                )
+            )
+        try:
+            checkpoint_at = parse_gw2_time(chosen)
+        except (TypeError, ValueError):
+            return None
+        lots: dict[int, list[BuyLot]] = {}
+        for record in records:
+            try:
+                occurred_at = parse_gw2_time(record.occurred_at)
+            except (TypeError, ValueError):
+                continue
+            lots.setdefault(record.item_id, []).append(
+                BuyLot(record.remaining, record.unit_price, occurred_at)
+            )
+        LOGGER.debug(
+            "Read a profit lot checkpoint; user_id=%s items=%s",
+            discord_user_id,
+            len(lots),
+        )
+        return checkpoint_at, {
+            item_id: tuple(rows) for item_id, rows in lots.items()
+        }
+
+    def discard_rollups_from(
+        self,
+        discord_user_id: int,
+        boundary: datetime,
+    ) -> None:
+        """Drop everything computed at or after ``boundary`` so it can be redone."""
+        stamp = boundary.isoformat()
+        with self._sessions.begin() as session:
+            session.execute(
+                delete(ProfitRollupRecord).where(
+                    ProfitRollupRecord.discord_user_id == discord_user_id,
+                    ProfitRollupRecord.sold_day >= boundary.date().isoformat(),
+                )
+            )
+            session.execute(
+                delete(ProfitLotCheckpointRecord).where(
+                    ProfitLotCheckpointRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitLotCheckpointRecord.checkpoint_at > stamp,
+                )
+            )
+        LOGGER.info(
+            "Discarded profit rollups for a rematch; user_id=%s",
+            discord_user_id,
+        )
 
     def get_newest_transaction_at(
         self,
@@ -1081,9 +1262,39 @@ def _store_transaction_records(
         )
 
 
+def _trim_lot_checkpoints(session: Session, discord_user_id: int) -> None:
+    """Keep only the newest checkpoints; older ones can never be rewound to."""
+    stamps = sorted(
+        set(
+            session.scalars(
+                select(ProfitLotCheckpointRecord.checkpoint_at).where(
+                    ProfitLotCheckpointRecord.discord_user_id
+                    == discord_user_id
+                )
+            )
+        ),
+        reverse=True,
+    )
+    stale = stamps[MAX_LOT_CHECKPOINTS:]
+    if not stale:
+        return
+    session.execute(
+        delete(ProfitLotCheckpointRecord).where(
+            ProfitLotCheckpointRecord.discord_user_id == discord_user_id,
+            ProfitLotCheckpointRecord.checkpoint_at.in_(stale),
+        )
+    )
+    LOGGER.debug(
+        "Trimmed profit lot checkpoints; user_id=%s dropped=%s",
+        discord_user_id,
+        len(stale),
+    )
+
+
 def _clear_member_rollups(session: Session, discord_user_id: int) -> None:
     for record_type in (
         ProfitRollupRecord,
+        ProfitLotCheckpointRecord,
         ProfitOpenLotRecord,
         ProfitRollupStateRecord,
     ):

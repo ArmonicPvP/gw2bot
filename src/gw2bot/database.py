@@ -176,6 +176,34 @@ class ProfitOpenLotRecord(Base):
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class ProfitLotCheckpointRecord(Base):
+    """What a member was holding at one month boundary.
+
+    The FIFO pass carries one thing forward - the queue of purchases it has
+    not yet sold - so a copy of that queue is a place a later pass can start
+    from. Keeping one per month means a trade that arrives late costs a
+    rematch back to the start of its own month instead of back to the start
+    of the member's history.
+    """
+
+    __tablename__ = "gw2_profit_lot_checkpoints"
+    __table_args__ = (
+        Index(
+            "idx_gw2_profit_lot_checkpoints_lookup",
+            "discord_user_id",
+            "checkpoint_at",
+        ),
+    )
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    checkpoint_at: Mapped[str] = mapped_column(String, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lot_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    remaining: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class ProfitRollupStateRecord(Base):
     """How current one member's rollups are."""
 

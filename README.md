@@ -1473,9 +1473,25 @@ new ones are matched — against the stock the member was already holding —
 rather than the years of history that established it. On a real account that
 is 82ms instead of 330ms today, and the gap widens with every month kept,
 because the incremental cost depends on how much is new and the full one on
-how much there is. A first pass, or trades that somehow arrive behind the
-watermark, still matches everything. The same stored lots are what the
-unrealized projection reads, so it needs no transaction reads either.
+how much there is. The same stored lots are what the unrealized projection
+reads, so it needs no transaction reads either.
+
+The pass also pauses at each month boundary to record what was held at that
+moment, keeping the last two years of those. They are places a rematch can
+start from. Trades do occasionally land behind the watermark — a backfill
+reaching further than the last one did — and because the newest transaction
+has not moved, the watermark alone would never notice; the bot looks for
+history stored since the last pass but dated before it. When it finds some,
+it rewinds to the month boundary before the oldest of them, throws away what
+was computed after it, and matches forward again. Only a first pass, or an
+arrival older than every checkpoint kept, matches a whole history.
+
+Lots older than a year are merged, per item, into one lot priced at their
+unit-weighted average and dated at the oldest of them, so it keeps its place
+in the queue and the total cost stays exact. Without this an item bought once
+and never sold is carried by every pass forever. What is given up is the split
+between those old purchases, which only shows in the cost basis of stock held
+longer than a year.
 
 Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2
@@ -1497,6 +1513,7 @@ The rest of the caching:
 | Transactions | Forever | The only copy of history older than GW2 serves |
 | Item names | 30 days | Fixed for the life of a game build |
 | Matched rollups | Until new trades land | Matching does not depend on the window |
+| Month-end lot snapshots | 24 months | Where a late arrival rematches from |
 | Transaction snapshots | 5 minutes | How often a refresh is worth making |
 | Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
 

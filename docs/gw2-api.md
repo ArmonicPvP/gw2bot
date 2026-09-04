@@ -91,6 +91,14 @@ the requested window, and the result is kept as one row per item per sale date.
 A report is then addition over those rows, which is why a ten-year window costs
 what a thirty-day one does.
 
+The pass pauses at each month boundary and records the purchases it has not yet
+sold. That queue is the whole of its carried state, so those snapshots are
+places a later pass can resume from. It matters here because these endpoints do
+occasionally yield a trade older than the newest one already stored - a
+backfill reaching further than the last did - and the newest-transaction
+watermark cannot see that. The bot instead looks for history stored since the
+last pass but dated before it, and rewinds to the boundary preceding it.
+
 ### `/v2/commerce/transactions/current/sells`
 
 Returns the member's current sale listings. The cached collection is replaced

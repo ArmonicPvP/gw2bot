@@ -22,15 +22,20 @@ from gw2bot.profit.models import (
     OpenOrdersReport,
     ProfitReport,
     Transaction,
+    BuyLot,
+    ItemDayProfit,
     RealizedProfit,
     aggregate_rollups,
     calculate_realized_profit,
     calculate_unrealized_profit,
     group_open_buy_orders,
+    month_boundaries,
+    prune_open_lots,
     sale_fee_total,
 )
 from gw2bot.profit.store import (
     HISTORY_KINDS,
+    RollupState,
     ITEM_NAME_TTL_SECONDS,
     MAX_REPORT_DAYS,
     MIN_REPORT_DAYS,
@@ -50,6 +55,12 @@ OPTIONAL_TRANSACTION_KIND = "current_buys"
 # The collections the realized report is built from. Open orders and delivery
 # are loaded on their own so neither waits on this one.
 HISTORY_REPORT_KINDS = ("history_buys", "history_sells", "current_sells")
+
+# How long a purchase stays its own lot before being merged with the other
+# long-held lots for that item. A year is well past any flip; what is still
+# held after it is a position, and the split between the purchases that built
+# it costs more to carry than it tells anyone.
+LOT_PRUNE_AFTER_DAYS = 365
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,14 +376,17 @@ class ProfitService:
         discord_user_id: int,
         now: datetime,
     ) -> bool:
-        """Rebuild this member's rollups when new trades have landed."""
-        computed_through, newest = await asyncio.to_thread(
+        """Bring this member's rollups up to date, reading as little as can be."""
+        state, newest, late = await asyncio.to_thread(
             self._rollup_freshness,
             discord_user_id,
         )
         if newest is None:
             return False
-        if computed_through is not None and computed_through >= newest:
+        if late is None and (
+            state.computed_through is not None
+            and state.computed_through >= newest
+        ):
             LOGGER.debug(
                 "Profit rollups are current; user_id=%s",
                 discord_user_id,
@@ -381,8 +395,9 @@ class ProfitService:
         await asyncio.to_thread(
             self._advance_rollups,
             discord_user_id,
-            computed_through,
+            state.computed_through,
             newest,
+            late,
             now,
         )
         return True
@@ -390,10 +405,21 @@ class ProfitService:
     def _rollup_freshness(
         self,
         discord_user_id: int,
-    ) -> tuple[datetime | None, datetime | None]:
+    ) -> tuple[RollupState, datetime | None, datetime | None]:
+        state = self._store.get_rollup_state(discord_user_id)
+        late = (
+            None
+            if state.computed_through is None or state.computed_at is None
+            else self._store.get_late_arrival(
+                discord_user_id,
+                state.computed_through,
+                state.computed_at,
+            )
+        )
         return (
-            self._store.get_rollup_state(discord_user_id),
+            state,
             self._store.get_newest_transaction_at(discord_user_id),
+            late,
         )
 
     def _advance_rollups(
@@ -401,80 +427,138 @@ class ProfitService:
         discord_user_id: int,
         computed_through: datetime | None,
         newest: datetime,
+        late: datetime | None,
         now: datetime,
     ) -> None:
         """Bring the rollups up to the newest trade, reading as little as can be.
 
-        With a watermark and the lots carried from the last pass, only trades
-        newer than the watermark need matching, so a member who sold something
-        five minutes ago costs a handful of rows rather than their whole
-        history. Without one - a first pass, or trades that arrived out of
-        order behind the watermark - everything is matched again.
+        There are three ways in. Normally only the trades newer than the
+        watermark need matching, resumed from the lots the last pass left, so
+        a member who sold something five minutes ago costs a handful of rows.
+        A trade that arrived behind the watermark rewinds to the last month
+        boundary before it and rematches from there. Only a first pass, or a
+        late arrival older than every checkpoint kept, matches everything.
         """
-        if computed_through is None:
-            self._rebuild_rollups(discord_user_id, newest, now)
-            return
+        resume_from = computed_through
+        opening_lots: dict[int, tuple[BuyLot, ...]] = {}
+        reason = "incremental"
+        if late is not None:
+            checkpoint = self._store.get_lot_checkpoint_at_or_before(
+                discord_user_id,
+                late,
+            )
+            if checkpoint is None:
+                resume_from = None
+                reason = "late-arrival-before-every-checkpoint"
+            else:
+                resume_from, opening_lots = checkpoint
+                self._store.discard_rollups_from(discord_user_id, resume_from)
+                reason = "rewound"
+        elif computed_through is None:
+            reason = "first-pass"
+        else:
+            opening_lots = self._store.get_open_lots(discord_user_id)
+
         buys = self._store.get_transactions(
-            discord_user_id, "history_buys", after=computed_through
+            discord_user_id, "history_buys", after=resume_from
         )
         sells = self._store.get_transactions(
-            discord_user_id, "history_sells", after=computed_through
+            discord_user_id, "history_sells", after=resume_from
         )
-        opening_lots = self._store.get_open_lots(discord_user_id)
-        realized = calculate_realized_profit(
-            buys,
-            sells,
-            with_item_days=True,
-            opening_lots=opening_lots,
-        )
-        self._store.merge_rollups(
-            discord_user_id,
-            realized.item_days,
-            realized.unmatched_buys,
-            newest,
-            now=now,
-        )
-        LOGGER.debug(
-            "Advanced profit rollups; user_id=%s transactions=%s rows=%s "
-            "carried_items=%s",
-            discord_user_id,
-            len(buys) + len(sells),
-            len(realized.item_days),
-            len(opening_lots),
-        )
-
-    def _rebuild_rollups(
-        self,
-        discord_user_id: int,
-        newest: datetime,
-        now: datetime,
-    ) -> None:
-        """Match a member's whole history once and store the result.
-
-        Matching runs over everything held rather than over one window, so a
-        sale of stock bought before the window is costed from the purchase
-        that actually paid for it instead of being dropped for having no
-        match inside the window.
-        """
-        buys = self._store.get_transactions(discord_user_id, "history_buys")
-        sells = self._store.get_transactions(discord_user_id, "history_sells")
         # No flip threshold here: it belongs to the window a member asked
         # for, not to their whole history, and is applied when the rollups
         # are read back.
-        realized = calculate_realized_profit(buys, sells, with_item_days=True)
-        self._store.store_rollups(
+        item_days, carried = self._match_in_segments(
             discord_user_id,
-            realized.item_days,
-            realized.unmatched_buys,
+            buys,
+            sells,
+            opening_lots,
+            resume_from,
             newest,
-            now=now,
         )
+        carried = prune_open_lots(
+            carried,
+            older_than=now - timedelta(days=LOT_PRUNE_AFTER_DAYS),
+        )
+        if resume_from is None:
+            self._store.store_rollups(
+                discord_user_id, item_days, carried, newest, now=now
+            )
+        else:
+            self._store.merge_rollups(
+                discord_user_id, item_days, carried, newest, now=now
+            )
         LOGGER.info(
-            "Rebuilt profit rollups; user_id=%s transactions=%s rows=%s",
+            "Advanced profit rollups; user_id=%s reason=%s transactions=%s "
+            "rows=%s carried_items=%s",
             discord_user_id,
+            reason,
             len(buys) + len(sells),
-            len(realized.item_days),
+            len(item_days),
+            len(carried),
         )
+
+    def _match_in_segments(
+        self,
+        discord_user_id: int,
+        buys: list[Transaction],
+        sells: list[Transaction],
+        opening_lots: dict[int, tuple[BuyLot, ...]],
+        resume_from: datetime | None,
+        newest: datetime,
+    ) -> tuple[dict[tuple[int, str], ItemDayProfit], dict[int, tuple[BuyLot, ...]]]:
+        """Match a stretch of history, pausing at each month boundary.
+
+        Pausing costs nothing - matching a run of segments in order is the
+        same arithmetic as matching the whole run - and each pause leaves a
+        checkpoint a later rematch can resume from.
+        """
+        occurred = [transaction.occurred_at for transaction in (*buys, *sells)]
+        first = min(occurred) if occurred else newest
+        boundaries = month_boundaries(
+            resume_from if resume_from is not None else first,
+            newest,
+        )
+        item_days: dict[tuple[int, str], ItemDayProfit] = {}
+        carried = opening_lots
+        # Exclusive lower bound. None on a first pass, where the oldest trade
+        # belongs to the first segment rather than to the pass before it.
+        lower = resume_from
+        for boundary in (*boundaries, None):
+            end = newest if boundary is None else boundary
+            realized = calculate_realized_profit(
+                [
+                    transaction
+                    for transaction in buys
+                    if (lower is None or transaction.occurred_at > lower)
+                    and transaction.occurred_at <= end
+                ],
+                [
+                    transaction
+                    for transaction in sells
+                    if (lower is None or transaction.occurred_at > lower)
+                    and transaction.occurred_at <= end
+                ],
+                with_item_days=True,
+                opening_lots=carried,
+            )
+            item_days.update(realized.item_days)
+            carried = realized.unmatched_buys
+            if boundary is not None:
+                self._store.store_lot_checkpoint(
+                    discord_user_id,
+                    boundary,
+                    carried,
+                )
+            lower = end
+        LOGGER.debug(
+            "Matched Trading Post history in segments; user_id=%s "
+            "checkpoints=%s rows=%s",
+            discord_user_id,
+            len(boundaries),
+            len(item_days),
+        )
+        return item_days, carried
 
     def _read_windowed_report(
         self,

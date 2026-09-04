@@ -28,6 +28,8 @@ from gw2bot.profit.models import (
     BuyLot,
     ItemDayProfit,
     aggregate_rollups,
+    month_boundaries,
+    prune_open_lots,
     DeliveryItem,
     ItemProfit,
     MarketPrice,
@@ -50,7 +52,11 @@ from gw2bot.profit.service import (
     serialize_open_orders,
     serialize_profit_report,
 )
-from gw2bot.profit.store import ITEM_NAME_TTL_SECONDS, ProfitStore
+from gw2bot.profit.store import (
+    ITEM_NAME_TTL_SECONDS,
+    MAX_LOT_CHECKPOINTS,
+    ProfitStore,
+)
 from gw2bot.settings.crypto import SettingsCipher
 
 
@@ -586,6 +592,98 @@ class TestRollups:
     def test_a_zero_flip_threshold_is_refused(self) -> None:
         with pytest.raises(ValueError):
             aggregate_rollups([], {}, minimum_flip_quantity=0)
+
+
+class TestLotCheckpointHelpers:
+    def test_boundaries_are_the_month_starts_in_between(self) -> None:
+        assert [
+            boundary.date().isoformat()
+            for boundary in month_boundaries(
+                datetime(2026, 1, 15, tzinfo=UTC),
+                datetime(2026, 4, 10, tzinfo=UTC),
+            )
+        ] == ["2026-02-01", "2026-03-01", "2026-04-01"]
+
+    def test_a_stretch_inside_one_month_has_no_boundary(self) -> None:
+        assert month_boundaries(
+            datetime(2026, 1, 15, tzinfo=UTC),
+            datetime(2026, 1, 20, tzinfo=UTC),
+        ) == []
+
+    def test_a_boundary_the_stretch_starts_on_is_not_repeated(self) -> None:
+        # Resuming from a checkpoint must not immediately write it again.
+        assert month_boundaries(
+            datetime(2026, 2, 1, tzinfo=UTC),
+            datetime(2026, 2, 20, tzinfo=UTC),
+        ) == []
+
+    def test_a_year_end_rolls_over(self) -> None:
+        assert [
+            boundary.date().isoformat()
+            for boundary in month_boundaries(
+                datetime(2026, 11, 5, tzinfo=UTC),
+                datetime(2027, 1, 5, tzinfo=UTC),
+            )
+        ] == ["2026-12-01", "2027-01-01"]
+
+    def test_pruning_merges_long_held_lots_without_losing_their_cost(
+        self,
+    ) -> None:
+        lots = {
+            1: (
+                BuyLot(3, 100, datetime(2024, 1, 1, tzinfo=UTC)),
+                BuyLot(2, 150, datetime(2024, 2, 1, tzinfo=UTC)),
+                BuyLot(5, 90, datetime(2026, 8, 1, tzinfo=UTC)),
+            )
+        }
+
+        pruned = prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        )
+
+        merged, recent = pruned[1]
+        assert merged.remaining == 5
+        # 3 at 100 and 2 at 150 is 600 held across 5 units.
+        assert merged.remaining * merged.unit_price == 600
+        # It keeps the oldest date, so it still sells first.
+        assert merged.occurred_at == datetime(2024, 1, 1, tzinfo=UTC)
+        assert recent == lots[1][2]
+
+    def test_pruning_leaves_a_single_old_lot_alone(self) -> None:
+        lots = {1: (BuyLot(3, 100, datetime(2024, 1, 1, tzinfo=UTC)),)}
+
+        assert prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        ) == lots
+
+    def test_pruning_leaves_recent_lots_apart(self) -> None:
+        lots = {
+            1: (
+                BuyLot(3, 100, datetime(2026, 8, 1, tzinfo=UTC)),
+                BuyLot(2, 150, datetime(2026, 8, 2, tzinfo=UTC)),
+            )
+        }
+
+        assert prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        ) == lots
+
+    def test_a_pruned_lot_is_priced_no_lower_than_it_cost(self) -> None:
+        # Three units costing 100 in total does not divide evenly. Rounding
+        # the basis up understates profit, which is the safer way to be out.
+        lots = {
+            1: (
+                BuyLot(1, 34, datetime(2024, 1, 1, tzinfo=UTC)),
+                BuyLot(2, 33, datetime(2024, 1, 2, tzinfo=UTC)),
+            )
+        }
+
+        merged = prune_open_lots(
+            lots, older_than=datetime(2025, 1, 1, tzinfo=UTC)
+        )[1][0]
+
+        assert merged.remaining == 3
+        assert merged.unit_price * merged.remaining >= 34 + 66
 
 
 class TestMarketPriceCache:
@@ -1626,7 +1724,9 @@ class TestRollupStore:
         )
 
         first = await service.load_report(101, 30, now=now)
-        assert store.get_rollup_state(101) == datetime(2026, 8, 2, tzinfo=UTC)
+        assert store.get_rollup_state(101).computed_through == datetime(
+            2026, 8, 2, tzinfo=UTC
+        )
         assert [row[1] for row in store.get_rollups(101, datetime(
             2026, 7, 1, tzinfo=UTC))] == ["2026-08-02"]
 
@@ -1775,7 +1875,238 @@ class TestRollupStore:
 
         assert store.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)) == []
         assert store.get_open_lots(101) == {}
-        assert store.get_rollup_state(101) is None
+        assert store.get_rollup_state(101).computed_through is None
+
+
+class TestRollupRewind:
+    @staticmethod
+    def _service(store: ProfitStore) -> ProfitService:
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        return service
+
+    @staticmethod
+    def _totals(store: ProfitStore) -> tuple[int, int]:
+        realized = aggregate_rollups(
+            store.get_rollups(101, datetime(2020, 1, 1, tzinfo=UTC)),
+            store.get_open_lots(101),
+        )
+        return realized.total_profit, realized.total_matched_quantity
+
+    async def test_months_are_checkpointed_as_the_pass_crosses_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction("b1", price=100, quantity=10,
+                            occurred_at=datetime(2026, 1, 10, tzinfo=UTC)),
+                transaction("b2", price=120, quantity=10,
+                            occurred_at=datetime(2026, 3, 10, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [
+                transaction("s1", price=200, quantity=6,
+                            occurred_at=datetime(2026, 2, 10, tzinfo=UTC)),
+                transaction("s2", price=210, quantity=6,
+                            occurred_at=datetime(2026, 4, 5, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        service = self._service(store)
+
+        await service._ensure_rollups(101, now)
+
+        # February, March and April starts all fall inside the stretch.
+        for boundary in (
+            datetime(2026, 2, 1, tzinfo=UTC),
+            datetime(2026, 3, 1, tzinfo=UTC),
+            datetime(2026, 4, 1, tzinfo=UTC),
+        ):
+            found = store.get_lot_checkpoint_at_or_before(101, boundary)
+            assert found is not None
+            assert found[0] == boundary
+        # The February checkpoint predates the first sale, so it still holds
+        # everything the January purchase bought.
+        february = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 2, 1, tzinfo=UTC)
+        )
+        assert february is not None
+        assert sum(lot.remaining for lot in february[1][1]) == 10
+
+    async def test_a_late_trade_rewinds_to_its_month_and_rematches(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b1", price=100, quantity=10,
+                         occurred_at=datetime(2026, 1, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s1", price=200, quantity=6,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+        before = self._totals(store)
+
+        # A March sale turns up after the fact: older than the watermark, so
+        # the newest transaction has not moved and only the arrival check
+        # can notice it.
+        later = datetime(2026, 4, 11, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s0", price=190, quantity=4,
+                         occurred_at=datetime(2026, 3, 15, tzinfo=UTC))],
+            now=later,
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(101, later)
+
+        assert "reason=rewound" in caplog.text
+        after = self._totals(store)
+        assert after[1] == before[1] + 4
+        # And it lands exactly where matching the lot from scratch would.
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert after == (whole.total_profit, whole.total_matched_quantity)
+        assert store.get_open_lots(101) == whole.unmatched_buys
+
+    async def test_a_late_trade_older_than_every_checkpoint_rebuilds(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b1", price=100, quantity=10,
+                         occurred_at=datetime(2026, 3, 10, tzinfo=UTC))],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s1", price=200, quantity=6,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+
+        later = datetime(2026, 4, 11, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b0", price=80, quantity=10,
+                         occurred_at=datetime(2025, 6, 1, tzinfo=UTC))],
+            now=later,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s0", price=150, quantity=5,
+                         occurred_at=datetime(2025, 7, 1, tzinfo=UTC))],
+            now=later,
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            assert await service._ensure_rollups(101, later)
+
+        assert "reason=late-arrival-before-every-checkpoint" in caplog.text
+        whole = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert self._totals(store) == (
+            whole.total_profit,
+            whole.total_matched_quantity,
+        )
+
+    async def test_long_held_lots_are_merged_once_they_age_out(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction("old-1", price=100, quantity=3,
+                            occurred_at=datetime(2024, 1, 1, tzinfo=UTC)),
+                transaction("old-2", price=150, quantity=2,
+                            occurred_at=datetime(2024, 2, 1, tzinfo=UTC)),
+                transaction("recent", price=90, quantity=5,
+                            occurred_at=datetime(2026, 4, 1, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        store.store_transactions(101, "history_sells", [], now=now)
+        service = self._service(store)
+
+        await service._ensure_rollups(101, now)
+
+        lots = store.get_open_lots(101)[1]
+        # Two purchases from 2024 became one; the recent one stayed its own.
+        assert len(lots) == 2
+        assert lots[0].remaining == 5
+        assert lots[0].remaining * lots[0].unit_price == 600
+        assert lots[1].remaining == 5
+        assert lots[1].unit_price == 90
+
+    def test_only_the_newest_checkpoints_are_kept(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        lots = {1: (BuyLot(1, 100, datetime(2024, 1, 1, tzinfo=UTC)),)}
+        for month in range(1, MAX_LOT_CHECKPOINTS + 4):
+            store.store_lot_checkpoint(
+                101,
+                datetime(2024, 1, 1, tzinfo=UTC)
+                + timedelta(days=31 * (month - 1)),
+                lots,
+            )
+
+        # The oldest fall away; the newest are the ones a rewind can use.
+        assert store.get_lot_checkpoint_at_or_before(
+            101, datetime(2024, 1, 1, tzinfo=UTC)
+        ) is None
+        assert store.get_lot_checkpoint_at_or_before(
+            101, datetime(2030, 1, 1, tzinfo=UTC)
+        ) is not None
 
 
 class TestProfitBackgroundSync:
