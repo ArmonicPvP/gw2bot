@@ -1417,9 +1417,17 @@ cost, and **Projected ROI** is the profit over that cost.
 **Your Price** and **Cost** come from the member's own purchase history. The
 delivery box holds everything bought since they last collected, and collecting
 empties it in one go, so what is waiting is normally the newest run of their
-purchases — which is what the section prices it from, newest first, drawing on
-the purchases no sale has been matched against. Your Price is the average
-across them.
+purchases — which is what the section prices it from, newest first. Your Price
+is the average across them.
+
+It reads the purchases themselves rather than what the matcher left over. A
+sale of stock that was never bought through the Trading Post — crafted,
+gathered, or held from before the member saved a key — is matched against the
+newest purchase FIFO can reach, and that can be one still sitting uncollected
+in the box. Since an uncollected item cannot have been sold, reading the
+purchases directly keeps such a stack priced by the buys that filled it. Only
+as many purchases as the waiting stacks need are read, so a heavily traded item
+costs the rows the box needs rather than its whole history.
 
 It is a cost basis rather than a receipt, and the distinction matters for one
 case the API cannot report: a stack handed back by a cancelled sell listing
@@ -1438,15 +1446,14 @@ dashed cost says how far the purchases reached. Those rows, and any with no
 current market price, are left out of the totals so the footer reconciles with
 itself, and a note above the table says so whenever there are any.
 
-Because the basis comes from the last matched pass, a purchase that filled
-since then is not in it yet, and a stack can price from the previous basis
-until the next pass lands.
+Because the basis comes from stored history, a purchase that filled since the
+last sync is not in it yet, and a stack can price from the previous basis until
+the next sync lands.
 
-The cost side is read from the matched history the daily sync already stores,
-never from a sync of this section's own, so it stays the one-request section it
-has always been. A member whose history has never been matched sees the market
-columns and dashes where the cost would be, and the costs appear on their next
-visit.
+The cost side is read from the history the daily sync already stores, never
+from a sync of this section's own, so it stays the one-request section it has
+always been. A member whose history has never been read sees the market columns
+and dashes where the cost would be, and the costs appear on their next visit.
 
 The window in the header is remembered the same way: whenever a member loads a
 report the chosen number of days is stored against their Discord account, and

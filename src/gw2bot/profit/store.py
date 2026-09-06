@@ -492,6 +492,76 @@ class ProfitStore:
         )
         return accepted
 
+    def get_recent_purchases(
+        self,
+        discord_user_id: int,
+        wanted: dict[int, int],
+    ) -> dict[int, tuple[BuyLot, ...]]:
+        """The newest purchases of each item, up to the quantity asked for.
+
+        This reads the purchases themselves rather than what FIFO left
+        unmatched, because a sale of stock that was never bought through the
+        Trading Post - crafted, gathered, or held from before the member
+        saved a key - consumes the newest lot it can reach, and that can be
+        a purchase still sitting uncollected in the delivery box. Reading the
+        purchases directly keeps a stack that cannot have been sold priced by
+        the buys that filled it.
+
+        Rows arrive newest first and stop per item once its quantity is
+        covered, so a heavily traded item costs the rows the box needs and
+        not its whole history.
+        """
+        if not wanted:
+            return {}
+        query = (
+            select(ProfitTransactionRecord)
+            .where(
+                ProfitTransactionRecord.discord_user_id == discord_user_id,
+                ProfitTransactionRecord.transaction_kind == "history_buys",
+                ProfitTransactionRecord.item_id.in_(wanted),
+            )
+            # Newest first, with the transaction id settling a shared
+            # timestamp so the same rows are read on every pass.
+            .order_by(
+                ProfitTransactionRecord.occurred_at.desc(),
+                ProfitTransactionRecord.transaction_id.desc(),
+            )
+        )
+        taken: dict[int, list[BuyLot]] = {}
+        covered: dict[int, int] = {}
+        with self._sessions() as session:
+            for record in session.scalars(query).yield_per(500):
+                still_wanted = wanted[record.item_id] - covered.get(
+                    record.item_id, 0
+                )
+                if still_wanted <= 0:
+                    continue
+                try:
+                    occurred_at = parse_gw2_time(record.occurred_at)
+                except (TypeError, ValueError):
+                    continue
+                units = min(record.quantity, still_wanted)
+                taken.setdefault(record.item_id, []).append(
+                    BuyLot(units, record.price, occurred_at)
+                )
+                covered[record.item_id] = (
+                    covered.get(record.item_id, 0) + units
+                )
+                if len(covered) == len(wanted) and all(
+                    covered[item_id] >= quantity
+                    for item_id, quantity in wanted.items()
+                ):
+                    break
+        LOGGER.debug(
+            "Read recent profit purchases; user_id=%s items=%s covered=%s",
+            discord_user_id,
+            len(wanted),
+            sum(1 for i, q in wanted.items() if covered.get(i, 0) >= q),
+        )
+        return {
+            item_id: tuple(lots) for item_id, lots in taken.items()
+        }
+
     def get_transactions(
         self,
         discord_user_id: int,

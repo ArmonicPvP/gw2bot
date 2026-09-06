@@ -773,25 +773,30 @@ def month_boundaries(after: datetime, through: datetime) -> list[datetime]:
 
 def attribute_delivery_cost(
     items: tuple[DeliveryItem, ...],
-    open_lots: dict[int, tuple[BuyLot, ...]],
+    purchases: dict[int, tuple[BuyLot, ...]],
 ) -> dict[int, DeliveryCost]:
-    """Price the delivery box from the purchases that filled it.
+    """Price the delivery box from the member's newest purchases.
 
     The box holds everything bought since the member last collected, and
     collecting takes all of it at once, so what is waiting is the newest run
-    of their purchases. The lots are therefore consumed newest first, which
-    is also why the unmatched lots are the right source: FIFO sells the
-    oldest stock, so what it leaves behind is the newest.
+    of their purchases. The lots are therefore consumed newest first.
 
-    A stack the lots cannot cover - items handed back by a cancelled sell
-    listing, or bought before the member saved a key - is attributed as far
-    as the purchases reach and no further.
+    They are the purchases themselves rather than what FIFO left unmatched.
+    A sale of stock that was never bought through the Trading Post - crafted,
+    gathered, or held from before the member saved a key - is matched against
+    the newest purchase the matcher can reach, and that can be one still
+    sitting uncollected in the box. Reading the purchases directly keeps a
+    stack that cannot have been sold priced by the buys that filled it.
+
+    A stack the purchases cannot cover - items handed back by a cancelled
+    sell listing, or bought before the member saved a key - is attributed as
+    far as they reach and no further.
     """
     costs: dict[int, DeliveryCost] = {}
     uncovered = 0
     for item in items:
         lots = sorted(
-            open_lots.get(item.item_id, ()),
+            purchases.get(item.item_id, ()),
             key=lambda lot: lot.occurred_at,
             reverse=True,
         )

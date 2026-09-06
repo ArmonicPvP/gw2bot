@@ -175,10 +175,10 @@ class ProfitService:
 
         Delivery depends on no transaction collection, so this answers in one
         request while the history sections are still being read. The cost
-        behind each stack comes from lots already stored by an earlier pass,
-        never from a sync of its own: a member who has never had one built
-        sees the market columns and no cost, rather than waiting on a history
-        read this section does not otherwise need.
+        behind each stack comes from purchases already stored by an earlier
+        sync, never from a sync of its own: a member whose history has never
+        been read sees the market columns and no cost, rather than waiting on
+        a collection this section does not otherwise need.
         """
         loaded_at = datetime.now(UTC) if now is None else now
         snapshot = await self._require_api_key(discord_user_id)
@@ -190,14 +190,19 @@ class ProfitService:
         )
         delivered = items or ()
         item_ids = {row.item_id for row in delivered}
-        # Prices, names and the stored lots are independent reads, so they
-        # go out together rather than one after another.
-        market_prices, item_names, open_lots = await asyncio.gather(
+        # Prices, names and the stored purchases are independent reads, so
+        # they go out together rather than one after another. Only as many
+        # purchases as the waiting stacks need are read.
+        market_prices, item_names, purchases = await asyncio.gather(
             self._api.fetch_market_prices(item_ids, force=force),
             self._resolve_item_names(item_ids, loaded_at),
-            asyncio.to_thread(self._store.get_open_lots, discord_user_id),
+            asyncio.to_thread(
+                self._store.get_recent_purchases,
+                discord_user_id,
+                {row.item_id: row.quantity for row in delivered},
+            ),
         )
-        costs = attribute_delivery_cost(delivered, open_lots)
+        costs = attribute_delivery_cost(delivered, purchases)
         LOGGER.debug(
             "Loaded Trading Post delivery; user_id=%s coins=%s items=%s "
             "priced=%s costed=%s",

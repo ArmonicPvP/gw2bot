@@ -193,10 +193,14 @@ added together.
 
 The response carries no prices and no purchase history, so the section's cost
 and market columns come from elsewhere: `/v2/commerce/prices` for the current
-spread, and the member's own stored purchase lots for what the stack cost. The
-box holds everything bought since the member last collected, and collecting
-empties it in one action, so the waiting stacks are normally the newest run of
-their purchases and the lots are consumed newest first.
+spread, and the member's own stored purchases for what the stack cost. The box
+holds everything bought since the member last collected, and collecting empties
+it in one action, so the waiting stacks are normally the newest run of their
+purchases and those purchases are consumed newest first. They are read
+directly rather than taken from what FIFO left unmatched: a sale of stock that
+was never bought here consumes the newest purchase the matcher can reach, which
+may be one still waiting in the box, and an uncollected item cannot have been
+sold.
 
 The response cannot say how a stack reached the box: a cancelled sell listing
 returns items exactly as a filled buy order delivers them. Stock of one item is

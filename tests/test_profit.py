@@ -928,6 +928,74 @@ class TestProfitStore:
         assert first not in caplog.text
         assert second not in caplog.text
 
+    def test_recent_purchases_stop_once_the_asked_quantity_is_covered(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # A heavily traded item must cost the rows the box needs, not its
+        # whole history, and the newest are the ones that filled the box.
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 22, tzinfo=UTC)
+        store.set_api_key(101, "recent-purchases-secret")
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction(f"buy-{day}", price=10 * day, quantity=5,
+                            occurred_at=datetime(2026, 8, day, tzinfo=UTC))
+                for day in range(1, 21)
+            ]
+            + [
+                transaction("other-item", item_id=2, price=999, quantity=9,
+                            occurred_at=datetime(2026, 8, 20, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+
+        purchases = store.get_recent_purchases(101, {1: 7})
+
+        # The newest lot whole, then part of the next, and nothing older.
+        assert purchases == {
+            1: (
+                BuyLot(5, 200, datetime(2026, 8, 20, tzinfo=UTC)),
+                BuyLot(2, 190, datetime(2026, 8, 19, tzinfo=UTC)),
+            )
+        }
+        assert store.get_recent_purchases(101, {}) == {}
+
+    def test_recent_purchases_ignore_sales_and_other_members(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 22, tzinfo=UTC)
+        store.set_api_key(101, "purchase-scope-secret")
+        store.set_api_key(202, "other-member-secret")
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("sold", price=500, quantity=4)],
+            now=now,
+        )
+        store.store_transactions(
+            202,
+            "history_buys",
+            [transaction("theirs", price=700, quantity=4)],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("mine", price=300, quantity=4)],
+            now=now,
+        )
+
+        purchases = store.get_recent_purchases(101, {1: 4})
+
+        assert purchases == {
+            1: (BuyLot(4, 300, datetime(2026, 8, 1, tzinfo=UTC)),)
+        }
+
     def test_equal_timestamp_transactions_come_back_in_a_stable_order(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -1432,17 +1500,17 @@ class TestProfitService:
         store, _, _ = profit_store
         store.set_api_key(101, "delivery-cost-secret")
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        store.store_rollups(
+        store.store_transactions(
             101,
-            {},
-            {
-                1: (
-                    BuyLot(5, 40, datetime(2026, 8, 1, tzinfo=UTC)),
-                    BuyLot(4, 100, datetime(2026, 8, 19, tzinfo=UTC)),
-                    BuyLot(3, 120, datetime(2026, 8, 20, tzinfo=UTC)),
-                )
-            },
-            now,
+            "history_buys",
+            [
+                transaction("old", price=40, quantity=5,
+                            occurred_at=datetime(2026, 8, 1, tzinfo=UTC)),
+                transaction("mid", price=100, quantity=4,
+                            occurred_at=datetime(2026, 8, 19, tzinfo=UTC)),
+                transaction("new", price=120, quantity=3,
+                            occurred_at=datetime(2026, 8, 20, tzinfo=UTC)),
+            ],
             now=now,
         )
         service = ProfitService(
@@ -1476,8 +1544,71 @@ class TestProfitService:
         assert row["projected_sale"] == 1_020
         assert row["projected_profit"] == 360
         assert row["roi_percent"] == pytest.approx(54.545, rel=1e-3)
-        # Costing the box reads stored lots; it never syncs history itself.
+        # Costing the box reads stored purchases; it never syncs them.
         api.fetch_transactions.assert_not_awaited()
+
+    async def test_a_sale_of_untracked_stock_leaves_the_box_priced(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # A sale of stock that was never bought through the Trading Post -
+        # crafted, gathered, or held from before the key - is matched
+        # against the newest purchase FIFO can reach, which can be one still
+        # sitting uncollected in the box. An uncollected item cannot have
+        # been sold, so the box must still be priced by the buy that filled
+        # it rather than losing its cost to that sale.
+        store, _, _ = profit_store
+        store.set_api_key(101, "untracked-stock-secret")
+        now = datetime(2026, 8, 22, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction("into-box", price=50, quantity=100,
+                            occurred_at=datetime(2026, 8, 20, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [
+                transaction("crafted", price=90, quantity=100,
+                            occurred_at=datetime(2026, 8, 21, tzinfo=UTC)),
+            ],
+            now=now,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(0, (DeliveryItem(1, 100),))
+            ),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(60, 80)}
+            ),
+        )
+
+        # The matcher really does consume that purchase, which is why the
+        # basis cannot be read from what it leaves behind.
+        realized = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+        )
+        assert realized.unmatched_buys == {}
+
+        report = await service.load_delivery(101, now=now)
+
+        payload = cast(dict[str, Any], serialize_delivery(report))
+        row = cast(list[dict[str, Any]], payload["items"])[0]
+        assert row["costed_quantity"] == 100
+        assert row["cost"] == 5_000
+        assert row["unit_price"] == 50
 
     async def test_delivery_box_is_held_between_price_beats(
         self,
@@ -1564,11 +1695,13 @@ class TestProfitService:
         store, _, _ = profit_store
         store.set_api_key(101, "partial-delivery-secret")
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        store.store_rollups(
+        store.store_transactions(
             101,
-            {},
-            {1: (BuyLot(2, 100, datetime(2026, 8, 20, tzinfo=UTC)),)},
-            now,
+            "history_buys",
+            [
+                transaction("only", price=100, quantity=2,
+                            occurred_at=datetime(2026, 8, 20, tzinfo=UTC)),
+            ],
             now=now,
         )
         service = ProfitService(
