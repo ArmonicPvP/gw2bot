@@ -8,7 +8,12 @@ from gw2bot.web.page import (
     sign_in_page,
 )
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
-from gw2bot.web.profit_page import PROFIT_PAGE
+from gw2bot.web.profit_page import (
+    PAGE_SIZE_DEFAULT,
+    PAGE_SIZE_LIMIT,
+    PROFIT_PAGE,
+    _pagination_nav,
+)
 
 
 def _call_arguments(source: str, name: str) -> list[list[str]]:
@@ -306,8 +311,116 @@ class TestProfitPage:
         assert 'id="days-page-size" type="number" min="1" max="90" value="10"' in PROFIT_PAGE
         assert 'id="days-pages-top"' in PROFIT_PAGE
         assert 'id="days-pages-bottom"' in PROFIT_PAGE
-        assert "function paginateDays()" in PROFIT_PAGE
-        assert 'button.setAttribute("aria-current", "page")' in PROFIT_PAGE
+        assert "function paginate(key)" in PROFIT_PAGE
+        assert 'days: { page: 1, size: 10, pages: 1, body: "days-body" }' in (
+            PROFIT_PAGE
+        )
+
+    def test_realized_profit_by_item_is_paginated_like_the_day_table(
+        self,
+    ) -> None:
+        # The two tables run on one paginator rather than a copy each, so the
+        # item table is a row in `pagers` and a pair of bars in the markup.
+        assert 'items: { page: 1, size: 10, pages: 1, body: "items-body" },' in (
+            PROFIT_PAGE
+        )
+        assert 'id="items-pages-top"' in PROFIT_PAGE
+        assert 'id="items-pages-bottom"' in PROFIT_PAGE
+        assert (
+            f'id="items-page-size" type="number" min="1"'
+            f' max="{PAGE_SIZE_LIMIT}" value="{PAGE_SIZE_DEFAULT}"'
+        ) in PROFIT_PAGE
+        assert PROFIT_PAGE.count('class="page-size-input"') == 2
+        # Totals are in the foot, which no page hides.
+        assert 'tr[data-sort-row]"))' in PROFIT_PAGE
+
+    def test_page_pickers_step_to_the_ends_and_take_a_typed_page(self) -> None:
+        # Four bars - two tables, above and below - each with first, previous,
+        # a typeable page box, next and last.
+        for step in ("first", "previous", "next", "last"):
+            assert PROFIT_PAGE.count(f'data-page-step="{step}"') == 4
+        assert PROFIT_PAGE.count("&#171;") == 4
+        assert PROFIT_PAGE.count("&#8249;") == 4
+        assert PROFIT_PAGE.count("&#8250;") == 4
+        assert PROFIT_PAGE.count("&#187;") == 4
+        assert PROFIT_PAGE.count('class="page-input"') == 4
+        assert ">Page number</label>" in PROFIT_PAGE
+        assert "function commitTypedPage(input)" in PROFIT_PAGE
+        assert "function goToPage(key, page)" in PROFIT_PAGE
+        # Numbered page links are gone; the box replaces them.
+        assert 'button.setAttribute("aria-current", "page")' not in PROFIT_PAGE
+
+    def test_page_picker_refuses_a_page_outside_the_table(self) -> None:
+        assert (
+            "if (!Number.isInteger(typed) || typed < 1 "
+            "|| typed > pager.pages) {"
+        ) in PROFIT_PAGE
+        assert 'trace(key + "-refuse-page", 0);' in PROFIT_PAGE
+        assert 'trace(key + "-refuse-page-size", 0);' in PROFIT_PAGE
+        # The ends stop being offered once the reader is already there.
+        assert 'var backwards = button.dataset.pageStep === "first"' in (
+            PROFIT_PAGE
+        )
+        assert "? pager.page <= 1" in PROFIT_PAGE
+        assert ": pager.page >= pager.pages;" in PROFIT_PAGE
+
+    def test_page_picker_leaves_a_box_being_typed_in_alone(self) -> None:
+        assert "if (document.activeElement !== input) {" in PROFIT_PAGE
+        # A nav is not a form, so Enter is wired rather than left to submit.
+        assert 'if (event.key === "Enter") {' in PROFIT_PAGE
+
+    def test_pagination_bars_are_written_once_for_both_tables(self) -> None:
+        top = _pagination_nav("items", "top", "Item pages")
+        bottom = _pagination_nav("items", "bottom", "Item pages and page size")
+        assert 'aria-label="Item pages"' in top
+        assert 'class="page-size"' not in top
+        # Only the bottom bar carries the rows-per-page control.
+        assert 'id="items-page-size"' in bottom
+        assert 'id="items-page-top"' in top
+        assert 'id="items-page-bottom"' in bottom
+        # Four steps, the page box and its total carry the group; the bottom
+        # bar's rows-per-page control is the seventh.
+        assert top.count('data-page-group="items"') == 6
+        assert bottom.count('data-page-group="items"') == 7
+
+    def test_your_picks_ranks_by_column_sort_rather_than_a_toggle(
+        self,
+    ) -> None:
+        # The ROI/Profit buttons are gone; the columns rank the picks now.
+        assert 'id="picks-roi"' not in PROFIT_PAGE
+        assert 'id="picks-profit"' not in PROFIT_PAGE
+        assert "picksMetric" not in PROFIT_PAGE
+        assert "pick-toggle" not in PROFIT_PAGE
+        assert 'id="picks-table" data-sort-table="picks"' in PROFIT_PAGE
+        for key in ("item", "buy-price", "sell-price", "pick-profit",
+                    "pick-roi"):
+            assert f'data-sort-key="{key}"' in PROFIT_PAGE
+        # It opens on the ranking the ROI button used to hold.
+        assert (
+            '<th aria-sort="descending"><button class="sort-button" '
+            'type="button" data-sort-index="4" data-sort-kind="number" '
+            'data-sort-key="pick-roi" data-sort-default="descending">ROI'
+            "</button>"
+        ) in PROFIT_PAGE
+        assert 'applySort("picks-table");' in PROFIT_PAGE
+
+    def test_your_picks_keeps_the_top_rows_of_whatever_sort_is_chosen(
+        self,
+    ) -> None:
+        # Every pick is rendered and sorted; only the rows the sort puts on
+        # top are shown, so sorting by profit or ROI lists the highest of it.
+        assert "var PICKS_LIMIT = 10;" in PROFIT_PAGE
+        assert "function limitPicks()" in PROFIT_PAGE
+        assert "row.hidden = index >= PICKS_LIMIT;" in PROFIT_PAGE
+        assert ").slice(0, 10).forEach(" not in PROFIT_PAGE
+        # Sorting reaches the trim and the pagers through one hook.
+        assert "function afterSort(key)" in PROFIT_PAGE
+        assert '} else if (key === "picks") {' in PROFIT_PAGE
+        # Picks are sortable rows now, so ties fall back on render order.
+        assert "var row = sortableRow(index);" in PROFIT_PAGE
+        assert 'cell(row, coin(item.buy_price), "", item.buy_price);' in (
+            PROFIT_PAGE
+        )
 
     def test_dynamic_trading_post_values_never_become_markup(self) -> None:
         assert "innerHTML" not in PROFIT_PAGE
@@ -323,8 +436,8 @@ class TestProfitPage:
         assert "location.pathname + location.search" in PROFIT_PAGE
 
     def test_detail_tables_have_accessible_sort_buttons(self) -> None:
-        assert PROFIT_PAGE.count('data-sort-table="') == 5
-        assert PROFIT_PAGE.count('class="sort-button"') == 33
+        assert PROFIT_PAGE.count('data-sort-table="') == 6
+        assert PROFIT_PAGE.count('class="sort-button"') == 38
         assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
         assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
         assert (
@@ -346,6 +459,7 @@ class TestProfitPage:
         )
 
     def test_a_new_report_keeps_each_tables_selected_sort(self) -> None:
+        assert 'applySort("picks-table");' in PROFIT_PAGE
         assert 'applySort("items-table");' in PROFIT_PAGE
         assert 'applySort("days-table");' in PROFIT_PAGE
         assert 'applySort("unrealized-table");' in PROFIT_PAGE
