@@ -73,14 +73,14 @@ def profit_report(days: int = 30) -> ProfitReport:
             total_matched_quantity=2,
         ),
         unrealized=UnrealizedProfit(
-            items={2: UnrealizedItemProfit(1, 100, 255, 155)},
+            items={(2, 300): UnrealizedItemProfit(1, 100, 255, 155, 300)},
             total_quantity=1,
             total_cost=100,
             total_projected_net_revenue=255,
             total_projected_profit=155,
         ),
         item_names={1: "Realized Item", 2: "Listed Item"},
-        market_prices={1: MarketPrice(100, 200)},
+        market_prices={1: MarketPrice(100, 200), 2: MarketPrice(240, 290)},
         history_start=datetime(2026, 5, 1, tzinfo=UTC),
     )
 
@@ -1020,6 +1020,9 @@ class TestProfitPage:
         assert payload["picks"][0]["profit"] == 70
         assert payload["days_table"][0]["date"] == "2026-08-20"
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
+        # The member's own listing price, and what the market is asking.
+        assert payload["unrealized"]["items"][0]["unit_price"] == 300
+        assert payload["unrealized"]["items"][0]["sell_price"] == 290
         assert payload["unrealized"]["roi_percent"] == 155
         # Delivery and open orders are their own requests now, so the report
         # carries neither and does not wait on either.

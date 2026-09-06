@@ -143,7 +143,9 @@ main { width: 100%; margin: 0; padding: 1rem; }
 }
 .row-action:hover { color: var(--text); }
 .row-action svg { pointer-events: none; }
-td.actions { text-align: center; }
+/* The heading and the icon under it are centred together, or the icon reads
+   as sitting off to one side of a right-aligned label. */
+th.actions, td.actions { text-align: center; }
 #hidden-dialog {
   /* The shared reset zeroes every margin, which takes the centring a modal
      dialog normally gets from the user agent's `margin: auto` with it. */
@@ -166,7 +168,7 @@ td.actions { text-align: center; }
   padding: 0.85rem 0.7rem 0.25rem 1rem;
 }
 .modal-head h2 { flex: 1; font-size: 1rem; }
-#hidden-count { padding-bottom: 0.6rem; }
+#hidden-count { padding: 0 1rem 0.6rem; }
 .modal-search { display: block; padding: 0 1rem 0.85rem; }
 .modal-search input { width: 100%; }
 .modal-scroll { overflow: auto; border-top: 1px solid var(--border); }
@@ -415,15 +417,17 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </section>
     <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
-      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Projected ROI is projected profit divided by their matched cost.</p>
+      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Stock listed at two prices is two rows, as in Open Orders. Your Price is what you listed at; Lowest Sell Listing is the cheapest anyone is asking now, so a higher Your Price means someone is undercutting you. Projected ROI is projected profit divided by their matched cost.</p>
       <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="projected-sale" data-sort-default="descending">Projected Sale</button></th>
-          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="projected-profit" data-sort-default="descending">Projected Profit</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="projected-roi" data-sort-default="descending">Projected ROI</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="listing-price" data-sort-default="descending">Your Price</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell Listing</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="projected-sale" data-sort-default="descending">Projected Sale</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="projected-profit" data-sort-default="descending">Projected Profit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="projected-roi" data-sort-default="descending">Projected ROI</button></th>
         </tr></thead>
         <tbody id="unrealized-body"></tbody>
         <tfoot id="unrealized-foot"></tfoot>
@@ -457,7 +461,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="order-profit" data-sort-default="descending">Profit / Unit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="order-total-profit" data-sort-default="descending">Total Profit</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="order-roi" data-sort-default="descending">ROI</button></th>
-          <th>Hide</th>
+          <th class="actions">Hide</th>
         </tr></thead>
         <tbody id="orders-body"></tbody>
         <tfoot id="orders-foot"></tfoot>
@@ -524,6 +528,32 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var daysPageSize = 10;
   var maxDays = __MAX_DAYS__;
   var historyStart = null;
+  var historyStartLabel = null;
+  // Whether dates carry their year. Decided once per report from the window:
+  // a window inside one year drops it everywhere, one that crosses a year
+  // boundary shows it everywhere, so no table mixes the two forms.
+  var showYear = false;
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+    "Sep", "Oct", "Nov", "Dec"];
+
+  // Formats a UTC calendar date from the API ("2026-06-13") as "Jun 13" or
+  // "Jun 13, 2026". It works on the string rather than through Date, which
+  // would read that string as UTC midnight and then print it in the
+  // viewer's zone - a day early anywhere west of Greenwich.
+  function shortDate(iso, withYear) {
+    var parts = String(iso).split("-");
+    if (parts.length !== 3) { return String(iso); }
+    var month = MONTHS[Number(parts[1]) - 1];
+    var day = Number(parts[2]);
+    if (!month || !Number.isInteger(day)) { return String(iso); }
+    return withYear
+      ? month + " " + day + ", " + parts[0]
+      : month + " " + day;
+  }
+
+  function spansYears(startIso, endIso) {
+    return String(startIso).slice(0, 4) !== String(endIso).slice(0, 4);
+  }
   var missingKey = false;
   var restoredWindow = false;
   // How often the open orders follow the market. The GW2 API declares its
@@ -841,13 +871,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       x: left,
       y: height - 8,
       "class": "chart-label"
-    }, points[0].date));
+    }, shortDate(points[0].date, showYear)));
     svg.appendChild(svgNode("text", {
       x: width - right,
       y: height - 8,
       "text-anchor": "end",
       "class": "chart-label"
-    }, points[points.length - 1].date));
+    }, shortDate(points[points.length - 1].date, showYear)));
     return {
       width: width,
       height: height,
@@ -925,7 +955,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       crosshair.style.visibility = "visible";
       rings.replaceChildren();
       tooltip.replaceChildren();
-      tooltip.appendChild(tooltipNode("tip-date", column.date));
+      tooltip.appendChild(
+        tooltipNode("tip-date", shortDate(column.date, showYear)));
 
       var anchorY = column.rows[0].y;
       var anchorDistance = Infinity;
@@ -1084,7 +1115,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
           ? "chart-bar-negative" : "chart-bar-positive"
       });
       bar.appendChild(svgNode(
-        "title", {}, point.date + ": " + coin(point.profit)));
+        "title", {},
+        shortDate(point.date, showYear) + ": " + coin(point.profit)));
       svg.appendChild(bar);
     });
     var averageLine = svgNode("line", {
@@ -1152,7 +1184,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         "class": pointClass
       });
       point.appendChild(svgNode(
-        "title", {}, entry.point.date + ": "
+        "title", {}, shortDate(entry.point.date, showYear) + ": "
         + coin(Math.round(entry.value))));
       svg.appendChild(point);
     });
@@ -1232,11 +1264,14 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     });
   }
 
-  function highlight(entry, labelKey) {
+  function highlight(entry, labelFor) {
     return entry === null
       ? "\u2014"
-      : entry[labelKey] + " (" + coin(entry.profit) + ")";
+      : labelFor(entry) + " (" + coin(entry.profit) + ")";
   }
+
+  function itemName(entry) { return entry.name; }
+  function dayLabel(entry) { return shortDate(entry.date, showYear); }
 
   function renderSummary(data) {
     var summary = data.summary;
@@ -1258,10 +1293,10 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       ["Average daily profit", coin(Math.round(summary.profit / data.days)), summary.profit],
       ["Unrealized profit", coin(unrealized.projected_profit), unrealized.projected_profit],
       ["Unrealized ROI", percent(unrealized.roi_percent), unrealized.roi_percent],
-      ["Best item", highlight(bestItem, "name"), bestItem && bestItem.profit],
-      ["Worst item", highlight(worstItem, "name"), worstItem && worstItem.profit],
-      ["Best trading day", highlight(bestDay, "date"), bestDay && bestDay.profit],
-      ["Worst trading day", highlight(worstDay, "date"), worstDay && worstDay.profit]
+      ["Best item", highlight(bestItem, itemName), bestItem && bestItem.profit],
+      ["Worst item", highlight(worstItem, itemName), worstItem && worstItem.profit],
+      ["Best trading day", highlight(bestDay, dayLabel), bestDay && bestDay.profit],
+      ["Worst trading day", highlight(worstDay, dayLabel), worstDay && worstDay.profit]
     ];
     var body = document.getElementById("summary-body");
     body.replaceChildren();
@@ -1337,7 +1372,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     body.replaceChildren();
     data.days_table.forEach(function (day, index) {
       var row = sortableRow(index);
-      cell(row, day.date, "", day.date);
+      cell(row, shortDate(day.date, showYear), "", day.date);
       cell(row, day.units, "", day.units);
       cell(row, coin(day.cost), "", day.cost);
       cell(row, coin(day.net_revenue), "", day.net_revenue);
@@ -1396,7 +1431,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       var row = sortableRow(index);
       cell(row, item.name, "name", item.name);
       cell(row, item.units, "", item.units);
+      cell(row, coin(item.unit_price), "", item.unit_price);
       cell(row, coin(item.cost), "", item.cost);
+      optionalCoinCell(row, item.sell_price);
       cell(
         row, coin(item.projected_net_revenue), "",
         item.projected_net_revenue);
@@ -1405,13 +1442,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       body.appendChild(row);
     });
     if (!unrealized.items.length) {
-      emptyRow(body, 6, "No currently listed unmatched purchases were found.");
+      emptyRow(body, 8, "No currently listed unmatched purchases were found.");
     }
     totalRow(document.getElementById("unrealized-foot"), [
-      "Total", unrealized.units, coin(unrealized.cost),
+      "Total", unrealized.units, "\u2014", coin(unrealized.cost), "\u2014",
       coin(unrealized.projected_net_revenue), unrealized.projected_profit,
       percent(unrealized.roi_percent)
-    ], 4);
+    ], 6);
     applySort("unrealized-table");
   }
 
@@ -1674,6 +1711,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       daysInput.max = String(maxDays);
     }
     historyStart = data.history_start_date;
+    showYear = spansYears(data.window.start_date, data.window.end_date);
+    // "Held since" is a single date whose range runs to the window's end,
+    // so it decides its year on its own rather than following the table.
+    historyStartLabel = historyStart
+      ? shortDate(
+        historyStart, spansYears(historyStart, data.window.end_date))
+      : null;
     history.replaceState(
       null, "", "/profit?days=" + encodeURIComponent(String(data.days)));
     renderSummary(data);
@@ -1795,9 +1839,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         status.textContent = "A Trading Post API key is required.";
       } else if (ready === loaded.length) {
         status.className = "";
-        status.textContent = historyStart
+        status.textContent = historyStartLabel
           ? "Updated from your private Trading Post data, held since "
-            + historyStart + "."
+            + historyStartLabel + "."
           : "Updated from your private Trading Post data.";
       } else {
         status.className = "error";

@@ -83,15 +83,27 @@ class RealizedProfit:
 
 @dataclass(frozen=True, slots=True)
 class UnrealizedItemProfit:
+    """Held stock listed at one price, and what selling it would return.
+
+    Rows are split by listing price the way open buy orders are split by
+    order price: the price is what decides the row's return, so averaging
+    two listings into one row would report a projection the member could
+    not act on.
+    """
+
     quantity: int
     cost: int
     projected_net_revenue: int
     projected_profit: int
+    # What the member listed these units at, per unit.
+    unit_price: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class UnrealizedProfit:
-    items: dict[int, UnrealizedItemProfit]
+    # Keyed by item and the price it is listed at, so one item listed at two
+    # prices stays two rows.
+    items: dict[tuple[int, int], UnrealizedItemProfit]
     total_quantity: int
     total_cost: int
     total_projected_net_revenue: int
@@ -100,10 +112,16 @@ class UnrealizedProfit:
 
 @dataclass(frozen=True, slots=True)
 class MarketPrice:
-    """Current highest buy order and lowest sell listing for one item."""
+    """Current highest buy order and lowest sell listing for one item.
 
-    buy_unit_price: int
-    sell_unit_price: int
+    Either side can be absent. An item nobody is bidding on still has
+    listings a member can undercut, and an item whose stock is exhausted
+    still has standing buy orders, so a quote is kept whenever one side is
+    usable and each side is read on its own.
+    """
+
+    buy_unit_price: int | None
+    sell_unit_price: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +509,7 @@ def calculate_unrealized_profit(
     for transaction in current_sells:
         sells_by_item[transaction.item_id].append(transaction)
 
-    item_totals: dict[int, UnrealizedItemProfit] = {}
+    item_totals: dict[tuple[int, int], UnrealizedItemProfit] = {}
     total_quantity = 0
     total_cost = 0
     total_projected_net_revenue = 0
@@ -506,14 +524,14 @@ def calculate_unrealized_profit(
             _MutableLot(lot.remaining, lot.unit_price, lot.occurred_at)
             for lot in sorted(buy_lots, key=lambda lot: lot.occurred_at)
         )
-        quantity = 0
-        cost = 0
-        projected_net_revenue = 0
-        projected_profit = 0
+        by_price: dict[int, _Totals] = defaultdict(_Totals)
 
+        # Costs are bucketed per listing price, so two listings that share
+        # a timestamp must not swap their FIFO purchases between passes.
+        # The transaction id settles the tie the same way every time.
         for transaction in sorted(
             sell_listings,
-            key=lambda listing: listing.occurred_at,
+            key=lambda listing: (listing.occurred_at, listing.transaction_id),
         ):
             sell_listing = _MutableListing(
                 transaction.quantity,
@@ -538,10 +556,11 @@ def calculate_unrealized_profit(
                         - sell_listing.remaining
                     ),
                 )
-                quantity += matched
-                cost += matched_cost
-                projected_net_revenue += matched_revenue
-                projected_profit += matched_revenue - matched_cost
+                priced = by_price[sell_listing.unit_price]
+                priced.matched_quantity += matched
+                priced.cost += matched_cost
+                priced.net_revenue += matched_revenue
+                priced.profit += matched_revenue - matched_cost
                 buy_lot.remaining -= matched
                 sell_listing.remaining -= matched
                 if buy_lot.remaining == 0:
@@ -553,18 +572,20 @@ def calculate_unrealized_profit(
             ):
                 chronology_blocked_listings += 1
 
-        if quantity == 0:
-            continue
-        item_totals[item_id] = UnrealizedItemProfit(
-            quantity,
-            cost,
-            projected_net_revenue,
-            projected_profit,
-        )
-        total_quantity += quantity
-        total_cost += cost
-        total_projected_net_revenue += projected_net_revenue
-        total_projected_profit += projected_profit
+        for unit_price, priced in by_price.items():
+            if priced.matched_quantity == 0:
+                continue
+            item_totals[(item_id, unit_price)] = UnrealizedItemProfit(
+                priced.matched_quantity,
+                priced.cost,
+                priced.net_revenue,
+                priced.profit,
+                unit_price,
+            )
+            total_quantity += priced.matched_quantity
+            total_cost += priced.cost
+            total_projected_net_revenue += priced.net_revenue
+            total_projected_profit += priced.profit
 
     result = UnrealizedProfit(
         items=item_totals,

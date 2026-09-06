@@ -1416,6 +1416,14 @@ The copy is tied to the API key it was saved under, so `/profit deletekey`
 really does forget the window: a key saved afterwards starts from the default
 again, while replacing a key with `/profit setkey` keeps it.
 
+Dates read as `Jun 13` throughout — the daily table, the summary's best and
+worst trading days, the chart axes and their hover readings. The year is added,
+everywhere at once, only when the selected window crosses one: a window inside
+a single year has nothing to disambiguate, and mixing the two forms in one
+table reads worse than either. The "held since" date in the status line decides
+its own year the same way, against the end of the window, because it can reach
+much further back than the window does.
+
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window
@@ -1500,6 +1508,14 @@ longer than a year.
 for sale, drawn from all their stored history rather than from the selected
 window: a purchase made before the window began is still stock they are holding
 now. The window bounds the realized tables, not this one.
+
+It reads like **Open Orders** on the selling side. Stock listed at two prices
+is two rows rather than one averaged one, because the price is what decides a
+row's projection. **Your Price** is what the member listed at and **Lowest Sell
+Listing** is the cheapest anyone is asking for that item now, so a Your Price
+above it says plainly that someone is undercutting them and the projection
+below is unlikely to be realized at that price. An item with no usable current
+price shows a dash there, as it does in Open Orders.
 
 Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2

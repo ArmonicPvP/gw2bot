@@ -89,6 +89,21 @@ class TestProfitPage:
         # The old single-count row is gone rather than kept alongside it.
         assert 'id="unclaimed-items"' not in PROFIT_PAGE
 
+    def test_unrealized_profit_shows_your_price_against_the_market(
+        self,
+    ) -> None:
+        assert '>Your Price</button>' in PROFIT_PAGE
+        assert 'data-sort-key="listing-price"' in PROFIT_PAGE
+        assert 'data-sort-key="lowest-sell"' in PROFIT_PAGE
+        assert 'cell(row, coin(item.unit_price), "", item.unit_price);' in (
+            PROFIT_PAGE
+        )
+        # An unpriced item shows a dash rather than a missing cell, the way
+        # an open order without a market price does.
+        assert "optionalCoinCell(row, item.sell_price);" in PROFIT_PAGE
+        # The footer spans the two added columns.
+        assert 'emptyRow(body, 8, "No currently listed' in PROFIT_PAGE
+
     def test_open_orders_shows_both_market_sides_with_profit_and_roi(
         self,
     ) -> None:
@@ -134,6 +149,8 @@ class TestProfitPage:
         assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 1
         assert '<dialog id="hidden-dialog"' in PROFIT_PAGE
         assert '<h2 id="hidden-title">Hidden items</h2>' in PROFIT_PAGE
+        # The count line is outside any card, so it carries its own inset.
+        assert "#hidden-count { padding: 0 1rem 0.6rem; }" in PROFIT_PAGE
         assert "dialog.showModal();" in PROFIT_PAGE
         assert "function openHiddenItems()" in PROFIT_PAGE
         assert 'document.getElementById("hidden-dialog").close();' in (
@@ -155,7 +172,9 @@ class TestProfitPage:
         )
 
     def test_hiding_a_row_uses_an_icon_rather_than_a_word(self) -> None:
-        assert "<th>Hide</th>" in PROFIT_PAGE
+        assert '<th class="actions">Hide</th>' in PROFIT_PAGE
+        # The heading and the icon under it share an alignment.
+        assert "th.actions, td.actions { text-align: center; }" in PROFIT_PAGE
         assert "<th>Exclude</th>" not in PROFIT_PAGE
         assert "function hideButton(order)" in PROFIT_PAGE
         assert 'button.title = "Hide " + order.name;' in PROFIT_PAGE
@@ -240,6 +259,34 @@ class TestProfitPage:
         assert "days <= maxDays" in PROFIT_PAGE
         assert "historyStart = data.history_start_date;" in PROFIT_PAGE
 
+    def test_dates_are_short_and_carry_a_year_only_across_years(self) -> None:
+        assert "function shortDate(iso, withYear)" in PROFIT_PAGE
+        assert "function spansYears(startIso, endIso)" in PROFIT_PAGE
+        # One decision for the whole report, taken from the window.
+        assert (
+            "showYear = spansYears(data.window.start_date, "
+            "data.window.end_date);"
+        ) in PROFIT_PAGE
+        # Every rendering site formats; sorting still uses the ISO value.
+        assert 'cell(row, shortDate(day.date, showYear), "", day.date);' in (
+            PROFIT_PAGE
+        )
+        assert 'tooltipNode("tip-date", shortDate(column.date, showYear))' in (
+            PROFIT_PAGE
+        )
+        assert "shortDate(points[0].date, showYear)" in PROFIT_PAGE
+        assert "shortDate(points[points.length - 1].date, showYear)" in (
+            PROFIT_PAGE
+        )
+        assert "shortDate(entry.date, showYear)" in PROFIT_PAGE
+        # The string is parsed directly: a Date round trip would print UTC
+        # midnight in the viewer's zone, a day early west of Greenwich.
+        assert 'String(iso).split("-")' in PROFIT_PAGE
+        # "Held since" pairs with the window end, not with the window start.
+        assert (
+            "spansYears(historyStart, data.window.end_date)" in PROFIT_PAGE
+        )
+
     def test_daily_profit_opens_with_the_most_recent_day_first(self) -> None:
         # The first page of a 90-day window should be this week, not the
         # start of the window, so the date column starts descending.
@@ -277,7 +324,7 @@ class TestProfitPage:
 
     def test_detail_tables_have_accessible_sort_buttons(self) -> None:
         assert PROFIT_PAGE.count('data-sort-table="') == 5
-        assert PROFIT_PAGE.count('class="sort-button"') == 31
+        assert PROFIT_PAGE.count('class="sort-button"') == 33
         assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
         assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
         assert (
@@ -317,14 +364,14 @@ class TestProfitPage:
         assert "item.roi_percent" in PROFIT_PAGE
 
     def test_summary_contains_best_and_worst_highlights(self) -> None:
-        assert '["Best item", highlight(bestItem, "name")' in PROFIT_PAGE
-        assert '["Worst item", highlight(worstItem, "name")' in PROFIT_PAGE
+        assert '["Best item", highlight(bestItem, itemName)' in PROFIT_PAGE
+        assert '["Worst item", highlight(worstItem, itemName)' in PROFIT_PAGE
         assert (
-            '["Best trading day", highlight(bestDay, "date")'
+            '["Best trading day", highlight(bestDay, dayLabel)'
             in PROFIT_PAGE
         )
         assert (
-            '["Worst trading day", highlight(worstDay, "date")'
+            '["Worst trading day", highlight(worstDay, dayLabel)'
             in PROFIT_PAGE
         )
         assert '["Realized ROI", percent(summary.roi_percent)' in PROFIT_PAGE
