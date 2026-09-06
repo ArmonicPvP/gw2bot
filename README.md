@@ -1509,6 +1509,14 @@ for sale, drawn from all their stored history rather than from the selected
 window: a purchase made before the window began is still stock they are holding
 now. The window bounds the realized tables, not this one.
 
+It reads like **Open Orders** on the selling side. Stock listed at two prices
+is two rows rather than one averaged one, because the price is what decides a
+row's projection. **Your Price** is what the member listed at and **Lowest Sell
+Listing** is the cheapest anyone is asking for that item now, so a Your Price
+above it says plainly that someone is undercutting them and the projection
+below is unlikely to be realized at that price. An item with no usable current
+price shows a dash there, as it does in Open Orders.
+
 Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2
 API. The same pass stores the name of every item in the game — about 74,000 of

@@ -349,11 +349,36 @@ class TestProfitCalculation:
             ],
         )
 
-        assert set(unrealized.items) == {1}
+        assert set(unrealized.items) == {(1, 300)}
         assert unrealized.total_quantity == 2
         assert unrealized.total_cost == 200
         assert unrealized.total_projected_net_revenue == 510
         assert unrealized.total_projected_profit == 310
+
+    def test_stock_listed_at_two_prices_stays_two_rows(self) -> None:
+        # The listing price decides a row's projection, so averaging two
+        # into one would report a return the member cannot act on.
+        unrealized = calculate_unrealized_profit(
+            {1: (BuyLot(10, 100, datetime(2026, 8, 1, tzinfo=UTC)),)},
+            [
+                transaction("cheap", price=200, quantity=4,
+                            occurred_at=datetime(2026, 8, 2, tzinfo=UTC)),
+                transaction("dear", price=210, quantity=6,
+                            occurred_at=datetime(2026, 8, 3, tzinfo=UTC)),
+            ],
+        )
+
+        assert set(unrealized.items) == {(1, 200), (1, 210)}
+        assert unrealized.items[(1, 200)].quantity == 4
+        assert unrealized.items[(1, 200)].unit_price == 200
+        assert unrealized.items[(1, 210)].quantity == 6
+        assert unrealized.items[(1, 210)].unit_price == 210
+        # Splitting the rows changes nothing about the totals beneath them.
+        assert unrealized.total_quantity == 10
+        assert unrealized.total_cost == 1_000
+        assert unrealized.total_projected_profit == sum(
+            row.projected_profit for row in unrealized.items.values()
+        )
 
     def test_preserves_listing_revenue_remainder_across_fifo_lots(self) -> None:
         unrealized = calculate_unrealized_profit(
@@ -374,7 +399,7 @@ class TestProfitCalculation:
         )
 
         assert unrealized.total_projected_net_revenue == 256
-        assert unrealized.items[1].projected_net_revenue == 256
+        assert unrealized.items[(1, 101)].projected_net_revenue == 256
 
     def test_matches_a_purchase_only_to_a_listing_created_after_it(
         self,

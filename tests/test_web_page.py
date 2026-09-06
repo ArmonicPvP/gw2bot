@@ -89,6 +89,21 @@ class TestProfitPage:
         # The old single-count row is gone rather than kept alongside it.
         assert 'id="unclaimed-items"' not in PROFIT_PAGE
 
+    def test_unrealized_profit_shows_your_price_against_the_market(
+        self,
+    ) -> None:
+        assert '>Your Price</button>' in PROFIT_PAGE
+        assert 'data-sort-key="listing-price"' in PROFIT_PAGE
+        assert 'data-sort-key="lowest-sell"' in PROFIT_PAGE
+        assert 'cell(row, coin(item.unit_price), "", item.unit_price);' in (
+            PROFIT_PAGE
+        )
+        # An unpriced item shows a dash rather than a missing cell, the way
+        # an open order without a market price does.
+        assert "optionalCoinCell(row, item.sell_price);" in PROFIT_PAGE
+        # The footer spans the two added columns.
+        assert 'emptyRow(body, 8, "No currently listed' in PROFIT_PAGE
+
     def test_open_orders_shows_both_market_sides_with_profit_and_roi(
         self,
     ) -> None:
@@ -309,7 +324,7 @@ class TestProfitPage:
 
     def test_detail_tables_have_accessible_sort_buttons(self) -> None:
         assert PROFIT_PAGE.count('data-sort-table="') == 5
-        assert PROFIT_PAGE.count('class="sort-button"') == 31
+        assert PROFIT_PAGE.count('class="sort-button"') == 33
         assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
         assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
         assert (

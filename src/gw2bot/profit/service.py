@@ -280,10 +280,16 @@ class ProfitService:
             realized.unmatched_buys,
             current_sells,
         )
+        unrealized_item_ids = {item_id for item_id, _price in unrealized.items}
         market_prices, item_names = await asyncio.gather(
-            self._api.fetch_market_prices(set(realized.items), force=force),
+            # Priced for the picks, and for what the held stock would fetch
+            # against the rest of the market right now.
+            self._api.fetch_market_prices(
+                set(realized.items) | unrealized_item_ids,
+                force=force,
+            ),
             self._resolve_item_names(
-                set(realized.items) | set(unrealized.items),
+                set(realized.items) | unrealized_item_ids,
                 loaded_at,
             ),
         )
@@ -945,9 +951,11 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
     unrealized_items = [
         {
             "item_id": item_id,
-            "name": report.item_names[item_id],
+            "name": report.item_names.get(item_id, f"Item {item_id}"),
             "units": totals.quantity,
+            "unit_price": totals.unit_price,
             "cost": totals.cost,
+            "sell_price": _lowest_listing(report, item_id),
             "projected_net_revenue": totals.projected_net_revenue,
             "projected_profit": totals.projected_profit,
             "roi_percent": percentage(
@@ -955,7 +963,7 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
                 totals.cost,
             ),
         }
-        for item_id, totals in sorted(
+        for (item_id, _unit_price), totals in sorted(
             unrealized.items.items(),
             key=lambda entry: entry[1].projected_profit,
             reverse=True,
@@ -1067,6 +1075,12 @@ def serialize_open_orders(report: OpenOrdersReport) -> dict[str, object]:
         "orders": orders,
         "excluded": excluded,
     }
+
+
+def _lowest_listing(report: ProfitReport, item_id: int) -> int | None:
+    """The market's cheapest listing for an item, when one is known."""
+    price = report.market_prices.get(item_id)
+    return None if price is None else price.sell_unit_price
 
 
 def _open_order_rows(

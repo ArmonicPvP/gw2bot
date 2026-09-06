@@ -417,15 +417,17 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </section>
     <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
-      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Projected ROI is projected profit divided by their matched cost.</p>
+      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Stock listed at two prices is two rows, as in Open Orders. Your Price is what you listed at; Lowest Sell Listing is the cheapest anyone is asking now, so a higher Your Price means someone is undercutting you. Projected ROI is projected profit divided by their matched cost.</p>
       <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="projected-sale" data-sort-default="descending">Projected Sale</button></th>
-          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="projected-profit" data-sort-default="descending">Projected Profit</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="projected-roi" data-sort-default="descending">Projected ROI</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="listing-price" data-sort-default="descending">Your Price</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell Listing</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="projected-sale" data-sort-default="descending">Projected Sale</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="projected-profit" data-sort-default="descending">Projected Profit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="projected-roi" data-sort-default="descending">Projected ROI</button></th>
         </tr></thead>
         <tbody id="unrealized-body"></tbody>
         <tfoot id="unrealized-foot"></tfoot>
@@ -1429,7 +1431,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       var row = sortableRow(index);
       cell(row, item.name, "name", item.name);
       cell(row, item.units, "", item.units);
+      cell(row, coin(item.unit_price), "", item.unit_price);
       cell(row, coin(item.cost), "", item.cost);
+      optionalCoinCell(row, item.sell_price);
       cell(
         row, coin(item.projected_net_revenue), "",
         item.projected_net_revenue);
@@ -1438,13 +1442,13 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       body.appendChild(row);
     });
     if (!unrealized.items.length) {
-      emptyRow(body, 6, "No currently listed unmatched purchases were found.");
+      emptyRow(body, 8, "No currently listed unmatched purchases were found.");
     }
     totalRow(document.getElementById("unrealized-foot"), [
-      "Total", unrealized.units, coin(unrealized.cost),
+      "Total", unrealized.units, "\u2014", coin(unrealized.cost), "\u2014",
       coin(unrealized.projected_net_revenue), unrealized.projected_profit,
       percent(unrealized.roi_percent)
-    ], 4);
+    ], 6);
     applySort("unrealized-table");
   }
 
