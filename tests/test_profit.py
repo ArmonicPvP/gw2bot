@@ -34,9 +34,11 @@ from gw2bot.profit.models import (
     ItemProfit,
     MarketPrice,
     OpenBuyOrder,
+    OpenOrdersReport,
     ProfitReport,
     RealizedProfit,
     Transaction,
+    UnrealizedItemProfit,
     UnrealizedProfit,
     allocated_net_revenue,
     calculate_realized_profit,
@@ -440,6 +442,32 @@ class TestProfitCalculation:
         assert older_id not in caplog.text
         assert newer_id not in caplog.text
 
+    def test_equal_timestamp_listings_split_costs_the_same_either_way(
+        self,
+    ) -> None:
+        # Costs are bucketed per listing price, so two listings posted in the
+        # same second must not trade FIFO purchases between passes.
+        listed_at = datetime(2026, 8, 2, tzinfo=UTC)
+        lots = {
+            1: (
+                BuyLot(1, 100, datetime(2026, 8, 1, tzinfo=UTC)),
+                BuyLot(1, 400, datetime(2026, 8, 1, 1, tzinfo=UTC)),
+            )
+        }
+        cheap = transaction(
+            "aaa", price=200, quantity=1, occurred_at=listed_at
+        )
+        dear = transaction(
+            "bbb", price=210, quantity=1, occurred_at=listed_at
+        )
+
+        forwards = calculate_unrealized_profit(lots, [cheap, dear])
+        backwards = calculate_unrealized_profit(lots, [dear, cheap])
+
+        assert forwards.items == backwards.items
+        assert forwards.items[(1, 200)].cost == 100
+        assert forwards.items[(1, 210)].cost == 400
+
     def test_picks_leave_out_items_whose_current_roi_is_negative(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -490,6 +518,62 @@ class TestProfitCalculation:
         assert kept_name not in caplog.text
         assert skipped_name not in caplog.text
         assert undefined_name not in caplog.text
+
+
+class TestOneSidedMarketQuotes:
+    def test_sell_only_quote_still_fills_the_lowest_listing_column(
+        self,
+    ) -> None:
+        # An item nobody is bidding on still has listings to undercut, so
+        # the sell side must survive the missing buy side.
+        report = ProfitReport(
+            days=30,
+            window_start=datetime(2026, 8, 1, tzinfo=UTC),
+            window_end=datetime(2026, 8, 31, tzinfo=UTC),
+            buy_transaction_count=0,
+            sell_transaction_count=0,
+            realized=RealizedProfit({}, {}, {}, 0, 0, 0, 0),
+            unrealized=UnrealizedProfit(
+                {(1, 300): UnrealizedItemProfit(2, 200, 510, 310, 300)},
+                2,
+                200,
+                510,
+                310,
+            ),
+            item_names={1: "Test Item"},
+            market_prices={1: MarketPrice(None, 250)},
+        )
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+
+        assert payload["unrealized"]["items"][0]["sell_price"] == 250
+        # A one-sided quote cannot score a round trip, so no pick is built.
+        assert payload["picks"] == []
+
+    def test_sell_only_quote_still_prices_an_open_order(self) -> None:
+        report = OpenOrdersReport(
+            available=True,
+            orders=(
+                OpenBuyOrder(
+                    item_id=1,
+                    unit_price=90,
+                    quantity=10,
+                    order_count=1,
+                    placed_at=datetime(2026, 8, 20, tzinfo=UTC),
+                ),
+            ),
+            item_names={1: "Test Item"},
+            market_prices={1: MarketPrice(None, 200)},
+            excluded_items=frozenset(),
+        )
+
+        payload = cast(dict[str, Any], serialize_open_orders(report))
+        order = payload["orders"][0]
+
+        assert order["buy_price"] is None
+        assert order["sell_price"] == 200
+        assert order["net_revenue"] == 1_700
+        assert order["total_profit"] == 800
 
 
 class TestOpenBuyOrders:
@@ -781,6 +865,31 @@ class TestProfitStore:
         assert {first, second} <= set(registry.current())
         assert first not in caplog.text
         assert second not in caplog.text
+
+    def test_equal_timestamp_transactions_come_back_in_a_stable_order(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # FIFO costs follow the order the matcher reads, so trades that
+        # share a timestamp must not be left to the query plan.
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        listed_at = datetime(2026, 8, 20, tzinfo=UTC)
+        store.set_api_key(101, "stable-order-secret")
+        store.store_transactions(
+            101,
+            "current_sells",
+            [
+                transaction("ccc", price=300, occurred_at=listed_at),
+                transaction("aaa", price=100, occurred_at=listed_at),
+                transaction("bbb", price=200, occurred_at=listed_at),
+            ],
+            now=now,
+        )
+
+        stored = store.get_transactions(101, "current_sells")
+
+        assert [row.transaction_id for row in stored] == ["aaa", "bbb", "ccc"]
 
     def test_deleting_one_members_key_does_not_touch_another(
         self,
@@ -2558,7 +2667,10 @@ class TestProfitApiLogging:
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             prices = await client.fetch_market_prices({2, 1})
 
-        assert prices == {1: MarketPrice(100, 200)}
+        assert prices == {
+            1: MarketPrice(100, 200),
+            2: MarketPrice(None, 300),
+        }
         assert payload_secret not in caplog.text
         request = http.get.call_args
         assert request.args[0] == "https://api.example/v2/commerce/prices"

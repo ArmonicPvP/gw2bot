@@ -134,9 +134,11 @@ authorization still fails the report.
 Returns `buys.unit_price` (the highest standing buy order) and
 `sells.unit_price` (the lowest sell listing) for each requested item, in chunks
 of 200 ids. The realized report reads it for the items flipped in the window
-and the Open Orders section for the items on order; neither waits on the other.
-An item whose response has a zero price on either side is skipped. It needs no
-API key.
+and for the stock held in the Unrealized Profit section, and the Open Orders
+section for the items on order; neither waits on the other. Each side is read
+on its own, because an item nobody is bidding on still has listings to
+undercut: a zero price drops that side alone, and only an item with neither
+side is skipped. It needs no API key.
 
 Readings are held for one minute in a cache shared by every member, because a
 price is public: several people watching the same item pay for one lookup

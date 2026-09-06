@@ -518,7 +518,13 @@ class ProfitStore:
             query = query.where(
                 ProfitTransactionRecord.occurred_at >= at_or_after.isoformat()
             )
-        query = query.order_by(ProfitTransactionRecord.occurred_at)
+        # The transaction id breaks ties so trades that share a
+        # timestamp always reach the matcher in the same order, and the
+        # FIFO costs it allocates do not depend on the query plan.
+        query = query.order_by(
+            ProfitTransactionRecord.occurred_at,
+            ProfitTransactionRecord.transaction_id,
+        )
         with self._sessions() as session:
             records = list(session.scalars(query))
         transactions = [

@@ -976,13 +976,17 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
     # priced item - decide what belongs here.
     for item_id in sorted(realized.items):
         price = report.market_prices.get(item_id)
+        # A pick is a round trip, so it needs both a price to buy at and a
+        # price to sell at. A one-sided quote cannot be scored.
         if price is None:
             continue
-        net_revenue = price.sell_unit_price - sale_fee_total(
-            price.sell_unit_price, 1
-        )
-        profit = net_revenue - price.buy_unit_price
-        roi_percent = percentage(profit, price.buy_unit_price)
+        buy_unit_price = price.buy_unit_price
+        sell_unit_price = price.sell_unit_price
+        if buy_unit_price is None or sell_unit_price is None:
+            continue
+        net_revenue = sell_unit_price - sale_fee_total(sell_unit_price, 1)
+        profit = net_revenue - buy_unit_price
+        roi_percent = percentage(profit, buy_unit_price)
         if roi_percent is not None and roi_percent < 0:
             skipped_picks += 1
             continue
@@ -990,8 +994,8 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             {
                 "item_id": item_id,
                 "name": report.item_names[item_id],
-                "buy_price": price.buy_unit_price,
-                "sell_price": price.sell_unit_price,
+                "buy_price": buy_unit_price,
+                "sell_price": sell_unit_price,
                 "net_revenue": net_revenue,
                 "profit": profit,
                 "roi_percent": roi_percent,
@@ -1134,20 +1138,21 @@ def _open_order_row(
     order: OpenBuyOrder,
 ) -> dict[str, object]:
     price = report.market_prices.get(order.item_id)
+    sell_unit_price = None if price is None else price.sell_unit_price
     cost = order.unit_price * order.quantity
     net_revenue: int | None = None
     profit: int | None = None
     total_profit: int | None = None
     roi_percent: float | None = None
-    if price is not None:
+    if sell_unit_price is not None:
         # The exit assumed here is the one the member controls: undercutting
         # nothing and selling at the current lowest listing, after both fees.
         # Both fees round up against the gross value of the whole order, the
         # way a realized sale of that quantity is charged; rounding each unit
         # on its own would overcharge every multi-unit order and understate
         # the return. The per-unit figure is then derived from that total.
-        net_revenue = price.sell_unit_price * order.quantity - sale_fee_total(
-            price.sell_unit_price,
+        net_revenue = sell_unit_price * order.quantity - sale_fee_total(
+            sell_unit_price,
             order.quantity,
         )
         total_profit = net_revenue - cost
@@ -1164,7 +1169,7 @@ def _open_order_row(
         "unit_price": order.unit_price,
         "cost": cost,
         "buy_price": None if price is None else price.buy_unit_price,
-        "sell_price": None if price is None else price.sell_unit_price,
+        "sell_price": sell_unit_price,
         "net_revenue": net_revenue,
         "profit": profit,
         "total_profit": total_profit,

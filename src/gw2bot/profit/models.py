@@ -112,10 +112,16 @@ class UnrealizedProfit:
 
 @dataclass(frozen=True, slots=True)
 class MarketPrice:
-    """Current highest buy order and lowest sell listing for one item."""
+    """Current highest buy order and lowest sell listing for one item.
 
-    buy_unit_price: int
-    sell_unit_price: int
+    Either side can be absent. An item nobody is bidding on still has
+    listings a member can undercut, and an item whose stock is exhausted
+    still has standing buy orders, so a quote is kept whenever one side is
+    usable and each side is read on its own.
+    """
+
+    buy_unit_price: int | None
+    sell_unit_price: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,9 +526,12 @@ def calculate_unrealized_profit(
         )
         by_price: dict[int, _Totals] = defaultdict(_Totals)
 
+        # Costs are bucketed per listing price, so two listings that share
+        # a timestamp must not swap their FIFO purchases between passes.
+        # The transaction id settles the tie the same way every time.
         for transaction in sorted(
             sell_listings,
-            key=lambda listing: listing.occurred_at,
+            key=lambda listing: (listing.occurred_at, listing.transaction_id),
         ):
             sell_listing = _MutableListing(
                 transaction.quantity,

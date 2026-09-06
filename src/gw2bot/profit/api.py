@@ -505,18 +505,22 @@ def _market_price_from_payload(
         or not isinstance(sells, dict)
     ):
         return None
-    buy_price = buys.get("unit_price")
-    sell_price = sells.get("unit_price")
-    if (
-        not isinstance(buy_price, int)
-        or isinstance(buy_price, bool)
-        or buy_price <= 0
-        or not isinstance(sell_price, int)
-        or isinstance(sell_price, bool)
-        or sell_price <= 0
-    ):
+    # Each side is read on its own: an item with listings but no bids, or
+    # bids but no listings, still quotes the side that exists. Only a
+    # payload with neither side usable is discarded.
+    buy_price = _usable_unit_price(buys)
+    sell_price = _usable_unit_price(sells)
+    if buy_price is None and sell_price is None:
         return None
     return item_id, MarketPrice(buy_price, sell_price)
+
+
+def _usable_unit_price(side: dict[object, object]) -> int | None:
+    """One side of a price quote, or ``None`` when the market has none."""
+    price = side.get("unit_price")
+    if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
+        return None
+    return price
 
 
 def _positive_int(payload: dict[object, object], key: str) -> int:
