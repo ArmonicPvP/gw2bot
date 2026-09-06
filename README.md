@@ -1342,9 +1342,15 @@ summary, realized profit grouped by item, realized profit grouped by sale date,
 projected profit for held purchases currently listed for sale, the items the
 member is currently buying, and the coins and each item awaiting pickup from the
 Trading Post. The
-daily realized-profit table is paginated with 10 rows by default; its bottom-left
-control accepts page sizes from 1 through 90, and page links appear above and
-below the table. Coin amounts account for the
+realized-profit-by-item and realized-profit-by-day tables are each paginated with
+10 rows by default; the bottom-left control of either accepts page sizes from 1
+through 90, and a page picker appears above and below both tables. That picker
+is a double arrow to the first or last page, a single arrow to the previous or
+next one, and between them a box holding the current page, which accepts a page
+typed straight into it. An arrow that would move nothing — a previous arrow on
+the first page, a next arrow on the last — is greyed out, and a page outside the
+table is refused and the box put back to the page on screen. Coin amounts
+account for the
 Trading Post's 5%
 listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
 the original profit bot. Matching runs over a member's whole stored history
@@ -1361,9 +1367,12 @@ by their corresponding matched cost. Each realized item also shows its
 unit-weighted average time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
 The **Your Picks** table revisits items flipped in the selected window using
-their current highest buy order and lowest sell listing. It shows the ten best
-opportunities after fees and can rank them by either ROI or profit per unit.
-Items whose current return after fees is a negative ROI are left out entirely.
+their current highest buy order and lowest sell listing. Its columns sort like
+those of the other detail tables, and it shows the ten rows at the top of
+whichever sort is chosen: sorting by ROI, which it opens on, lists the ten
+highest returns after fees, and sorting by profit per unit the ten highest
+profits. Items whose current return after fees is a negative ROI are left out
+entirely.
 
 The **Open Orders** table lists every item the member is currently buying on the
 Trading Post. Each row gives the units on order, the price the member is buying

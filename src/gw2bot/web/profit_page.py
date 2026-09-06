@@ -3,6 +3,60 @@
 from gw2bot.profit.store import MAX_REPORT_DAYS
 from gw2bot.web.page import _DASHBOARD_HEADER_STYLE, _SHARED_STYLE
 
+# Rows per page a paginated table opens on, and the largest it will accept.
+PAGE_SIZE_DEFAULT = 10
+PAGE_SIZE_LIMIT = 90
+
+
+def _pagination_nav(group: str, position: str, label: str) -> str:
+    """Return one pagination bar for ``group``, above or below its table.
+
+    Every paginated table carries the same control twice, so it is written
+    once here rather than four times in the template: jump to the first or
+    last page, step one page either way, or type the page wanted into the box
+    between them. ``position`` says which of the two bars this is - the page
+    box needs an id of its own for its label, and the bottom bar is the one
+    that carries the rows-per-page control.
+    """
+
+    def step(name: str, glyph: str, description: str) -> str:
+        return (
+            '          <button class="page-step" type="button"'
+            f' data-page-group="{group}" data-page-step="{name}"'
+            f' aria-label="{description}">{glyph}</button>\n'
+        )
+
+    box = f"{group}-page-{position}"
+    size = (
+        f'        <label class="page-size" for="{group}-page-size">'
+        "Rows per page\n"
+        f'          <input id="{group}-page-size" type="number" min="1"'
+        f' max="{PAGE_SIZE_LIMIT}" value="{PAGE_SIZE_DEFAULT}"'
+        f' class="page-size-input" data-page-group="{group}">\n'
+        "        </label>\n"
+    )
+    return (
+        f'      <nav class="pagination" aria-label="{label}">\n'
+        + (size if position == "bottom" else "")
+        + f'        <span class="pagination-pages" id="{group}-pages-'
+        f'{position}">\n'
+        + step("first", "&#171;", "First page")
+        + step("previous", "&#8249;", "Previous page")
+        + '          <span class="page-current">\n'
+        f'            <label class="visually-hidden" for="{box}">'
+        "Page number</label>\n"
+        f'            <input id="{box}" class="page-input" type="number"'
+        f' min="1" value="1" inputmode="numeric" data-page-group="{group}">\n'
+        f'            <span class="page-total" data-page-group="{group}">'
+        "of 1</span>\n"
+        "          </span>\n"
+        + step("next", "&#8250;", "Next page")
+        + step("last", "&#187;", "Last page")
+        + "        </span>\n"
+        "      </nav>"
+    )
+
+
 _PROFIT_PAGE_TEMPLATE = (
     """<!DOCTYPE html>
 <html lang="en">
@@ -59,23 +113,34 @@ main { width: 100%; margin: 0; padding: 1rem; }
 .pagination {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.35rem;
   padding: 0.65rem 0.8rem;
 }
-.pagination-pages { display: flex; gap: 0.25rem; margin-left: auto; }
-.pagination button { min-width: 2rem; padding: 0.3rem 0.5rem; }
-.pagination button[aria-current="page"] {
-  background: var(--accent); border-color: var(--accent); color: #fff;
+.pagination-pages {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
 }
+.pagination button { min-width: 2rem; padding: 0.3rem 0.5rem; }
+/* The first and last steps sit at the ends of the run, so they stop being
+   offered once the reader is already there rather than moving nothing. */
+.pagination button:disabled { opacity: 0.4; cursor: default; }
+.pagination button:disabled:hover { background: var(--panel-2); }
+.page-step { line-height: 1; }
+.page-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.page-current input { width: 3.6rem; text-align: center; }
 .page-size { display: flex; align-items: center; gap: 0.4rem; }
 .page-size input { width: 4rem; }
 .card-heading { display: flex; align-items: center; gap: 0.75rem; padding-right: 1rem; }
 .card-heading h2 { flex: 1; }
-.pick-toggle { display: inline-flex; margin-top: 0.6rem; }
-.pick-toggle button { border-radius: 0; }
-.pick-toggle button:first-child { border-radius: 6px 0 0 6px; }
-.pick-toggle button:last-child { border-radius: 0 6px 6px 0; }
-.pick-toggle button[aria-pressed="true"] { background: var(--accent); color: #fff; }
 .card h3.subheading { font-size: 0.92rem; padding: 0.85rem 1rem 0.15rem; }
 /* A loading card keeps its heading and shows a spinner where its body will
    be, so the page reads as a list of named sections filling in rather than a
@@ -357,16 +422,16 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
     <section class="card loading" data-source="report">
-      <div class="card-heading">
-        <h2>Your Picks</h2>
-        <div class="pick-toggle" aria-label="Rank picks by">
-          <button id="picks-roi" type="button" aria-pressed="true">ROI</button>
-          <button id="picks-profit" type="button" aria-pressed="false">Profit</button>
-        </div>
-      </div>
-      <p class="note">Current buy-order and sell-listing returns for items you flipped in the selected window. Prices include Trading Post fees, and items whose current return is negative are left out.</p>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Item</th><th>Buy Order</th><th>Sell Price</th><th>Profit / Unit</th><th>ROI</th></tr></thead>
+      <h2>Your Picks</h2>
+      <p class="note">Current buy-order and sell-listing returns for items you flipped in the selected window. Prices include Trading Post fees, and items whose current return is negative are left out. Sorting a column ranks every pick by it and shows the ten rows at the top, so sorting by Profit / Unit lists the highest profit and sorting by ROI the highest ROI.</p>
+      <div class="table-scroll"><table id="picks-table" data-sort-table="picks">
+        <thead><tr>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="buy-price" data-sort-default="descending">Buy Order</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="sell-price" data-sort-default="descending">Sell Price</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="pick-profit" data-sort-default="descending">Profit / Unit</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="pick-roi" data-sort-default="descending">ROI</button></th>
+        </tr></thead>
         <tbody id="picks-body"></tbody>
       </table></div>
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
@@ -374,6 +439,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     <section class="card loading" data-source="report">
       <h2>Realized Profit by Item</h2>
       <p class="note">Avg Hold is the mean time those units were held, weighted by units. Profit Share is signed item profit divided by total realized profit.</p>
+__ITEMS_PAGES_TOP__
       <div class="table-scroll"><table id="items-table" data-sort-table="items">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
@@ -389,13 +455,12 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="items-body"></tbody>
         <tfoot id="items-foot"></tfoot>
       </table></div>
+__ITEMS_PAGES_BOTTOM__
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
     <section class="card loading" data-source="report">
       <h2>Realized Profit by Day</h2>
-      <nav class="pagination" aria-label="Daily profit pages">
-        <span class="pagination-pages" id="days-pages-top"></span>
-      </nav>
+__DAYS_PAGES_TOP__
       <div class="table-scroll"><table id="days-table" data-sort-table="days">
         <thead><tr>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="date" data-sort-default="descending">Date</button></th>
@@ -407,12 +472,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         <tbody id="days-body"></tbody>
         <tfoot id="days-foot"></tfoot>
       </table></div>
-      <nav class="pagination" aria-label="Daily profit pages and page size">
-        <label class="page-size" for="days-page-size">Rows per page
-          <input id="days-page-size" type="number" min="1" max="90" value="10">
-        </label>
-        <span class="pagination-pages" id="days-pages-bottom"></span>
-      </nav>
+__DAYS_PAGES_BOTTOM__
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
     <section class="card loading" data-source="report">
@@ -533,8 +593,15 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   var reports = document.getElementById("reports");
   var keyHelp = document.getElementById("key-help");
   var sortStates = {};
-  var daysPage = 1;
-  var daysPageSize = 10;
+  // Every paginated table keeps its page, its rows per page, and how many
+  // pages that works out to. The controls themselves are in the page rather
+  // than rebuilt on each move, so a page typed into the box keeps the caret
+  // where the reader put it. Page sizes are read from the controls at start-up
+  // so the page and the markup cannot disagree about the default.
+  var pagers = {
+    items: { page: 1, size: 10, pages: 1, body: "items-body" },
+    days: { page: 1, size: 10, pages: 1, body: "days-body" }
+  };
   var maxDays = __MAX_DAYS__;
   var historyStart = null;
   var historyStartLabel = null;
@@ -714,9 +781,145 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     return rows.length;
   }
 
+  function pagerParts(key, selector) {
+    return document.querySelectorAll(
+      selector + '[data-page-group="' + key + '"]');
+  }
+
+  function updatePagerControls(key) {
+    var pager = pagers[key];
+    pagerParts(key, "input.page-input").forEach(function (input) {
+      input.max = String(pager.pages);
+      // A box the reader is still typing in is left alone; whatever they
+      // settle on is written back when the change commits.
+      if (document.activeElement !== input) {
+        input.value = String(pager.page);
+      }
+    });
+    pagerParts(key, ".page-total").forEach(function (node) {
+      node.textContent = "of " + pager.pages;
+    });
+    pagerParts(key, "button[data-page-step]").forEach(function (button) {
+      var backwards = button.dataset.pageStep === "first"
+        || button.dataset.pageStep === "previous";
+      button.disabled = backwards
+        ? pager.page <= 1
+        : pager.page >= pager.pages;
+    });
+  }
+
+  function paginate(key) {
+    var pager = pagers[key];
+    var rows = Array.prototype.slice.call(
+      document.querySelectorAll("#" + pager.body + " tr[data-sort-row]"));
+    pager.pages = Math.max(1, Math.ceil(rows.length / pager.size));
+    pager.page = Math.min(Math.max(1, pager.page), pager.pages);
+    rows.forEach(function (row, index) {
+      row.hidden = index < (pager.page - 1) * pager.size
+        || index >= pager.page * pager.size;
+    });
+    updatePagerControls(key);
+  }
+
+  function goToPage(key, page) {
+    var pager = pagers[key];
+    var target = Math.min(Math.max(1, page), pager.pages);
+    if (target === pager.page) {
+      // Nothing moves, but a box typed past the last page still has to be
+      // put back to the page actually on screen.
+      updatePagerControls(key);
+      return;
+    }
+    pager.page = target;
+    paginate(key);
+    trace(key + "-page", target);
+  }
+
+  function commitTypedPage(input) {
+    var key = input.dataset.pageGroup;
+    var pager = pagers[key];
+    var typed = Number(input.value);
+    if (!Number.isInteger(typed) || typed < 1 || typed > pager.pages) {
+      input.value = String(pager.page);
+      trace(key + "-refuse-page", 0);
+      return;
+    }
+    goToPage(key, typed);
+    input.value = String(pager.page);
+  }
+
+  function commitPageSize(input) {
+    var key = input.dataset.pageGroup;
+    var pager = pagers[key];
+    var value = Number(input.value);
+    var largest = Number(input.max);
+    if (!Number.isInteger(value) || value < 1 || value > largest) {
+      input.value = String(pager.size);
+      trace(key + "-refuse-page-size", 0);
+      return;
+    }
+    pager.size = value;
+    pager.page = 1;
+    paginate(key);
+    trace(key + "-page-size", value);
+  }
+
+  function initializePagers() {
+    document.querySelectorAll("input.page-size-input").forEach(
+      function (input) {
+        pagers[input.dataset.pageGroup].size = Number(input.value);
+        input.addEventListener("change", function () {
+          commitPageSize(input);
+        });
+      });
+    document.querySelectorAll("input.page-input").forEach(function (input) {
+      input.addEventListener("change", function () { commitTypedPage(input); });
+      input.addEventListener("keydown", function (event) {
+        // The page box sits in a nav rather than a form, so Enter would
+        // otherwise do nothing at all.
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commitTypedPage(input);
+        }
+      });
+    });
+    document.querySelectorAll("button[data-page-step]").forEach(
+      function (button) {
+        button.addEventListener("click", function () {
+          var key = button.dataset.pageGroup;
+          var step = button.dataset.pageStep;
+          if (step === "first") {
+            goToPage(key, 1);
+          } else if (step === "previous") {
+            goToPage(key, pagers[key].page - 1);
+          } else if (step === "next") {
+            goToPage(key, pagers[key].page + 1);
+          } else {
+            goToPage(key, pagers[key].pages);
+          }
+        });
+      });
+    Object.keys(pagers).forEach(updatePagerControls);
+  }
+
+  // What a table settles into once its rows are in a new order: a paginated
+  // table goes back to its first page, and Your Picks re-trims to the rows the
+  // new order puts on top, which is how sorting by Profit / Unit or ROI now
+  // ranks the picks the way the two buttons used to.
+  function afterSort(key) {
+    if (Object.prototype.hasOwnProperty.call(pagers, key)) {
+      pagers[key].page = 1;
+      paginate(key);
+    } else if (key === "picks") {
+      limitPicks();
+    }
+  }
+
   function applySort(tableId) {
     var table = document.getElementById(tableId);
-    sortTable(table, sortStates[table.dataset.sortTable]);
+    var key = table.dataset.sortTable;
+    sortTable(table, sortStates[key]);
+    afterSort(key);
   }
 
   function initializeSorters() {
@@ -745,9 +948,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
               direction: direction,
               kind: button.dataset.sortKind
             };
-            if (key === "days") { daysPage = 1; }
             var rows = sortTable(table, sortStates[key]);
-            if (key === "days") { paginateDays(); }
+            afterSort(key);
             traceSort(key, button.dataset.sortKey, direction, rows);
           });
         });
@@ -1350,20 +1552,32 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   }
 
   var picksData = [];
-  var picksMetric = "roi_percent";
+  // Your Picks is a shortlist rather than a full table: every pick is sorted,
+  // and only the rows at the top of that order are shown.
+  var PICKS_LIMIT = 10;
+
+  function limitPicks() {
+    var rows = document.querySelectorAll("#picks-body tr[data-sort-row]");
+    rows.forEach(function (row, index) {
+      row.hidden = index >= PICKS_LIMIT;
+    });
+    trace("picks-shown", Math.min(PICKS_LIMIT, rows.length));
+  }
 
   function renderPicks() {
     var body = document.getElementById("picks-body");
     body.replaceChildren();
+    // The order rows are built in is the tie-break the sorter falls back on,
+    // so picks are built in the profit-then-name order the removed toggle
+    // used to break its own ties with.
     picksData.slice().sort(function (left, right) {
-      var difference = right[picksMetric] - left[picksMetric];
-      return difference || right.profit - left.profit
+      return right.profit - left.profit
         || left.name.localeCompare(right.name);
-    }).slice(0, 10).forEach(function (item) {
-      var row = document.createElement("tr");
-      cell(row, item.name, "name");
-      cell(row, coin(item.buy_price));
-      cell(row, coin(item.sell_price));
+    }).forEach(function (item, index) {
+      var row = sortableRow(index);
+      cell(row, item.name, "name", item.name);
+      cell(row, coin(item.buy_price), "", item.buy_price);
+      cell(row, coin(item.sell_price), "", item.sell_price);
       profitCell(row, item.profit);
       percentCell(row, item.roi_percent);
       body.appendChild(row);
@@ -1372,8 +1586,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       emptyRow(body, 5,
         "No current prices showed a positive return for your previous flips.");
     }
-    trace("picks-" + (picksMetric === "roi_percent" ? "roi" : "profit"),
-      Math.min(10, picksData.length));
+    applySort("picks-table");
   }
 
   function renderDays(data) {
@@ -1395,41 +1608,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       "Total", data.summary.matched_units, coin(data.summary.cost),
       coin(data.summary.net_revenue), data.summary.profit
     ], 4);
-    daysPage = 1;
     applySort("days-table");
-    paginateDays();
-  }
-
-  function pageButton(page) {
-    var button = document.createElement("button");
-    button.type = "button";
-    button.textContent = String(page);
-    button.setAttribute("aria-label", "Page " + page);
-    if (page === daysPage) { button.setAttribute("aria-current", "page"); }
-    button.addEventListener("click", function () {
-      daysPage = page;
-      paginateDays();
-      trace("days-page", page);
-    });
-    return button;
-  }
-
-  function paginateDays() {
-    var rows = Array.prototype.slice.call(
-      document.querySelectorAll("#days-body tr[data-sort-row]"));
-    var pageCount = Math.max(1, Math.ceil(rows.length / daysPageSize));
-    daysPage = Math.min(daysPage, pageCount);
-    rows.forEach(function (row, index) {
-      row.hidden = index < (daysPage - 1) * daysPageSize
-        || index >= daysPage * daysPageSize;
-    });
-    ["days-pages-top", "days-pages-bottom"].forEach(function (id) {
-      var pages = document.getElementById(id);
-      pages.replaceChildren();
-      for (var page = 1; page <= pageCount; page += 1) {
-        pages.appendChild(pageButton(page));
-      }
-    });
   }
 
   function renderUnrealized(data) {
@@ -1944,19 +2123,6 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     event.preventDefault();
     load(false, true);
   });
-  document.getElementById("days-page-size").addEventListener(
-    "change", function (event) {
-      var value = Number(event.target.value);
-      if (!Number.isInteger(value) || value < 1 || value > 90) {
-        event.target.value = String(daysPageSize);
-        trace("refuse-page-size", 0);
-        return;
-      }
-      daysPageSize = value;
-      daysPage = 1;
-      paginateDays();
-      trace("days-page-size", value);
-    });
   document.getElementById("orders-menu").addEventListener(
     "click", openHiddenItems);
   document.getElementById("hidden-close").addEventListener(
@@ -1974,18 +2140,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         trace("hidden-items-dismiss", 0);
       }
     });
-  document.getElementById("picks-roi").addEventListener("click", function () {
-    picksMetric = "roi_percent";
-    this.setAttribute("aria-pressed", "true");
-    document.getElementById("picks-profit").setAttribute("aria-pressed", "false");
-    renderPicks();
-  });
-  document.getElementById("picks-profit").addEventListener("click", function () {
-    picksMetric = "profit";
-    this.setAttribute("aria-pressed", "true");
-    document.getElementById("picks-roi").setAttribute("aria-pressed", "false");
-    renderPicks();
-  });
+  initializePagers();
   initializeSorters();
   var initial = Number(new URLSearchParams(location.search).get("days"));
   var requested = Number.isInteger(initial)
@@ -2007,8 +2162,29 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 )
 
 # The window the page offers has to match the one the API will accept, so the
-# bound is written once, in the store, and stamped into the page here.
-PROFIT_PAGE = _PROFIT_PAGE_TEMPLATE.replace(
-    "__MAX_DAYS__",
-    str(MAX_REPORT_DAYS),
+# bound is written once, in the store, and stamped into the page here. The
+# pagination bars are stamped in the same way, one shared control serving both
+# paginated tables above and below their rows.
+PROFIT_PAGE = (
+    _PROFIT_PAGE_TEMPLATE.replace("__MAX_DAYS__", str(MAX_REPORT_DAYS))
+    .replace(
+        "__ITEMS_PAGES_TOP__",
+        _pagination_nav("items", "top", "Realized profit by item pages"),
+    )
+    .replace(
+        "__ITEMS_PAGES_BOTTOM__",
+        _pagination_nav(
+            "items",
+            "bottom",
+            "Realized profit by item pages and page size",
+        ),
+    )
+    .replace(
+        "__DAYS_PAGES_TOP__",
+        _pagination_nav("days", "top", "Daily profit pages"),
+    )
+    .replace(
+        "__DAYS_PAGES_BOTTOM__",
+        _pagination_nav("days", "bottom", "Daily profit pages and page size"),
+    )
 )
