@@ -1396,8 +1396,34 @@ item hidden while it had an order keeps its entry there after the order fills or
 is cancelled, so it can always be restored.
 
 The **Unclaimed Trading Post** section shows the coins waiting for pickup and
-then one row per item waiting with it, with the total below them. An item
+then one row per item waiting with it, with the totals below them. An item
 delivered as several stacks is added together into a single row.
+
+It reads like **Open Orders** on the market side, with **Highest Buy** and
+**Lowest Sell** for each waiting stack and a projection built from them:
+**Projected Sale** is what selling the whole stack at the current lowest sell
+would return after both fees, **Projected Profit** is that less what the stack
+cost, and **Projected ROI** is the profit over that cost.
+
+**Your Price** and **Cost** come from the member's own purchase history. The
+delivery box holds everything bought since they last collected, and collecting
+empties it in one go, so what is waiting is the newest run of their purchases —
+which is what the section prices it from, newest first. Your Price is the
+average across the purchases behind the stack.
+
+Not every stack has purchases behind it: items handed back by a cancelled sell
+listing, or bought before the member saved a key, are not in the history. A
+stack the purchases cover only part of shows its Highest Buy, Lowest Sell and
+Projected Sale but no profit or ROI, because a cost over part of a stack cannot
+be set against a sale over all of it. Those rows, and any with no current
+market price, are left out of the totals so the footer reconciles with itself,
+and a note above the table says so whenever there are any.
+
+The cost side is read from the matched history the daily sync already stores,
+never from a sync of this section's own, so it stays the one-request section it
+has always been. A member whose history has never been matched sees the market
+columns and dashes where the cost would be, and the costs appear on their next
+visit.
 
 The window in the header is remembered the same way: whenever a member loads a
 report the chosen number of days is stored against their Discord account, and
@@ -1511,8 +1537,8 @@ now. The window bounds the realized tables, not this one.
 
 It reads like **Open Orders** on the selling side. Stock listed at two prices
 is two rows rather than one averaged one, because the price is what decides a
-row's projection. **Your Price** is what the member listed at and **Lowest Sell
-Listing** is the cheapest anyone is asking for that item now, so a Your Price
+row's projection. **Your Price** is what the member listed at and **Lowest
+Sell** is the cheapest anyone is asking for that item now, so a Your Price
 above it says plainly that someone is undercutting them and the projection
 below is unlikely to be realized at that price. An item with no usable current
 price shows a dash there, as it does in Open Orders.
@@ -1526,9 +1552,9 @@ who wants the last few minutes too.
 
 Market prices are shared: they are public, so the highest buy order for Wool
 Scrap is one lookup for the whole guild rather than one per member. **Open
-Orders** follows them on its own, re-reading every minute without a page
-reload, and pauses while the tab is in the background. Pressing **Load**
-bypasses that cache as well.
+Orders** and **Unclaimed Trading Post** follow them on their own, re-reading
+every minute without a page reload, and pause while the tab is in the
+background. Pressing **Load** bypasses that cache as well.
 
 The rest of the caching:
 
@@ -1547,7 +1573,8 @@ revalidated cheaply and every TTL above is a real one. It does declare how long
 each answer is good for, and none of these hold anything longer than it says:
 prices `max-age=120`, items `max-age=3600`, transactions `max-age=60`.
 
-Unclaimed coins and items are read when the delivery section is built. Keys
+Unclaimed coins and items are read when the delivery section is built, together
+with the current price of every item waiting. Keys
 saved before delivery reporting or Open Orders were added can still load their
 existing reports if a route restriction blocks one of those newer endpoints:
 that section alone is marked unavailable and the page directs the member to run

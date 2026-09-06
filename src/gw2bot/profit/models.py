@@ -133,6 +133,20 @@ class DeliveryItem:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryCost:
+    """What the units waiting in the delivery box were bought for.
+
+    ``quantity`` is how much of the delivered stack stored purchases could
+    account for, which is not always the whole of it: items returned by a
+    cancelled sell listing, or bought before the member saved a key, have no
+    purchase behind them here. ``cost`` covers those attributed units only.
+    """
+
+    quantity: int
+    cost: int
+
+
+@dataclass(frozen=True, slots=True)
 class OpenBuyOrder:
     """The member's outstanding buy orders for one item at one price.
 
@@ -182,6 +196,8 @@ class DeliveryReport:
     coins: int | None
     items: tuple[DeliveryItem, ...] | None
     item_names: dict[int, str]
+    market_prices: dict[int, MarketPrice] = field(default_factory=dict)
+    costs: dict[int, DeliveryCost] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -753,6 +769,51 @@ def month_boundaries(after: datetime, through: datetime) -> list[datetime]:
         if boundary > after:
             boundaries.append(boundary)
     return boundaries
+
+
+def attribute_delivery_cost(
+    items: tuple[DeliveryItem, ...],
+    open_lots: dict[int, tuple[BuyLot, ...]],
+) -> dict[int, DeliveryCost]:
+    """Price the delivery box from the purchases that filled it.
+
+    The box holds everything bought since the member last collected, and
+    collecting takes all of it at once, so what is waiting is the newest run
+    of their purchases. The lots are therefore consumed newest first, which
+    is also why the unmatched lots are the right source: FIFO sells the
+    oldest stock, so what it leaves behind is the newest.
+
+    A stack the lots cannot cover - items handed back by a cancelled sell
+    listing, or bought before the member saved a key - is attributed as far
+    as the purchases reach and no further.
+    """
+    costs: dict[int, DeliveryCost] = {}
+    uncovered = 0
+    for item in items:
+        lots = sorted(
+            open_lots.get(item.item_id, ()),
+            key=lambda lot: lot.occurred_at,
+            reverse=True,
+        )
+        attributed = 0
+        cost = 0
+        for lot in lots:
+            if attributed >= item.quantity:
+                break
+            taken = min(lot.remaining, item.quantity - attributed)
+            attributed += taken
+            cost += taken * lot.unit_price
+        if attributed < item.quantity:
+            uncovered += 1
+        if attributed > 0:
+            costs[item.item_id] = DeliveryCost(attributed, cost)
+    LOGGER.debug(
+        "Attributed delivery cost; stacks=%s priced=%s partial_or_unpriced=%s",
+        len(items),
+        len(costs),
+        uncovered,
+    )
+    return costs
 
 
 def prune_open_lots(

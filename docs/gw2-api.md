@@ -134,8 +134,9 @@ authorization still fails the report.
 Returns `buys.unit_price` (the highest standing buy order) and
 `sells.unit_price` (the lowest sell listing) for each requested item, in chunks
 of 200 ids. The realized report reads it for the items flipped in the window
-and for the stock held in the Unrealized Profit section, and the Open Orders
-section for the items on order; neither waits on the other. Each side is read
+and for the stock held in the Unrealized Profit section, the Open Orders
+section for the items on order, and the delivery section for the items waiting
+to be collected; none of them waits on the others. Each side is read
 on its own, because an item nobody is bidding on still has listings to
 undercut: a zero price drops that side alone, and only an item with neither
 side is skipped. It needs no API key.
@@ -188,7 +189,19 @@ Returns the items and copper waiting for pickup from the Trading Post as
 `{"coins": <copper>, "items": [{"id": <item id>, "count": <quantity>}]}`. The
 profit dashboard shows `coins` as unclaimed Trading Post gold and lists the
 items one row per item; a single item delivered as several stacks has its counts
-added together. Route-restricted member subtokens must allow this endpoint along
+added together.
+
+The response carries no prices and no purchase history, so the section's cost
+and market columns come from elsewhere: `/v2/commerce/prices` for the current
+spread, and the member's own stored purchase lots for what the stack cost. The
+box holds everything bought since the member last collected, and collecting
+empties it in one action, so the waiting stacks are the newest run of their
+purchases and the lots are consumed newest first. Purchases that do not cover a
+whole stack - items handed back by a cancelled sell listing, or bought before
+the member saved a key - leave that row without a cost rather than with a
+partial one.
+
+Route-restricted member subtokens must allow this endpoint along
 with the four transaction endpoints above. A legacy subtoken accepted before this
 route was required can still load its transaction report; only the unclaimed
 amount is marked unavailable after a 401 or 403, with the page prompting the

@@ -28,10 +28,12 @@ from gw2bot.profit.models import (
     BuyLot,
     ItemDayProfit,
     aggregate_rollups,
+    attribute_delivery_cost,
     month_boundaries,
     prune_open_lots,
     DeliveryItem,
     ItemProfit,
+    DeliveryCost,
     MarketPrice,
     OpenBuyOrder,
     OpenOrdersReport,
@@ -518,6 +520,51 @@ class TestProfitCalculation:
         assert kept_name not in caplog.text
         assert skipped_name not in caplog.text
         assert undefined_name not in caplog.text
+
+
+class TestDeliveryCostAttribution:
+    def test_consumes_the_newest_lots_first(self) -> None:
+        costs = attribute_delivery_cost(
+            (DeliveryItem(1, 6),),
+            {
+                1: (
+                    BuyLot(5, 40, datetime(2026, 8, 1, tzinfo=UTC)),
+                    BuyLot(4, 100, datetime(2026, 8, 19, tzinfo=UTC)),
+                    BuyLot(3, 120, datetime(2026, 8, 20, tzinfo=UTC)),
+                )
+            },
+        )
+
+        assert costs == {1: DeliveryCost(6, 660)}
+
+    def test_attributes_as_far_as_the_purchases_reach(self) -> None:
+        costs = attribute_delivery_cost(
+            (DeliveryItem(1, 9),),
+            {1: (BuyLot(2, 100, datetime(2026, 8, 20, tzinfo=UTC)),)},
+        )
+
+        assert costs == {1: DeliveryCost(2, 200)}
+
+    def test_leaves_out_an_item_no_purchase_covers(self) -> None:
+        costs = attribute_delivery_cost(
+            (DeliveryItem(1, 4), DeliveryItem(2, 3)),
+            {1: (BuyLot(4, 50, datetime(2026, 8, 20, tzinfo=UTC)),)},
+        )
+
+        assert costs == {1: DeliveryCost(4, 200)}
+
+    def test_never_takes_more_units_than_a_lot_still_holds(self) -> None:
+        costs = attribute_delivery_cost(
+            (DeliveryItem(1, 5),),
+            {
+                1: (
+                    BuyLot(3, 10, datetime(2026, 8, 1, tzinfo=UTC)),
+                    BuyLot(1, 90, datetime(2026, 8, 20, tzinfo=UTC)),
+                )
+            },
+        )
+
+        assert costs == {1: DeliveryCost(4, 120)}
 
 
 class TestOneSidedMarketQuotes:
@@ -1339,10 +1386,132 @@ class TestProfitService:
         assert report.items == (DeliveryItem(1, 7),)
         assert serialize_delivery(report) == {
             "coins": 12_345,
-            "items": [{"item_id": 1, "name": "Test Item", "quantity": 7}],
+            "items": [
+                {
+                    "item_id": 1,
+                    "name": "Test Item",
+                    "quantity": 7,
+                    # No stored lots and no price: the stack still lists,
+                    # with dashes where a projection would go.
+                    "costed_quantity": None,
+                    "unit_price": None,
+                    "cost": None,
+                    "buy_price": None,
+                    "sell_price": None,
+                    "projected_sale": None,
+                    "projected_profit": None,
+                    "roi_percent": None,
+                }
+            ],
         }
         api.fetch_transactions.assert_not_awaited()
         api.fetch_delivery.assert_awaited_once_with("member-secret")
+
+    async def test_delivery_prices_a_stack_from_the_newest_purchases(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The box holds everything bought since the last collection, and
+        # collecting takes all of it, so the stack waiting is the newest run
+        # of purchases - not the oldest, which FIFO has already sold.
+        store, _, _ = profit_store
+        store.set_api_key(101, "delivery-cost-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_rollups(
+            101,
+            {},
+            {
+                1: (
+                    BuyLot(5, 40, datetime(2026, 8, 1, tzinfo=UTC)),
+                    BuyLot(4, 100, datetime(2026, 8, 19, tzinfo=UTC)),
+                    BuyLot(3, 120, datetime(2026, 8, 20, tzinfo=UTC)),
+                )
+            },
+            now,
+            now=now,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(0, (DeliveryItem(1, 6),))
+            ),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(150, 200)}
+            ),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        report = await service.load_delivery(101, now=now)
+
+        payload = cast(dict[str, Any], serialize_delivery(report))
+        row = cast(list[dict[str, Any]], payload["items"])[0]
+        # The three newest units at 120 and the next three at 100.
+        assert row["costed_quantity"] == 6
+        assert row["cost"] == 660
+        assert row["unit_price"] == 110
+        assert row["buy_price"] == 150
+        assert row["sell_price"] == 200
+        # 6 x 200 = 1200 gross, less 60 listing and 120 exchange.
+        assert row["projected_sale"] == 1_020
+        assert row["projected_profit"] == 360
+        assert row["roi_percent"] == pytest.approx(54.545, rel=1e-3)
+        # Costing the box reads stored lots; it never syncs history itself.
+        api.fetch_transactions.assert_not_awaited()
+
+    async def test_delivery_leaves_a_partly_covered_stack_unprojected(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # Items handed back by a cancelled sell listing have no purchase
+        # behind them here, so a cost over part of the stack must not be set
+        # against a sale over all of it.
+        store, _, _ = profit_store
+        store.set_api_key(101, "partial-delivery-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_rollups(
+            101,
+            {},
+            {1: (BuyLot(2, 100, datetime(2026, 8, 20, tzinfo=UTC)),)},
+            now,
+            now=now,
+        )
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(0, (DeliveryItem(1, 9),))
+            ),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(150, 200)}
+            ),
+        )
+
+        report = await service.load_delivery(101, now=now)
+
+        payload = cast(dict[str, Any], serialize_delivery(report))
+        row = cast(list[dict[str, Any]], payload["items"])[0]
+        assert row["quantity"] == 9
+        # What the purchases reached is reported, but not as a cost: two
+        # units' worth shown against a stack of nine is a price per unit the
+        # member never paid.
+        assert row["costed_quantity"] == 2
+        assert row["cost"] is None
+        assert row["unit_price"] is None
+        # The sale still stands on its own; the profit against it does not.
+        assert row["projected_sale"] == 1_530
+        assert row["projected_profit"] is None
+        assert row["roi_percent"] is None
 
     async def test_legacy_restricted_key_still_reports_its_delivery_box(
         self,

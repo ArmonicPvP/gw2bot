@@ -801,7 +801,10 @@ class WebServer:
         try:
             if section == "delivery":
                 payload = serialize_delivery(
-                    await service.load_delivery(session.user_id)
+                    await service.load_delivery(
+                        session.user_id,
+                        force=self._forced(request),
+                    )
                 )
             else:
                 payload = serialize_open_orders(

@@ -18,6 +18,7 @@ from gw2bot.profit.models import (
     MIN_FLIP_QUANTITY,
     DeliveryItem,
     DeliveryReport,
+    attribute_delivery_cost,
     OpenBuyOrder,
     OpenOrdersReport,
     ProfitReport,
@@ -148,12 +149,17 @@ class ProfitService:
         self,
         discord_user_id: int,
         *,
+        force: bool = False,
         now: datetime | None = None,
     ) -> DeliveryReport:
-        """Load what is waiting for pickup, and nothing else.
+        """Load what is waiting for pickup, and what it is worth.
 
         Delivery depends on no transaction collection, so this answers in one
-        request while the history sections are still being read.
+        request while the history sections are still being read. The cost
+        behind each stack comes from lots already stored by an earlier pass,
+        never from a sync of its own: a member who has never had one built
+        sees the market columns and no cost, rather than waiting on a history
+        read this section does not otherwise need.
         """
         loaded_at = datetime.now(UTC) if now is None else now
         snapshot = await self._require_api_key(discord_user_id)
@@ -161,12 +167,19 @@ class ProfitService:
             discord_user_id,
             snapshot.api_key,
         )
-        item_names = await self._resolve_item_names(
-            {row.item_id for row in items or ()},
-            loaded_at,
+        delivered = items or ()
+        item_ids = {row.item_id for row in delivered}
+        # Prices, names and the stored lots are independent reads, so they
+        # go out together rather than one after another.
+        market_prices, item_names, open_lots = await asyncio.gather(
+            self._api.fetch_market_prices(item_ids, force=force),
+            self._resolve_item_names(item_ids, loaded_at),
+            asyncio.to_thread(self._store.get_open_lots, discord_user_id),
         )
+        costs = attribute_delivery_cost(delivered, open_lots)
         LOGGER.debug(
-            "Loaded Trading Post delivery; user_id=%s coins=%s items=%s",
+            "Loaded Trading Post delivery; user_id=%s coins=%s items=%s "
+            "priced=%s costed=%s",
             discord_user_id,
             (
                 "unavailable"
@@ -174,8 +187,16 @@ class ProfitService:
                 else "available" if coins > 0 else "empty"
             ),
             "unavailable" if items is None else len(items),
+            len(market_prices),
+            len(costs),
         )
-        return DeliveryReport(coins=coins, items=items, item_names=item_names)
+        return DeliveryReport(
+            coins=coins,
+            items=items,
+            item_names=item_names,
+            market_prices=market_prices,
+            costs=costs,
+        )
 
     async def load_open_orders(
         self,
@@ -910,12 +931,14 @@ class ProfitService:
         raise ProfitApiError("GW2 API key changed during profit refresh")
 
 
+def percentage(numerator: int, denominator: int) -> float | None:
+    """A return over a base, or nothing when there is no base to divide by."""
+    return numerator / denominator * 100 if denominator else None
+
+
 def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
     realized = report.realized
     unrealized = report.unrealized
-
-    def percentage(numerator: int, denominator: int) -> float | None:
-        return numerator / denominator * 100 if denominator else None
 
     items = [
         {
@@ -1057,18 +1080,58 @@ def serialize_delivery(report: DeliveryReport) -> dict[str, object]:
         "items": (
             None
             if report.items is None
-            else [
-                {
-                    "item_id": row.item_id,
-                    "name": report.item_names.get(
-                        row.item_id,
-                        f"Item {row.item_id}",
-                    ),
-                    "quantity": row.quantity,
-                }
-                for row in report.items
-            ]
+            else [_delivery_row(report, row) for row in report.items]
         ),
+    }
+
+
+def _delivery_row(
+    report: DeliveryReport,
+    item: DeliveryItem,
+) -> dict[str, object]:
+    """One waiting stack: what it cost, and what selling it would return."""
+    price = report.market_prices.get(item.item_id)
+    cost_basis = report.costs.get(item.item_id)
+    # A cost is reported only when the purchases account for the whole stack.
+    # Part of one shown against the stack's own quantity is a per-unit price
+    # the member never paid, so a row the lots only partly cover says how far
+    # they reached and nothing more.
+    covered = cost_basis is not None and cost_basis.quantity == item.quantity
+    cost = cost_basis.cost if covered and cost_basis is not None else None
+    unit_price = (
+        None
+        if cost is None or cost_basis is None
+        else round(cost_basis.cost / cost_basis.quantity)
+    )
+    sell_unit_price = None if price is None else price.sell_unit_price
+    projected_sale: int | None = None
+    projected_profit: int | None = None
+    roi_percent: float | None = None
+    if sell_unit_price is not None:
+        # The same exit Open Orders assumes: sell the whole stack at the
+        # current lowest listing, with both fees rounded over its gross
+        # value rather than unit by unit.
+        projected_sale = sell_unit_price * item.quantity - sale_fee_total(
+            sell_unit_price,
+            item.quantity,
+        )
+        if cost is not None:
+            projected_profit = projected_sale - cost
+            roi_percent = percentage(projected_profit, cost)
+    return {
+        "item_id": item.item_id,
+        "name": report.item_names.get(item.item_id, f"Item {item.item_id}"),
+        "quantity": item.quantity,
+        # Kept even when the cost is withheld: it is what tells the reader
+        # why the row is dashed rather than priced.
+        "costed_quantity": None if cost_basis is None else cost_basis.quantity,
+        "unit_price": unit_price,
+        "cost": cost,
+        "buy_price": None if price is None else price.buy_unit_price,
+        "sell_price": sell_unit_price,
+        "projected_sale": projected_sale,
+        "projected_profit": projected_profit,
+        "roi_percent": roi_percent,
     }
 
 

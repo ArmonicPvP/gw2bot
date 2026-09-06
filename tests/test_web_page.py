@@ -104,13 +104,54 @@ class TestProfitPage:
         # The footer spans the two added columns.
         assert 'emptyRow(body, 8, "No currently listed' in PROFIT_PAGE
 
+    def test_delivery_shows_both_market_sides_with_a_projection(
+        self,
+    ) -> None:
+        assert 'id="delivery-table" data-sort-table="delivery"' in PROFIT_PAGE
+        for heading in (
+            ">Your Price<",
+            ">Cost<",
+            ">Highest Buy<",
+            ">Lowest Sell<",
+            ">Projected Sale<",
+            ">Projected Profit<",
+            ">Projected ROI<",
+        ):
+            assert heading in PROFIT_PAGE
+        assert "optionalCoinCell(row, item.unit_price);" in PROFIT_PAGE
+        assert "optionalCoinCell(row, item.buy_price);" in PROFIT_PAGE
+        assert "optionalCoinCell(row, item.projected_sale);" in PROFIT_PAGE
+        assert "optionalProfitCell(row, item.projected_profit);" in PROFIT_PAGE
+        # The footer and the empty row span every added column.
+        assert 'emptyRow(body, 9, "No items are waiting' in PROFIT_PAGE
+
+    def test_delivery_totals_cover_the_fully_costed_rows_only(self) -> None:
+        assert 'id="delivery-unpriced" hidden' in PROFIT_PAGE
+        assert (
+            "if (item.projected_profit === null || item.cost === null) {"
+            in PROFIT_PAGE
+        )
+        assert 'document.getElementById("delivery-unpriced").hidden' not in (
+            PROFIT_PAGE
+        )
+        assert "unpriced.hidden = partial === 0;" in PROFIT_PAGE
+        # A dashed cost says why, rather than leaving the reader guessing.
+        assert "costCell.title = \"Your purchases cover only \"" in PROFIT_PAGE
+
+    def test_market_columns_are_named_the_short_way(self) -> None:
+        # One name per side across every table that quotes the market.
+        assert "Highest Buy Order" not in PROFIT_PAGE
+        assert "Lowest Sell Listing" not in PROFIT_PAGE
+        assert PROFIT_PAGE.count(">Highest Buy<") == 2
+        assert PROFIT_PAGE.count(">Lowest Sell<") == 3
+
     def test_open_orders_shows_both_market_sides_with_profit_and_roi(
         self,
     ) -> None:
         assert 'id="orders-table" data-sort-table="orders"' in PROFIT_PAGE
         assert ">Your Price<" in PROFIT_PAGE
-        assert ">Highest Buy Order<" in PROFIT_PAGE
-        assert ">Lowest Sell Listing<" in PROFIT_PAGE
+        assert ">Highest Buy<" in PROFIT_PAGE
+        assert ">Lowest Sell<" in PROFIT_PAGE
         assert ">Profit / Unit<" in PROFIT_PAGE
         assert ">ROI<" in PROFIT_PAGE
         assert "optionalCoinCell(row, order.buy_price);" in PROFIT_PAGE
@@ -217,7 +258,10 @@ class TestProfitPage:
         assert "if (missingKey || document.hidden) { return; }" in PROFIT_PAGE
         assert 'addEventListener("visibilitychange"' in PROFIT_PAGE
         # The beat rides the cache; only Load asks for a live read.
-        assert 'fetch("/api/profit/orders").then' in PROFIT_PAGE
+        assert 'beat("/api/profit/orders", "orders"' in PROFIT_PAGE
+        # Delivery carries live market columns now, so it rides the beat too.
+        assert 'beat("/api/profit/delivery", "delivery"' in PROFIT_PAGE
+        assert 'fetch(path).then' in PROFIT_PAGE
         assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
 
     def test_only_the_load_button_asks_for_a_live_read(self) -> None:
@@ -324,7 +368,7 @@ class TestProfitPage:
 
     def test_detail_tables_have_accessible_sort_buttons(self) -> None:
         assert PROFIT_PAGE.count('data-sort-table="') == 5
-        assert PROFIT_PAGE.count('class="sort-button"') == 33
+        assert PROFIT_PAGE.count('class="sort-button"') == 40
         assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
         assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
         assert (
