@@ -195,10 +195,15 @@ The response carries no prices and no purchase history, so the section's cost
 and market columns come from elsewhere: `/v2/commerce/prices` for the current
 spread, and the member's own stored purchase lots for what the stack cost. The
 box holds everything bought since the member last collected, and collecting
-empties it in one action, so the waiting stacks are the newest run of their
-purchases and the lots are consumed newest first. Purchases that do not cover a
-whole stack - items handed back by a cancelled sell listing, or bought before
-the member saved a key - leave that row without a cost rather than with a
+empties it in one action, so the waiting stacks are normally the newest run of
+their purchases and the lots are consumed newest first.
+
+The response cannot say how a stack reached the box: a cancelled sell listing
+returns items exactly as a filled buy order delivers them. Stock of one item is
+interchangeable, so both are priced from the same pool of unmatched purchases -
+a cost basis, not a receipt for those units - and a member with no unmatched
+purchases of that item gets no cost rather than a guess. Purchases that cover
+only part of a stack leave that row without a cost too, rather than with a
 partial one.
 
 Route-restricted member subtokens must allow this endpoint along

@@ -553,6 +553,21 @@ class TestDeliveryCostAttribution:
 
         assert costs == {1: DeliveryCost(4, 200)}
 
+    def test_prices_a_stack_from_the_pool_however_it_reached_the_box(
+        self,
+    ) -> None:
+        # A cancelled sell listing returns items exactly as a filled buy
+        # order delivers them, and the response cannot tell them apart.
+        # Stock of one item is interchangeable - the units merge into one
+        # stack on collection - so both are priced from the same unmatched
+        # purchases, which is the basis the realized report matches under.
+        costs = attribute_delivery_cost(
+            (DeliveryItem(1, 3),),
+            {1: (BuyLot(10, 70, datetime(2026, 8, 20, tzinfo=UTC)),)},
+        )
+
+        assert costs == {1: DeliveryCost(3, 210)}
+
     def test_never_takes_more_units_than_a_lot_still_holds(self) -> None:
         costs = attribute_delivery_cost(
             (DeliveryItem(1, 5),),

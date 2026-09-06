@@ -1407,17 +1407,31 @@ cost, and **Projected ROI** is the profit over that cost.
 
 **Your Price** and **Cost** come from the member's own purchase history. The
 delivery box holds everything bought since they last collected, and collecting
-empties it in one go, so what is waiting is the newest run of their purchases —
-which is what the section prices it from, newest first. Your Price is the
-average across the purchases behind the stack.
+empties it in one go, so what is waiting is normally the newest run of their
+purchases — which is what the section prices it from, newest first, drawing on
+the purchases no sale has been matched against. Your Price is the average
+across them.
 
-Not every stack has purchases behind it: items handed back by a cancelled sell
-listing, or bought before the member saved a key, are not in the history. A
-stack the purchases cover only part of shows its Highest Buy, Lowest Sell and
-Projected Sale but no profit or ROI, because a cost over part of a stack cannot
-be set against a sale over all of it. Those rows, and any with no current
-market price, are left out of the totals so the footer reconciles with itself,
-and a note above the table says so whenever there are any.
+It is a cost basis rather than a receipt, and the distinction matters for one
+case the API cannot report: a stack handed back by a cancelled sell listing
+arrives in the box the same way a filled buy order does, with nothing to tell
+them apart. Stock of one item is interchangeable — the units merge into one
+stack the moment they are collected — so such a stack is priced from the same
+pool of unmatched purchases, which is the same convention the realized report
+already matches sales under. A member holding no unmatched purchases of that
+item gets no cost at all rather than a guess.
+
+The other gap is a stack the purchases only partly cover, usually one bought
+before the member saved a key. It shows its Highest Buy, Lowest Sell and
+Projected Sale but no cost, price, profit or ROI: part of a stack's cost set
+against a sale of all of it is a per-unit price nobody paid. Hovering the
+dashed cost says how far the purchases reached. Those rows, and any with no
+current market price, are left out of the totals so the footer reconciles with
+itself, and a note above the table says so whenever there are any.
+
+Because the basis comes from the last matched pass, a purchase that filled
+since then is not in it yet, and a stack can price from the previous basis
+until the next pass lands.
 
 The cost side is read from the matched history the daily sync already stores,
 never from a sync of this section's own, so it stays the one-request section it

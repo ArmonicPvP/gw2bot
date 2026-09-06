@@ -71,9 +71,7 @@ class TestProfitPage:
         assert "delivery.coins === null" in PROFIT_PAGE
         assert 'coins.textContent = "Unavailable";' in PROFIT_PAGE
         assert "help.hidden = false;" in PROFIT_PAGE
-        assert 'fetchSection("delivery", "/api/profit/delivery", renderDelivery)' in (
-            PROFIT_PAGE
-        )
+        assert 'fetchSection("delivery", "/api/profit/delivery"' in PROFIT_PAGE
         assert 'fetchSection("report", "/api/profit"' in PROFIT_PAGE
 
     def test_delivery_lists_each_waiting_item_instead_of_one_count(
@@ -262,6 +260,25 @@ class TestProfitPage:
         # Delivery carries live market columns now, so it rides the beat too.
         assert 'beat("/api/profit/delivery", "delivery"' in PROFIT_PAGE
         assert 'fetch(path).then' in PROFIT_PAGE
+
+    def test_a_refused_beat_is_traced_with_its_section(self) -> None:
+        # A non-2xx answer is a failure, not an empty one, and one helper
+        # now serves two sections, so every trace has to say which.
+        assert (
+            'trace("prices-refresh-refused-" + section, response.status);'
+            in PROFIT_PAGE
+        )
+        assert 'trace("prices-refreshed-" + section, rows);' in PROFIT_PAGE
+        assert 'trace("prices-refresh-failed-" + section, 0);' in PROFIT_PAGE
+
+    def test_load_asks_delivery_for_a_live_read_too(self) -> None:
+        # Delivery quotes the market now, so Load has to bypass the price
+        # cache there as well, or one section redraws with an older quote.
+        assert (
+            'fetchSection("delivery", "/api/profit/delivery"\n'
+            '        + (refresh ? "?" + refresh : ""), renderDelivery)'
+            in PROFIT_PAGE
+        )
         assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
 
     def test_only_the_load_button_asks_for_a_live_read(self) -> None:

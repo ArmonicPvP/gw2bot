@@ -479,7 +479,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         </tbody>
       </table></div>
       <h3 class="subheading">Items available to collect</h3>
-      <p class="note">Your Price is the average of the purchases that filled these stacks, taken newest first, because collecting empties the box and what is in it is everything bought since. Projected Sale assumes selling the whole stack at the current lowest sell after the 5% listing and 10% exchange fees, and Projected ROI is the profit over what the stack cost you.</p>
+      <p class="note">Your Price is a cost basis, not a receipt: it averages your newest purchases of that item that no sale has been matched against. Collecting empties the box in one go, so what is waiting is normally the run of buys you have made since — and stock of one item is interchangeable, so a stack that arrived another way, such as a cancelled sell listing, is priced from the same purchases. Projected Sale assumes selling the whole stack at the current lowest sell after the 5% listing and 10% exchange fees, and Projected ROI is the profit over that cost.</p>
       <p class="note" id="delivery-unpriced" hidden>Rows with no current price, or with purchases that cover only part of the stack, show dashes and are left out of the totals below, so the totals cover the same stacks throughout.</p>
       <div class="table-scroll"><table id="delivery-table" data-sort-table="delivery">
         <thead><tr>
@@ -1872,7 +1872,8 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         + (reportQuery ? "?" + reportQuery : ""), renderReport),
       fetchSection("orders", "/api/profit/orders"
         + (refresh ? "?" + refresh : ""), renderOrdersSection),
-      fetchSection("delivery", "/api/profit/delivery", renderDelivery)
+      fetchSection("delivery", "/api/profit/delivery"
+        + (refresh ? "?" + refresh : ""), renderDelivery)
     ]).then(function (loaded) {
       var ready = loaded.filter(Boolean).length;
       if (missingKey) {
@@ -1913,17 +1914,23 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   function beat(path, section, render) {
     fetch(path).then(function (response) {
-      return response.ok ? response.json() : null;
+      if (!response.ok) {
+        // A refused beat is a failure, not an empty answer: say so, with
+        // the status and the section, rather than returning quietly.
+        trace("prices-refresh-refused-" + section, response.status);
+        return null;
+      }
+      return response.json();
     }).then(function (data) {
       if (!data) { return; }
       var rows = render(data);
       markSection(section, "ready");
-      trace("prices-refreshed", rows);
+      trace("prices-refreshed-" + section, rows);
     }).catch(function () {
       // A dropped beat is not worth telling the reader about; the next one
       // is a minute away and the numbers on screen are still the last good
-      // ones.
-      trace("prices-refresh-failed", 0);
+      // ones. It is still worth tracing, and worth saying which section.
+      trace("prices-refresh-failed-" + section, 0);
     });
   }
 
