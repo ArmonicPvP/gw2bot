@@ -36,6 +36,7 @@ from gw2bot.profit.models import (
 )
 from gw2bot.profit.store import (
     HISTORY_KINDS,
+    ProfitApiKeySnapshot,
     RollupState,
     ITEM_NAME_TTL_SECONDS,
     MAX_REPORT_DAYS,
@@ -65,6 +66,23 @@ LOT_PRUNE_AFTER_DAYS = 365
 
 
 @dataclass(frozen=True, slots=True)
+class _DeliverySnapshot:
+    """One member's delivery box as last read, and when that was.
+
+    The box only changes when the member trades or collects, but its prices
+    move every minute, so the price beat re-reads this section constantly.
+    Holding the box for as long as a transaction snapshot lasts keeps that
+    beat to the public price lookup it is meant to be, instead of a private
+    authenticated request per tab per minute.
+    """
+
+    coins: int | None
+    items: tuple[DeliveryItem, ...] | None
+    generation: str
+    fetched_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ReportWindow:
     """The window a request resolved to, and whether it was a stored choice."""
 
@@ -85,6 +103,7 @@ class ProfitService:
     ) -> None:
         self._store = store
         self._api = ProfitApiClient(http, base_url)
+        self._deliveries: dict[int, _DeliverySnapshot] = {}
 
     async def validate_api_key(self, api_key: str) -> bool:
         LOGGER.debug("Validating a member profit API key")
@@ -163,9 +182,11 @@ class ProfitService:
         """
         loaded_at = datetime.now(UTC) if now is None else now
         snapshot = await self._require_api_key(discord_user_id)
-        coins, items = await self._fetch_delivery(
+        coins, items = await self._delivery_box(
             discord_user_id,
-            snapshot.api_key,
+            snapshot,
+            loaded_at,
+            force=force,
         )
         delivered = items or ()
         item_ids = {row.item_id for row in delivered}
@@ -372,6 +393,56 @@ class ProfitService:
             len(missing_ids),
         )
         return item_names
+
+    async def _delivery_box(
+        self,
+        discord_user_id: int,
+        snapshot: ProfitApiKeySnapshot,
+        now: datetime,
+        *,
+        force: bool,
+    ) -> tuple[int | None, tuple[DeliveryItem, ...] | None]:
+        """The member's delivery box, from the last read when it is recent.
+
+        A key replaced since the read is a miss whatever its age: the box
+        belongs to the account behind the key, not to the member row.
+        """
+        held = self._deliveries.get(discord_user_id)
+        if (
+            not force
+            and held is not None
+            and held.generation == snapshot.generation
+            and (now - held.fetched_at).total_seconds() < CACHE_TTL_SECONDS
+        ):
+            LOGGER.debug(
+                "Reused stored Trading Post delivery box; user_id=%s age=%ss",
+                discord_user_id,
+                int((now - held.fetched_at).total_seconds()),
+            )
+            return held.coins, held.items
+        coins, items = await self._fetch_delivery(
+            discord_user_id,
+            snapshot.api_key,
+        )
+        # Members come and go, so an entry nobody has read since it expired
+        # is dropped rather than held for the life of the process.
+        for user_id, expired in list(self._deliveries.items()):
+            if (now - expired.fetched_at).total_seconds() >= CACHE_TTL_SECONDS:
+                del self._deliveries[user_id]
+        # An unavailable box is stored too: a route-restricted key must not
+        # be asked again every minute to be refused the same way.
+        self._deliveries[discord_user_id] = _DeliverySnapshot(
+            coins=coins,
+            items=items,
+            generation=snapshot.generation,
+            fetched_at=now,
+        )
+        LOGGER.debug(
+            "Stored Trading Post delivery box; user_id=%s forced=%s",
+            discord_user_id,
+            force,
+        )
+        return coins, items
 
     async def _fetch_delivery(
         self,

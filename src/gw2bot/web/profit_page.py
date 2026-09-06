@@ -1896,8 +1896,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 
   function refreshPrices() {
     // A quiet re-read on the cached path: the server holds each price for a
-    // minute and shares it between members, so this beat costs almost
-    // nothing and never forces a fetch of its own.
+    // minute and shares it between members, and holds the delivery box for
+    // as long as it holds a transaction snapshot, so this beat costs one
+    // public price lookup and never a private read of its own.
     if (missingKey || document.hidden) { return; }
     // Both sections carry live market columns now, so both ride the beat.
     // They are separate requests so a failure in one leaves the other's

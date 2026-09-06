@@ -1568,7 +1568,10 @@ Market prices are shared: they are public, so the highest buy order for Wool
 Scrap is one lookup for the whole guild rather than one per member. **Open
 Orders** and **Unclaimed Trading Post** follow them on their own, re-reading
 every minute without a page reload, and pause while the tab is in the
-background. Pressing **Load** bypasses that cache as well.
+background. That beat is a public price lookup and nothing more: the box
+itself is held for five minutes, the way a transaction snapshot is, so an open
+tab does not ask the member's own account for its delivery box every minute.
+Pressing **Load** bypasses both caches.
 
 The rest of the caching:
 
@@ -1579,6 +1582,7 @@ The rest of the caching:
 | Matched rollups | Until new trades land | Matching does not depend on the window |
 | Month-end lot snapshots | 24 months | Where a late arrival rematches from |
 | Transaction snapshots | 5 minutes | How often a refresh is worth making |
+| Delivery box | 5 minutes | Changes only on a trade; its prices move faster |
 | Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
 
 The Guild Wars 2 API supports no conditional requests — no `ETag` and no

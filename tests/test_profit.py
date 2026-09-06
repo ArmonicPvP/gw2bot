@@ -1479,6 +1479,81 @@ class TestProfitService:
         # Costing the box reads stored lots; it never syncs history itself.
         api.fetch_transactions.assert_not_awaited()
 
+    async def test_delivery_box_is_held_between_price_beats(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The price beat re-reads this section every minute. The box only
+        # changes when the member trades, so re-reading it upstream on every
+        # beat would spend a private authenticated request per tab per
+        # minute on an answer that has not moved.
+        store, _, _ = profit_store
+        store.set_api_key(101, "delivery-beat-secret")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(0, (DeliveryItem(1, 4),))
+            ),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(150, 200)}
+            ),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        await service.load_delivery(101, now=now)
+        await service.load_delivery(101, now=now + timedelta(seconds=60))
+        await service.load_delivery(101, now=now + timedelta(seconds=120))
+
+        # One private read, but a price lookup on every beat.
+        api.fetch_delivery.assert_awaited_once()
+        assert api.fetch_market_prices.await_count == 3
+
+        # Load asks for a live one, and the snapshot expires on its own.
+        await service.load_delivery(
+            101, force=True, now=now + timedelta(seconds=150)
+        )
+        assert api.fetch_delivery.await_count == 2
+        await service.load_delivery(101, now=now + timedelta(seconds=460))
+        assert api.fetch_delivery.await_count == 3
+
+    async def test_a_replaced_key_is_never_served_the_old_delivery_box(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The box belongs to the account behind the key, so a key swapped
+        # inside the snapshot's life must not be answered from it.
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-delivery-key")
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        api = SimpleNamespace(
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(
+                return_value=(0, (DeliveryItem(1, 4),))
+            ),
+            fetch_item_names=AsyncMock(return_value={}),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        service._api = api  # type: ignore[assignment]
+
+        await service.load_delivery(101, now=now)
+        store.set_api_key(101, "second-delivery-key")
+        await service.load_delivery(101, now=now + timedelta(seconds=30))
+
+        assert api.fetch_delivery.await_count == 2
+        assert api.fetch_delivery.await_args.args == ("second-delivery-key",)
+
     async def test_delivery_leaves_a_partly_covered_stack_unprojected(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
