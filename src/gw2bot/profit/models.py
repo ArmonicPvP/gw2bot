@@ -133,6 +133,20 @@ class DeliveryItem:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryCost:
+    """What the units waiting in the delivery box were bought for.
+
+    ``quantity`` is how much of the delivered stack stored purchases could
+    account for, which is not always the whole of it: items returned by a
+    cancelled sell listing, or bought before the member saved a key, have no
+    purchase behind them here. ``cost`` covers those attributed units only.
+    """
+
+    quantity: int
+    cost: int
+
+
+@dataclass(frozen=True, slots=True)
 class OpenBuyOrder:
     """The member's outstanding buy orders for one item at one price.
 
@@ -182,6 +196,8 @@ class DeliveryReport:
     coins: int | None
     items: tuple[DeliveryItem, ...] | None
     item_names: dict[int, str]
+    market_prices: dict[int, MarketPrice] = field(default_factory=dict)
+    costs: dict[int, DeliveryCost] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -753,6 +769,56 @@ def month_boundaries(after: datetime, through: datetime) -> list[datetime]:
         if boundary > after:
             boundaries.append(boundary)
     return boundaries
+
+
+def attribute_delivery_cost(
+    items: tuple[DeliveryItem, ...],
+    purchases: dict[int, tuple[BuyLot, ...]],
+) -> dict[int, DeliveryCost]:
+    """Price the delivery box from the member's newest purchases.
+
+    The box holds everything bought since the member last collected, and
+    collecting takes all of it at once, so what is waiting is the newest run
+    of their purchases. The lots are therefore consumed newest first.
+
+    They are the purchases themselves rather than what FIFO left unmatched.
+    A sale of stock that was never bought through the Trading Post - crafted,
+    gathered, or held from before the member saved a key - is matched against
+    the newest purchase the matcher can reach, and that can be one still
+    sitting uncollected in the box. Reading the purchases directly keeps a
+    stack that cannot have been sold priced by the buys that filled it.
+
+    A stack the purchases cannot cover - items handed back by a cancelled
+    sell listing, or bought before the member saved a key - is attributed as
+    far as they reach and no further.
+    """
+    costs: dict[int, DeliveryCost] = {}
+    uncovered = 0
+    for item in items:
+        lots = sorted(
+            purchases.get(item.item_id, ()),
+            key=lambda lot: lot.occurred_at,
+            reverse=True,
+        )
+        attributed = 0
+        cost = 0
+        for lot in lots:
+            if attributed >= item.quantity:
+                break
+            taken = min(lot.remaining, item.quantity - attributed)
+            attributed += taken
+            cost += taken * lot.unit_price
+        if attributed < item.quantity:
+            uncovered += 1
+        if attributed > 0:
+            costs[item.item_id] = DeliveryCost(attributed, cost)
+    LOGGER.debug(
+        "Attributed delivery cost; stacks=%s priced=%s partial_or_unpriced=%s",
+        len(items),
+        len(costs),
+        uncovered,
+    )
+    return costs
 
 
 def prune_open_lots(

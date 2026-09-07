@@ -477,14 +477,14 @@ __DAYS_PAGES_BOTTOM__
     </section>
     <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
-      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Stock listed at two prices is two rows, as in Open Orders. Your Price is what you listed at; Lowest Sell Listing is the cheapest anyone is asking now, so a higher Your Price means someone is undercutting you. Projected ROI is projected profit divided by their matched cost.</p>
+      <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Stock listed at two prices is two rows, as in Open Orders. Your Price is what you listed at; Lowest Sell is the cheapest anyone is asking now, so a higher Your Price means someone is undercutting you. Projected ROI is projected profit divided by their matched cost.</p>
       <div class="table-scroll"><table id="unrealized-table" data-sort-table="unrealized">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="listing-price" data-sort-default="descending">Your Price</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell Listing</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="projected-sale" data-sort-default="descending">Projected Sale</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="projected-profit" data-sort-default="descending">Projected Profit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="projected-roi" data-sort-default="descending">Projected ROI</button></th>
@@ -507,7 +507,7 @@ __DAYS_PAGES_BOTTOM__
           </svg>
         </button>
       </div>
-      <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling the whole order at the current lowest sell listing after the 5% listing and 10% exchange fees, and ROI is that profit over what the order costs you.</p>
+      <p class="note">Items you are currently buying on the Trading Post. Orders for the same item at the same price are shown as one row. Profit assumes selling the whole order at the current lowest sell after the 5% listing and 10% exchange fees, and ROI is that profit over what the order costs you.</p>
       <p class="note" id="orders-unpriced" hidden>Rows with no current Trading Post price show dashes and are left out of every total below, so the totals cover the same orders throughout.</p>
       <p class="note" id="orders-key-help" hidden>Open orders are unavailable for this saved key. Run <code>/profit setkey</code> again with a key that allows <code>/v2/commerce/transactions/current/buys</code>.</p>
       <div class="table-scroll"><table id="orders-table" data-sort-table="orders">
@@ -516,8 +516,8 @@ __DAYS_PAGES_BOTTOM__
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="units" data-sort-default="descending">Units</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="order-price" data-sort-default="descending">Your Price</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="order-cost" data-sort-default="descending">Order Cost</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="highest-buy" data-sort-default="descending">Highest Buy Order</button></th>
-          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell Listing</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="highest-buy" data-sort-default="descending">Highest Buy</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="order-profit" data-sort-default="descending">Profit / Unit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="order-total-profit" data-sort-default="descending">Total Profit</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="order-roi" data-sort-default="descending">ROI</button></th>
@@ -539,10 +539,19 @@ __DAYS_PAGES_BOTTOM__
         </tbody>
       </table></div>
       <h3 class="subheading">Items available to collect</h3>
+      <p class="note">Your Price is a cost basis, not a receipt: it averages your newest purchases of that item that no sale has been matched against. Collecting empties the box in one go, so what is waiting is normally the run of buys you have made since — and stock of one item is interchangeable, so a stack that arrived another way, such as a cancelled sell listing, is priced from the same purchases. Projected Sale assumes selling the whole stack at the current lowest sell after the 5% listing and 10% exchange fees, and Projected ROI is the profit over that cost.</p>
+      <p class="note" id="delivery-unpriced" hidden>Rows with no current price, or with purchases that cover only part of the stack, show dashes and are left out of the totals below, so the totals cover the same stacks throughout.</p>
       <div class="table-scroll"><table id="delivery-table" data-sort-table="delivery">
         <thead><tr>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="0" data-sort-kind="text" data-sort-key="item" data-sort-default="ascending">Item</button></th>
           <th aria-sort="descending"><button class="sort-button" type="button" data-sort-index="1" data-sort-kind="number" data-sort-key="quantity" data-sort-default="descending">Quantity</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="2" data-sort-kind="number" data-sort-key="delivery-price" data-sort-default="descending">Your Price</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="3" data-sort-kind="number" data-sort-key="delivery-cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="4" data-sort-kind="number" data-sort-key="highest-buy" data-sort-default="descending">Highest Buy</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="5" data-sort-kind="number" data-sort-key="lowest-sell" data-sort-default="descending">Lowest Sell</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="delivery-sale" data-sort-default="descending">Projected Sale</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="delivery-profit" data-sort-default="descending">Projected Profit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="delivery-roi" data-sort-default="descending">Projected ROI</button></th>
         </tr></thead>
         <tbody id="delivery-body"></tbody>
         <tfoot id="delivery-foot"></tfoot>
@@ -1834,14 +1843,17 @@ __DAYS_PAGES_BOTTOM__
     var body = document.getElementById("delivery-body");
     var help = document.getElementById("delivery-key-help");
     body.replaceChildren();
+    var unpriced = document.getElementById("delivery-unpriced");
     if (delivery.coins === null) {
       coins.textContent = "Unavailable";
       coins.className = "";
-      emptyRow(body, 2, "Delivery is unavailable for this saved key.");
+      emptyRow(body, 9, "Delivery is unavailable for this saved key.");
       totalRow(
         document.getElementById("delivery-foot"),
-        ["Total", "\u2014"], -1);
+        ["Total", "\u2014", "\u2014", "\u2014", "\u2014", "\u2014",
+          "\u2014", "\u2014", "\u2014"], -1);
       help.hidden = false;
+      unpriced.hidden = true;
       trace("delivery-unavailable", 0);
       return;
     }
@@ -1849,19 +1861,48 @@ __DAYS_PAGES_BOTTOM__
     coins.className = delivery.coins > 0 ? "positive" : "";
     help.hidden = true;
     var items = delivery.items;
+    // The footer covers only the stacks a projection could be built for, so
+    // its cost, sale and profit reconcile against each other rather than
+    // adding a cost whose sale is missing.
     var quantity = 0;
+    var cost = 0;
+    var sale = 0;
+    var profit = 0;
+    var partial = 0;
     items.forEach(function (item, index) {
       var row = sortableRow(index);
       cell(row, item.name, "name", item.name);
       cell(row, item.quantity, "positive", item.quantity);
+      optionalCoinCell(row, item.unit_price);
+      var costCell = optionalCoinCell(row, item.cost);
+      if (item.cost === null && item.costed_quantity) {
+        // The row is dashed because the purchases ran out part way, which
+        // is worth saying rather than leaving the reader to guess.
+        costCell.title = "Your purchases cover only "
+          + item.costed_quantity + " of these " + item.quantity + ".";
+      }
+      optionalCoinCell(row, item.buy_price);
+      optionalCoinCell(row, item.sell_price);
+      optionalCoinCell(row, item.projected_sale);
+      optionalProfitCell(row, item.projected_profit);
+      percentCell(row, item.roi_percent);
       body.appendChild(row);
+      if (item.projected_profit === null || item.cost === null) {
+        partial += 1;
+        return;
+      }
       quantity += item.quantity;
+      cost += item.cost;
+      sale += item.projected_sale;
+      profit += item.projected_profit;
     });
     if (!items.length) {
-      emptyRow(body, 2, "No items are waiting for pickup.");
+      emptyRow(body, 9, "No items are waiting for pickup.");
     }
+    unpriced.hidden = partial === 0;
     totalRow(document.getElementById("delivery-foot"),
-      ["Total", quantity], -1);
+      ["Total", quantity, "\u2014", coin(cost), "\u2014", "\u2014",
+        coin(sale), profit, percent(cost ? profit / cost * 100 : null)], 7);
     applySort("delivery-table");
     trace("delivery", items.length);
   }
@@ -2010,7 +2051,8 @@ __DAYS_PAGES_BOTTOM__
         + (reportQuery ? "?" + reportQuery : ""), renderReport),
       fetchSection("orders", "/api/profit/orders"
         + (refresh ? "?" + refresh : ""), renderOrdersSection),
-      fetchSection("delivery", "/api/profit/delivery", renderDelivery)
+      fetchSection("delivery", "/api/profit/delivery"
+        + (refresh ? "?" + refresh : ""), renderDelivery)
     ]).then(function (loaded) {
       var ready = loaded.filter(Boolean).length;
       if (missingKey) {
@@ -2033,21 +2075,42 @@ __DAYS_PAGES_BOTTOM__
 
   function refreshPrices() {
     // A quiet re-read on the cached path: the server holds each price for a
-    // minute and shares it between members, so this beat costs almost
-    // nothing and never forces a fetch of its own.
+    // minute and shares it between members, and holds the delivery box for
+    // as long as it holds a transaction snapshot, so this beat costs one
+    // public price lookup and never a private read of its own.
     if (missingKey || document.hidden) { return; }
-    fetch("/api/profit/orders").then(function (response) {
-      return response.ok ? response.json() : null;
+    // Both sections carry live market columns now, so both ride the beat.
+    // They are separate requests so a failure in one leaves the other's
+    // numbers on screen.
+    beat("/api/profit/orders", "orders", function (data) {
+      renderOrdersSection(data);
+      return data.orders.length;
+    });
+    beat("/api/profit/delivery", "delivery", function (data) {
+      renderDelivery(data);
+      return data.items === null ? 0 : data.items.length;
+    });
+  }
+
+  function beat(path, section, render) {
+    fetch(path).then(function (response) {
+      if (!response.ok) {
+        // A refused beat is a failure, not an empty answer: say so, with
+        // the status and the section, rather than returning quietly.
+        trace("prices-refresh-refused-" + section, response.status);
+        return null;
+      }
+      return response.json();
     }).then(function (data) {
       if (!data) { return; }
-      renderOrdersSection(data);
-      markSection("orders", "ready");
-      trace("prices-refreshed", data.orders.length);
+      var rows = render(data);
+      markSection(section, "ready");
+      trace("prices-refreshed-" + section, rows);
     }).catch(function () {
       // A dropped beat is not worth telling the reader about; the next one
       // is a minute away and the numbers on screen are still the last good
-      // ones.
-      trace("prices-refresh-failed", 0);
+      // ones. It is still worth tracing, and worth saying which section.
+      trace("prices-refresh-failed-" + section, 0);
     });
   }
 

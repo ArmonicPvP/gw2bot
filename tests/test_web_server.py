@@ -26,6 +26,7 @@ from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
 from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
 from gw2bot.profit import (
     DayProfit,
+    DeliveryCost,
     DeliveryItem,
     DeliveryReport,
     ItemProfit,
@@ -90,6 +91,8 @@ def delivery_report() -> DeliveryReport:
         coins=12_345,
         items=(DeliveryItem(3, 7),),
         item_names={3: "Delivered Item"},
+        market_prices={3: MarketPrice(180, 240)},
+        costs={3: DeliveryCost(7, 700)},
     )
 
 
@@ -1090,10 +1093,26 @@ class TestProfitPage:
         assert response.status == 200
         assert await response.json() == {
             "coins": 12_345,
-            "items": [{"item_id": 3, "name": "Delivered Item", "quantity": 7}],
+            "items": [
+                {
+                    "item_id": 3,
+                    "name": "Delivered Item",
+                    "quantity": 7,
+                    "costed_quantity": 7,
+                    "unit_price": 100,
+                    "cost": 700,
+                    "buy_price": 180,
+                    "sell_price": 240,
+                    # 7 x 240 = 1680 gross, less 84 listing and 168 exchange.
+                    "projected_sale": 1_428,
+                    "projected_profit": 728,
+                    "roi_percent": 104,
+                }
+            ],
         }
         bot.profit_service.load_delivery.assert_awaited_once_with(
-            SESSION_USER_ID
+            SESSION_USER_ID,
+            force=False,
         )
         bot.profit_service.load_report.assert_not_awaited()
 

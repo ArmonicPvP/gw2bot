@@ -1405,8 +1405,55 @@ item hidden while it had an order keeps its entry there after the order fills or
 is cancelled, so it can always be restored.
 
 The **Unclaimed Trading Post** section shows the coins waiting for pickup and
-then one row per item waiting with it, with the total below them. An item
+then one row per item waiting with it, with the totals below them. An item
 delivered as several stacks is added together into a single row.
+
+It reads like **Open Orders** on the market side, with **Highest Buy** and
+**Lowest Sell** for each waiting stack and a projection built from them:
+**Projected Sale** is what selling the whole stack at the current lowest sell
+would return after both fees, **Projected Profit** is that less what the stack
+cost, and **Projected ROI** is the profit over that cost.
+
+**Your Price** and **Cost** come from the member's own purchase history. The
+delivery box holds everything bought since they last collected, and collecting
+empties it in one go, so what is waiting is normally the newest run of their
+purchases — which is what the section prices it from, newest first. Your Price
+is the average across them.
+
+It reads the purchases themselves rather than what the matcher left over. A
+sale of stock that was never bought through the Trading Post — crafted,
+gathered, or held from before the member saved a key — is matched against the
+newest purchase FIFO can reach, and that can be one still sitting uncollected
+in the box. Since an uncollected item cannot have been sold, reading the
+purchases directly keeps such a stack priced by the buys that filled it. Only
+as many purchases as the waiting stacks need are read, so a heavily traded item
+costs the rows the box needs rather than its whole history.
+
+It is a cost basis rather than a receipt, and the distinction matters for one
+case the API cannot report: a stack handed back by a cancelled sell listing
+arrives in the box the same way a filled buy order does, with nothing to tell
+them apart. Stock of one item is interchangeable — the units merge into one
+stack the moment they are collected — so such a stack is priced from the same
+pool of unmatched purchases, which is the same convention the realized report
+already matches sales under. A member holding no unmatched purchases of that
+item gets no cost at all rather than a guess.
+
+The other gap is a stack the purchases only partly cover, usually one bought
+before the member saved a key. It shows its Highest Buy, Lowest Sell and
+Projected Sale but no cost, price, profit or ROI: part of a stack's cost set
+against a sale of all of it is a per-unit price nobody paid. Hovering the
+dashed cost says how far the purchases reached. Those rows, and any with no
+current market price, are left out of the totals so the footer reconciles with
+itself, and a note above the table says so whenever there are any.
+
+Because the basis comes from stored history, a purchase that filled since the
+last sync is not in it yet, and a stack can price from the previous basis until
+the next sync lands.
+
+The cost side is read from the history the daily sync already stores, never
+from a sync of this section's own, so it stays the one-request section it has
+always been. A member whose history has never been read sees the market columns
+and dashes where the cost would be, and the costs appear on their next visit.
 
 The window in the header is remembered the same way: whenever a member loads a
 report the chosen number of days is stored against their Discord account, and
@@ -1520,8 +1567,8 @@ now. The window bounds the realized tables, not this one.
 
 It reads like **Open Orders** on the selling side. Stock listed at two prices
 is two rows rather than one averaged one, because the price is what decides a
-row's projection. **Your Price** is what the member listed at and **Lowest Sell
-Listing** is the cheapest anyone is asking for that item now, so a Your Price
+row's projection. **Your Price** is what the member listed at and **Lowest
+Sell** is the cheapest anyone is asking for that item now, so a Your Price
 above it says plainly that someone is undercutting them and the projection
 below is unlikely to be realized at that price. An item with no usable current
 price shows a dash there, as it does in Open Orders.
@@ -1535,9 +1582,12 @@ who wants the last few minutes too.
 
 Market prices are shared: they are public, so the highest buy order for Wool
 Scrap is one lookup for the whole guild rather than one per member. **Open
-Orders** follows them on its own, re-reading every minute without a page
-reload, and pauses while the tab is in the background. Pressing **Load**
-bypasses that cache as well.
+Orders** and **Unclaimed Trading Post** follow them on their own, re-reading
+every minute without a page reload, and pause while the tab is in the
+background. That beat is a public price lookup and nothing more: the box
+itself is held for five minutes, the way a transaction snapshot is, so an open
+tab does not ask the member's own account for its delivery box every minute.
+Pressing **Load** bypasses both caches.
 
 The rest of the caching:
 
@@ -1548,6 +1598,7 @@ The rest of the caching:
 | Matched rollups | Until new trades land | Matching does not depend on the window |
 | Month-end lot snapshots | 24 months | Where a late arrival rematches from |
 | Transaction snapshots | 5 minutes | How often a refresh is worth making |
+| Delivery box | 5 minutes | Changes only on a trade; its prices move faster |
 | Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
 
 The Guild Wars 2 API supports no conditional requests — no `ETag` and no
@@ -1556,7 +1607,8 @@ revalidated cheaply and every TTL above is a real one. It does declare how long
 each answer is good for, and none of these hold anything longer than it says:
 prices `max-age=120`, items `max-age=3600`, transactions `max-age=60`.
 
-Unclaimed coins and items are read when the delivery section is built. Keys
+Unclaimed coins and items are read when the delivery section is built, together
+with the current price of every item waiting. Keys
 saved before delivery reporting or Open Orders were added can still load their
 existing reports if a route restriction blocks one of those newer endpoints:
 that section alone is marked unavailable and the page directs the member to run

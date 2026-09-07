@@ -1,6 +1,7 @@
 from gw2bot.profit.models import (
     BuyLot,
     DayProfit,
+    DeliveryCost,
     DeliveryItem,
     DeliveryReport,
     ItemDayProfit,
@@ -25,6 +26,7 @@ from gw2bot.profit.models import (
 __all__ = [
     "BuyLot",
     "DayProfit",
+    "DeliveryCost",
     "DeliveryItem",
     "DeliveryReport",
     "ItemDayProfit",
