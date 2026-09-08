@@ -2060,27 +2060,41 @@ class RemoveSignupsView(discord.ui.View):
         # Picks the check took off because they had left the server. They are
         # off the roster, which is what the commander asked for, but reporting
         # them as never having been signed up would deny the removal this very
-        # confirmation made.
-        gone = [user_id for user_id in user_ids if user_id in set(departed)]
+        # confirmation made. Taken out of the batch as well as counted: the
+        # loop has nothing left to do for them, and leaving them in it would
+        # let the remainder below claim they were kept for an event that ended
+        # after they had already gone.
+        departed_ids = set(departed)
+        picked = list(user_ids)
+        gone = [user_id for user_id in picked if user_id in departed_ids]
+        user_ids = [user_id for user_id in picked if user_id not in gone]
         updates: list[RosterUpdate] = [checked]
         kept_after_end: list[int] = []
         undelivered: list[int] = []
         for index, user_id in enumerate(user_ids):
             # The picker holds several members and remove_signup awaits Discord
             # I/O between each, so the event can cross its end partway through
-            # the loop even though the pre-loop check passed. Re-check every
-            # iteration and stop the moment it has ended, so no removal (and no
-            # waitlist promotion behind it) ever lands on a finished roster.
-            if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+            # the loop even though the pre-loop check passed. Re-read the row
+            # every iteration and stop the moment it is history, so no removal
+            # (and no waitlist promotion behind it) ever lands on a finished
+            # roster. The clock is not the only way it gets there: a removal
+            # that refreshes a message somebody deleted retires the run
+            # outright, so one of these removals can be what ends it.
+            live = self._bot.event_store.get_occurrence(
+                occurrence.occurrence_id
+            )
+            if live is None or occurrence_finished(event, live):
                 kept_after_end = list(user_ids[index:])
                 LOGGER.debug(
                     "Event ended mid-removal; stopping; occurrence_id=%s "
-                    "user_id=%s kept=%s",
+                    "user_id=%s kept=%s exists=%s",
                     occurrence.occurrence_id,
                     interaction.user.id,
                     len(kept_after_end),
+                    live is not None,
                 )
                 break
+            occurrence = live
             # Notification is deferred to a single merged announcement after
             # the loop: per-removal pings would post one thread message per
             # member for what the leader sees as a single edit.
@@ -2092,8 +2106,7 @@ class RemoveSignupsView(discord.ui.View):
                 notify=False,
             )
             if signup is None:
-                if user_id not in gone:
-                    skipped.append(user_id)
+                skipped.append(user_id)
                 continue
             removed.append(user_id)
             updates.append(update)
@@ -2123,7 +2136,7 @@ class RemoveSignupsView(discord.ui.View):
             event.event_id,
             occurrence.occurrence_id,
             interaction.user.id,
-            len(user_ids),
+            len(picked),
             len(removed),
             len(skipped),
             len(gone),

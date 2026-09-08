@@ -3299,6 +3299,53 @@ class TestCheckRosterMembership:
         assert not result.signup.waitlisted
         assert result.signup.assigned_role is EventRole.QUICKNESS_HEAL
 
+    async def test_a_post_subscribes_the_roster_before_it_pings_them(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+        # Seeded from the previous run: 11 has left, and 12 is waiting for the
+        # seat they hold.
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+        order: list[str] = []
+
+        async def record_add(_member: Any) -> None:
+            order.append("add")
+
+        async def record_send(_content: Any) -> None:
+            order.append("send")
+
+        channel.thread.add_user = AsyncMock(side_effect=record_add)
+        channel.thread.send = AsyncMock(side_effect=record_send)
+
+        await post_pending_occurrence(bot, event, pending, BEFORE_START)
+
+        promoted = store.get_signup(pending.occurrence_id, 12)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        # The thread was opened moments ago with nobody in it, so a promotion
+        # sent before the subscription reaches no one.
+        assert order == ["add", "send"]
+
     async def test_a_repost_subscribes_the_roster_before_it_pings_them(
         self,
         store: EventStore,

@@ -5943,6 +5943,82 @@ class TestRemoveSignups:
         assert promoted is not None
         assert not promoted.waitlisted
 
+    async def test_removal_stops_when_a_removal_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # The event post is gone, so the first pick's own removal refreshes a
+        # message that answers NotFound - and that retires the run, well
+        # before its scheduled end.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        # The clock has not passed, so only the stored status says the run is
+        # over. Judging the loop on the schedule alone would report 3 as never
+        # signed up while their row is still there, and rebuild the edit
+        # preview over a roster that is history.
+        assert store.get_signup(occurrence.occurrence_id, 3) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "<@3>" in kwargs["content"]
+        assert "ended before" in kwargs["content"]
+        assert "not signed up" not in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_a_pick_the_check_took_off_is_not_also_kept(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # 5 has left, so the batch's check takes them off before the loop.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 6)}
+        )
+        real_remove = store.remove_signup
+
+        def end_the_event_after_the_first_pick(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            signup = real_remove(occurrence_id, discord_user_id)
+            if discord_user_id == 2:
+                store.set_occurrence_start_time(
+                    occurrence_id,
+                    datetime.now(UTC)
+                    - timedelta(minutes=event.duration_minutes + 1),
+                )
+            return signup
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            end_the_event_after_the_first_pick
+        )
+        interaction = self.make_remove_interaction()
+
+        # 5 is picked after 2, so an unfiltered batch would still be holding
+        # them when the event ends and count them among the kept.
+        await view.remove(interaction, picked_users(2, 5, 3))
+
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        # 5 went because they had left, 3 was kept because the event ended.
+        # Claiming both of 5 would be the summary contradicting itself.
+        assert "left the server" in content
+        assert "ended before" in content
+        kept = content.split("ended before")[1]
+        assert "<@3>" in kept
+        assert "<@5>" not in kept
+
     async def test_removal_credits_a_pick_the_check_took_off(
         self,
         fake_bot: Any,
@@ -6195,7 +6271,6 @@ class TestRemoveSignups:
         self,
         fake_bot: Any,
         store: EventStore,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # The end check runs once before the loop, but remove_signup awaits
         # Discord I/O between members, so the event can cross its end partway
@@ -6203,18 +6278,22 @@ class TestRemoveSignups:
         event, occurrence = self.make_full_roster(store)
         view = self.make_remove_view(fake_bot, event, occurrence)
         interaction = self.make_remove_interaction()
+        real_remove = store.remove_signup
 
-        # False for the pre-loop check and the first iteration, then True: the
-        # event ends right after the first member is removed.
-        calls = {"count": 0}
+        def end_the_event_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            signup = real_remove(occurrence_id, discord_user_id)
+            store.set_occurrence_start_time(
+                occurrence_id,
+                datetime.now(UTC)
+                - timedelta(minutes=event.duration_minutes + 1),
+            )
+            return signup
 
-        def fake_ended(_event: Any, _occurrence: Any, _now: Any) -> bool:
-            calls["count"] += 1
-            return calls["count"] > 2
-
-        monkeypatch.setattr(
-            "gw2bot.events.views.occurrence_has_ended",
-            fake_ended,
+        store.remove_signup = (  # type: ignore[method-assign]
+            end_the_event_after_the_first
         )
 
         await view.remove(interaction, picked_users(2, 3, 4))

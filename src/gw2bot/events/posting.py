@@ -1511,8 +1511,18 @@ async def post_pending_occurrence(
         # once, so there is no burst for the window to bound, and a roster
         # nobody has looked at since it was seeded is exactly the one worth
         # asking about.
-        await check_roster_membership(
-            bot, event, posted, now=now, force=True
+        #
+        # Quietly: whatever it moves is announced after the roster below is
+        # subscribed to the post's thread, because a mention only reaches a
+        # member who is in the thread to receive it - and this thread was
+        # opened moments ago with nobody in it.
+        _, checked = await check_roster_membership(
+            bot,
+            event,
+            posted,
+            now=now,
+            force=True,
+            notify=False,
         )
     try:
         signups = bot.event_store.get_signups(posted.occurrence_id)
@@ -1537,6 +1547,7 @@ async def post_pending_occurrence(
             signup.discord_user_id,
             add=True,
         )
+    await notify_roster_update(bot, posted, checked)
     return posted
 
 
