@@ -3201,6 +3201,104 @@ class TestCheckRosterMembership:
         assert stored is not None
         assert stored.role is EventRole.QUICKNESS_HEAL
 
+    async def test_a_repost_folds_the_moves_own_announcement_in(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        for user_id in (11, 12):
+            store.add_signup(
+                occurrence_id=posted.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+        # What a category change re-seated, computed before the move and held
+        # back because the move deletes the thread it would have announced in.
+        deferred = RosterUpdate(
+            reassigned=(
+                RoleChange(11, EventRole.DPS, EventRole.QUICKNESS_DPS),
+                RoleChange(12, EventRole.DPS, EventRole.ALACRITY_DPS),
+            )
+        )
+
+        await repost_occurrence(bot, moved, posted, deferred)
+
+        # One announcement in the new thread, and nothing in it about the
+        # member the move's own roster check took off.
+        assert new_channel.thread.send.await_count == 1
+        assert new_channel.thread.send.await_args is not None
+        content = new_channel.thread.send.await_args.args[0]
+        assert "<@11>" not in content
+        assert "<@12>" in content
+
+    async def test_a_confirmed_waitlist_edit_checks_again(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        bot.guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 13, 14, 15)
+            }
+        )
+        # The healer seat 11 holds is what blocks this edit, so the member is
+        # offered the waitlist - and that call has just checked the roster.
+        offered = await apply_signup_edit(
+            bot,
+            event,
+            occurrence,
+            13,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        assert offered.needs_waitlist_confirmation
+        # 11 leaves while the confirmation sits open.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15)}
+        )
+
+        result = await apply_signup_edit(
+            bot,
+            event,
+            occurrence,
+            13,
+            EventRole.QUICKNESS_HEAL,
+            (),
+            allow_waitlist=True,
+        )
+
+        # Answering the confirmation from its own offer's check would drop
+        # this member behind a seat whose holder is gone.
+        assert store.get_signup(occurrence.occurrence_id, 11) is None
+        assert result.signup is not None
+        assert not result.signup.waitlisted
+        assert result.signup.assigned_role is EventRole.QUICKNESS_HEAL
+
     async def test_a_repost_checks_again_after_the_editor_just_did(
         self,
         store: EventStore,

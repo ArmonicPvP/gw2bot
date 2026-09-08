@@ -1663,8 +1663,11 @@ async def open_roster_removal(
         event,
         occurrence,
     )
-    if departed_note is not None:
-        signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    # Read the roster back whatever the check reported. A prune that fails
+    # partway still commits the removals it had made and cannot report them,
+    # so the list read before it can offer seats that are already vacant - or
+    # be non-empty for a roster the prune has emptied.
+    signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not signups:
         LOGGER.debug(
             "Roster removal emptied the roster by pruning departed members; "
@@ -1992,6 +1995,7 @@ class RemoveSignupsView(discord.ui.View):
             check_roster_membership,
             merge_roster_updates,
             notify_roster_update,
+            occurrence_finished,
             remove_signup,
         )
 
@@ -2016,6 +2020,33 @@ class RemoveSignupsView(discord.ui.View):
         # waitlist. Ask once for the batch; the removals are answered from
         # this rather than sweeping the roster per member.
         await check_roster_membership(self._bot, event, occurrence, force=True)
+        # That check can retire the occurrence itself: the removal it makes
+        # refreshes a message that may have been deleted by hand, and the
+        # NotFound behind that persists OVER and seeds the series' next run.
+        # Read the row back and stop, rather than reporting every pick as "not
+        # signed up" - which is what each removal would answer - and rebuilding
+        # the edit preview over a roster that is history.
+        current = self._bot.event_store.get_occurrence(
+            occurrence.occurrence_id
+        )
+        if current is None or occurrence_finished(event, current):
+            LOGGER.debug(
+                "Roster removal found the occurrence retired; "
+                "occurrence_id=%s user_id=%s exists=%s",
+                occurrence.occurrence_id,
+                interaction.user.id,
+                current is not None,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "This event has already ended, so its roster can no "
+                    "longer be changed."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
+        occurrence = current
         removed: list[int] = []
         skipped: list[int] = []
         updates: list[RosterUpdate] = []
@@ -3217,8 +3248,17 @@ async def apply_event_edit(
                 # returns the occurrence carrying the new one, so the deferred
                 # roster ping goes there - the old thread the members were
                 # notified in no longer exists.
-                reposted = await repost_occurrence(bot, updated, current)
-                await notify_roster_update(bot, reposted, roster_update)
+                # The re-post checks the roster against the server, which
+                # can take departed members off it and re-seat the rest, so
+                # the update computed above is handed over rather than sent
+                # after it: the two are folded into one line per member,
+                # inside the thread the move has just opened.
+                reposted = await repost_occurrence(
+                    bot,
+                    updated,
+                    current,
+                    roster_update,
+                )
             else:
                 await refresh_occurrence_message(
                     bot,
@@ -4880,7 +4920,10 @@ class SignOutConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[SignOutConfirmView],
     ) -> None:
-        from gw2bot.events.posting import remove_signup
+        from gw2bot.events.posting import (
+            occurrence_finished,
+            remove_signup,
+        )
 
         # The event may have ended while this confirmation was open; never
         # mutate a historical roster (which could also promote a waitlisted
@@ -4913,15 +4956,20 @@ class SignOutConfirmView(discord.ui.View):
             interaction.user.id,
         )
         if removed is None:
-            # The run can also cross its end inside the removal itself, whose
-            # roster check is Discord I/O: a roster that is history is left
-            # alone, which is not the same as never having been on it.
+            # The run can also end inside the removal itself, whose roster
+            # check is Discord I/O: a roster that is history is left alone,
+            # which is not the same as never having been on it. Read the row
+            # back and count its stored status, because that check can retire
+            # the occurrence outright - refreshing a message somebody deleted
+            # answers NotFound - well before its scheduled end.
+            current = self._bot.event_store.get_occurrence(
+                self._occurrence.occurrence_id
+            )
             content = (
                 "This event has already ended, so its roster can no longer "
                 "be changed."
-                if occurrence_has_ended(
-                    self._event, self._occurrence, datetime.now(UTC)
-                )
+                if current is None
+                or occurrence_finished(self._event, current)
                 else "You were not signed up for the event."
             )
         else:

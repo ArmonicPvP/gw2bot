@@ -1158,6 +1158,7 @@ async def repost_occurrence(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
+    deferred_update: RosterUpdate = RosterUpdate(),
 ) -> EventOccurrence:
     # Discord cannot move a message between channels, so a channel change is
     # applied by sending a fresh post and removing the old one. The occurrence
@@ -1238,7 +1239,24 @@ async def repost_occurrence(
     # confirmation sat open would be carried across anyway. The freshness the
     # window buys is there to bound bursts of roster changes; a move happens
     # once.
-    await check_roster_membership(bot, event, reposted, force=True)
+    departed, checked = await check_roster_membership(
+        bot,
+        event,
+        reposted,
+        force=True,
+        notify=False,
+    )
+    # A move deletes the thread the caller would have announced in, so it
+    # hands its announcement over instead - a category change's re-seat, say.
+    # Both describe the same roster settling, and the check ran after the
+    # caller computed its half, so they are folded into one line per member:
+    # a member moved twice reads as one move, and one who has left is dropped
+    # rather than told about a seat they no longer hold.
+    await notify_roster_update(
+        bot,
+        reposted,
+        merge_roster_updates([deferred_update, checked], departed),
+    )
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(
@@ -2093,7 +2111,7 @@ async def remove_signup(
     # into a run that has already finished. prune_departed_signups stops on
     # the same test rather than removing from a finished roster.
     current = bot.event_store.get_occurrence(occurrence.occurrence_id)
-    if current is None or _occurrence_finished(event, current):
+    if current is None or occurrence_finished(event, current):
         LOGGER.debug(
             "Skipped a removal from a roster that is history; "
             "occurrence_id=%s user_id=%s exists=%s",
@@ -2328,6 +2346,7 @@ async def check_roster_membership(
     memberships: Mapping[int, GuildMembership] | None = None,
     now: datetime | None = None,
     force: bool = False,
+    notify: bool = True,
 ) -> tuple[list[int], RosterUpdate]:
     """Re-check a roster against Discord and take off everyone who has left.
 
@@ -2345,9 +2364,10 @@ async def check_roster_membership(
     further calls here.
 
     Returns the ids actually removed and the roster movement their removal
-    caused, which has already been announced. Nothing here is allowed to fail
-    its caller: a sign-up, a removal or a post must land whether or not the
-    check behind it could be made.
+    caused, which has already been announced - unless the caller passed
+    notify=False because it has an announcement of its own to fold this into.
+    Nothing here is allowed to fail its caller: a sign-up, a removal or a post
+    must land whether or not the check behind it could be made.
     """
     occurrence_id = occurrence.occurrence_id
     checks = _membership_checks(bot)
@@ -2416,7 +2436,7 @@ async def check_roster_membership(
             resolved,
             now,
         )
-        if departed:
+        if departed and notify:
             await notify_roster_update(bot, occurrence, update)
     except (discord.DiscordException, SQLAlchemyError) as exc:
         # A roster the bot could not check is still a roster: report nothing
@@ -2446,7 +2466,7 @@ async def check_roster_membership(
     return departed, update
 
 
-def _occurrence_finished(
+def occurrence_finished(
     event: Event,
     occurrence: EventOccurrence,
     now: datetime | None = None,
@@ -2475,6 +2495,8 @@ async def _checked_roster(
     occurrence: EventOccurrence,
     now: datetime | None,
     ended_message: str,
+    *,
+    force: bool = False,
 ) -> tuple[EventOccurrence, list[EventSignup]]:
     """Check the roster against the server, then read back what stands.
 
@@ -2491,11 +2513,11 @@ async def _checked_roster(
     be gone - so the stored status is what is read back, not a status derived
     from the schedule.
     """
-    await check_roster_membership(bot, event, occurrence, now=now)
+    await check_roster_membership(bot, event, occurrence, now=now, force=force)
     current = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if current is None:
         raise ValueError(ended_message)
-    if _occurrence_finished(event, current, now):
+    if occurrence_finished(event, current, now):
         raise ValueError(ended_message)
     return current, bot.event_store.get_signups(current.occurrence_id)
 
@@ -2913,6 +2935,12 @@ async def apply_signup_edit(
         now,
         "This event has already ended, so your signup can no longer be "
         "changed.",
+        # A confirmed edit is the member's second look at this roster: the
+        # call that offered them the waitlist checked it moments ago, and
+        # answering from that would drop them behind a seat whose holder left
+        # while the confirmation sat open. Only EditWaitlistConfirmView gets
+        # here, so this forces a confirmation rather than every edit.
+        force=allow_waitlist,
     )
     current = next(
         (

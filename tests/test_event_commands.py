@@ -1785,6 +1785,42 @@ class TestSignOutFlow:
         assert "You were removed from the event." in kwargs["content"]
         assert "Automatic sign-up is still on" in kwargs["content"]
 
+    async def test_sign_out_reports_a_run_retired_during_the_check(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        # Somebody deleted the event post, so refreshing it after the check's
+        # own removal answers NotFound - which retires the run outright, well
+        # before its scheduled end.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        fake_bot.guild = FakeGuild({42: "User 42"})
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # The roster was left alone, which is not the same as never having
+        # been on it - and the scheduled end has not passed, so only the
+        # stored status can say so.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "already ended" in content
+        assert "not signed up" not in content
+
     async def test_sign_out_does_not_prompt_without_auto_signup(
         self,
         fake_bot: Any,
@@ -5906,6 +5942,77 @@ class TestRemoveSignups:
         promoted = store.get_signup(occurrence.occurrence_id, 7)
         assert promoted is not None
         assert not promoted.waitlisted
+
+    async def test_removal_stops_when_the_check_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # 6 has left, and the post they would be removed from is gone: the
+        # refresh answers NotFound and retires the occurrence mid-check.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5)}
+        )
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Continuing would report every pick as "not signed up" - which is
+        # what each removal answers on a retired roster - and rebuild the
+        # edit preview over a run that has already been replaced.
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_picker_is_built_from_what_a_partial_prune_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        real_remove = store.remove_signup
+        removals = 0
+
+        def fail_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            nonlocal removals
+            removals += 1
+            if removals > 1:
+                raise SQLAlchemyError("boom")
+            return real_remove(occurrence_id, discord_user_id)
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            fail_after_the_first
+        )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        # 1 and 5 have left. The first removal commits, the second refuses,
+        # and the check reports nothing because it could not finish.
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild(
+                {user_id: f"User {user_id}" for user_id in (2, 3, 4, 6)}
+            ),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 1) is None
+        assert interaction.edit_original_response.await_args is not None
+        picker = interaction.edit_original_response.await_args.kwargs["view"]
+        # Offering a seat that is already vacant would remove nobody and
+        # report the pick as never having been signed up.
+        assert "1" not in select_option_values(picker)
 
     async def test_removal_takes_several_members_at_once(
         self,
