@@ -2304,7 +2304,21 @@ async def prune_departed_signups(
         # An explicit now pins the clock for callers that asked for one;
         # otherwise it really is the elapsing time that counts.
         current_time = now if now is not None else datetime.now(UTC)
-        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        # Every store call that opens an iteration fails the same way and
+        # stops the loop the same way: what the members ahead of this one
+        # committed is reported, rather than thrown away by an exception
+        # escaping to the check above.
+        try:
+            current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the occurrence mid-prune; stopping; "
+                "occurrence_id=%s kept=%s error_type=%s",
+                occurrence.occurrence_id,
+                len(departed) - index,
+                type(exc).__name__,
+            )
+            break
         if current is None or current_time >= current.start_time + timedelta(
             minutes=event.duration_minutes
         ):
@@ -2325,11 +2339,8 @@ async def prune_departed_signups(
         # no longer has and seat members against seats that are already free.
         # Read before the removal so the recovery below can say what it did:
         # the store can fail with the seat already handed on, and what landed
-        # is only visible by comparing the two readings. This read is a store
-        # call like the removal behind it and fails the same way, so it stops
-        # the loop the same way too: letting it raise out of here would throw
-        # away the removals the members ahead of this one already committed,
-        # and report a roster that no longer exists.
+        # is only visible by comparing the two readings. Guarded like the read
+        # above, and for the same reason.
         try:
             before = bot.event_store.get_signups(current.occurrence_id)
         except SQLAlchemyError as exc:
@@ -2603,9 +2614,24 @@ async def check_roster_membership(
                 [signup.discord_user_id for signup in signups],
             )
         )
+        # Those lookups awaited Discord, and a commander can save the event
+        # while they are in flight. The prune judges the run's end by the
+        # event's duration and re-seats the roster it leaves behind against
+        # the event's capacity, so it needs the event as it stands now:
+        # _checked_roster reads it back for its own callers, but only after
+        # this prune has already moved the roster.
+        edited = bot.event_store.get_event(event.event_id)
+        if edited is None or edited.cancelled:
+            LOGGER.debug(
+                "Skipped a roster prune for an event that is gone; "
+                "occurrence_id=%s exists=%s",
+                occurrence_id,
+                edited is not None,
+            )
+            return [], RosterUpdate()
         departed, update = await prune_departed_signups(
             bot,
-            event,
+            edited,
             occurrence,
             resolved,
             now,

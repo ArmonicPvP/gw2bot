@@ -3370,6 +3370,47 @@ class TestEditCommandOngoing:
         assert "<@7>" in rendered
         assert "<@8>" not in rendered
 
+    async def test_edit_stops_when_the_check_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        for user_id in (7, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # 8 has left, and the post their removal refreshes was deleted by
+        # hand: the NotFound behind that retires this run and seeds the
+        # series' next one, mid-check.
+        guild = FakeGuild({7: "Still Here"})
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=guild,
+        )
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # A preview here would offer save controls for a roster that is
+        # history, against a draft holding the retired run's start time.
+        assert interaction.followup.send.await_args is not None
+        answer = interaction.followup.send.await_args
+        assert "can no longer be edited" in answer.args[0]
+        assert "view" not in answer.kwargs
+
     async def test_edit_keeps_the_roster_when_lookups_fail(
         self,
         fake_bot: Any,
@@ -6067,6 +6108,36 @@ class TestRemoveSignups:
         # what each removal answers on a retired roster - and rebuild the
         # edit preview over a run that has already been replaced.
         assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_picker_stops_when_the_check_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # 1 has left, and the post their removal refreshes is gone: the
+        # NotFound behind that retires the run before the picker is drawn.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild(
+                {user_id: f"User {user_id}" for user_id in (2, 3, 4, 5, 6)}
+            ),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        # The picker would only be refused on submission; there is no reason
+        # to offer a roster that is already history.
         assert interaction.edit_original_response.await_args is not None
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert "already ended" in kwargs["content"]

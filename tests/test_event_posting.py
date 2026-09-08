@@ -3684,6 +3684,103 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    async def test_an_occurrence_read_that_fails_keeps_the_removals_made(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        # 11 and 13 have both left; the store starts refusing the read that
+        # opens an iteration between the two removals.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15, 16)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+
+        departed, update = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # Same rule as the roster read beside it: the removal of 11 and the
+        # promotion behind it are committed, so a failure reading for 13 stops
+        # the loop rather than carrying the whole check away.
+        assert departed == [11]
+        assert [signup.discord_user_id for signup in update.promoted] == [16]
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+
+    async def test_a_prune_resettles_against_a_category_saved_mid_check(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        for user_id in (16, 17):
+            waiting = await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+            assert waiting.waitlisted
+        guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 14, 15, 16, 17)
+            }
+        )
+        real_fetch = guild.fetch_member
+
+        async def widen_the_event(user_id: int) -> Any:
+            # A commander saves a category change while the lookups are in
+            # flight: a raid seats ten where the fractal seated five.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.RAID,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = widen_the_event  # type: ignore[method-assign]
+        bot.guild = guild
+
+        departed, update = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # 13 leaves one seat behind, but the squad is a raid now: both of the
+        # members waiting for one get in. Re-seating against the capacity the
+        # event had when the lookups started would seat only the first.
+        assert departed == [13]
+        promoted = sorted(
+            signup.discord_user_id for signup in update.promoted
+        )
+        assert promoted == [16, 17]
+
     async def test_a_recovered_removal_finishes_its_own_cleanup(
         self,
         bot: Any,

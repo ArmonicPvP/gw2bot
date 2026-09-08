@@ -1663,6 +1663,31 @@ async def open_roster_removal(
         event,
         occurrence,
     )
+    # The check can also retire the run outright - its own removal refreshes a
+    # message somebody may have deleted, and the NotFound behind that persists
+    # OVER - so the occurrence is read back before a picker is drawn over a
+    # roster that has become history. RemoveSignupsView.remove refuses one on
+    # submission; there is no reason to offer it first.
+    from gw2bot.events.posting import occurrence_finished
+
+    live_occurrence = bot.event_store.get_occurrence(occurrence.occurrence_id)
+    if live_occurrence is None or occurrence_finished(event, live_occurrence):
+        LOGGER.debug(
+            "Roster removal found the occurrence retired while checking it; "
+            "occurrence_id=%s user_id=%s exists=%s",
+            occurrence.occurrence_id,
+            interaction.user.id,
+            live_occurrence is not None,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "This event has already ended, so its roster can no longer "
+                "be edited."
+            ),
+            embeds=[],
+            view=None,
+        )
+        return
     # Read the roster back whatever the check reported. A prune that fails
     # partway still commits the removals it had made and cannot report them,
     # so the list read before it can offer seats that are already vacant - or
