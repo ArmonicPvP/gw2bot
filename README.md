@@ -492,8 +492,10 @@ occurrence does not seat them again. The check runs:
   than before it, so there is a message to correct and a claim on the run to
   keep; the removal refreshes the embed that has just gone out. Both ask the
   server again rather than reusing a recent answer;
-- when `/event edit` or the **Remove sign-ups** picker is opened, which asks
-  for a fresh answer rather than reusing a recent one.
+- when `/event edit` or the **Remove sign-ups** picker is opened, and again
+  when an **Add sign-ups** or **Remove sign-ups** batch is confirmed — a
+  picker can sit open for minutes, so the seats it hands out are decided
+  against the roster as it stands at that moment.
 
 Only a definite "not a member" costs anyone their seat. A lookup that failed —
 a missing permission, an outage, a Discord the bot could not reach — proves
@@ -501,9 +503,11 @@ nothing, so the roster is left exactly as it stands and the check is made again
 on the next change. A roster checked seconds ago is not re-checked by the
 sign-up behind it either: every member on it is a Discord lookup, so a burst of
 sign-ups on a fifty-seat roster spends one round rather than one per click.
-That only applies to roster changes, which come in bursts. Posting an
-occurrence, moving one to another channel and a commander opening the roster
-each happen once, so each asks the server again.
+That only applies to members changing the roster themselves, which comes in
+bursts. Posting an occurrence, moving one to another channel, and a commander
+opening the roster or confirming an edit to it each happen once, so each asks
+the server again — and one answer covers a whole batch rather than a sweep per
+member in it.
 
 ## Guild Event Destinations
 

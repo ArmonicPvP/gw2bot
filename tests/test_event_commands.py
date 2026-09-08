@@ -16,6 +16,7 @@ from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import (
     OccurrenceCancellation,
     cancel_occurrence,
+    check_roster_membership,
     post_occurrence,
 )
 from gw2bot.config import DEFAULT_EVENT_CREATE_ROLE_ID as EVENT_CREATE_ROLE_ID
@@ -5866,6 +5867,46 @@ class TestRemoveSignups:
         assert isinstance(kwargs["view"], EventEditConfirmView)
         assert len(kwargs["embeds"]) == 2
 
+    async def test_removal_frees_the_seat_to_someone_still_here(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # The picker was drawn from a check that found everyone present.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in range(1, 8)}
+        )
+        await check_roster_membership(
+            fake_bot, event, occurrence, force=True
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # 6 - first in the queue - leaves while the picker sits open.
+        fake_bot.guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (1, 2, 3, 4, 5, 7)
+            }
+        )
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Answering the removal from the picker's own check would hand the
+        # freed seat to a member who has left the server.
+        assert store.get_signup(occurrence.occurrence_id, 6) is None
+        promoted = store.get_signup(occurrence.occurrence_id, 7)
+        assert promoted is not None
+        assert not promoted.waitlisted
+
     async def test_removal_takes_several_members_at_once(
         self,
         fake_bot: Any,
@@ -6823,6 +6864,46 @@ class TestAddSignups:
         assert "Added <@11> to the roster." not in content
         # They are still told, because they are on the event either way.
         fake_bot.users[11].send.assert_awaited_once()
+
+    async def test_an_addition_seats_against_a_freshly_checked_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        # /event edit checked this roster before drawing the picker, and
+        # found everyone present.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 11)}
+        )
+        await check_roster_membership(
+            fake_bot, event, occurrence, force=True
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        # 5 leaves while the picker and its role step sit open.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 11)}
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # Seating against the preview's answer would spend the batch's one
+        # free seat on somebody who is no longer in the server.
+        assert store.get_signup(occurrence.occurrence_id, 5) is None
+        added = store.get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert not added.waitlisted
 
     async def test_stale_commander_role_is_normalized_after_category_change(
         self,

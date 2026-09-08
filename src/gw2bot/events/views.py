@@ -1989,6 +1989,7 @@ class RemoveSignupsView(discord.ui.View):
         user_ids: list[int],
     ) -> None:
         from gw2bot.events.posting import (
+            check_roster_membership,
             merge_roster_updates,
             notify_roster_update,
             remove_signup,
@@ -2009,6 +2010,12 @@ class RemoveSignupsView(discord.ui.View):
             embeds=[],
             view=None,
         )
+        # The picker was drawn from a check, and that answer stands for a
+        # minute: a member who left while it sat open would still be holding
+        # a seat here, and the removals below would hand one to them off the
+        # waitlist. Ask once for the batch; the removals are answered from
+        # this rather than sweeping the roster per member.
+        await check_roster_membership(self._bot, event, occurrence, force=True)
         removed: list[int] = []
         skipped: list[int] = []
         updates: list[RosterUpdate] = []
@@ -2618,6 +2625,7 @@ async def apply_roster_addition(
 ) -> None:
     """Sign the picked members up, then report what the roster did."""
     from gw2bot.events.posting import (
+        check_roster_membership,
         merge_roster_updates,
         notify_roster_update,
         seat_signup,
@@ -2689,6 +2697,14 @@ async def apply_roster_addition(
         interaction,
         user_ids,
     )
+    # The picks are checked above; this checks the roster they are being
+    # seated alongside. The preview behind this picker already asked about it,
+    # and its answer stands for a minute, so the seats would otherwise be
+    # solved against a roster read before the commander opened the picker -
+    # and a member who left while it sat open would hold one of them. Once
+    # for the batch: the seatings below each ask too, and are answered from
+    # this one rather than sweeping the roster per member.
+    await check_roster_membership(bot, event, current, force=True)
     for index, user_id in enumerate(user_ids):
         # Re-read both rows rather than trusting the ones the batch started
         # with. The member being seated when a change lands is already past
