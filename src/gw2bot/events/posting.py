@@ -2290,6 +2290,25 @@ async def prune_departed_signups(
                 len(departed) - index,
                 type(exc).__name__,
             )
+            # The deletion commits before the resettle and the message
+            # refresh behind it, so this can fail with the member already off
+            # the roster. Read the row back and report the departure if it
+            # landed: a caller told it did not happen keeps them in whatever
+            # it announces, naming a seat that is no longer theirs.
+            try:
+                still_on = (
+                    bot.event_store.get_signup(
+                        current.occurrence_id,
+                        user_id,
+                    )
+                    is not None
+                )
+            except SQLAlchemyError:
+                # The store cannot say either way, and claiming a departure
+                # that did not happen is the worse mistake of the two.
+                still_on = True
+            if not still_on:
+                removed.append(user_id)
             break
         if signup is None:
             continue

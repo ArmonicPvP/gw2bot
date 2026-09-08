@@ -3446,6 +3446,35 @@ class TestCheckRosterMembership:
         assert [signup.discord_user_id for signup in update.promoted] == [16]
         assert store.get_signup(occurrence.occurrence_id, 13) is not None
 
+    async def test_a_removal_that_fails_after_committing_is_reported(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15)}
+        )
+
+        def refuse(occurrence_id: int, assignments: Any) -> None:
+            # The resettle behind a removal, which runs once the deletion has
+            # already committed.
+            raise SQLAlchemyError("boom")
+
+        store.apply_roster_assignments = (  # type: ignore[method-assign]
+            refuse
+        )
+
+        departed, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # 11 is off the roster whatever the resettle did, so reporting no
+        # departure would leave a caller merging an announcement that still
+        # names the seat they held.
+        assert store.get_signup(occurrence.occurrence_id, 11) is None
+        assert departed == [11]
+
     async def test_a_sign_out_is_not_announced_as_a_promotion_first(
         self,
         bot: Any,
