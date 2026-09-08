@@ -441,8 +441,8 @@ A repeating event recurs daily, weekly on named days, or monthly on numbered
 days; a monthly day past the end of a short month lands on that month's last
 day. The next occurrence is created when the current one ends and posted by the
 maintenance pass, carrying a fresh roster. That roster is checked against the
-server before the post goes out, so a member who has left is not seeded onto it
-by their automatic sign-up (see
+server as the post goes out, so a member who has left does not keep a seat their
+automatic sign-up seeded (see
 [Members Who Leave The Server](#members-who-leave-the-server)).
 
 **Delete the previous post on repeat** is asked when the repeat is set up. With
@@ -485,10 +485,12 @@ occurrence does not seat them again. The check runs:
   adding or removing members — so a departed member never holds a seat against
   somebody who could fill it, and is never promoted off the waitlist into a run
   they cannot see;
-- before an occurrence is posted, which covers a repeating event's next
-  occurrence (its roster is seeded from the previous run's automatic sign-ups
-  and nothing has looked at it since) and an event moved to another channel
-  (its roster carries over to the new post);
+- as an occurrence is posted, which covers a repeating event's next occurrence
+  (its roster is seeded from the previous run's automatic sign-ups and nothing
+  has looked at it since) and an event moved to another channel (its roster
+  carries over to the new post). The check runs once the post is live rather
+  than before it, so there is a message to correct and a claim on the run to
+  keep; the removal refreshes the embed that has just gone out;
 - when `/event edit` or the **Remove sign-ups** picker is opened, which asks
   for a fresh answer rather than reusing a recent one.
 
