@@ -2142,19 +2142,30 @@ async def remove_signup(
     # hands the freed seat to the waitlist, so going on would promote somebody
     # into a run that has already finished. prune_departed_signups stops on
     # the same test rather than removing from a finished roster.
+    # The event comes back with it. A commander can save the event while the
+    # lookups are in flight, and this removal judges the run's end by its
+    # duration, re-seats the roster the freed seat belongs to against its
+    # capacity, and re-renders the message from both.
     current = bot.event_store.get_occurrence(occurrence.occurrence_id)
-    if current is None or occurrence_finished(event, current):
+    edited = bot.event_store.get_event(event.event_id)
+    if (
+        current is None
+        or edited is None
+        or occurrence_finished(edited, current)
+    ):
         LOGGER.debug(
             "Skipped a removal from a roster that is history; "
-            "occurrence_id=%s user_id=%s exists=%s",
+            "occurrence_id=%s user_id=%s exists=%s event_exists=%s",
             occurrence.occurrence_id,
             discord_user_id,
             current is not None,
+            edited is not None,
         )
         if notify:
             await notify_roster_update(bot, occurrence, checked)
         return None, checked
     occurrence = current
+    event = edited
     removed = bot.event_store.remove_signup(
         occurrence.occurrence_id,
         discord_user_id,
@@ -2319,11 +2330,11 @@ async def prune_departed_signups(
                 type(exc).__name__,
             )
             break
-        if current is None or current_time >= current.start_time + timedelta(
-            minutes=event.duration_minutes
+        if current is None or occurrence_finished(
+            event, current, current_time
         ):
             LOGGER.debug(
-                "Event ended mid-prune; stopping; occurrence_id=%s kept=%s "
+                "Event over mid-prune; stopping; occurrence_id=%s kept=%s "
                 "exists=%s",
                 occurrence.occurrence_id,
                 len(departed) - index,

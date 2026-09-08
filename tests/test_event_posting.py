@@ -3781,6 +3781,85 @@ class TestCheckRosterMembership:
         )
         assert promoted == [16, 17]
 
+    async def test_a_prune_stops_when_a_removal_retires_the_run(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        # 11 and 13 have both left, and the post was deleted by hand: taking
+        # 11 off refreshes a message that answers NotFound, which retires the
+        # run and seeds its successor - mid-loop.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15)}
+        )
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+
+        departed, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # The run is over before its time, and no removal lands on it: 13
+        # keeps their row rather than being taken off a roster that is
+        # history, with the promotion behind it. The prune's own guard reads
+        # the stored status for this; remove_signup refuses the same removal
+        # a level down, so this holds either way and is pinned here.
+        assert departed == [11]
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+
+    async def test_a_removal_reseats_against_a_category_saved_mid_check(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        for user_id in (16, 17):
+            waiting = await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+            assert waiting.waitlisted
+        # Nobody has left; what moves the roster here is the sign-out and the
+        # save that lands while its check is asking.
+        guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 13, 14, 15, 16, 17)
+            }
+        )
+        real_fetch = guild.fetch_member
+
+        async def widen_the_event(user_id: int) -> Any:
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.RAID,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = widen_the_event  # type: ignore[method-assign]
+        bot.guild = guild
+
+        _, update = await remove_signup(bot, event, occurrence, 15)
+
+        # The squad is a raid by the time the seat is freed, so both members
+        # waiting for one get in. Re-seating against the capacity the event
+        # had when the lookups started would seat only the first.
+        promoted = sorted(
+            signup.discord_user_id for signup in update.promoted
+        )
+        assert promoted == [16, 17]
+
     async def test_a_recovered_removal_finishes_its_own_cleanup(
         self,
         bot: Any,

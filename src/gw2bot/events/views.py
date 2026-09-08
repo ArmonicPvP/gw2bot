@@ -3158,7 +3158,10 @@ async def apply_event_edit(
     repost: bool,
 ) -> None:
     from gw2bot.events.posting import (
+        check_roster_membership,
+        merge_roster_updates,
         notify_roster_update,
+        occurrence_finished,
         rebalance_occurrence_roster,
         refresh_occurrence_message,
         repost_occurrence,
@@ -3285,15 +3288,64 @@ async def apply_event_edit(
             if refetched is not None:
                 current = refetched
         if category_changed:
+            # Re-seat the members who are actually still here. The preview's
+            # check can be minutes old by the time the pickers and the modal
+            # are done with, and a departed member re-seated under the new
+            # capacity would hold one of its seats - or be handed a better one
+            # - for a squad they cannot see, with their automatic sign-up
+            # still on. A move checks again after its post as well, which is a
+            # different question: who is still here to be subscribed to the
+            # thread it has just opened.
+            checked = RosterUpdate()
+            try:
+                _, checked = await check_roster_membership(
+                    bot,
+                    updated,
+                    current,
+                    force=True,
+                    notify=False,
+                )
+            except (discord.DiscordException, SQLAlchemyError) as exc:
+                # A roster the bot could not check is still a roster to
+                # re-seat; the departures wait for the next check.
+                LOGGER.error(
+                    "Could not check the roster before a category rebalance; "
+                    "occurrence_id=%s error_type=%s",
+                    current.occurrence_id,
+                    type(exc).__name__,
+                )
+            # The check removes through remove_signup, which re-solves the
+            # roster it leaves behind, so the rebalance below must see those
+            # rows rather than the ones read before it. That removal also
+            # refreshes a message somebody may have deleted, and the NotFound
+            # behind it retires the run: re-seating a roster that is history,
+            # and re-rendering a message that is gone, helps nobody. Every
+            # occurrence here is still in the future, so only that can end one.
+            reread = bot.event_store.get_occurrence(current.occurrence_id)
+            if reread is None or occurrence_finished(updated, reread):
+                LOGGER.debug(
+                    "Skipped a category rebalance for a run the check "
+                    "retired; occurrence_id=%s exists=%s",
+                    current.occurrence_id,
+                    reread is not None,
+                )
+                await notify_roster_update(bot, current, checked)
+                continue
+            current = reread
             # The category picks the capacity the roster was seated against, so
             # changing it invalidates every stored assignment. Re-seat the roster
             # before the message is re-rendered, so the embed and the capacity
             # checks both describe the new category, and announce the moves in
             # the occurrence's thread so members learn their new seat.
             try:
-                _, roster_update = rebalance_occurrence_roster(
+                _, rebalanced = rebalance_occurrence_roster(
                     bot, updated, current
                 )
+                # The check moved the roster before the re-seat did, and it
+                # can have moved the same member: folded, they read as one
+                # move, and anybody it took off is dropped rather than given a
+                # seat in the new squad.
+                roster_update = merge_roster_updates([checked, rebalanced])
             except (SQLAlchemyError, ValueError) as exc:
                 # A stale roster must not block the rest of the edit.
                 LOGGER.error(
@@ -3302,7 +3354,9 @@ async def apply_event_edit(
                     current.occurrence_id,
                     type(exc).__name__,
                 )
-                roster_update = RosterUpdate()
+                # The check's own movements are committed whatever the
+                # re-seat did, so they are still what gets announced.
+                roster_update = checked
             else:
                 if not moving:
                     # For an in-place refresh the thread is stable, so announce

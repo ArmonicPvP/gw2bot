@@ -3968,6 +3968,68 @@ class TestEventEditConfirmView:
         assert "already started" in content
         assert "/event delete" in content
 
+    async def test_category_change_reseats_without_who_has_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border Push",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        for user_id in range(1, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # 1 and 2 have left since the preview drew this roster. The channel is
+        # not changing, so nothing else on this path asks the server.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (3, 4, 5, 6, 7)}
+        )
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        on_roster = [signup.discord_user_id for signup in signups]
+        seated = [
+            signup.discord_user_id
+            for signup in signups
+            if not signup.waitlisted
+        ]
+        # The fractal's four DPS seats go to members who can still see the
+        # event; seating the two who left would hold two of them for a squad
+        # they are not in, and leave their automatic sign-up on.
+        assert 1 not in on_roster
+        assert 2 not in on_roster
+        assert seated == [3, 4, 5, 6]
+
     async def test_category_change_reseats_the_roster(
         self,
         fake_bot: Any,
