@@ -5943,6 +5943,32 @@ class TestRemoveSignups:
         assert promoted is not None
         assert not promoted.waitlisted
 
+    async def test_removal_credits_a_pick_the_check_took_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # 5 leaves while the picker sits open, so the batch's own check is
+        # what takes them off rather than the removal below.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 6)}
+        )
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(5))
+
+        assert store.get_signup(occurrence.occurrence_id, 5) is None
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        # The commander asked for them off and they are off; saying they were
+        # never signed up would deny the removal this confirmation made.
+        assert "left the server" in content
+        assert "not signed up" not in content
+
     async def test_removal_stops_when_the_check_retires_the_run(
         self,
         fake_bot: Any,
@@ -7011,6 +7037,55 @@ class TestAddSignups:
         added = store.get_signup(occurrence.occurrence_id, 11)
         assert added is not None
         assert not added.waitlisted
+
+    async def test_an_addition_announces_the_batch_once(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A raid seats two quickness, so adding a third flexes the quickness
+        # DPS onto their plain-DPS flex - a move of the batch's own, on top
+        # of the promotion the check makes.
+        event, occurrence = self.make_event(store, EventCategory.RAID)
+        self.seat(store, occurrence, 1, EventRole.DPS)
+        self.seat(
+            store,
+            occurrence,
+            2,
+            EventRole.QUICKNESS_DPS,
+            (EventRole.DPS,),
+        )
+        self.seat(store, occurrence, 7, EventRole.QUICKNESS_HEAL)
+        self.seat(store, occurrence, 6, EventRole.DPS, waitlisted=True)
+        # 1 has left, so the check takes their seat back and the waitlist
+        # moves up into it.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (2, 6, 7, 11)}
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        channel.thread.send.reset_mock()
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_DPS)
+
+        promoted = store.get_signup(occurrence.occurrence_id, 6)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        flexed = store.get_signup(occurrence.occurrence_id, 2)
+        assert flexed is not None
+        assert flexed.assigned_role is EventRole.DPS
+        # One commander action says one thing about each member: the check's
+        # promotion and the seating's flex arrive together, not one after the
+        # other.
+        assert channel.thread.send.await_count == 1
 
     async def test_stale_commander_role_is_normalized_after_category_change(
         self,

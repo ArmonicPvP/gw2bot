@@ -2018,8 +2018,16 @@ class RemoveSignupsView(discord.ui.View):
         # minute: a member who left while it sat open would still be holding
         # a seat here, and the removals below would hand one to them off the
         # waitlist. Ask once for the batch; the removals are answered from
-        # this rather than sweeping the roster per member.
-        await check_roster_membership(self._bot, event, occurrence, force=True)
+        # this rather than sweeping the roster per member. Quietly, for the
+        # same reason the additions do: the removals below are announced once
+        # at the end, and this half belongs in that.
+        departed, checked = await check_roster_membership(
+            self._bot,
+            event,
+            occurrence,
+            force=True,
+            notify=False,
+        )
         # That check can retire the occurrence itself: the removal it makes
         # refreshes a message that may have been deleted by hand, and the
         # NotFound behind that persists OVER and seeds the series' next run.
@@ -2049,7 +2057,12 @@ class RemoveSignupsView(discord.ui.View):
         occurrence = current
         removed: list[int] = []
         skipped: list[int] = []
-        updates: list[RosterUpdate] = []
+        # Picks the check took off because they had left the server. They are
+        # off the roster, which is what the commander asked for, but reporting
+        # them as never having been signed up would deny the removal this very
+        # confirmation made.
+        gone = [user_id for user_id in user_ids if user_id in set(departed)]
+        updates: list[RosterUpdate] = [checked]
         kept_after_end: list[int] = []
         undelivered: list[int] = []
         for index, user_id in enumerate(user_ids):
@@ -2079,7 +2092,8 @@ class RemoveSignupsView(discord.ui.View):
                 notify=False,
             )
             if signup is None:
-                skipped.append(user_id)
+                if user_id not in gone:
+                    skipped.append(user_id)
                 continue
             removed.append(user_id)
             updates.append(update)
@@ -2099,19 +2113,20 @@ class RemoveSignupsView(discord.ui.View):
         # each user's changes into one line and drops the ones who ended up off
         # the roster, so the announcement and the summary below both describe
         # the net result.
-        merged = merge_roster_updates(updates, removed)
+        merged = merge_roster_updates(updates, [*removed, *gone])
         await notify_roster_update(self._bot, occurrence, merged)
         promoted = [signup.discord_user_id for signup in merged.promoted]
         LOGGER.debug(
             "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
-            "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s "
-            "undelivered=%s",
+            "picked=%s removed=%s not_signed_up=%s departed=%s promoted=%s "
+            "kept=%s undelivered=%s",
             event.event_id,
             occurrence.occurrence_id,
             interaction.user.id,
             len(user_ids),
             len(removed),
             len(skipped),
+            len(gone),
             len(promoted),
             len(kept_after_end),
             len(undelivered),
@@ -2122,6 +2137,7 @@ class RemoveSignupsView(discord.ui.View):
             promoted,
             kept_after_end,
             undelivered,
+            gone,
         )
         if kept_after_end:
             # The event ended partway through, so the edit session is no longer
@@ -2214,12 +2230,21 @@ def _removal_summary(
     promoted: list[int],
     kept_after_end: list[int] | None = None,
     undelivered: list[int] | None = None,
+    departed: list[int] | None = None,
 ) -> str:
     lines: list[str] = []
     if removed:
         lines.append(f"Removed {_mention_list(removed)} from the roster.")
-    else:
+    elif not departed:
         lines.append("Nobody was removed from the roster.")
+    if departed:
+        # Off the roster either way, but by the membership check rather than
+        # by this removal - so they were never sent the direct message the
+        # others get, and the commander should know why.
+        lines.append(
+            _mention_list(departed)
+            + " had left the server, so they were taken off the roster."
+        )
     if skipped:
         lines.append(
             f"{_mention_list(skipped)} was not signed up for this event."
@@ -2735,7 +2760,20 @@ async def apply_roster_addition(
     # and a member who left while it sat open would hold one of them. Once
     # for the batch: the seatings below each ask too, and are answered from
     # this one rather than sweeping the roster per member.
-    await check_roster_membership(bot, event, current, force=True)
+    #
+    # Quietly: the additions below collect their own moves for a single
+    # announcement at the end, and a member the check promotes can be moved
+    # again by a seating in the same batch. One commander action says one
+    # thing about each member, so the check's half is folded in rather than
+    # sent ahead of it.
+    _, checked = await check_roster_membership(
+        bot,
+        event,
+        current,
+        force=True,
+        notify=False,
+    )
+    updates.append(checked)
     for index, user_id in enumerate(user_ids):
         # Re-read both rows rather than trusting the ones the batch started
         # with. The member being seated when a change lands is already past
