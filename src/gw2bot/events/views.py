@@ -1705,12 +1705,15 @@ async def prune_departed_members(
 
     Returns the line describing who went (None when nobody did) and the
     display names of the whole roster, which the caller reuses so one round of
-    member lookups serves both the check and whatever it renders next.
+    member lookups serves both the check and whatever it renders next. Those
+    same lookups are handed to the shared check, which therefore spends none
+    of its own.
+
+    A commander who has just opened the roster is asking about it now, so the
+    check is forced rather than answered from the one a sign-up may have made
+    moments ago.
     """
-    from gw2bot.events.posting import (
-        notify_roster_update,
-        prune_departed_signups,
-    )
+    from gw2bot.events.posting import check_roster_membership
 
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not signups:
@@ -1724,15 +1727,15 @@ async def prune_departed_members(
         user_id: membership.display_name
         for user_id, membership in memberships.items()
     }
-    departed, update = await prune_departed_signups(
+    departed, _ = await check_roster_membership(
         bot,
         event,
         occurrence,
-        memberships,
+        memberships=memberships,
+        force=True,
     )
     if not departed:
         return None, names
-    await notify_roster_update(bot, occurrence, update)
     return _departed_summary(departed, names), names
 
 

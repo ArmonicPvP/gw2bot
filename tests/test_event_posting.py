@@ -36,6 +36,7 @@ from gw2bot.events.posting import (
     apply_auto_signups,
     apply_signup_edit,
     cancel_occurrence,
+    check_roster_membership,
     post_pending_occurrence,
     complete_signup,
     delete_event_posts,
@@ -58,7 +59,12 @@ from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
 from gw2bot.logging_setup import SecretRegistry, configure_logging
 
-from factories import default_config, forbidden_error, not_found_error
+from factories import (
+    FakeGuild,
+    default_config,
+    forbidden_error,
+    not_found_error,
+)
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 BEFORE_START = START - timedelta(hours=2)
@@ -225,7 +231,12 @@ class FakeUser:
 
 
 class FakeBot:
-    def __init__(self, store: EventStore, channel: FakeChannel):
+    def __init__(
+        self,
+        store: EventStore,
+        channel: FakeChannel,
+        guild: Any = None,
+    ):
         self.event_store = store
         self.event_timezone = ZoneInfo("UTC")
         # Role gates read their id off the config now, so the double carries
@@ -235,6 +246,11 @@ class FakeBot:
             channel.id: channel,
             channel.thread.id: channel.thread,
         }
+        # The server the roster membership checks ask about. None stands for a
+        # bot that cannot reach one - the checks then leave the roster alone -
+        # which is what most posting tests want, so they say nothing about
+        # membership at all.
+        self.guild = guild
         # Users are created on demand and kept, so a test can read back the
         # direct messages the bot sent to any of them.
         self.users: dict[int, FakeUser] = {}
@@ -242,7 +258,11 @@ class FakeBot:
         self.dm_errors: dict[int, Exception] = {}
 
     def get_guild(self, guild_id: int) -> Any:
-        # The bot runs without the members intent, so a guild is never cached.
+        # The guilds intent is on, so the guild itself is cached; without the
+        # members intent its member cache is not, which is the fetch-per-member
+        # behaviour FakeGuild answers with.
+        if self.guild is not None and guild_id == self.guild.id:
+            return self.guild
         return None
 
     async def fetch_user(self, user_id: int) -> Any:
@@ -2862,6 +2882,326 @@ class TestPruneDepartedSignups:
 
         assert removed == []
         assert store.get_signup(finished.occurrence_id, 11) is not None
+
+
+class TestCheckRosterMembership:
+    """The roster is re-checked whenever it changes and before it is posted.
+
+    The bot runs without the members intent, so nothing tells it that a member
+    left: their seat stands, the waitlist behind it is blocked, and an
+    automatic sign-up seats them again on the next occurrence. Every test here
+    starts with a roster built while the bot could not reach a server - so the
+    checks skipped and said nothing - and then hands it one.
+    """
+
+    async def fill_fractal(self, bot: Any, store: EventStore) -> Any:
+        # Five seats: one healer, four DPS, one quickness and one alacrity.
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+        await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()
+        )
+        for user_id in (13, 14, 15):
+            await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+        return event, occurrence
+
+    async def test_a_signup_takes_the_seat_of_a_member_who_left(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 14, 15, 16)}
+        )
+
+        signup = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+
+        # The roster only looked full: the DPS seat 13 was holding is not
+        # really taken, so the newcomer takes it rather than the waitlist.
+        assert not signup.waitlisted
+        assert signup.assigned_role is EventRole.DPS
+        assert store.get_signup(occurrence.occurrence_id, 13) is None
+
+    async def test_a_sign_out_never_promotes_a_member_who_left(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        gone = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        waiting = await complete_signup(
+            bot, event, occurrence, 17, EventRole.DPS, ()
+        )
+        assert gone.waitlisted
+        assert waiting.waitlisted
+        bot.guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 13, 14, 15, 17)
+            }
+        )
+
+        await remove_signup(bot, event, occurrence, 15)
+
+        # The check runs before the seat is freed, so the queue it is handed
+        # to no longer holds the member who left.
+        assert store.get_signup(occurrence.occurrence_id, 16) is None
+        promoted = store.get_signup(occurrence.occurrence_id, 17)
+        assert promoted is not None
+        assert not promoted.waitlisted
+
+    async def test_a_signup_edit_is_judged_against_who_is_still_here(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15)}
+        )
+
+        result = await apply_signup_edit(
+            bot,
+            event,
+            occurrence,
+            13,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+
+        # The healer seat 11 was holding is free once they go, so the edit
+        # keeps its member seated instead of offering them the waitlist over
+        # a seat nobody holds.
+        assert result.signup is not None
+        assert not result.signup.waitlisted
+        assert result.signup.assigned_role is EventRole.QUICKNESS_HEAL
+        assert store.get_signup(occurrence.occurrence_id, 11) is None
+
+    async def test_a_posted_successor_drops_auto_signups_who_left(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # What _create_next_occurrence leaves behind: a pending occurrence
+        # whose roster came entirely from the automatic sign-ups of the run
+        # before it, and which nothing has looked at since.
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+        for user_id in (11, 12):
+            store.add_signup(
+                occurrence_id=pending.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        bot.guild = FakeGuild({12: "User 12"})
+
+        posted = await post_pending_occurrence(
+            bot, event, pending, BEFORE_START
+        )
+
+        assert posted is not None
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(pending.occurrence_id)
+        ] == [12]
+        # The embed goes out already describing the members who are there,
+        # and only they are subscribed to the thread it opened.
+        embed = channel.sent[0]["embed"]
+        rendered = "\n".join(
+            field.value for field in embed.fields if field.value
+        )
+        assert "<@11>" not in rendered
+        assert "<@12>" in rendered
+        assert channel.thread.add_user.await_count == 1
+
+    async def test_a_repost_leaves_a_departed_member_behind(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        for user_id in (11, 12):
+            store.add_signup(
+                occurrence_id=posted.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+
+        await repost_occurrence(bot, moved, posted)
+
+        # The roster carries over to the new post, so a member who left would
+        # be carried with it and added to a thread they cannot read.
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(posted.occurrence_id)
+        ] == [12]
+        assert new_channel.thread.add_user.await_count == 1
+
+    async def test_several_departures_cost_one_round_of_lookups(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15, 16)}
+        )
+        bot.guild = guild
+
+        await complete_signup(bot, event, occurrence, 16, EventRole.DPS, ())
+
+        assert store.get_signup(occurrence.occurrence_id, 11) is None
+        assert store.get_signup(occurrence.occurrence_id, 13) is None
+        # Each removal goes through remove_signup, which asks for a check of
+        # its own: the roster is looked up once for the whole prune rather
+        # than again for every member it takes off.
+        assert sorted(guild.fetched) == [11, 12, 13, 14, 15]
+
+    async def test_a_roster_checked_moments_ago_is_not_checked_again(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13)}
+        )
+        bot.guild = guild
+
+        await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()
+        )
+        first_round = list(guild.fetched)
+        await complete_signup(bot, event, occurrence, 13, EventRole.DPS, ())
+
+        # Every member on the roster is a fetch, so a burst of sign-ups on a
+        # fifty-seat roster must not re-ask about all fifty per click.
+        assert first_round == [11]
+        assert guild.fetched == first_round
+
+    async def test_a_commander_gets_an_answer_of_their_own(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+        bot.guild = FakeGuild({11: "User 11", 12: "User 12"})
+        # A sign-up checks the roster with both members present, and 11 leaves
+        # a moment later.
+        await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()
+        )
+        memberships = {
+            11: GuildMembership("Gone", False),
+            12: GuildMembership("User 12", True),
+        }
+
+        unforced, _ = await check_roster_membership(
+            bot,
+            event,
+            occurrence,
+            memberships=memberships,
+        )
+        forced, _ = await check_roster_membership(
+            bot,
+            event,
+            occurrence,
+            memberships=memberships,
+            force=True,
+        )
+
+        # The picker and /event edit are the commander asking about the roster
+        # now, so they are answered fresh rather than from the check a
+        # sign-up made seconds earlier.
+        assert unforced == []
+        assert forced == [11]
+
+    async def test_a_roster_check_without_a_server_leaves_everyone_seated(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+
+        await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()
+        )
+
+        # Only the server can say who is still in it; guessing would cost
+        # members their seats, so the roster stands.
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        # And nothing was asked of Discord either, because no lookup could
+        # have answered the question.
+        assert bot.users == {}
+
+    async def test_a_check_that_cannot_be_made_still_seats_the_member(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+        bot.guild = FakeGuild({11: "User 11", 12: "User 12"})
+
+        async def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise forbidden_error(50001)
+
+        monkeypatch.setattr(posting, "resolve_guild_memberships", refuse)
+
+        signup = await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()
+        )
+
+        # The sign-up is the member's; the check behind it is housekeeping.
+        assert not signup.waitlisted
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
 
 
 class TestRemoveSignupResettle:
@@ -5976,6 +6316,44 @@ class TestPostingLoggingSafety:
             with pytest.raises(discord.HTTPException):
                 await post_occurrence(bot, event, retry, BEFORE_START)
 
+        assert title not in caplog.text
+        assert description not in caplog.text
+
+    async def test_membership_check_logs_never_contain_member_names(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Checking the roster against the server resolves display names on the
+        # way - the guild nickname of a member who is still there, the global
+        # name of one who has gone - and those belong to the members, so
+        # nothing along the check may write one out.
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description=description,
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        await complete_signup(bot, event, posted, 11, EventRole.DPS, ())
+        bot.users[11] = FakeUser(11, "SECRET DEPARTED NAME")
+        bot.guild = FakeGuild({12: "SECRET MEMBER NAME"})
+
+        with caplog.at_level("DEBUG"):
+            await complete_signup(bot, event, posted, 12, EventRole.DPS, ())
+
+        assert store.get_signup(posted.occurrence_id, 11) is None
+        assert "SECRET DEPARTED NAME" not in caplog.text
+        assert "SECRET MEMBER NAME" not in caplog.text
         assert title not in caplog.text
         assert description not in caplog.text
 

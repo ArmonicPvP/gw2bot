@@ -92,7 +92,12 @@ from gw2bot.events.views import (
     start_signup_flow,
 )
 
-from factories import default_config, forbidden_error, not_found_error
+from factories import (
+    FakeGuild,
+    default_config,
+    forbidden_error,
+    not_found_error,
+)
 from test_event_posting import FakeBot, FakeChannel, FakeThread, FakeUser
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
@@ -143,28 +148,6 @@ def preview_kwargs(interaction: Any) -> Any:
     """The preview /event edit sent; it defers first, so it is a follow-up."""
     assert interaction.followup.send.await_args is not None
     return interaction.followup.send.await_args.kwargs
-
-
-class FakeGuild:
-    """Answers member lookups the way Discord does for a bot without the intent.
-
-    The member cache is always empty, so every lookup is a fetch, and a member
-    who has left raises NotFound.
-    """
-
-    def __init__(self, members: dict[int, str]):
-        self._members = members
-        self.fetched: list[int] = []
-
-    def get_member(self, user_id: int) -> Any:
-        return None
-
-    async def fetch_member(self, user_id: int) -> Any:
-        self.fetched.append(user_id)
-        name = self._members.get(user_id)
-        if name is None:
-            raise not_found_error()
-        return SimpleNamespace(id=user_id, display_name=name)
 
 
 class TestEventCommandGroup:

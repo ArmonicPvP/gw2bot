@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 
 import discord
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,6 +17,7 @@ from gw2bot.discord_utils import (
     GuildMembership,
     discord_failure_reason,
     log_discord_failure,
+    resolve_guild_memberships,
 )
 from gw2bot.events.formatting import (
     compute_status,
@@ -1173,6 +1176,12 @@ async def repost_occurrence(
     # refresh would look for that dead id in the new channel, get NotFound and
     # retire a still-active occurrence. Posting first means a failed move leaves
     # the old message live and still correctly referenced.
+    #
+    # The roster is checked against the server first: it carries over to the
+    # new post untouched, and every member on it is subscribed to the new
+    # thread at the end, so anyone who has left would be carried across and
+    # added to a thread they cannot read.
+    await check_roster_membership(bot, event, occurrence)
     old_message_id = occurrence.message_id
     old_thread_id = occurrence.thread_id
     old_channel_id = occurrence_channel_id(event, occurrence)
@@ -1428,6 +1437,14 @@ async def post_pending_occurrence(
                 current is not None,
             )
             return None
+        # A pending occurrence's roster was seeded from the automatic sign-ups
+        # of the run before it, and nothing has looked at it since: a member
+        # who left the server in the meantime would be posted onto it, hold a
+        # seat in a run they cannot see, and be seeded again next week. Check
+        # it before the post goes out, so the embed and the thread the roster
+        # is subscribed to below both describe the members who are really
+        # there.
+        await check_roster_membership(bot, event, current, now=now)
         posted = await post_occurrence(bot, event, current, now)
         if current.needs_refresh:
             # The flag only asked for this posting, and the message it produced
@@ -1951,6 +1968,16 @@ async def seat_signup(
         raise ValueError(
             "This event has already ended, so you can no longer sign up."
         )
+    # Seat this member against a roster the server still recognises. A member
+    # who has left holds a seat nobody can fill, and admitting around one
+    # would send this member to the waitlist over a place that is not really
+    # taken, so the departed go first and the seating below is solved without
+    # them.
+    departed, _ = await check_roster_membership(
+        bot, event, occurrence, now=now
+    )
+    if departed:
+        signups = bot.event_store.get_signups(occurrence.occurrence_id)
     assigned_role: EventRole | None = None
     waitlisted: bool
     update = RosterUpdate()
@@ -2025,6 +2052,14 @@ async def remove_signup(
     *,
     notify: bool = True,
 ) -> tuple[EventSignup | None, RosterUpdate]:
+    # Before the seat is freed, not after: the resettle below hands it to the
+    # waitlist, and a waitlisted member who has left the server would be
+    # promoted into a run they cannot see. Checking first takes them out of
+    # the queue, so the seat goes to somebody who can actually use it. The
+    # check itself removes through this function, and re-enters it while its
+    # own removals are in flight; that re-entry is refused there rather than
+    # here, so this stays the one door onto the roster.
+    await check_roster_membership(bot, event, occurrence)
     removed = bot.event_store.remove_signup(
         occurrence.occurrence_id,
         discord_user_id,
@@ -2175,6 +2210,197 @@ async def prune_departed_signups(
         len(merged.promoted),
     )
     return removed, merged
+
+
+# How long one membership check of an occurrence's roster stands. The bot runs
+# without the members intent, so its member cache is empty and every member on
+# the roster costs a Discord lookup; a burst of sign-ups on a fifty-seat roster
+# would otherwise spend fifty of them per click. A commander who opened the
+# roster asks for a fresh answer with force=True, and a roster the check has
+# never seen - a newly seeded occurrence about to be posted - is never covered
+# by an earlier one, so what this bounds is only how often the same live roster
+# is re-asked about.
+ROSTER_MEMBERSHIP_CHECK_SECONDS = 60.0
+
+
+@dataclass(slots=True)
+class _RosterMembershipChecks:
+    """One bot's bookkeeping for the roster membership checks.
+
+    ``checked_at`` is when each occurrence's roster was last asked about, and
+    ``in_flight`` the occurrences a check is running over right now. Held per
+    bot rather than per module because it describes that bot's conversation
+    with Discord: a second bot (a test's, say) starts with its own empty state
+    and cannot be answered from the first one's.
+    """
+
+    checked_at: dict[int, float] = field(default_factory=dict)
+    in_flight: set[int] = field(default_factory=set)
+
+
+_MEMBERSHIP_CHECKS: WeakKeyDictionary[Any, _RosterMembershipChecks] = (
+    WeakKeyDictionary()
+)
+
+
+def _membership_checks(bot: Gw2Bot) -> _RosterMembershipChecks:
+    checks = _MEMBERSHIP_CHECKS.get(bot)
+    if checks is None:
+        checks = _RosterMembershipChecks()
+        _MEMBERSHIP_CHECKS[bot] = checks
+    return checks
+
+
+def _membership_check_due(
+    checks: _RosterMembershipChecks,
+    occurrence_id: int,
+    moment: float,
+) -> bool:
+    # Expired entries are dropped as they are passed over, so the table holds
+    # the rosters checked within the window rather than every occurrence this
+    # process has ever posted.
+    for checked_id, checked_at in list(checks.checked_at.items()):
+        if moment - checked_at >= ROSTER_MEMBERSHIP_CHECK_SECONDS:
+            del checks.checked_at[checked_id]
+    return occurrence_id not in checks.checked_at
+
+
+def _event_guild(bot: Gw2Bot) -> discord.Guild | None:
+    """The server an event's roster is a roster of.
+
+    Membership is a question about that one server, and the posting and
+    scheduler paths have no interaction to read it off, so it comes from the
+    configured command guild. The guild cache needs no members intent, so this
+    is a local lookup rather than a Discord call.
+    """
+    return bot.get_guild(bot._config.discord_command_guild_id)
+
+
+async def check_roster_membership(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    *,
+    guild: discord.Guild | None = None,
+    memberships: Mapping[int, GuildMembership] | None = None,
+    now: datetime | None = None,
+    force: bool = False,
+) -> tuple[list[int], RosterUpdate]:
+    """Re-check a roster against Discord and take off everyone who has left.
+
+    The bot is never told that a member left the server: it runs without the
+    members intent, so nothing arrives to act on and a departed member keeps
+    their seat. That seat holds a place nobody can fill for an event they
+    cannot even see, blocks the waitlist behind it, and on a repeating event
+    is handed straight back to them when their automatic sign-up seeds the
+    next occurrence. So the roster is asked about again whenever it changes
+    and before an occurrence is posted, rather than only when a commander
+    opens it.
+
+    Callers that have already looked the roster up - the pickers, which need
+    the same lookups for their names - pass ``memberships`` and spend no
+    further calls here.
+
+    Returns the ids actually removed and the roster movement their removal
+    caused, which has already been announced. Nothing here is allowed to fail
+    its caller: a sign-up, a removal or a post must land whether or not the
+    check behind it could be made.
+    """
+    occurrence_id = occurrence.occurrence_id
+    checks = _membership_checks(bot)
+    if occurrence_id in checks.in_flight:
+        # prune_departed_signups removes through remove_signup, which asks for
+        # this check itself. Without this the removal would re-enter the check
+        # that is making it, over a roster read before any of it landed, and
+        # go round removing the same members again.
+        LOGGER.debug(
+            "Skipped a roster membership check already in flight; "
+            "occurrence_id=%s",
+            occurrence_id,
+        )
+        return [], RosterUpdate()
+    moment = time.monotonic()
+    if not force and not _membership_check_due(checks, occurrence_id, moment):
+        LOGGER.debug(
+            "Skipped a roster membership check made moments ago; "
+            "occurrence_id=%s",
+            occurrence_id,
+        )
+        return [], RosterUpdate()
+    server = guild if guild is not None else _event_guild(bot)
+    if memberships is None and server is None:
+        # Only the server can say who is still in it. Without one there is no
+        # answer to act on, and guessing would cost members their seats, so
+        # the roster stands as it is until a check can be made.
+        LOGGER.debug(
+            "Skipped a roster membership check without a server to ask; "
+            "occurrence_id=%s",
+            occurrence_id,
+        )
+        return [], RosterUpdate()
+    try:
+        signups = bot.event_store.get_signups(occurrence_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster to check it against the server; "
+            "occurrence_id=%s error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+        return [], RosterUpdate()
+    if not signups:
+        checks.checked_at[occurrence_id] = moment
+        LOGGER.debug(
+            "Checked an empty roster against the server; occurrence_id=%s",
+            occurrence_id,
+        )
+        return [], RosterUpdate()
+    checks.in_flight.add(occurrence_id)
+    try:
+        resolved = (
+            memberships
+            if memberships is not None
+            else await resolve_guild_memberships(
+                bot,
+                server,
+                [signup.discord_user_id for signup in signups],
+            )
+        )
+        departed, update = await prune_departed_signups(
+            bot,
+            event,
+            occurrence,
+            resolved,
+            now,
+        )
+        if departed:
+            await notify_roster_update(bot, occurrence, update)
+    except (discord.DiscordException, SQLAlchemyError) as exc:
+        # A roster the bot could not check is still a roster: report nothing
+        # removed and let the sign-up, removal or post behind this carry on.
+        LOGGER.error(
+            "Could not check the roster against the server; occurrence_id=%s "
+            "error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+        return [], RosterUpdate()
+    finally:
+        checks.in_flight.discard(occurrence_id)
+        # Recorded whatever the outcome. A check that failed against an
+        # unreachable Discord must not be retried by every click behind it,
+        # which would spend the same failing lookups over and over.
+        checks.checked_at[occurrence_id] = time.monotonic()
+    LOGGER.debug(
+        "Checked the roster against the server; event_id=%s occurrence_id=%s "
+        "roster=%s departed=%s promoted=%s",
+        event.event_id,
+        occurrence_id,
+        len(signups),
+        len(departed),
+        len(update.promoted),
+    )
+    return departed, update
 
 
 def rebalance_occurrence_roster(
@@ -2580,6 +2806,14 @@ async def apply_signup_edit(
         )
     if not event.capacity.has_roles:
         raise ValueError("This event has no roles to edit.")
+    # The new selection is judged against the members who are actually still
+    # here, so an edit is not sent to the waitlist by a seat its holder left
+    # the server on.
+    departed, _ = await check_roster_membership(
+        bot, event, occurrence, now=now
+    )
+    if departed:
+        signups = bot.event_store.get_signups(occurrence.occurrence_id)
     current = next(
         (
             signup
