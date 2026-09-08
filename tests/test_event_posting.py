@@ -3299,6 +3299,131 @@ class TestCheckRosterMembership:
         assert not result.signup.waitlisted
         assert result.signup.assigned_role is EventRole.QUICKNESS_HEAL
 
+    async def test_a_repost_subscribes_the_roster_before_it_pings_them(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+        order: list[str] = []
+
+        async def record_add(_member: Any) -> None:
+            order.append("add")
+
+        async def record_send(_content: Any) -> None:
+            order.append("send")
+
+        new_channel.thread.add_user = AsyncMock(side_effect=record_add)
+        new_channel.thread.send = AsyncMock(side_effect=record_send)
+
+        await repost_occurrence(
+            bot,
+            moved,
+            posted,
+            RosterUpdate(
+                reassigned=(
+                    RoleChange(12, EventRole.DPS, EventRole.ALACRITY_DPS),
+                )
+            ),
+        )
+
+        # A mention only reaches a member who is in the thread to receive it,
+        # and the move has just opened a thread nobody is in yet.
+        assert order == ["add", "send"]
+
+    async def test_a_prune_that_fails_partway_reports_what_it_did(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15, 16)}
+        )
+        real_remove = store.remove_signup
+        removals = 0
+
+        def fail_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            nonlocal removals
+            removals += 1
+            if removals > 1:
+                raise SQLAlchemyError("boom")
+            return real_remove(occurrence_id, discord_user_id)
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            fail_after_the_first
+        )
+
+        departed, update = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # The first removal and the promotion behind it are committed, so
+        # reporting nothing would lose the promotion's announcement and let a
+        # caller merge an update that still names the member who went.
+        assert departed == [11]
+        assert [signup.discord_user_id for signup in update.promoted] == [16]
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+
+    async def test_a_sign_out_is_not_announced_as_a_promotion_first(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        # 11 holds the healer seat 16 is waiting for, and has left.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15, 16)}
+        )
+        channel.thread.send.reset_mock()
+
+        await remove_signup(bot, event, occurrence, 16)
+
+        # The check promotes 16 into the seat 11 vacated and this removal
+        # takes them straight back off it. Announcing the promotion on its own
+        # would tell the thread two contradictory things about one member.
+        assert store.get_signup(occurrence.occurrence_id, 16) is None
+        assert channel.thread.send.await_count == 0
+
     async def test_a_repost_checks_again_after_the_editor_just_did(
         self,
         store: EventStore,

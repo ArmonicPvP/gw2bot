@@ -1246,17 +1246,6 @@ async def repost_occurrence(
         force=True,
         notify=False,
     )
-    # A move deletes the thread the caller would have announced in, so it
-    # hands its announcement over instead - a category change's re-seat, say.
-    # Both describe the same roster settling, and the check ran after the
-    # caller computed its half, so they are folded into one line per member:
-    # a member moved twice reads as one move, and one who has left is dropped
-    # rather than told about a seat they no longer hold.
-    await notify_roster_update(
-        bot,
-        reposted,
-        merge_roster_updates([deferred_update, checked], departed),
-    )
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(
@@ -1265,6 +1254,20 @@ async def repost_occurrence(
             signup.discord_user_id,
             add=True,
         )
+    # A move deletes the thread the caller would have announced in, so it
+    # hands its announcement over instead - a category change's re-seat, say.
+    # Both describe the same roster settling, and the check ran after the
+    # caller computed its half, so they are folded into one line per member:
+    # a member moved twice reads as one move, and one who has left is dropped
+    # rather than told about a seat they no longer hold.
+    #
+    # After the subscriptions above, because the mentions are only worth
+    # sending to members who are in the thread to receive them.
+    await notify_roster_update(
+        bot,
+        reposted,
+        merge_roster_updates([deferred_update, checked], departed),
+    )
     LOGGER.debug(
         "Reposted event occurrence to new channel; occurrence_id=%s "
         "signups=%s",
@@ -2103,7 +2106,17 @@ async def remove_signup(
     # check itself removes through this function, and re-enters it while its
     # own removals are in flight; that re-entry is refused there rather than
     # here, so this stays the one door onto the roster.
-    await check_roster_membership(bot, event, occurrence)
+    #
+    # Its movements are announced with this removal rather than ahead of it:
+    # the member being removed can be one the check has just promoted into a
+    # seat a departure freed, and telling the thread they moved up moments
+    # before taking them off it says two contradictory things.
+    _, checked = await check_roster_membership(
+        bot,
+        event,
+        occurrence,
+        notify=False,
+    )
     # That awaited Discord, and the run can cross its end - or be retired by
     # the check's own refresh - while the lookups are in flight. Read the row
     # back and leave a roster that is now history alone: the resettle below
@@ -2119,14 +2132,20 @@ async def remove_signup(
             discord_user_id,
             current is not None,
         )
-        return None, RosterUpdate()
+        if notify:
+            await notify_roster_update(bot, occurrence, checked)
+        return None, checked
     occurrence = current
     removed = bot.event_store.remove_signup(
         occurrence.occurrence_id,
         discord_user_id,
     )
     if removed is None:
-        return None, RosterUpdate()
+        # This member was not on the roster, but the check may still have
+        # moved it, and that movement is real whatever this call does next.
+        if notify:
+            await notify_roster_update(bot, occurrence, checked)
+        return None, checked
     # Resettle the roster into the freed capacity before yielding to any
     # awaited Discord I/O. The removal and the resettle are synchronous store
     # writes, so keeping them adjacent makes the mutation atomic: a concurrent
@@ -2136,6 +2155,10 @@ async def remove_signup(
     update = RosterUpdate()
     if not removed.waitlisted:
         update = _resettle_roster(bot, event, occurrence)
+    # The check moved the roster first and this removal moved it after, so
+    # they fold into one line per member with this member dropped: whatever
+    # seat the check gave them, they are off the roster now.
+    update = merge_roster_updates([checked, update], [discord_user_id])
     await update_thread_membership(
         bot,
         occurrence,
@@ -2234,14 +2257,29 @@ async def prune_departed_signups(
             )
             break
         # One member failing to leave the roster must not strand the rest, and
-        # remove_signup already absorbs its own Discord failures.
-        signup, update = await remove_signup(
-            bot,
-            event,
-            current,
-            user_id,
-            notify=False,
-        )
+        # remove_signup already absorbs its own Discord failures. A store
+        # failure is different: it says the database is refusing writes right
+        # now, so the removals still to come would fail too. Stop there and
+        # report what did land - the rows are committed one removal at a
+        # time, and a caller told nothing happened would announce a roster it
+        # no longer has and seat members against seats that are already free.
+        try:
+            signup, update = await remove_signup(
+                bot,
+                event,
+                current,
+                user_id,
+                notify=False,
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not remove a departed member; stopping the prune; "
+                "occurrence_id=%s kept=%s error_type=%s",
+                occurrence.occurrence_id,
+                len(departed) - index,
+                type(exc).__name__,
+            )
+            break
         if signup is None:
             continue
         removed.append(user_id)
