@@ -179,9 +179,14 @@ class FakeGuild:
         self,
         members: Mapping[int, str],
         guild_id: int = COMMAND_GUILD_ID,
+        fetch_error: Exception | None = None,
     ):
         self.id = guild_id
         self._members = dict(members)
+        # What a member this guild does not list raises. "Unknown member" by
+        # default, which is the one answer that proves somebody has left; pass
+        # another to exercise a 404 that says nothing about them.
+        self._fetch_error = fetch_error
         self.fetched: list[int] = []
 
     def get_member(self, user_id: int) -> Any:
@@ -191,7 +196,11 @@ class FakeGuild:
         self.fetched.append(user_id)
         name = self._members.get(user_id)
         if name is None:
-            raise not_found_error()
+            raise (
+                self._fetch_error
+                if self._fetch_error is not None
+                else not_found_error()
+            )
         return SimpleNamespace(id=user_id, display_name=name)
 
 
@@ -233,6 +242,19 @@ def not_found_error() -> discord.NotFound:
     return discord.NotFound(
         response,  # type: ignore[arg-type]
         {"code": 10007, "message": "Unknown Member"},
+    )
+
+
+def unknown_guild_error() -> discord.NotFound:
+    """The other 404 a member lookup can answer with.
+
+    Discord says it does not know the guild, not that it does not know this
+    member in it - so it says nothing about whether they have left.
+    """
+    response = SimpleNamespace(status=404, reason="Not Found")
+    return discord.NotFound(
+        response,  # type: ignore[arg-type]
+        {"code": 10004, "message": "Unknown Guild"},
     )
 
 

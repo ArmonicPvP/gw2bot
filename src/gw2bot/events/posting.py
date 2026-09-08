@@ -2029,7 +2029,7 @@ async def seat_signup(
     # would send this member to the waitlist over a place that is not really
     # taken, so the departed go first and the seating below is solved without
     # them.
-    occurrence, signups, checked = await _checked_roster(
+    event, occurrence, signups, checked = await _checked_roster(
         bot,
         event,
         occurrence,
@@ -2205,6 +2205,47 @@ def departed_roster_members(
     ]
 
 
+def _roster_movement(
+    before: Sequence[EventSignup],
+    after: Sequence[EventSignup],
+    removed_user_id: int,
+) -> RosterUpdate:
+    """What changed between two readings of one roster, minus who left.
+
+    Used to recover the movement a removal made when the store failed after
+    committing it: the resettle may have landed and the refresh behind it
+    raised, so re-running the resettle finds nothing left to do and reports
+    nothing, while the promotion is sitting in the rows. Comparing the two
+    readings says what really happened whichever half failed.
+    """
+    was = {signup.discord_user_id: signup for signup in before}
+    promoted: list[EventSignup] = []
+    reassigned: list[RoleChange] = []
+    for signup in after:
+        previous = was.get(signup.discord_user_id)
+        if previous is None or signup.discord_user_id == removed_user_id:
+            continue
+        if previous.waitlisted and not signup.waitlisted:
+            promoted.append(signup)
+        elif (
+            not previous.waitlisted
+            and previous.assigned_role is not None
+            and signup.assigned_role is not None
+            and previous.assigned_role is not signup.assigned_role
+        ):
+            reassigned.append(
+                RoleChange(
+                    discord_user_id=signup.discord_user_id,
+                    old_role=previous.assigned_role,
+                    new_role=signup.assigned_role,
+                )
+            )
+    return RosterUpdate(
+        reassigned=tuple(reassigned),
+        promoted=tuple(promoted),
+    )
+
+
 async def prune_departed_signups(
     bot: Gw2Bot,
     event: Event,
@@ -2278,6 +2319,10 @@ async def prune_departed_signups(
         # report what did land - the rows are committed one removal at a
         # time, and a caller told nothing happened would announce a roster it
         # no longer has and seat members against seats that are already free.
+        # Read before the removal so the recovery below can say what it did:
+        # the store can fail with the seat already handed on, and what landed
+        # is only visible by comparing the two readings.
+        before = bot.event_store.get_signups(current.occurrence_id)
         try:
             signup, update = await remove_signup(
                 bot,
@@ -2321,7 +2366,7 @@ async def prune_departed_signups(
                 # is there, so the next roster change picks it up, and a
                 # member seeded again is one the next post's check removes.
                 try:
-                    updates.append(_resettle_roster(bot, event, current))
+                    _resettle_roster(bot, event, current)
                     disable_auto_signup(bot, event, current, user_id)
                 except SQLAlchemyError as cleanup_error:
                     LOGGER.error(
@@ -2330,6 +2375,26 @@ async def prune_departed_signups(
                         occurrence.occurrence_id,
                         user_id,
                         type(cleanup_error).__name__,
+                    )
+                # Whatever the roster did, whichever half failed: the resettle
+                # above reports only what it moved itself, and it moves
+                # nothing when the first one had already landed.
+                try:
+                    updates.append(
+                        _roster_movement(
+                            before,
+                            bot.event_store.get_signups(
+                                current.occurrence_id
+                            ),
+                            user_id,
+                        )
+                    )
+                except SQLAlchemyError:
+                    LOGGER.error(
+                        "Could not read back a recovered removal's roster; "
+                        "occurrence_id=%s user_id=%s",
+                        occurrence.occurrence_id,
+                        user_id,
                     )
             break
         if signup is None:
@@ -2587,7 +2652,7 @@ async def _checked_roster(
     ended_message: str,
     *,
     force: bool = False,
-) -> tuple[EventOccurrence, list[EventSignup], RosterUpdate]:
+) -> tuple[Event, EventOccurrence, list[EventSignup], RosterUpdate]:
     """Check the roster against the server, then read back what stands.
 
     The check awaits Discord, so nothing read before it holds afterwards.
@@ -2603,6 +2668,12 @@ async def _checked_roster(
     be gone - so the stored status is what is read back, not a status derived
     from the schedule.
 
+    The event comes back too. A commander can save an edit while the lookups
+    are in flight, and the roster is seated against whatever category the
+    event carries now - admitting somebody under the capacity it had before
+    would seat them into a squad shape that no longer exists, and a shortened
+    duration can have ended the run outright.
+
     Whatever the check moved comes back rather than being announced here: the
     caller is about to move the same roster, and on a role-limited one it can
     move the very member the check just promoted. One announcement, folded,
@@ -2616,13 +2687,14 @@ async def _checked_roster(
         force=force,
         notify=False,
     )
+    edited = bot.event_store.get_event(event.event_id)
     current = bot.event_store.get_occurrence(occurrence.occurrence_id)
-    if current is None:
+    if edited is None or edited.cancelled or current is None:
         raise ValueError(ended_message)
-    if occurrence_finished(event, current, now):
+    if occurrence_finished(edited, current, now):
         raise ValueError(ended_message)
     signups = bot.event_store.get_signups(current.occurrence_id)
-    return current, signups, checked
+    return edited, current, signups, checked
 
 
 def rebalance_occurrence_roster(
@@ -3031,7 +3103,7 @@ async def apply_signup_edit(
     # The new selection is judged against the members who are actually still
     # here, so an edit is not sent to the waitlist by a seat its holder left
     # the server on.
-    occurrence, signups, checked = await _checked_roster(
+    event, occurrence, signups, checked = await _checked_roster(
         bot,
         event,
         occurrence,

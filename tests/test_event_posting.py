@@ -64,6 +64,7 @@ from factories import (
     default_config,
     forbidden_error,
     not_found_error,
+    unknown_guild_error,
 )
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
@@ -3445,6 +3446,101 @@ class TestCheckRosterMembership:
         assert departed == [11]
         assert [signup.discord_user_id for signup in update.promoted] == [16]
         assert store.get_signup(occurrence.occurrence_id, 13) is not None
+
+    async def test_a_guild_that_answers_404_does_not_empty_the_roster(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        # The bot has been removed from the server, or it is gone: every
+        # member lookup answers 404, and every member looks equally missing.
+        bot.guild = FakeGuild({}, fetch_error=unknown_guild_error())
+
+        departed, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # Only "unknown member" proves somebody left. Reading this as five
+        # departures would take the whole roster off in one pass.
+        assert departed == []
+        assert len(store.get_signups(occurrence.occurrence_id)) == 5
+
+    async def test_a_recovered_removal_reports_a_promotion_that_landed(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15, 16)}
+        )
+        # The removal and the resettle behind it both land; the refresh that
+        # follows is what fails, so re-running the resettle finds nothing
+        # left to move and the promotion is only visible in the rows.
+        channel.partial_message.edit = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+        store.set_occurrence_needs_refresh = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+
+        departed, update = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        assert departed == [11]
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert [signup.discord_user_id for signup in update.promoted] == [16]
+
+    async def test_a_signup_is_seated_against_a_category_saved_mid_check(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 13, 14, 15, 16)
+            }
+        )
+        real_fetch = guild.fetch_member
+
+        async def widen_the_event(user_id: int) -> Any:
+            # A commander saves a category change while the lookups are in
+            # flight: a raid seats ten where the fractal seated five.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.RAID,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = widen_the_event  # type: ignore[method-assign]
+        bot.guild = guild
+
+        signup = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+
+        # Seating against the capacity the event had before the save would
+        # send them to the waitlist over a squad shape that no longer exists.
+        assert not signup.waitlisted
 
     async def test_a_recovered_removal_finishes_its_own_cleanup(
         self,

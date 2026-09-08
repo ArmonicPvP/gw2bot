@@ -90,6 +90,14 @@ def discord_failure_signature(error: discord.DiscordException) -> str:
     )
 
 
+# The only 404 that proves a member has left: Discord knows the guild and does
+# not know them in it. Every other 404 from a member lookup is about the guild
+# rather than the member - the bot removed from it, the guild gone, an id that
+# no longer resolves - and reading those as departures would report the whole
+# roster as gone at once.
+UNKNOWN_MEMBER_CODE = 10007
+
+
 @dataclass(frozen=True, slots=True)
 class GuildMembership:
     """What one member lookup could establish about a Discord user.
@@ -124,16 +132,21 @@ async def resolve_guild_membership(
         try:
             member = await guild.fetch_member(user_id)
         except discord.NotFound as exc:
-            # Discord knows the guild and does not know this member in it, so
-            # they have left. The global lookup below still runs: the name is
-            # wanted for whatever the caller reports about the departure.
+            # Only "unknown member" says this user has left. A 404 carrying
+            # any other code is about the guild, not them, and answering it
+            # with a departure would take a whole roster off at once - every
+            # member of it looks equally missing. The global lookup below
+            # still runs either way: the name is wanted for whatever the
+            # caller reports.
+            departed = getattr(exc, "code", None) == UNKNOWN_MEMBER_CODE
             LOGGER.debug(
-                "Guild member lookup reported a departed member; user_id=%s "
-                "failure=%s",
+                "Guild member lookup answered not found; user_id=%s "
+                "departed=%s failure=%s",
                 user_id,
+                departed,
                 discord_failure_signature(exc),
             )
-            in_guild = False
+            in_guild = False if departed else None
             member = None
         except discord.HTTPException as exc:
             # The global lookup below can still succeed and hide this from the
