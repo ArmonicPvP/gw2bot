@@ -490,7 +490,8 @@ occurrence does not seat them again. The check runs:
   has looked at it since) and an event moved to another channel (its roster
   carries over to the new post). The check runs once the post is live rather
   than before it, so there is a message to correct and a claim on the run to
-  keep; the removal refreshes the embed that has just gone out;
+  keep; the removal refreshes the embed that has just gone out. Both ask the
+  server again rather than reusing a recent answer;
 - when `/event edit` or the **Remove sign-ups** picker is opened, which asks
   for a fresh answer rather than reusing a recent one.
 
@@ -500,6 +501,9 @@ nothing, so the roster is left exactly as it stands and the check is made again
 on the next change. A roster checked seconds ago is not re-checked by the
 sign-up behind it either: every member on it is a Discord lookup, so a burst of
 sign-ups on a fifty-seat roster spends one round rather than one per click.
+That only applies to roster changes, which come in bursts. Posting an
+occurrence, moving one to another channel and a commander opening the roster
+each happen once, so each asks the server again.
 
 ## Guild Event Destinations
 

@@ -3201,6 +3201,56 @@ class TestCheckRosterMembership:
         assert stored is not None
         assert stored.role is EventRole.QUICKNESS_HEAL
 
+    async def test_a_repost_checks_again_after_the_editor_just_did(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        for user_id in (11, 12):
+            store.add_signup(
+                occurrence_id=posted.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # /event edit checks this roster before drawing its preview, and finds
+        # everyone present.
+        bot.guild = FakeGuild({11: "User 11", 12: "User 12"})
+        await check_roster_membership(bot, event, posted, force=True)
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        # 11 leaves while the channel picker and its confirmation sit open.
+        bot.guild = FakeGuild({12: "User 12"})
+
+        await repost_occurrence(bot, moved, posted)
+
+        # Answering the move from the preview's check would carry them across
+        # and subscribe them to the replacement thread.
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(posted.occurrence_id)
+        ] == [12]
+        assert new_channel.thread.add_user.await_count == 1
+
     async def test_a_repost_does_not_retire_an_event_whose_message_is_gone(
         self,
         store: EventStore,

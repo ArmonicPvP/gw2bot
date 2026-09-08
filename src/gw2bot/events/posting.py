@@ -1231,7 +1231,14 @@ async def repost_occurrence(
     # retires this still-live occurrence and seeds a successor the series does
     # not want yet. Once the row names the new post there is a message to
     # refresh, and the roster settles before anyone is subscribed to it.
-    await check_roster_membership(bot, event, reposted)
+    #
+    # Forced: a move begins at /event edit, whose preview checks this very
+    # roster, so the answer here would otherwise be the one from before the
+    # commander opened the channel picker - and whoever left while that
+    # confirmation sat open would be carried across anyway. The freshness the
+    # window buys is there to bound bursts of roster changes; a move happens
+    # once.
+    await check_roster_membership(bot, event, reposted, force=True)
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(
@@ -1478,7 +1485,14 @@ async def post_pending_occurrence(
         # that then failed would leave the series with nothing posted, an
         # unclaimed pending row that maintenance skips forever, and a
         # cancellation reporting a retry that is not coming.
-        await check_roster_membership(bot, event, posted, now=now)
+        #
+        # Forced for the same reason a move is: posting an occurrence happens
+        # once, so there is no burst for the window to bound, and a roster
+        # nobody has looked at since it was seeded is exactly the one worth
+        # asking about.
+        await check_roster_membership(
+            bot, event, posted, now=now, force=True
+        )
     try:
         signups = bot.event_store.get_signups(posted.occurrence_id)
     except SQLAlchemyError as exc:
