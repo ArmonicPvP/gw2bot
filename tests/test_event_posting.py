@@ -3251,6 +3251,77 @@ class TestCheckRosterMembership:
         ] == [12]
         assert new_channel.thread.add_user.await_count == 1
 
+    async def test_a_sign_out_does_not_promote_into_a_run_that_just_ended(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        self.end_the_run_mid_lookup(
+            bot,
+            store,
+            event,
+            occurrence,
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 13, 14, 15, 16)
+            },
+        )
+
+        removed, update = await remove_signup(bot, event, occurrence, 15)
+
+        # The seat is freed and handed to the waitlist in one breath, so a run
+        # that ended during the lookups must stop the whole removal - not just
+        # the promotion behind it.
+        assert removed is None
+        assert update.promoted == ()
+        assert store.get_signup(occurrence.occurrence_id, 15) is not None
+        still_waiting = store.get_signup(occurrence.occurrence_id, 16)
+        assert still_waiting is not None
+        assert still_waiting.waitlisted
+
+    async def test_a_signup_is_refused_when_the_check_retires_the_run(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Somebody deleted the event post, so the refresh behind the check's
+        # own removal answers NotFound - which retires the occurrence and
+        # seeds the series' next run well before this one's time is up.
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        channel.partial_message.edit = AsyncMock(
+            side_effect=not_found_error()
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+
+        with pytest.raises(ValueError, match="already ended"):
+            await complete_signup(
+                bot, event, posted, 12, EventRole.QUICKNESS_HEAL, ()
+            )
+
+        # The run is retired and replaced, so its status says so even though
+        # its start time has not passed. Recomputing from the schedule alone
+        # would read it as open and seat this member onto a dead roster.
+        retired = store.get_occurrence(posted.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        assert store.get_signup(posted.occurrence_id, 12) is None
+
     async def test_a_repost_does_not_retire_an_event_whose_message_is_gone(
         self,
         store: EventStore,

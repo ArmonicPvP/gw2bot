@@ -4897,7 +4897,17 @@ class SignOutConfirmView(discord.ui.View):
             interaction.user.id,
         )
         if removed is None:
-            content = "You were not signed up for the event."
+            # The run can also cross its end inside the removal itself, whose
+            # roster check is Discord I/O: a roster that is history is left
+            # alone, which is not the same as never having been on it.
+            content = (
+                "This event has already ended, so its roster can no longer "
+                "be changed."
+                if occurrence_has_ended(
+                    self._event, self._occurrence, datetime.now(UTC)
+                )
+                else "You were not signed up for the event."
+            )
         else:
             content = "You were removed from the event."
         LOGGER.debug(

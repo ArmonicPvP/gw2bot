@@ -2086,6 +2086,23 @@ async def remove_signup(
     # own removals are in flight; that re-entry is refused there rather than
     # here, so this stays the one door onto the roster.
     await check_roster_membership(bot, event, occurrence)
+    # That awaited Discord, and the run can cross its end - or be retired by
+    # the check's own refresh - while the lookups are in flight. Read the row
+    # back and leave a roster that is now history alone: the resettle below
+    # hands the freed seat to the waitlist, so going on would promote somebody
+    # into a run that has already finished. prune_departed_signups stops on
+    # the same test rather than removing from a finished roster.
+    current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+    if current is None or _occurrence_finished(event, current):
+        LOGGER.debug(
+            "Skipped a removal from a roster that is history; "
+            "occurrence_id=%s user_id=%s exists=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            current is not None,
+        )
+        return None, RosterUpdate()
+    occurrence = current
     removed = bot.event_store.remove_signup(
         occurrence.occurrence_id,
         discord_user_id,
@@ -2429,6 +2446,29 @@ async def check_roster_membership(
     return departed, update
 
 
+def _occurrence_finished(
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime | None = None,
+) -> bool:
+    """Whether an occurrence's roster is history, by the clock or the status.
+
+    Both count, which is why this is not compute_status. The clock is the
+    ordinary end; the stored status is how an occurrence retires early, when a
+    message somebody deleted answers a refresh with NotFound and OVER is
+    persisted (and the series' next run seeded) before this one's time is up.
+    Deriving the status from the schedule alone reads such an occurrence as
+    open, and a roster change would land on a run that has already been
+    replaced.
+    """
+    if occurrence.status is EventStatus.OVER:
+        return True
+    current_time = now if now is not None else datetime.now(UTC)
+    return current_time >= occurrence.start_time + timedelta(
+        minutes=event.duration_minutes
+    )
+
+
 async def _checked_roster(
     bot: Gw2Bot,
     event: Event,
@@ -2446,16 +2486,18 @@ async def _checked_roster(
     outright) while the lookups are in flight, which is what admitted the
     caller in the first place, so that decision is taken again too: seating
     somebody into a run that finished meanwhile would mutate a historical
-    roster and refresh a post nobody is coming back to.
+    roster and refresh a post nobody is coming back to. The check can retire
+    the occurrence itself - the removal it makes refreshes a message that may
+    be gone - so the stored status is what is read back, not a status derived
+    from the schedule.
     """
     await check_roster_membership(bot, event, occurrence, now=now)
     current = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if current is None:
         raise ValueError(ended_message)
-    signups = bot.event_store.get_signups(current.occurrence_id)
-    if occurrence_status(event, current, signups, now) is EventStatus.OVER:
+    if _occurrence_finished(event, current, now):
         raise ValueError(ended_message)
-    return current, signups
+    return current, bot.event_store.get_signups(current.occurrence_id)
 
 
 def rebalance_occurrence_roster(
