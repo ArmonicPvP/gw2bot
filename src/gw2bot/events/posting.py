@@ -2041,6 +2041,10 @@ async def seat_signup(
     update = RosterUpdate()
     if event.capacity.has_roles:
         if role is None:
+            # The check moved the roster before this call refused to seat
+            # anybody, and a call that raises hands its caller no update to
+            # fold, whatever notify says. Announce it here or nowhere.
+            await notify_roster_update(bot, occurrence, checked)
             raise ValueError("This event requires picking a role.")
         # The newcomer is appended after the seated members rather than
         # re-sorted: their signup time is "now", so they carry the lowest
@@ -2321,8 +2325,23 @@ async def prune_departed_signups(
         # no longer has and seat members against seats that are already free.
         # Read before the removal so the recovery below can say what it did:
         # the store can fail with the seat already handed on, and what landed
-        # is only visible by comparing the two readings.
-        before = bot.event_store.get_signups(current.occurrence_id)
+        # is only visible by comparing the two readings. This read is a store
+        # call like the removal behind it and fails the same way, so it stops
+        # the loop the same way too: letting it raise out of here would throw
+        # away the removals the members ahead of this one already committed,
+        # and report a roster that no longer exists.
+        try:
+            before = bot.event_store.get_signups(current.occurrence_id)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the roster before removing a departed "
+                "member; stopping the prune; occurrence_id=%s kept=%s "
+                "error_type=%s",
+                occurrence.occurrence_id,
+                len(departed) - index,
+                type(exc).__name__,
+            )
+            break
         try:
             signup, update = await remove_signup(
                 bot,
@@ -3126,6 +3145,10 @@ async def apply_signup_edit(
         None,
     )
     if current is None:
+        # Nothing below this will announce what the check moved, and it did
+        # move the roster: the departures are committed and so is whatever
+        # they promoted. Say so before this call ends empty-handed.
+        await notify_roster_update(bot, occurrence, checked)
         raise ValueError("You are not signed up for this event.")
     # Rate limit: a token bucket per signup (three edits, refilling one per
     # three hours) keeps a member from churning the roster and pinging the
@@ -3141,6 +3164,7 @@ async def apply_signup_edit(
             discord_user_id,
             tokens,
         )
+        await notify_roster_update(bot, occurrence, checked)
         raise ValueError(signup_edit_limit_message(tokens))
     keeps_seat = current.waitlisted is False
     if keeps_seat:
@@ -3163,9 +3187,16 @@ async def apply_signup_edit(
                 role.value,
                 len(flex_roles),
             )
+            # The check ahead of this edit has already taken its departures
+            # off the roster and moved whoever that promoted, and this exit
+            # changes nothing further. The member may well cancel the
+            # confirmation they are about to see, and a confirmed one re-runs
+            # the check over a roster that is settled by then, so there is no
+            # later announcement to fold this into: it is announced here.
+            await notify_roster_update(bot, occurrence, checked)
             return SignupEditResult(
                 signup=None,
-                update=RosterUpdate(),
+                update=checked,
                 needs_waitlist_confirmation=True,
             )
     bot.event_store.set_signup_edit_tokens(
@@ -3192,6 +3223,13 @@ async def apply_signup_edit(
         discord_user_id,
     )
     if updated is None:
+        # The resettle above committed too, so both halves are announced
+        # rather than lost with the row.
+        await notify_roster_update(
+            bot,
+            occurrence,
+            merge_roster_updates([checked, update]),
+        )
         raise ValueError("You are not signed up for this event.")
     # A stored auto sign-up snapshots the roles it will use for future
     # occurrences, so an enabled one must follow the edit or next week's

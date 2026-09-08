@@ -3542,6 +3542,148 @@ class TestCheckRosterMembership:
         # send them to the waitlist over a squad shape that no longer exists.
         assert not signup.waitlisted
 
+    async def test_a_snapshot_read_that_fails_keeps_the_removals_made(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        # 11 and 13 have both left; the store starts refusing reads between
+        # the two removals.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15, 16)}
+        )
+        real_get_signups = store.get_signups
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # Disabling the automatic sign-up is the last thing the prune
+            # does with a member it removed, so this arms the failure exactly
+            # between the first removal and the read that opens the second.
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signups(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_signups = refuse_once_armed  # type: ignore[method-assign]
+
+        departed, update = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # 11 is off the roster and 16 holds the seat that freed, both
+        # committed before the read for 13 failed. Letting that failure carry
+        # the whole check away would lose the promotion's announcement and
+        # report a roster that no longer exists.
+        assert departed == [11]
+        assert [signup.discord_user_id for signup in update.promoted] == [16]
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+
+    async def test_a_waitlist_confirmation_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # 14 has left, so the check hands their seat to the member waiting
+        # for one - while the edit behind it only gets as far as offering its
+        # author the waitlist.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+        channel.thread.send.reset_mock()
+
+        offered = await apply_signup_edit(
+            bot, event, occurrence, 13, EventRole.QUICKNESS_HEAL, ()
+        )
+
+        assert offered.needs_waitlist_confirmation
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        # That promotion is committed whatever the member answers, and a
+        # confirmed edit re-checks a roster that is settled by then, so this
+        # is the only chance to say it happened.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
+    async def test_an_edit_refused_by_the_limit_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        store.set_signup_edit_tokens(
+            occurrence.occurrence_id,
+            13,
+            0.0,
+            datetime.now(UTC),
+        )
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(ValueError):
+            await apply_signup_edit(
+                bot, event, occurrence, 13, EventRole.ALACRITY_DPS, ()
+            )
+
+        # The edit is refused, but the check ahead of it already moved the
+        # roster: an editor out of tokens must not cost the thread that.
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
+    async def test_a_seating_refused_without_a_role_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(ValueError):
+            await seat_signup(bot, event, occurrence, 17, None, ())
+
+        # A call that raises hands its caller no update to fold, so the
+        # movement the check made is announced here or nowhere.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
     async def test_a_recovered_removal_finishes_its_own_cleanup(
         self,
         bot: Any,
