@@ -2029,7 +2029,7 @@ async def seat_signup(
     # would send this member to the waitlist over a place that is not really
     # taken, so the departed go first and the seating below is solved without
     # them.
-    occurrence, signups = await _checked_roster(
+    occurrence, signups, checked = await _checked_roster(
         bot,
         event,
         occurrence,
@@ -2090,6 +2090,10 @@ async def seat_signup(
         flex_roles=flex_roles,
         waitlisted=waitlisted,
     )
+    # The check moved the roster before this seating did, and a member it
+    # promoted can be one the seating then flexes. Folded, they read as one
+    # move apiece.
+    update = merge_roster_updates([checked, update])
     await update_thread_membership(
         bot,
         occurrence,
@@ -2309,6 +2313,24 @@ async def prune_departed_signups(
                 still_on = True
             if not still_on:
                 removed.append(user_id)
+                # The deletion landed; what follows it did not. Try that
+                # again rather than leave the seat it freed unclaimed with a
+                # waitlist behind it, and the member's automatic sign-up on
+                # to seed them onto the next run. The store may still refuse,
+                # which is logged and left: the resettle re-solves from what
+                # is there, so the next roster change picks it up, and a
+                # member seeded again is one the next post's check removes.
+                try:
+                    updates.append(_resettle_roster(bot, event, current))
+                    disable_auto_signup(bot, event, current, user_id)
+                except SQLAlchemyError as cleanup_error:
+                    LOGGER.error(
+                        "Could not finish a departed member's removal; "
+                        "occurrence_id=%s user_id=%s error_type=%s",
+                        occurrence.occurrence_id,
+                        user_id,
+                        type(cleanup_error).__name__,
+                    )
             break
         if signup is None:
             continue
@@ -2565,7 +2587,7 @@ async def _checked_roster(
     ended_message: str,
     *,
     force: bool = False,
-) -> tuple[EventOccurrence, list[EventSignup]]:
+) -> tuple[EventOccurrence, list[EventSignup], RosterUpdate]:
     """Check the roster against the server, then read back what stands.
 
     The check awaits Discord, so nothing read before it holds afterwards.
@@ -2580,14 +2602,27 @@ async def _checked_roster(
     the occurrence itself - the removal it makes refreshes a message that may
     be gone - so the stored status is what is read back, not a status derived
     from the schedule.
+
+    Whatever the check moved comes back rather than being announced here: the
+    caller is about to move the same roster, and on a role-limited one it can
+    move the very member the check just promoted. One announcement, folded,
+    says one thing about each of them.
     """
-    await check_roster_membership(bot, event, occurrence, now=now, force=force)
+    _, checked = await check_roster_membership(
+        bot,
+        event,
+        occurrence,
+        now=now,
+        force=force,
+        notify=False,
+    )
     current = bot.event_store.get_occurrence(occurrence.occurrence_id)
     if current is None:
         raise ValueError(ended_message)
     if occurrence_finished(event, current, now):
         raise ValueError(ended_message)
-    return current, bot.event_store.get_signups(current.occurrence_id)
+    signups = bot.event_store.get_signups(current.occurrence_id)
+    return current, signups, checked
 
 
 def rebalance_occurrence_roster(
@@ -2996,7 +3031,7 @@ async def apply_signup_edit(
     # The new selection is judged against the members who are actually still
     # here, so an edit is not sent to the waitlist by a seat its holder left
     # the server on.
-    occurrence, signups = await _checked_roster(
+    occurrence, signups, checked = await _checked_roster(
         bot,
         event,
         occurrence,
@@ -3115,6 +3150,9 @@ async def apply_signup_edit(
         len(update.reassigned),
         len(update.promoted),
     )
+    # The check moved the roster before this edit did, and a member it
+    # promoted can be one the edit then flexes, so the two are folded first.
+    update = merge_roster_updates([checked, update])
     # The editor sees their own outcome in the ephemeral summary; the thread
     # only hears about the members their edit moved.
     await notify_roster_update(

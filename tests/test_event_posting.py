@@ -3446,6 +3446,58 @@ class TestCheckRosterMembership:
         assert [signup.discord_user_id for signup in update.promoted] == [16]
         assert store.get_signup(occurrence.occurrence_id, 13) is not None
 
+    async def test_a_recovered_removal_finishes_its_own_cleanup(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15, 16)}
+        )
+        real_apply = store.apply_roster_assignments
+        refusals = 0
+
+        def refuse_once(occurrence_id: int, assignments: Any) -> None:
+            # The resettle behind the removal fails, then works: a store that
+            # was refusing writes for a moment rather than for good.
+            nonlocal refusals
+            refusals += 1
+            if refusals == 1:
+                raise SQLAlchemyError("boom")
+            return real_apply(occurrence_id, assignments)
+
+        store.apply_roster_assignments = (  # type: ignore[method-assign]
+            refuse_once
+        )
+
+        departed, update = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        assert departed == [11]
+        # The seat 11 freed goes to the waitlist rather than sitting open for
+        # the next sign-up to take ahead of it...
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert [signup.discord_user_id for signup in update.promoted] == [16]
+        # ...and their automatic sign-up is off, so the next occurrence does
+        # not seed them again.
+        entries = store.get_auto_signup_entries(event.event_id)
+        assert [entry.discord_user_id for entry in entries] == []
+
     async def test_a_removal_that_fails_after_committing_is_reported(
         self,
         bot: Any,
@@ -3474,6 +3526,47 @@ class TestCheckRosterMembership:
         # names the seat they held.
         assert store.get_signup(occurrence.occurrence_id, 11) is None
         assert departed == [11]
+
+    async def test_a_signup_announces_the_check_and_its_seating_once(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A raid seats two quickness. The check promotes the waitlisted
+        # quickness DPS into the seat a departure frees, and the sign-up
+        # behind it takes the second quickness seat and flexes them again.
+        event, occurrence = await post_new_event(
+            bot, store, EventCategory.RAID
+        )
+        await complete_signup(bot, event, occurrence, 11, EventRole.DPS, ())
+        await complete_signup(
+            bot, event, occurrence, 12, EventRole.QUICKNESS_HEAL, ()
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=13,
+            role=EventRole.QUICKNESS_DPS,
+            assigned_role=None,
+            flex_roles=(EventRole.DPS,),
+            waitlisted=True,
+        )
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14)}
+        )
+        channel.thread.send.reset_mock()
+
+        await complete_signup(
+            bot, event, occurrence, 14, EventRole.QUICKNESS_DPS, ()
+        )
+
+        promoted = store.get_signup(occurrence.occurrence_id, 13)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        # One interaction says one thing about each member: telling 13 they
+        # moved up as a quickness DPS and then moved again would be the same
+        # sign-up contradicting itself.
+        assert channel.thread.send.await_count == 1
 
     async def test_a_sign_out_is_not_announced_as_a_promotion_first(
         self,
