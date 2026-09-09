@@ -264,8 +264,28 @@ class EventCommands(app_commands.Group):
         # the pre-check draft would offer save controls for a roster that is
         # history, and the run it saved would no longer be the one the
         # commander opened.
-        current_event = self._bot.event_store.get_event(event_id)
-        current = self._bot.event_store.get_occurrence(primary.occurrence_id)
+        try:
+            current_event = self._bot.event_store.get_event(event_id)
+            current = self._bot.event_store.get_occurrence(
+                primary.occurrence_id
+            )
+        except SQLAlchemyError as exc:
+            # The interaction is already deferred, so letting this escape
+            # leaves the commander waiting on a follow-up that never comes.
+            # A store that cannot say what the run is now cannot draw a
+            # preview of it either; the check's own removals are committed
+            # and the next roster change picks them up.
+            LOGGER.error(
+                "Could not re-read the event after its roster check; "
+                "event_id=%s error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+            await interaction.followup.send(
+                "The event could not be opened for editing. Try again later.",
+                ephemeral=True,
+            )
+            return
         if (
             current_event is None
             or current_event.cancelled

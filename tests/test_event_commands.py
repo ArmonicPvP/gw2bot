@@ -3411,6 +3411,57 @@ class TestEditCommandOngoing:
         assert "can no longer be edited" in answer.args[0]
         assert "view" not in answer.kwargs
 
+    async def test_edit_answers_a_refused_reread_instead_of_hanging(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        for user_id in (7, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # 8 has left, and the store starts refusing reads once their removal
+        # is committed - which is exactly where the preview reads the event
+        # back.
+        guild = FakeGuild({7: "Still Here"})
+        real_get_event = store.get_event
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(event_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_event = refuse_once_armed  # type: ignore[method-assign]
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=guild,
+        )
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        # The interaction is deferred by then, so an escaping error would
+        # leave the commander waiting on a follow-up that never comes.
+        assert interaction.followup.send.await_args is not None
+        answer = interaction.followup.send.await_args
+        assert "could not be opened" in answer.args[0]
+
     async def test_edit_keeps_the_roster_when_lookups_fail(
         self,
         fake_bot: Any,

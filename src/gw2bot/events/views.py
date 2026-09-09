@@ -3404,6 +3404,17 @@ async def apply_event_edit(
                     current,
                     roster_update,
                 )
+                if reposted is None:
+                    # The move's own roster check retired this run - its
+                    # replacement message was gone by the time the check
+                    # refreshed it - so there is no live post in the new
+                    # channel to report as moved.
+                    LOGGER.error(
+                        "Moved occurrence retired during its roster check; "
+                        "occurrence_id=%s",
+                        current.occurrence_id,
+                    )
+                    continue
             else:
                 await refresh_occurrence_message(
                     bot,

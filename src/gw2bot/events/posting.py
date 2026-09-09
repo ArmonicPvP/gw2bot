@@ -1159,7 +1159,7 @@ async def repost_occurrence(
     event: Event,
     occurrence: EventOccurrence,
     deferred_update: RosterUpdate = RosterUpdate(),
-) -> EventOccurrence:
+) -> EventOccurrence | None:
     # Discord cannot move a message between channels, so a channel change is
     # applied by sending a fresh post and removing the old one. The occurrence
     # row (and therefore the roster) is preserved because signups are keyed by
@@ -1246,6 +1246,26 @@ async def repost_occurrence(
         force=True,
         notify=False,
     )
+    # The same thing that can happen to a fresh post can happen here: the
+    # check removes through remove_signup, whose refresh addresses the
+    # replacement message, and one deleted while the lookups were in flight
+    # answers NotFound - retiring this run and seeding its successor. There is
+    # no live post to subscribe a roster to then, and no thread worth
+    # mentioning anybody in, so the move reports nothing moved and the caller
+    # says so rather than counting it as refreshed.
+    settled = bot.event_store.get_occurrence(reposted.occurrence_id)
+    if settled is None or (
+        settled.status is EventStatus.OVER
+        and reposted.status is not EventStatus.OVER
+    ):
+        LOGGER.error(
+            "Moved occurrence retired by its own roster check; "
+            "occurrence_id=%s exists=%s",
+            reposted.occurrence_id,
+            settled is not None,
+        )
+        return None
+    reposted = settled
     signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(
@@ -1455,8 +1475,10 @@ async def post_pending_occurrence(
     """Post an occurrence that has no message yet, at most once.
 
     Returns the posted occurrence, or None when it turned out to be posted
-    already (or gone). Members on its roster are subscribed to the post, which
-    is how a successor's auto-signups reach the thread they were seeded into.
+    already, to be gone, or to have been retired by its own roster check
+    before that roster could be set up. Members on its roster are subscribed
+    to the post, which is how a successor's auto-signups reach the thread they
+    were seeded into.
     """
     async with _posting_lock(occurrence.occurrence_id):
         current = bot.event_store.get_occurrence(occurrence.occurrence_id)
@@ -1531,15 +1553,28 @@ async def post_pending_occurrence(
         # the thread of a run that has just been replaced, and mentioning
         # them in it, is worse than saying nothing, so the row is read back
         # and the setup stops there.
+        #
+        # Reported as nothing posted, rather than as this row: the successor
+        # the refresh seeded is what the series is on now, and a caller told
+        # otherwise sends the commander to a run that has been superseded.
+        # Callers resolve what actually stands from None.
+        #
+        # A run that was over before this check - posting blocked past its
+        # end - is a different thing and is still returned, because the
+        # scheduler seeds the series' next run off exactly that.
         settled = bot.event_store.get_occurrence(posted.occurrence_id)
-        if settled is None or occurrence_finished(event, settled, now):
+        if settled is None or (
+            settled.status is EventStatus.OVER
+            and posted.status is not EventStatus.OVER
+        ):
             LOGGER.debug(
                 "Posted occurrence retired by its own roster check; "
                 "occurrence_id=%s exists=%s",
                 posted.occurrence_id,
                 settled is not None,
             )
-            return settled
+            return None
+        posted = settled
     try:
         signups = bot.event_store.get_signups(posted.occurrence_id)
     except SQLAlchemyError as exc:

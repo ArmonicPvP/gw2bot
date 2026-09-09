@@ -1048,6 +1048,7 @@ class TestPostingIntoAnExistingForumPost:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         assert len(post.sent) == 1
         assert reposted.channel_id == post.id
@@ -1081,6 +1082,7 @@ class TestPostingIntoAnExistingForumPost:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         assert len(channel.sent) == 1
         assert reposted.channel_id == channel.id
@@ -1350,6 +1352,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         ping_channel.partial_message.delete.assert_awaited_once()
         # The event now lives in a channel, which pings its own roles, so the
@@ -1389,6 +1392,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         # One announcement removed, one sent, and the row points at the one
         # that is actually standing.
@@ -1511,6 +1515,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         # Read from the row, which is what the retry reads.
         stored = store.get_occurrence(reposted.occurrence_id)
@@ -1562,6 +1567,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         assert current is not None
 
         reposted = await repost_occurrence(bot, moved, current)
+        assert reposted is not None
 
         stored = store.get_occurrence(reposted.occurrence_id)
         assert stored is not None
@@ -3388,6 +3394,66 @@ class TestCheckRosterMembership:
         # subscribe a roster or mention anybody.
         assert channel.thread.add_user.await_count == 0
         assert channel.thread.send.await_count == 0
+
+    async def test_a_repost_stops_when_its_own_check_retires_the_run(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        # The move lands, and its replacement message is deleted while the
+        # lookups are in flight: taking 11 off refreshes a message that is
+        # gone, and the NotFound retires this run and seeds tomorrow's.
+        new_channel.partial_message.edit = AsyncMock(
+            side_effect=not_found_error()
+        )
+
+        reposted = await repost_occurrence(bot, moved, posted)
+
+        settled = store.get_occurrence(posted.occurrence_id)
+        assert settled is not None
+        assert settled.status is EventStatus.OVER
+        # There is no live post in the new channel, so the caller is told the
+        # move moved nothing rather than counting it as refreshed - and the
+        # replaced run's thread is not somewhere to subscribe or mention.
+        assert reposted is None
+        assert new_channel.thread.add_user.await_count == 0
+        assert new_channel.thread.send.await_count == 0
 
     async def test_a_repost_subscribes_the_roster_before_it_pings_them(
         self,
@@ -6026,6 +6092,7 @@ class TestRepostOccurrence:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         # Old message and its thread deleted, fresh one sent in the new
         # channel, and every existing signup re-added to the new thread.
@@ -6068,6 +6135,7 @@ class TestRepostOccurrence:
         )
 
         reposted = await repost_occurrence(bot, moved, posted)
+        assert reposted is not None
 
         # A failed delete of the old post must not stop the move from posting
         # into the new channel, nor stop the old thread from being cleaned up.
@@ -7245,6 +7313,39 @@ class TestCancelOccurrence:
         # the removal it makes refreshes an occurrence with no message - and
         # the series would be left with nothing posted and nothing coming.
         assert stored.needs_refresh
+
+    async def test_a_successor_retired_by_its_check_is_not_reported_posted(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, posted = await self.make_series(bot, store)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        # The successor is seeded with that member, who has since left - and
+        # its own post is deleted while the check is asking, so taking them
+        # off refreshes a message that is gone. The NotFound retires the
+        # successor and seeds one behind it.
+        bot.guild = FakeGuild({})
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+
+        cancellation = await cancel_occurrence(
+            bot, event, posted, BEFORE_START
+        )
+
+        retired = cancellation.successor
+        assert retired is not None
+        # The run the series is on is the one the retirement seeded, not the
+        # row that was posted and replaced seconds later. Reporting that one
+        # sends the commander to an occurrence that is already history.
+        assert retired.status is not EventStatus.OVER
+        assert retired.occurrence_id != posted.occurrence_id
 
     async def test_a_store_failure_leaves_the_occurrence_in_place(
         self,
