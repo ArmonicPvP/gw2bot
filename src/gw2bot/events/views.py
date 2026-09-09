@@ -2059,16 +2059,48 @@ class RemoveSignupsView(discord.ui.View):
         # Read the row back and stop, rather than reporting every pick as "not
         # signed up" - which is what each removal would answer - and rebuilding
         # the edit preview over a roster that is history.
-        current = self._bot.event_store.get_occurrence(
-            occurrence.occurrence_id
-        )
-        if current is None or occurrence_finished(event, current):
+        #
+        # The event comes back with it. Another leader can save a shorter
+        # duration or a different category while the lookups are in flight,
+        # and the batch judges the run's end by that duration, hands the event
+        # to every removal, and tells each member about it.
+        try:
+            current = self._bot.event_store.get_occurrence(
+                occurrence.occurrence_id
+            )
+            edited = self._bot.event_store.get_event(event.event_id)
+        except SQLAlchemyError as exc:
+            # The message already says the removals are under way, so this
+            # answers rather than escaping. The check's own removals are
+            # committed and nothing below is going to announce them.
+            LOGGER.error(
+                "Could not re-read the run after a removal batch's check; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            await notify_roster_update(self._bot, occurrence, checked)
+            await interaction.edit_original_response(
+                content=(
+                    "The roster could not be read just now, so nobody was "
+                    "removed. Try again in a moment."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
+        if (
+            current is None
+            or edited is None
+            or occurrence_finished(edited, current)
+        ):
             LOGGER.debug(
                 "Roster removal found the occurrence retired; "
-                "occurrence_id=%s user_id=%s exists=%s",
+                "occurrence_id=%s user_id=%s exists=%s event_exists=%s",
                 occurrence.occurrence_id,
                 interaction.user.id,
                 current is not None,
+                edited is not None,
             )
             await interaction.edit_original_response(
                 content=(
@@ -2080,6 +2112,7 @@ class RemoveSignupsView(discord.ui.View):
             )
             return
         occurrence = current
+        event = edited
         removed: list[int] = []
         skipped: list[int] = []
         # Picks the check took off because they had left the server. They are
@@ -2177,11 +2210,30 @@ class RemoveSignupsView(discord.ui.View):
             undelivered,
             gone,
         )
-        if kept_after_end:
-            # The event ended partway through, so the edit session is no longer
-            # valid (an ended event cannot be edited). Report what was applied
-            # and stop, rather than re-showing an edit preview that can no
-            # longer be saved.
+        # The guard above runs before each removal, so the last one is not
+        # covered by it: a removal that refreshes a message somebody deleted
+        # retires the run, and with nothing left to iterate there is no next
+        # pass to notice. Read the row once more before offering a preview. A
+        # store that cannot answer is treated the same way, because a preview
+        # drawn from what it could not read is worse than none.
+        try:
+            settled = self._bot.event_store.get_occurrence(
+                occurrence.occurrence_id
+            )
+            retired = settled is None or occurrence_finished(event, settled)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after a removal batch; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            retired = True
+        if kept_after_end or retired:
+            # The event ended partway through, or one of these removals ended
+            # it, so the edit session is no longer valid (an ended event
+            # cannot be edited). Report what was applied and stop, rather than
+            # re-showing an edit preview that can no longer be saved.
             await interaction.edit_original_response(
                 content=summary,
                 embeds=[],

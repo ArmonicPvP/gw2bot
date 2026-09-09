@@ -3968,6 +3968,159 @@ class TestCheckRosterMembership:
         )
         assert promoted == [16, 17]
 
+    async def test_a_check_announces_in_the_thread_a_move_just_opened(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15, 16)}
+        )
+        real_fetch = guild.fetch_member
+        moved = False
+
+        async def move_the_occurrence(user_id: int) -> Any:
+            # A channel move lands while the lookups are in flight: the old
+            # thread is gone and the row names the one it opened.
+            nonlocal moved
+            if not moved:
+                moved = True
+                store.set_occurrence_message(
+                    occurrence.occurrence_id,
+                    new_channel.id,
+                    556,
+                    new_channel.thread.id,
+                )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = move_the_occurrence  # type: ignore[method-assign]
+        bot.guild = guild
+
+        departed, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        # 11 has left, so 16 takes the healer seat - and hears about it where
+        # the roster now is, not in a thread the move has deleted.
+        assert departed == [11]
+        assert new_channel.thread.send.await_count == 1
+        assert new_channel.thread.send.await_args is not None
+        assert "<@16>" in new_channel.thread.send.await_args.args[0]
+        assert old_channel.thread.send.await_count == 0
+
+    async def test_a_signup_answers_when_the_roster_reread_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15, 16)}
+        )
+        real_get_event = store.get_event
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(event_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_event = refuse_once_armed  # type: ignore[method-assign]
+        channel.thread.send.reset_mock()
+
+        # The signup views answer a ValueError and nothing else, so a store
+        # error escaping here leaves the member on "Signing you up...".
+        with pytest.raises(ValueError, match="could not be read"):
+            await complete_signup(
+                bot, event, occurrence, 17, EventRole.DPS, ()
+            )
+
+        # 11 had left, and 16 has their seat: committed, and this is the last
+        # chance to say so.
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
+    async def test_a_post_announces_when_the_roster_read_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+        real_get_signups = store.get_signups
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signups(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_signups = refuse_once_armed  # type: ignore[method-assign]
+
+        await post_pending_occurrence(bot, event, pending, BEFORE_START)
+
+        # The read that failed is the one the subscriptions and the mention
+        # were waiting on, so nobody is added to the thread - but 12 holds the
+        # seat 11 left behind, and the line belongs in the thread whether or
+        # not anyone is in it yet to see it arrive.
+        promoted = store.get_signup(pending.occurrence_id, 12)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert channel.thread.add_user.await_count == 0
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+
     async def test_a_recovered_removal_finishes_its_own_cleanup(
         self,
         bot: Any,

@@ -6385,6 +6385,141 @@ class TestRemoveSignups:
         assert "already ended" in kwargs["content"]
         assert kwargs["view"] is None
 
+    async def test_removal_judges_the_end_by_a_duration_saved_mid_check(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A run that is under way, so a shorter duration can put its end
+        # behind us while the lookups are in flight.
+        event, occurrence = make_ongoing_edit_event(store)
+        for user_id, role, waitlisted in (
+            (1, EventRole.QUICKNESS_HEAL, False),
+            (2, EventRole.DPS, False),
+            (3, EventRole.DPS, False),
+            (4, EventRole.DPS, False),
+            (5, EventRole.DPS, False),
+            (6, EventRole.DPS, True),
+        ):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=None if waitlisted else role,
+                flex_roles=(),
+                waitlisted=waitlisted,
+            )
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        real_fetch = guild.fetch_member
+
+        async def shorten_the_event(user_id: int) -> Any:
+            # Another leader saves a one-minute duration while the batch's
+            # lookups are in flight, which puts this run behind us.
+            store.update_event(
+                event_id=event.event_id,
+                category=event.category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=1,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = shorten_the_event  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Judged by the duration the event carries now, the run is over, so
+        # nobody comes off a roster that is history.
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+
+    async def test_removal_offers_no_preview_when_the_last_one_retires_it(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        # The post was deleted by hand, so the one removal in this batch
+        # refreshes a message that is gone and retires the run - with no
+        # iteration behind it to notice.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # The removal itself stands; what must not follow it is an edit
+        # preview over a run that has been replaced.
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert kwargs["embeds"] == []
+
+    async def test_removal_answers_when_the_run_reread_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # 5 has left, so the check frees the DPS seat 6 is waiting for.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 6)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+        channel.thread.send.reset_mock()
+
+        await view.remove(interaction, picked_users(2))
+
+        # The message already said the removals were under way, so an error
+        # escaping here would leave the commander on it - and lose the
+        # promotion the check committed.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@6>" in channel.thread.send.await_args.args[0]
+
     async def test_picker_is_built_from_what_a_partial_prune_left(
         self,
         fake_bot: Any,

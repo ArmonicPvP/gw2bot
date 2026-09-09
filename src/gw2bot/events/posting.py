@@ -1590,6 +1590,11 @@ async def post_pending_occurrence(
             posted.occurrence_id,
             type(exc).__name__,
         )
+        # Whatever the check moved is committed, and the subscription loop
+        # below is what would have carried it. Say it in the thread rather
+        # than nowhere: it is in the post's embed either way, and a member who
+        # opens the thread finds the line waiting.
+        await notify_roster_update(bot, posted, checked)
         return posted
     for signup in signups:
         await update_thread_membership(
@@ -2691,6 +2696,13 @@ async def check_roster_membership(
                 edited is not None,
             )
             return [], RosterUpdate()
+        # The occurrence comes back for the same reason the event does. A
+        # channel move landing while the lookups were in flight has deleted
+        # the thread this would otherwise announce in, and the row now names
+        # the one the move opened.
+        moved = bot.event_store.get_occurrence(occurrence_id)
+        if moved is not None:
+            occurrence = moved
         departed, update = await prune_departed_signups(
             bot,
             edited,
@@ -2794,13 +2806,35 @@ async def _checked_roster(
         force=force,
         notify=False,
     )
-    edited = bot.event_store.get_event(event.event_id)
-    current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+    try:
+        edited = bot.event_store.get_event(event.event_id)
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        signups = (
+            bot.event_store.get_signups(current.occurrence_id)
+            if current is not None
+            else []
+        )
+    except SQLAlchemyError as exc:
+        # The callers here are a member's sign-up or signup edit, whose views
+        # answer a ValueError and nothing else: letting this escape leaves
+        # them on "Signing you up..." for good. The check's own removals are
+        # committed, and this is the last chance to say what they moved.
+        LOGGER.error(
+            "Could not read the roster back after checking it; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        await notify_roster_update(bot, occurrence, checked)
+        raise ValueError(
+            "The roster could not be read just now. Try again in a moment."
+        ) from exc
     if edited is None or edited.cancelled or current is None:
+        await notify_roster_update(bot, occurrence, checked)
         raise ValueError(ended_message)
     if occurrence_finished(edited, current, now):
+        await notify_roster_update(bot, occurrence, checked)
         raise ValueError(ended_message)
-    signups = bot.event_store.get_signups(current.occurrence_id)
     return edited, current, signups, checked
 
 
