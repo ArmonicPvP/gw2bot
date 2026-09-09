@@ -2686,15 +2686,16 @@ def _addition_dm_content(
 class _AdditionStop(StrEnum):
     """Why a batch addition stopped before it reached every picked member.
 
-    The three read very differently to the commander: an event that finished
-    is nobody's fault, a retired occurrence means its post was deleted and is
-    worth chasing, and a concurrent edit means the batch can simply be run
-    again.
+    They read very differently to the commander: an event that finished is
+    nobody's fault, a retired occurrence means its post was deleted and is
+    worth chasing, a concurrent edit means the batch can simply be run again,
+    and a roster the store would not read is worth trying again in a moment.
     """
 
     ENDED = "ended"
     RETIRED = "retired"
     CHANGED = "changed"
+    UNREADABLE = "unreadable"
 
 
 @dataclass
@@ -2896,7 +2897,24 @@ async def apply_roster_addition(
         # with. The member being seated when a change lands is already past
         # this check and keeps whatever seat the old state gave them; stopping
         # here bounds that to one member instead of the whole batch.
-        target = _addition_target(bot, event, current)
+        #
+        # A store that refuses those reads has to answer rather than escape:
+        # the response already says the members are being added, and the
+        # check's own departures are committed with nothing to announce them
+        # if this call never reaches the end of the batch, which is where the
+        # one merged announcement goes out.
+        try:
+            target = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back during a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.stop = _AdditionStop.UNREADABLE
+            outcome.left_off = list(user_ids[index:])
+            break
         if isinstance(target, _AdditionStop):
             outcome.stop = target
             outcome.left_off = list(user_ids[index:])
@@ -3091,6 +3109,11 @@ def _addition_finished_note(stop: _AdditionStop) -> str:
             "This event's post is no longer available; its message may have "
             "been deleted."
         )
+    if stop is _AdditionStop.UNREADABLE:
+        return (
+            "The roster could not be read while the members were being "
+            "added, so it may have moved on since."
+        )
     return "The event ended while the members were being added."
 
 
@@ -3114,6 +3137,11 @@ def _addition_stop_note(
         return (
             f"This event's post is no longer available, so {who} {were} left "
             "off. Its message may have been deleted."
+        )
+    if stop is _AdditionStop.UNREADABLE:
+        return (
+            f"The roster could not be read just now, so {who} {were} left "
+            "off. Try `/event edit` again in a moment."
         )
     return (
         f"The event ended before the rest could be added, so {who} {were} "
@@ -5197,14 +5225,20 @@ class SignOutConfirmView(discord.ui.View):
             # back and count its stored status, because that check can retire
             # the occurrence outright - refreshing a message somebody deleted
             # answers NotFound - well before its scheduled end.
+            # The event comes back with it, because a duration saved while
+            # the lookups were in flight is what made the removal refuse:
+            # judging by the one this view opened with would tell the member
+            # they were never signed up while their signup is still there.
             current = self._bot.event_store.get_occurrence(
                 self._occurrence.occurrence_id
             )
+            edited = self._bot.event_store.get_event(self._event.event_id)
             content = (
                 "This event has already ended, so its roster can no longer "
                 "be changed."
                 if current is None
-                or occurrence_finished(self._event, current)
+                or edited is None
+                or occurrence_finished(edited, current)
                 else "You were not signed up for the event."
             )
         else:

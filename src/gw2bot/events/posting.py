@@ -1582,7 +1582,22 @@ async def post_pending_occurrence(
         # A run that was over before this check - posting blocked past its
         # end - is a different thing and is still returned, because the
         # scheduler seeds the series' next run off exactly that.
-        settled = bot.event_store.get_occurrence(posted.occurrence_id)
+        #
+        # The post itself is done by the time this runs - the message is live
+        # and its id is stored - so a store that cannot answer must not turn
+        # it into a failure. The scheduler would take the exception for a
+        # failed post and skip the cleanup behind it, which for an occurrence
+        # that was already over means never seeding the series' next run.
+        try:
+            settled = bot.event_store.get_occurrence(posted.occurrence_id)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after posting it; "
+                "occurrence_id=%s error_type=%s",
+                posted.occurrence_id,
+                type(exc).__name__,
+            )
+            return posted
         if settled is None or (
             settled.status is EventStatus.OVER
             and posted.status is not EventStatus.OVER
@@ -2482,13 +2497,28 @@ async def prune_departed_signups(
                 # which is logged and left: the resettle re-solves from what
                 # is there, so the next roster change picks it up, and a
                 # member seeded again is one the next post's check removes.
+                #
+                # One boundary each: they are independent repairs, and the
+                # automatic sign-up is the one that matters next week. Sharing
+                # a try meant a refused resettle took the disable with it, and
+                # seeded the member who had left onto the next run - the very
+                # thing this recovery was added to stop.
                 try:
                     _resettle_roster(bot, event, current)
+                except SQLAlchemyError as cleanup_error:
+                    LOGGER.error(
+                        "Could not re-seat the roster a departure freed; "
+                        "occurrence_id=%s user_id=%s error_type=%s",
+                        occurrence.occurrence_id,
+                        user_id,
+                        type(cleanup_error).__name__,
+                    )
+                try:
                     disable_auto_signup(bot, event, current, user_id)
                 except SQLAlchemyError as cleanup_error:
                     LOGGER.error(
-                        "Could not finish a departed member's removal; "
-                        "occurrence_id=%s user_id=%s error_type=%s",
+                        "Could not switch off a departed member's automatic "
+                        "sign-up; occurrence_id=%s user_id=%s error_type=%s",
                         occurrence.occurrence_id,
                         user_id,
                         type(cleanup_error).__name__,

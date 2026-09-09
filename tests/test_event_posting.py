@@ -4178,6 +4178,94 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@12>" in channel.thread.send.await_args.args[0]
 
+    async def test_a_recovered_removal_disables_auto_signup_regardless(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15, 16)}
+        )
+        # The deletion commits, and every re-seat after it is refused: the
+        # first one inside remove_signup, and the recovery's retry.
+        store.apply_roster_assignments = (  # type: ignore[method-assign]
+            MagicMock(side_effect=SQLAlchemyError("boom"))
+        )
+
+        departed, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        assert departed == [11]
+        # The re-seat is beyond saving on this path, but switching the
+        # automatic sign-up off is not, and it is the half that would
+        # otherwise seed the member who left onto next week's run.
+        auto = store.get_auto_signup(event.event_id, 11)
+        assert auto is not None
+        assert auto.choice is AutoSignupChoice.NO
+
+    async def test_a_post_stands_when_the_run_reread_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({11: "User 11"})
+        real_fetch = guild.fetch_member
+        real_get_occurrence = store.get_occurrence
+        refusing = False
+
+        async def arm_the_refusal(user_id: int) -> Any:
+            # By the time the membership lookups run, the post is sent and
+            # its id is stored; the reads that confirm it are what fail.
+            nonlocal refusing
+            refusing = True
+            return await real_fetch(user_id)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        guild.fetch_member = arm_the_refusal  # type: ignore[method-assign]
+        bot.guild = guild
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+
+        posted = await post_pending_occurrence(
+            bot, event, pending, BEFORE_START
+        )
+
+        # Reporting this as a failed post would have the scheduler skip the
+        # cleanup behind it - and for a run that is already over, never seed
+        # the series' next one.
+        assert posted is not None
+        assert len(channel.sent) == 1
+
     async def test_a_recovered_removal_finishes_its_own_cleanup(
         self,
         bot: Any,

@@ -1821,6 +1821,69 @@ class TestSignOutFlow:
         assert "already ended" in content
         assert "not signed up" not in content
 
+    async def test_sign_out_reports_a_duration_saved_during_the_check(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A run that is under way, so a shorter duration can put its end
+        # behind us while the membership lookups are in flight.
+        started = datetime.now(UTC) - timedelta(minutes=10)
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=7,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, started)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({42: "User 42"})
+        real_fetch = guild.fetch_member
+
+        async def shorten_the_event(user_id: int) -> Any:
+            store.update_event(
+                event_id=event.event_id,
+                category=event.category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=1,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = shorten_the_event  # type: ignore[method-assign]
+        fake_bot.guild = guild
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        # The removal refused because the run is over by the duration the
+        # event carries now. Judged by the one this view opened with, the
+        # member would be told they were never signed up - with their signup
+        # still sitting on the roster.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "already ended" in content
+        assert "not signed up" not in content
+
     async def test_sign_out_does_not_prompt_without_auto_signup(
         self,
         fake_bot: Any,
@@ -7655,6 +7718,57 @@ class TestAddSignups:
         added = store.get_signup(occurrence.occurrence_id, 11)
         assert added is not None
         assert not added.waitlisted
+
+    async def test_an_addition_answers_when_the_run_reread_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        # 5 has left, so the batch's own check takes them off - and the store
+        # starts refusing reads the moment that removal is committed.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 11)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The response already said the members were being added, so an error
+        # escaping here would leave the commander on it.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@11>" in kwargs["content"]
 
     async def test_an_addition_announces_the_batch_once(
         self,
