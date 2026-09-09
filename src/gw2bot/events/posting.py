@@ -1253,7 +1253,28 @@ async def repost_occurrence(
     # no live post to subscribe a roster to then, and no thread worth
     # mentioning anybody in, so the move reports nothing moved and the caller
     # says so rather than counting it as refreshed.
-    settled = bot.event_store.get_occurrence(reposted.occurrence_id)
+    #
+    # The move itself is done by now - the new post is live, its id is stored
+    # and the old message is deleted - so a store that cannot answer these
+    # reads must not turn it into a failure. The caller would restore the old
+    # channel and tell the commander the event stayed there, while its only
+    # post sits in the new one. What is lost is the subscriptions and the
+    # announcement, which the next roster change makes good.
+    try:
+        settled = bot.event_store.get_occurrence(reposted.occurrence_id)
+        signups = (
+            bot.event_store.get_signups(reposted.occurrence_id)
+            if settled is not None
+            else []
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster back after moving it; "
+            "occurrence_id=%s error_type=%s",
+            reposted.occurrence_id,
+            type(exc).__name__,
+        )
+        return reposted
     if settled is None or (
         settled.status is EventStatus.OVER
         and reposted.status is not EventStatus.OVER
@@ -1266,7 +1287,6 @@ async def repost_occurrence(
         )
         return None
     reposted = settled
-    signups = bot.event_store.get_signups(reposted.occurrence_id)
     for signup in signups:
         await update_thread_membership(
             bot,

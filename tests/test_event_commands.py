@@ -3462,6 +3462,52 @@ class TestEditCommandOngoing:
         answer = interaction.followup.send.await_args
         assert "could not be opened" in answer.args[0]
 
+    async def test_edit_judges_the_run_by_the_clock_after_the_lookups(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({7: "Still Here"})
+        real_fetch = guild.fetch_member
+
+        async def end_the_run(user_id: int) -> Any:
+            # The run reaches its end while the lookups are in flight: its end
+            # lands after the moment the command was typed and before the
+            # answer comes back.
+            store.set_occurrence_start_time(
+                occurrence.occurrence_id,
+                datetime.now(UTC)
+                - timedelta(minutes=event.duration_minutes),
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = end_the_run  # type: ignore[method-assign]
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=guild,
+        )
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        # Judged by the clock as it was when the command was typed, the run
+        # still looks live, and the commander gets save controls for an event
+        # that is over.
+        assert interaction.followup.send.await_args is not None
+        answer = interaction.followup.send.await_args
+        assert "can no longer be edited" in answer.args[0]
+
     async def test_edit_keeps_the_roster_when_lookups_fail(
         self,
         fake_bot: Any,
@@ -6519,6 +6565,51 @@ class TestRemoveSignups:
         assert channel.thread.send.await_count == 1
         assert channel.thread.send.await_args is not None
         assert "<@6>" in channel.thread.send.await_args.args[0]
+
+    async def test_picker_answers_when_the_roster_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        # 1 has left; reads start failing once their removal is committed.
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild(
+                {user_id: f"User {user_id}" for user_id in (2, 3, 4, 5, 6)}
+            ),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        # The response already said the roster was loading, so an error
+        # escaping here would leave the commander on it for good.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert kwargs["view"] is None
 
     async def test_picker_is_built_from_what_a_partial_prune_left(
         self,

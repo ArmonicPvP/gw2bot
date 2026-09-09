@@ -286,6 +286,11 @@ class EventCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
+        # The clock moved with the lookups: a run that was minutes from its
+        # end when this command started can be past it by the time they
+        # answer, and judging it by the time the command was typed would hand
+        # back save controls for a run that is over.
+        now = datetime.now(UTC)
         if (
             current_event is None
             or current_event.cancelled

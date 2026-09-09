@@ -3455,6 +3455,63 @@ class TestCheckRosterMembership:
         assert new_channel.thread.add_user.await_count == 0
         assert new_channel.thread.send.await_count == 0
 
+    async def test_a_move_stands_when_the_roster_read_behind_it_fails(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        bot.guild = FakeGuild({11: "User 11"})
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        real_get_occurrence = store.get_occurrence
+        calls = {"count": 0}
+
+        def refuse_the_verification(occurrence_id: int) -> Any:
+            # Everything up to and including the move is done; the read that
+            # confirms it is what fails.
+            calls["count"] += 1
+            if calls["count"] > 2:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_the_verification
+        )
+
+        reposted = await repost_occurrence(bot, moved, posted)
+
+        # The new post is live and the old message is gone, so reporting the
+        # move as failed would put the event's channel back and tell the
+        # commander it stayed put, with its only post in the new channel.
+        assert reposted is not None
+        assert len(new_channel.sent) == 1
+        old_channel.partial_message.delete.assert_awaited_once()
+
     async def test_a_repost_subscribes_the_roster_before_it_pings_them(
         self,
         store: EventStore,

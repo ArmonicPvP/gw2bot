@@ -1670,7 +1670,35 @@ async def open_roster_removal(
     # submission; there is no reason to offer it first.
     from gw2bot.events.posting import occurrence_finished
 
-    live_occurrence = bot.event_store.get_occurrence(occurrence.occurrence_id)
+    # Both reads are store calls, and the response already says the roster is
+    # loading: a refusal has to answer rather than escape and leave the
+    # commander on it. The departures the check made are committed either way,
+    # and the next look at this roster shows them.
+    try:
+        live_occurrence = bot.event_store.get_occurrence(
+            occurrence.occurrence_id
+        )
+        signups = (
+            bot.event_store.get_signups(occurrence.occurrence_id)
+            if live_occurrence is not None
+            else []
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster back after checking it; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "The roster could not be read just now. Try again in a "
+                "moment."
+            ),
+            embeds=[],
+            view=None,
+        )
+        return
     if live_occurrence is None or occurrence_finished(event, live_occurrence):
         LOGGER.debug(
             "Roster removal found the occurrence retired while checking it; "
@@ -1688,11 +1716,10 @@ async def open_roster_removal(
             view=None,
         )
         return
-    # Read the roster back whatever the check reported. A prune that fails
-    # partway still commits the removals it had made and cannot report them,
-    # so the list read before it can offer seats that are already vacant - or
-    # be non-empty for a roster the prune has emptied.
-    signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    # The roster was read back above whatever the check reported. A prune that
+    # fails partway still commits the removals it had made and cannot report
+    # them, so the list read before it can offer seats that are already vacant
+    # - or be non-empty for a roster the prune has emptied.
     if not signups:
         LOGGER.debug(
             "Roster removal emptied the roster by pruning departed members; "
