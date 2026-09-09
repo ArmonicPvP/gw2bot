@@ -3347,6 +3347,48 @@ class TestCheckRosterMembership:
         # sent before the subscription reaches no one.
         assert order == ["add", "send"]
 
+    async def test_a_post_stops_when_its_own_check_retires_the_run(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+        # Seeded from the previous run: 11 has left, and 12 is waiting for the
+        # seat they hold.
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        bot.guild = FakeGuild({12: "User 12"})
+        # The post goes out and its message is deleted while the lookups are
+        # in flight, so taking 11 off refreshes a message that is gone: the
+        # NotFound retires this run and seeds tomorrow's.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+
+        await post_pending_occurrence(bot, event, pending, BEFORE_START)
+
+        settled = store.get_occurrence(pending.occurrence_id)
+        assert settled is not None
+        assert settled.status is EventStatus.OVER
+        # This run has been replaced, so its thread is not somewhere to
+        # subscribe a roster or mention anybody.
+        assert channel.thread.add_user.await_count == 0
+        assert channel.thread.send.await_count == 0
+
     async def test_a_repost_subscribes_the_roster_before_it_pings_them(
         self,
         store: EventStore,

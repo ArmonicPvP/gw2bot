@@ -3321,7 +3321,21 @@ async def apply_event_edit(
             # behind it retires the run: re-seating a roster that is history,
             # and re-rendering a message that is gone, helps nobody. Every
             # occurrence here is still in the future, so only that can end one.
-            reread = bot.event_store.get_occurrence(current.occurrence_id)
+            try:
+                reread = bot.event_store.get_occurrence(
+                    current.occurrence_id
+                )
+            except SQLAlchemyError as exc:
+                # The event row is already saved, so this must not escape the
+                # callback and leave the commander on "Saving your changes".
+                # A store that cannot answer cannot re-seat either.
+                LOGGER.error(
+                    "Could not re-read the occurrence after its roster "
+                    "check; occurrence_id=%s error_type=%s",
+                    current.occurrence_id,
+                    type(exc).__name__,
+                )
+                reread = None
             if reread is None or occurrence_finished(updated, reread):
                 LOGGER.debug(
                     "Skipped a category rebalance for a run the check "
@@ -3357,13 +3371,14 @@ async def apply_event_edit(
                 # The check's own movements are committed whatever the
                 # re-seat did, so they are still what gets announced.
                 roster_update = checked
-            else:
-                if not moving:
-                    # For an in-place refresh the thread is stable, so announce
-                    # the reseat now. A channel move deletes this thread and
-                    # opens a new one, so its ping is deferred to after the
-                    # repost below and re-targeted at the new thread.
-                    await notify_roster_update(bot, current, roster_update)
+            if not moving:
+                # For an in-place refresh the thread is stable, so announce
+                # what moved the roster now - the re-seat and the check
+                # folded, or just the check when the re-seat failed. A channel
+                # move deletes this thread and opens a new one, so its ping is
+                # deferred to after the repost below and re-targeted at the
+                # new thread.
+                await notify_roster_update(bot, current, roster_update)
         if current.message_id is None:
             # Unposted (e.g. a recurring series' next occurrence): the
             # reschedule above is persisted and the scheduler will post it with

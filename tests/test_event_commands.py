@@ -3968,6 +3968,135 @@ class TestEventEditConfirmView:
         assert "already started" in content
         assert "/event delete" in content
 
+    def make_waitlisted_fractal(self, store: EventStore) -> Any:
+        """A full healer seat with somebody waiting behind it."""
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Deep Dive",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        return event, occurrence
+
+    def make_category_change(self, fake_bot: Any, event: Any, occurrence: Any):
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.RAID
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        return view, interaction
+
+    async def test_category_change_announces_a_check_the_reseat_lost(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event, occurrence = self.make_waitlisted_fractal(store)
+        # 11 has left, so the check frees the healer seat 12 is waiting for.
+        fake_bot.guild = FakeGuild({12: "User 12"})
+
+        def refuse(*_args: Any, **_kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        monkeypatch.setattr(
+            "gw2bot.events.posting.rebalance_occurrence_roster",
+            refuse,
+        )
+        view, interaction = self.make_category_change(
+            fake_bot, event, occurrence
+        )
+        channel.thread.send.reset_mock()
+
+        await view.save_changes.callback(interaction)
+
+        promoted = store.get_signup(occurrence.occurrence_id, 12)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        # The re-seat failed, but the promotion the check made is committed,
+        # and nothing after this would have said so - the channel is not
+        # changing, so no re-post carries the update on.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+
+    async def test_category_change_survives_a_refused_occurrence_reread(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_waitlisted_fractal(store)
+        fake_bot.guild = FakeGuild({12: "User 12"})
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # The prune switches a removed member's automatic sign-up off
+            # last, so the next occurrence read is the one the rebalance
+            # takes after the check.
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view, interaction = self.make_category_change(
+            fake_bot, event, occurrence
+        )
+        channel.thread.send.reset_mock()
+
+        await view.save_changes.callback(interaction)
+
+        # The event row is already saved by then, so letting the read escape
+        # would leave the commander on "Saving your changes" for good - and
+        # lose the promotion the check had committed.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Saving your changes" not in (kwargs.get("content") or "")
+
     async def test_category_change_reseats_without_who_has_left(
         self,
         fake_bot: Any,

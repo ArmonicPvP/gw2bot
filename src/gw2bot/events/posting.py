@@ -1524,6 +1524,22 @@ async def post_pending_occurrence(
             force=True,
             notify=False,
         )
+        # That check removes through remove_signup, whose refresh addresses
+        # the message sent moments ago - and a message or channel deleted
+        # while the lookups were in flight answers it with NotFound, which
+        # retires this run and seeds its successor. Subscribing a roster to
+        # the thread of a run that has just been replaced, and mentioning
+        # them in it, is worse than saying nothing, so the row is read back
+        # and the setup stops there.
+        settled = bot.event_store.get_occurrence(posted.occurrence_id)
+        if settled is None or occurrence_finished(event, settled, now):
+            LOGGER.debug(
+                "Posted occurrence retired by its own roster check; "
+                "occurrence_id=%s exists=%s",
+                posted.occurrence_id,
+                settled is not None,
+            )
+            return settled
     try:
         signups = bot.event_store.get_signups(posted.occurrence_id)
     except SQLAlchemyError as exc:
