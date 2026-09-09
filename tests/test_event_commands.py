@@ -1884,6 +1884,39 @@ class TestSignOutFlow:
         assert "already ended" in content
         assert "not signed up" not in content
 
+    async def test_sign_out_answers_when_the_run_reread_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        fake_bot.guild = FakeGuild({42: "User 42"})
+        real_get_event = store.get_event
+        calls = {"count": 0}
+
+        def refuse_after_the_check(event_id: int) -> Any:
+            # The removal's own re-read is the first, and the view's
+            # classification follows it.
+            calls["count"] += 1
+            if calls["count"] > 1:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.get_event = (  # type: ignore[method-assign]
+            refuse_after_the_check
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        # Telling the member they were never signed up would be a guess, and
+        # their signup is still on the roster.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "could not be read" in content
+        assert "not signed up" not in content
+
     async def test_sign_out_does_not_prompt_without_auto_signup(
         self,
         fake_bot: Any,
@@ -6672,6 +6705,53 @@ class TestRemoveSignups:
         assert interaction.edit_original_response.await_args is not None
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert "could not be read" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_removal_keeps_what_it_did_when_a_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_remove = store.remove_signup
+        refusing = False
+
+        def arm_the_refusal(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            # Reads start failing once the first pick is off the roster.
+            nonlocal refusing
+            result = real_remove(occurrence_id, discord_user_id)
+            refusing = True
+            return result
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.remove_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        # The first removal stands; the second is reported as kept rather
+        # than the response sitting on "Removing…" for good, and the wording
+        # says the store would not answer rather than that the event ended.
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@3>" in kwargs["content"]
         assert kwargs["view"] is None
 
     async def test_picker_is_built_from_what_a_partial_prune_left(

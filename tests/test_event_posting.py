@@ -3512,6 +3512,111 @@ class TestCheckRosterMembership:
         assert len(new_channel.sent) == 1
         old_channel.partial_message.delete.assert_awaited_once()
 
+    async def test_a_move_announces_what_it_carried_when_the_read_fails(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel(channel_id=1234, thread=FakeThread(777))
+        new_channel = FakeChannel(channel_id=4321, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        store.add_signup(
+            occurrence_id=posted.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        bot.guild = FakeGuild({11: "User 11"})
+        moved = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=new_channel.id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        real_get_occurrence = store.get_occurrence
+        calls = {"count": 0}
+
+        def refuse_the_verification(occurrence_id: int) -> Any:
+            calls["count"] += 1
+            if calls["count"] > 2:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_the_verification
+        )
+        # A category change's re-seat, handed over because the move deletes
+        # the thread it would have been announced in.
+        deferred = RosterUpdate(
+            reassigned=(RoleChange(11, EventRole.DPS, EventRole.ALACRITY_DPS),)
+        )
+
+        reposted = await repost_occurrence(bot, moved, posted, deferred)
+
+        # The move is reported as done, so nothing after this would have said
+        # what it carried - and the row already names the thread it opened.
+        assert reposted is not None
+        assert new_channel.thread.send.await_count == 1
+        assert new_channel.thread.send.await_args is not None
+        assert "<@11>" in new_channel.thread.send.await_args.args[0]
+
+    async def test_a_removal_answers_when_the_run_reread_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.QUICKNESS_HEAL, ()
+        )
+        assert waiting.waitlisted
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15, 16)}
+        )
+        real_get_event = store.get_event
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(event_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_event = refuse_once_armed  # type: ignore[method-assign]
+        channel.thread.send.reset_mock()
+
+        removed, update = await remove_signup(bot, event, occurrence, 12)
+
+        # Neither caller catches a store error, so this escaping would leave
+        # a member - or a commander mid-batch - on "Removing…" for good.
+        assert removed is None
+        # 11 had left and 16 has their seat: committed, and announced here
+        # because the removal this was folding into never happened.
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert [signup.discord_user_id for signup in update.promoted] == [16]
+        assert channel.thread.send.await_count == 1
+
     async def test_a_repost_subscribes_the_roster_before_it_pings_them(
         self,
         store: EventStore,

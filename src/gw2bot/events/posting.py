@@ -1274,6 +1274,15 @@ async def repost_occurrence(
             reposted.occurrence_id,
             type(exc).__name__,
         )
+        # The move is reported as done, so nothing after this announces the
+        # caller's deferred re-seat or what the check moved - and the row
+        # already names the thread the move opened, which is where both
+        # belong. Only the subscriptions are lost with that read.
+        await notify_roster_update(
+            bot,
+            reposted,
+            merge_roster_updates([deferred_update, checked], departed),
+        )
         return reposted
     if settled is None or (
         settled.status is EventStatus.OVER
@@ -2237,8 +2246,26 @@ async def remove_signup(
     # lookups are in flight, and this removal judges the run's end by its
     # duration, re-seats the roster the freed seat belongs to against its
     # capacity, and re-renders the message from both.
-    current = bot.event_store.get_occurrence(occurrence.occurrence_id)
-    edited = bot.event_store.get_event(event.event_id)
+    #
+    # Both are store calls, and neither caller catches a store error: a
+    # sign-out and a commander's batch would be left on "Removing..." for
+    # good. A store that cannot say what the run is now cannot be asked to
+    # change it either, so this reports the same nothing-removed as a roster
+    # that has become history.
+    try:
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        edited = bot.event_store.get_event(event.event_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the run back before removing a signup; "
+            "occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        if notify:
+            await notify_roster_update(bot, occurrence, checked)
+        return None, checked
     if (
         current is None
         or edited is None

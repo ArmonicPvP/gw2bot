@@ -2155,6 +2155,7 @@ class RemoveSignupsView(discord.ui.View):
         user_ids = [user_id for user_id in picked if user_id not in gone]
         updates: list[RosterUpdate] = [checked]
         kept_after_end: list[int] = []
+        unread: list[int] = []
         undelivered: list[int] = []
         for index, user_id in enumerate(user_ids):
             # The picker holds several members and remove_signup awaits Discord
@@ -2165,9 +2166,23 @@ class RemoveSignupsView(discord.ui.View):
             # roster. The clock is not the only way it gets there: a removal
             # that refreshes a message somebody deleted retires the run
             # outright, so one of these removals can be what ends it.
-            live = self._bot.event_store.get_occurrence(
-                occurrence.occurrence_id
-            )
+            try:
+                live = self._bot.event_store.get_occurrence(
+                    occurrence.occurrence_id
+                )
+            except SQLAlchemyError as exc:
+                # A store that will not answer cannot be asked to remove the
+                # rest either. Stop with what landed rather than letting this
+                # escape and leave the commander on "Removing…".
+                unread = list(user_ids[index:])
+                LOGGER.error(
+                    "Could not read the run mid-removal; stopping; "
+                    "occurrence_id=%s kept=%s error_type=%s",
+                    occurrence.occurrence_id,
+                    len(unread),
+                    type(exc).__name__,
+                )
+                break
             if live is None or occurrence_finished(event, live):
                 kept_after_end = list(user_ids[index:])
                 LOGGER.debug(
@@ -2236,6 +2251,7 @@ class RemoveSignupsView(discord.ui.View):
             kept_after_end,
             undelivered,
             gone,
+            unread,
         )
         # The guard above runs before each removal, so the last one is not
         # covered by it: a removal that refreshes a message somebody deleted
@@ -2256,7 +2272,7 @@ class RemoveSignupsView(discord.ui.View):
                 type(exc).__name__,
             )
             retired = True
-        if kept_after_end or retired:
+        if kept_after_end or unread or retired:
             # The event ended partway through, or one of these removals ended
             # it, so the edit session is no longer valid (an ended event
             # cannot be edited). Report what was applied and stop, rather than
@@ -2348,6 +2364,7 @@ def _removal_summary(
     kept_after_end: list[int] | None = None,
     undelivered: list[int] | None = None,
     departed: list[int] | None = None,
+    unread: list[int] | None = None,
 ) -> str:
     lines: list[str] = []
     if removed:
@@ -2375,6 +2392,16 @@ def _removal_summary(
             "The event ended before the rest could be removed, so "
             + _mention_list(kept_after_end)
             + (" was kept." if len(kept_after_end) == 1 else " were kept.")
+        )
+    if unread:
+        # A different stop from the one above: the run did not end, the store
+        # simply would not answer, and trying again in a moment is the right
+        # advice rather than "the event is over".
+        lines.append(
+            "The roster could not be read, so "
+            + _mention_list(unread)
+            + (" was kept." if len(unread) == 1 else " were kept.")
+            + " Try again in a moment."
         )
     if undelivered:
         # The removal itself went through; only the courtesy DM did not, which
@@ -5229,18 +5256,37 @@ class SignOutConfirmView(discord.ui.View):
             # the lookups were in flight is what made the removal refuse:
             # judging by the one this view opened with would tell the member
             # they were never signed up while their signup is still there.
-            current = self._bot.event_store.get_occurrence(
-                self._occurrence.occurrence_id
-            )
-            edited = self._bot.event_store.get_event(self._event.event_id)
-            content = (
-                "This event has already ended, so its roster can no longer "
-                "be changed."
-                if current is None
-                or edited is None
-                or occurrence_finished(edited, current)
-                else "You were not signed up for the event."
-            )
+            try:
+                current = self._bot.event_store.get_occurrence(
+                    self._occurrence.occurrence_id
+                )
+                edited = self._bot.event_store.get_event(
+                    self._event.event_id
+                )
+            except SQLAlchemyError as exc:
+                # The removal can refuse because the store would not answer
+                # it either, and these reads then fail the same way. Telling
+                # the member nothing was wrong with their signup would be a
+                # guess, and the wrong one.
+                LOGGER.error(
+                    "Could not read the run back after a sign out; "
+                    "occurrence_id=%s error_type=%s",
+                    self._occurrence.occurrence_id,
+                    type(exc).__name__,
+                )
+                content = (
+                    "The roster could not be read just now. Try again in a "
+                    "moment."
+                )
+            else:
+                content = (
+                    "This event has already ended, so its roster can no "
+                    "longer be changed."
+                    if current is None
+                    or edited is None
+                    or occurrence_finished(edited, current)
+                    else "You were not signed up for the event."
+                )
         else:
             content = "You were removed from the event."
         LOGGER.debug(
