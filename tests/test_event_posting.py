@@ -3617,6 +3617,67 @@ class TestCheckRosterMembership:
         assert [signup.discord_user_id for signup in update.promoted] == [16]
         assert channel.thread.send.await_count == 1
 
+    async def test_a_post_announces_the_check_when_the_reread_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        pending = store.create_occurrence(event.event_id, START)
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=pending.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        # 11 has left, so the check frees the seat 12 is waiting for - and
+        # the read that confirms the post afterwards is refused.
+        guild = FakeGuild({12: "User 12"})
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        bot.guild = guild
+
+        posted = await post_pending_occurrence(
+            bot, event, pending, BEFORE_START
+        )
+
+        # The post stands, and what the check moved is said in the thread it
+        # opened rather than lost with the read.
+        assert posted is not None
+        promoted = store.get_signup(pending.occurrence_id, 12)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+
     async def test_a_repost_subscribes_the_roster_before_it_pings_them(
         self,
         store: EventStore,

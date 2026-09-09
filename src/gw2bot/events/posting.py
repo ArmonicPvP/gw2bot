@@ -1606,6 +1606,11 @@ async def post_pending_occurrence(
                 posted.occurrence_id,
                 type(exc).__name__,
             )
+            # The post is reported as made, so nothing behind this announces
+            # what the check moved. The thread is the one this post opened
+            # and nobody is in it yet, but the line belongs there rather
+            # than nowhere - the same call the move's recovery makes.
+            await notify_roster_update(bot, posted, checked)
             return posted
         if settled is None or (
             settled.status is EventStatus.OVER

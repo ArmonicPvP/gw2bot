@@ -2996,7 +2996,19 @@ async def apply_roster_addition(
         # check once more, so the final member is not sent a link to a message
         # that is gone and the preview below is not offered for a roster that
         # can no longer be edited.
-        target = _addition_target(bot, event, current)
+        # Guarded like the one inside the loop: the seats are committed by
+        # now, and a store that will not answer must not take the notices,
+        # the announcement and the summary down with it.
+        try:
+            target = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            target = _AdditionStop.UNREADABLE
         if isinstance(target, _AdditionStop):
             outcome.stop = target
             LOGGER.debug(
@@ -3042,7 +3054,16 @@ async def apply_roster_addition(
         # above guarded what the notices say; this one guards what is offered
         # afterwards, so edit controls are never rebuilt for a roster that has
         # since gone.
-        final = _addition_target(bot, event, current)
+        try:
+            final = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after a roster addition's "
+                "notices; occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            final = _AdditionStop.UNREADABLE
         if isinstance(final, _AdditionStop):
             outcome.stop = final
             LOGGER.debug(
@@ -3463,13 +3484,26 @@ async def apply_event_edit(
                 # The event row is already saved, so this must not escape the
                 # callback and leave the commander on "Saving your changes".
                 # A store that cannot answer cannot re-seat either.
+                #
+                # Not the same thing as a run that has gone, though, which is
+                # why this does not fall into the branch below: that message
+                # is still in its channel carrying the old category, and
+                # calling the edit applied would leave it there. Counted as a
+                # posted occurrence that failed to refresh, so the scheduler
+                # retries it, the commander is told, and a move puts the
+                # channel back rather than pointing the event at one its post
+                # never reached.
                 LOGGER.error(
                     "Could not re-read the occurrence after its roster "
                     "check; occurrence_id=%s error_type=%s",
                     current.occurrence_id,
                     type(exc).__name__,
                 )
-                reread = None
+                await notify_roster_update(bot, current, checked)
+                if current.message_id is not None:
+                    attempted += 1
+                    _mark_occurrence_stale(bot, current)
+                continue
             if reread is None or occurrence_finished(updated, reread):
                 LOGGER.debug(
                     "Skipped a category rebalance for a run the check "

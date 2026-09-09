@@ -4290,6 +4290,48 @@ class TestEventEditConfirmView:
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert "Saving your changes" not in (kwargs.get("content") or "")
 
+    async def test_category_change_reports_a_stale_post_when_a_read_fails(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_waitlisted_fractal(store)
+        fake_bot.guild = FakeGuild({12: "User 12"})
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view, interaction = self.make_category_change(
+            fake_bot, event, occurrence
+        )
+
+        await view.save_changes.callback(interaction)
+
+        # The post is still carrying the old category, so saying the event
+        # was updated would leave it that way. It is reported as stale and
+        # marked for the scheduler to retry.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "may be out of date" in kwargs["content"]
+        stored = real_get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.needs_refresh
+
     async def test_category_change_reseats_without_who_has_left(
         self,
         fake_bot: Any,
@@ -7849,6 +7891,58 @@ class TestAddSignups:
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert "could not be read" in kwargs["content"]
         assert "<@11>" in kwargs["content"]
+
+    async def test_an_addition_reports_what_it_did_when_a_read_fails(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 11)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_add_signup = store.add_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # Seating the picked member is the last thing the loop does, so
+            # this pins the failure to the reads that come after it.
+            nonlocal refusing
+            result = real_add_signup(*args, **kwargs)
+            refusing = True
+            return result
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.add_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The seat is committed, so the summary has to go out rather than the
+        # error taking it, the notices and the announcement with it.
+        assert real_get_occurrence(occurrence.occurrence_id) is not None
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "<@11>" in kwargs["content"]
+        assert "could not be read" in kwargs["content"]
 
     async def test_an_addition_announces_the_batch_once(
         self,
