@@ -3739,6 +3739,65 @@ class TestEditCommandOngoing:
             for signup in store.get_signups(successor.occurrence_id)
         ] == [8]
 
+    async def test_roster_removal_reads_the_event_back_after_checking(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_ongoing_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({7: "User 7"})
+        real_fetch = guild.fetch_member
+
+        async def shorten_the_event(user_id: int) -> Any:
+            # Another leader ends the run early while the picker's member
+            # lookups are in flight.
+            store.update_event(
+                event_id=event.event_id,
+                category=event.category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=5,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = shorten_the_event  # type: ignore[method-assign]
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+            roster_only=True,
+        )
+        view = EventRosterEditView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=guild,
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        # The run's end is read off the event, so judging it by the one this
+        # picker opened with would draw removal controls over a roster that
+        # has already ended and refuse the next click.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "already ended" in kwargs["content"]
+
     async def test_roster_removal_stays_available_while_running(
         self,
         fake_bot: Any,

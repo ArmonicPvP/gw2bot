@@ -1678,6 +1678,14 @@ async def open_roster_removal(
         live_occurrence = bot.event_store.get_occurrence(
             occurrence.occurrence_id
         )
+        # The event comes back with it. The end check below reads the run's
+        # duration off the event, and a leader can shorten an ongoing one
+        # while the lookups run: judged against the event this picker opened
+        # with, the controls would be drawn over a roster that has already
+        # ended, only to be refused on the commander's next click. The draft
+        # is left as it is - it is this commander's unsaved edit, not the
+        # other leader's save.
+        live_event = bot.event_store.get_event(editing_event_id)
         signups = (
             bot.event_store.get_signups(occurrence.occurrence_id)
             if live_occurrence is not None
@@ -1699,13 +1707,18 @@ async def open_roster_removal(
             view=None,
         )
         return
-    if live_occurrence is None or occurrence_finished(event, live_occurrence):
+    if (
+        live_occurrence is None
+        or live_event is None
+        or occurrence_finished(live_event, live_occurrence)
+    ):
         LOGGER.debug(
             "Roster removal found the occurrence retired while checking it; "
-            "occurrence_id=%s user_id=%s exists=%s",
+            "occurrence_id=%s user_id=%s exists=%s event_exists=%s",
             occurrence.occurrence_id,
             interaction.user.id,
             live_occurrence is not None,
+            live_event is not None,
         )
         await interaction.edit_original_response(
             content=(

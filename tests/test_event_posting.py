@@ -4019,6 +4019,175 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    def category_changer(
+        self,
+        store: EventStore,
+        event: Any,
+        guild: Any,
+        category: EventCategory,
+    ) -> Any:
+        """Save the event under another category from inside a lookup."""
+        real_fetch = guild.fetch_member
+
+        async def change_the_category(user_id: int) -> Any:
+            store.update_event(
+                event_id=event.event_id,
+                category=category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        return change_the_category
+
+    async def test_a_signup_drops_a_role_a_headcount_event_cannot_hold(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.DPS, ()
+        )
+        guild = FakeGuild({11: "User 11", 12: "User 12"})
+        changer = self.category_changer(
+            store,
+            event,
+            guild,
+            EventCategory.WVW,
+        )
+        guild.fetch_member = changer  # type: ignore[method-assign]
+        bot.guild = guild
+
+        signup, _ = await seat_signup(
+            bot, event, occurrence, 12, EventRole.QUICKNESS_HEAL, ()
+        )
+
+        # A headcount event has no role to hold, so storing the one picked
+        # against the old category would leave it waiting to come back to
+        # life the next time somebody makes this a raid.
+        assert signup.role is None
+        assert signup.assigned_role is None
+        assert not signup.waitlisted
+
+    async def test_a_signup_normalizes_a_role_the_new_category_dropped(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.DPS, ()
+        )
+        guild = FakeGuild({11: "User 11", 12: "User 12"})
+        changer = self.category_changer(
+            store,
+            event,
+            guild,
+            EventCategory.DUNGEON,
+        )
+        guild.fetch_member = changer  # type: ignore[method-assign]
+        bot.guild = guild
+
+        signup, _ = await seat_signup(
+            bot, event, occurrence, 12, EventRole.QUICKNESS_HEAL, ()
+        )
+
+        # A dungeon has no quickness healer to seat, and solving for one
+        # would waitlist this member over a DPS seat standing open.
+        assert signup.role is EventRole.DPS
+        assert signup.assigned_role is EventRole.DPS
+        assert not signup.waitlisted
+
+    async def test_an_edit_the_store_refuses_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # 14 has left, so the check frees their DPS seat and 16 moves up.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        # Only this edit spends a token, so nothing before it is refused.
+        store.set_signup_edit_tokens = refuse  # type: ignore[method-assign]
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(ValueError, match="could not be updated"):
+            await apply_signup_edit(
+                bot,
+                event,
+                occurrence,
+                13,
+                EventRole.DPS,
+                (EventRole.QUICKNESS_DPS,),
+            )
+
+        # The edit flow answers a ValueError and nothing else, so the
+        # refusal has to arrive as one - and the promotion the check
+        # committed is announced rather than escaping with it.
+        edited = store.get_signup(occurrence.occurrence_id, 13)
+        assert edited is not None
+        assert edited.flex_roles == ()
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
+    async def test_a_removal_the_store_refuses_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # 14 has left, so the check frees their DPS seat and 16 moves up;
+        # the store then refuses the removal the commander asked for.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+        real_remove = store.remove_signup
+
+        def refuse_the_pick(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            if discord_user_id == 13:
+                raise SQLAlchemyError("boom")
+            return real_remove(occurrence_id, discord_user_id)
+
+        store.remove_signup = refuse_the_pick  # type: ignore[method-assign]
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(RosterUnreadable):
+            await remove_signup(bot, event, occurrence, 13)
+
+        # A sign-out and a commander's batch both handle RosterUnreadable,
+        # so the refusal answers them instead of escaping; nothing of this
+        # removal is committed, and the check's promotion is announced.
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
     async def test_a_seating_the_store_refuses_announces_the_check(
         self,
         bot: Any,
