@@ -8061,6 +8061,98 @@ class TestAddSignups:
         assert "could not be read" in kwargs["content"]
         assert "<@11>" in kwargs["content"]
 
+    async def test_an_addition_reports_the_notices_a_refused_read_lost(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        real_get_signup = store.get_signup
+        refusing = False
+        recipient = await fake_bot.fetch_user(11)
+
+        async def arm_the_refusal(*args: Any, **kwargs: Any) -> None:
+            # The first notice has gone out, so the read that refuses is the
+            # one the loop takes to see the second member is still seated.
+            nonlocal refusing
+            refusing = True
+
+        recipient.send = AsyncMock(side_effect=arm_the_refusal)
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            nonlocal refusing
+            if refusing:
+                refusing = False
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # Both seats are committed, so the refusal costs the one notice it
+        # stopped rather than the summary that has to report it.
+        assert real_get_signup(occurrence.occurrence_id, 11) is not None
+        assert real_get_signup(occurrence.occurrence_id, 12) is not None
+        fake_bot.users[12].send.assert_not_awaited()
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11>, <@12> to the roster." in content
+        assert "Could not send a direct message to <@12>" in content
+
+    async def test_an_addition_answers_when_the_waitlist_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        real_get_signup = store.get_signup
+        refusing = False
+        recipient = await fake_bot.fetch_user(11)
+
+        async def arm_the_refusal(*args: Any, **kwargs: Any) -> None:
+            # The only notice has gone out, so the seat reads left are the
+            # ones that work out who ended up on the waitlist.
+            nonlocal refusing
+            refusing = True
+
+        recipient.send = AsyncMock(side_effect=arm_the_refusal)
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        with caplog.at_level("ERROR"):
+            await view.pick(interaction, [11])
+
+        # The seat is committed and the member has been told, so a store
+        # that will not say who is on the waitlist costs that line alone.
+        assert real_get_signup(occurrence.occurrence_id, 11) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11> to the roster." in content
+        assert "waitlist" not in content
+        assert (
+            "Could not read back who a roster addition waitlisted"
+            in caplog.text
+        )
+
     async def test_an_addition_announces_the_batch_once(
         self,
         fake_bot: Any,

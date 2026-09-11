@@ -3073,7 +3073,27 @@ async def apply_roster_addition(
         # wrong, while a row that survives an occurrence retired above still
         # earns its notice (without the link the check above already dropped).
         # Either way the commander is told they went unnotified.
-        if bot.event_store.get_signup(current.occurrence_id, user_id) is None:
+        #
+        # A store that will not answer is not evidence the seat has gone, and
+        # everything after this loop - the announcement and the summary - is
+        # still owed to the commander. The notices left are recorded as
+        # undelivered, which is what they are, and the rest carries on.
+        try:
+            seated = bot.event_store.get_signup(
+                current.occurrence_id, user_id
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read a seat before its addition notice; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.undelivered.extend(
+                outcome.added[outcome.added.index(user_id):]
+            )
+            break
+        if seated is None:
             LOGGER.debug(
                 "Skipped a roster addition notice for a seat that has gone; "
                 "occurrence_id=%s",
@@ -3115,11 +3135,25 @@ async def apply_roster_addition(
     # rebalance has since seated them. One store read describes them all as
     # they now stand. A member whose row has gone (the event was deleted) is
     # left out of the waitlist entirely; the stop note below covers that.
-    outcome.waitlisted = [
-        user_id
-        for user_id in outcome.added
-        if _is_waitlisted(bot, current.occurrence_id, user_id)
-    ]
+    #
+    # Guarded like every other read on this path: the seats are committed and
+    # the announcement and the summary still have to go out, so a store that
+    # will not say who ended up on the waitlist costs that one line of the
+    # summary rather than the whole answer.
+    try:
+        outcome.waitlisted = [
+            user_id
+            for user_id in outcome.added
+            if _is_waitlisted(bot, current.occurrence_id, user_id)
+        ]
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read back who a roster addition waitlisted; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+        outcome.waitlisted = []
     # Each addition can flex seated members into another of their roles, and a
     # later addition can move someone an earlier one already moved. Merging
     # collapses each member's changes into one line describing the net result.
