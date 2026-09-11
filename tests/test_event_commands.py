@@ -2768,6 +2768,44 @@ class TestEditSignupFlow:
         assert not updated.waitlisted
         assert updated.signed_up_at == original.signed_up_at
 
+    async def test_edit_says_when_the_automatic_signup_kept_old_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        store.set_auto_signup = refuse  # type: ignore[method-assign]
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        # The edit applied, so the member is told that and not that it
+        # failed - along with the one thing they have to put right, since
+        # next week's roster is seeded from that snapshot.
+        updated = store.get_signup(occurrence.occurrence_id, 42)
+        assert updated is not None
+        assert updated.role is EventRole.ALACRITY_DPS
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Your signup was updated" in kwargs["content"]
+        assert "still holds your previous roles" in kwargs["content"]
+
     async def test_edit_normalizes_a_stale_role_after_category_change(
         self,
         fake_bot: Any,

@@ -5840,6 +5840,16 @@ class EditSignupFlow(SignupFlow):
             await edit(content="Your signup was updated.", view=None)
             return
         content = _signup_edit_summary(signup)
+        if result.auto_signup_stale:
+            # The edit is on this roster, but the snapshot that seeds the
+            # next run kept the old selection and nothing retries it. Said
+            # here so the member can put it right rather than find next
+            # week's roster holding roles they changed.
+            content = (
+                f"{content}\n\nYour automatic sign-up for this event still "
+                "holds your previous roles. Edit your signup again later to "
+                "bring it across."
+            )
         preference = (
             self.bot.event_store.get_signup_preference(
                 self.event.event_id,

@@ -4188,6 +4188,130 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    async def test_a_removal_whose_resettle_fails_still_stands(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # Nobody has left, so the only failure is the re-seat behind the
+        # removal the commander asked for.
+        bot.guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (11, 12, 13, 14, 15, 16)
+            }
+        )
+
+        def refuse(occurrence_id: int, assignments: Any) -> None:
+            raise SQLAlchemyError("boom")
+
+        store.apply_roster_assignments = refuse  # type: ignore[method-assign]
+        channel.thread.remove_user.reset_mock()
+
+        removed, _ = await remove_signup(bot, event, occurrence, 13)
+
+        # The row is gone by the time the re-seat runs, so reporting this as
+        # a removal that did not happen would leave the member in the thread
+        # and send them to a retry with no signup left to remove.
+        assert removed is not None
+        assert store.get_signup(occurrence.occurrence_id, 13) is None
+        channel.thread.remove_user.assert_awaited_once()
+        # The seat it freed is left for the next roster change to fill.
+        still_waiting = store.get_signup(occurrence.occurrence_id, 16)
+        assert still_waiting is not None
+        assert still_waiting.waitlisted
+
+    async def test_an_edit_stands_when_its_read_back_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        original = await complete_signup(
+            bot, event, occurrence, 11, EventRole.DPS, ()
+        )
+        real_get_signup = store.get_signup
+        real_apply = store.apply_roster_assignments
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # The resettle is the last write the edit makes, so the read
+            # that refuses is the one that reads the row back.
+            nonlocal refusing
+            result = real_apply(*args, **kwargs)
+            refusing = True
+            return result
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.apply_roster_assignments = (  # type: ignore[method-assign]
+            arm_the_refusal
+        )
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+
+        result = await apply_signup_edit(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_DPS, ()
+        )
+
+        # The declaration is committed by then, so refusing the edit would
+        # spend a second token on a change already on the roster and lose
+        # the announcement and the message refresh with it.
+        assert result.signup is not None
+        assert result.signup.role is EventRole.QUICKNESS_DPS
+        # Described from the write and corrected by what the resettle moved,
+        # which is where the assigned role comes from.
+        assert result.signup.assigned_role is EventRole.QUICKNESS_DPS
+        stored = real_get_signup(occurrence.occurrence_id, 11)
+        assert stored is not None
+        assert stored.role is EventRole.QUICKNESS_DPS
+        assert stored.edit_tokens < original.edit_tokens
+        assert stored.edit_tokens > original.edit_tokens - 2.0
+        channel.partial_message.edit.assert_awaited()
+
+    async def test_an_edit_reports_an_automatic_signup_it_could_not_update(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(bot, event, occurrence, 11, EventRole.DPS, ())
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        store.set_auto_signup = refuse  # type: ignore[method-assign]
+
+        result = await apply_signup_edit(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_DPS, ()
+        )
+
+        # The edit itself applied, so it is not refused; the snapshot that
+        # seeds next week's roster still holds the old roles, and nothing
+        # retries it, so that has to reach the member.
+        assert result.signup is not None
+        assert result.signup.role is EventRole.QUICKNESS_DPS
+        assert result.auto_signup_stale
+
     async def test_a_seating_the_store_refuses_announces_the_check(
         self,
         bot: Any,
@@ -4796,7 +4920,10 @@ class TestCheckRosterMembership:
             bot, event, occurrence, force=True
         )
 
-        assert departed == [11]
+        # The removal itself completes whatever the re-seat behind it did,
+        # so the prune goes on to 13 rather than stopping on a member who is
+        # already off the roster.
+        assert departed == [11, 13]
         # The seat 11 freed goes to the waitlist rather than sitting open for
         # the next sign-up to take ahead of it...
         promoted = store.get_signup(occurrence.occurrence_id, 16)
@@ -4833,9 +4960,11 @@ class TestCheckRosterMembership:
 
         # 11 is off the roster whatever the resettle did, so reporting no
         # departure would leave a caller merging an announcement that still
-        # names the seat they held.
+        # names the seat they held. 13 had left too, and a removal that
+        # committed is not a reason to leave them on it.
         assert store.get_signup(occurrence.occurrence_id, 11) is None
-        assert departed == [11]
+        assert store.get_signup(occurrence.occurrence_id, 13) is None
+        assert departed == [11, 13]
 
     async def test_a_signup_announces_the_check_and_its_seating_once(
         self,

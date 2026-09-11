@@ -2409,31 +2409,25 @@ async def remove_signup(
     # departure frees nothing, so the roster is left untouched.
     update = RosterUpdate()
     if not removed.waitlisted:
-        # This one is raised rather than swallowed on purpose. The row is
-        # gone by now and the freed seat is nobody's, and the recovery that
-        # hands it to the waitlist - re-running the resettle, switching the
-        # automatic sign-up off, and reading the movement from the rows
-        # either side of the removal - lives in prune_departed_signups,
-        # which is reached only if this propagates. A caller with no
-        # recovery of its own tells the member to try again, which is the
-        # same answer the reads above it give.
+        # Unlike the deletion above, this refusal has the member already off
+        # the roster. Reporting it as a failed removal would leave them in
+        # the thread and in whatever the caller announces, and send them to a
+        # retry that finds no signup to remove - so the removal is finished
+        # on its own terms instead, with nothing promoted. The freed seat is
+        # re-solved by the next roster change, and a caller with a recovery
+        # of its own - the prune - still has one for the failures after this
+        # point, which is where its own re-seat comes in.
         try:
             update = _resettle_roster(bot, event, occurrence)
         except SQLAlchemyError as exc:
             LOGGER.error(
                 "Could not resettle a roster after removing a signup; "
-                "occurrence_id=%s user_id=%s error_type=%s",
+                "the removal stands; occurrence_id=%s user_id=%s "
+                "error_type=%s",
                 occurrence.occurrence_id,
                 discord_user_id,
                 type(exc).__name__,
             )
-            if notify:
-                await notify_roster_update(
-                    bot,
-                    occurrence,
-                    merge_roster_updates([checked], [discord_user_id]),
-                )
-            raise RosterUnreadable from exc
     # The check moved the roster first and this removal moved it after, so
     # they fold into one line per member with this member dropped: whatever
     # seat the check gave them, they are off the roster now.
@@ -3401,6 +3395,10 @@ class SignupEditResult:
     signup: EventSignup | None
     update: RosterUpdate
     needs_waitlist_confirmation: bool = False
+    # The edit applied, but the automatic sign-up that would carry it into
+    # next week's roster still holds the old selection. The member is told,
+    # because nothing else will correct it before the series is seeded.
+    auto_signup_stale: bool = False
 
 
 def _without_member(update: RosterUpdate, discord_user_id: int) -> RosterUpdate:
@@ -3569,10 +3567,6 @@ async def apply_signup_edit(
             waitlisted=not keeps_seat,
         )
         update = _resettle_roster(bot, event, occurrence)
-        updated = bot.event_store.get_signup(
-            occurrence.occurrence_id,
-            discord_user_id,
-        )
     except SQLAlchemyError as exc:
         LOGGER.error(
             "Could not apply a signup edit; occurrence_id=%s user_id=%s "
@@ -3586,6 +3580,53 @@ async def apply_signup_edit(
             "Your signup could not be updated just now. Try again in a "
             "moment."
         ) from exc
+    # The edit is committed by here, so this read is outside the guard above:
+    # answering a refusal with "try again" would spend a second edit token on
+    # a change that is already on the roster, and lose the announcement and
+    # the message refresh below with it. The row is described from what was
+    # just written instead, corrected by what the resettle reported about
+    # this member - it re-solves the seated set, so it can have promoted them
+    # or moved their assigned role since.
+    try:
+        updated = bot.event_store.get_signup(
+            occurrence.occurrence_id,
+            discord_user_id,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read a signup back after editing it; "
+            "occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        updated = replace(
+            current,
+            role=role,
+            flex_roles=flex_roles,
+            assigned_role=current.assigned_role if keeps_seat else None,
+            waitlisted=not keeps_seat,
+        )
+        seated = next(
+            (
+                signup
+                for signup in update.promoted
+                if signup.discord_user_id == discord_user_id
+            ),
+            None,
+        )
+        moved = next(
+            (
+                change
+                for change in update.reassigned
+                if change.discord_user_id == discord_user_id
+            ),
+            None,
+        )
+        if seated is not None:
+            updated = seated
+        elif moved is not None:
+            updated = replace(updated, assigned_role=moved.new_role)
     if updated is None:
         # The resettle above committed too, so both halves are announced
         # rather than lost with the row.
@@ -3601,8 +3642,11 @@ async def apply_signup_edit(
     #
     # Guarded on its own rather than with the phase above, because the edit
     # this follows is committed: refusing it now would tell the member their
-    # change failed when it is sitting on the roster. Logged instead, and the
-    # stale snapshot is corrected by their next edit.
+    # change failed when it is sitting on the roster. A failure here is not
+    # silent either - the snapshot decides next week's roster, and nothing
+    # retries it - so the member is told their automatic sign-up still holds
+    # the old selection and can put it right themselves.
+    auto_signup_stale = False
     try:
         auto = bot.event_store.get_auto_signup(
             event.event_id,
@@ -3617,6 +3661,7 @@ async def apply_signup_edit(
                 flex_roles,
             )
     except SQLAlchemyError as exc:
+        auto_signup_stale = True
         LOGGER.error(
             "Could not carry a signup edit into its automatic sign-up; "
             "occurrence_id=%s user_id=%s error_type=%s",
@@ -3652,7 +3697,11 @@ async def apply_signup_edit(
         _without_member(update, discord_user_id),
     )
     await refresh_occurrence_message(bot, event, occurrence)
-    return SignupEditResult(signup=updated, update=update)
+    return SignupEditResult(
+        signup=updated,
+        update=update,
+        auto_signup_stale=auto_signup_stale,
+    )
 
 
 def apply_auto_signups(
