@@ -16,6 +16,12 @@ from gw2bot.events.models import (
     EventStatus,
     RepeatFrequency,
 )
+# Two different questions share a name: reminders ask whether the clock has
+# run out, and the roster paths ask whether the run is over at all, which a
+# retired occurrence is before its end time.
+from gw2bot.events.posting import (
+    occurrence_finished as occurrence_retired,
+)
 from gw2bot.events.reminders import (
     occurrence_finished,
     reminder_participants,
@@ -251,6 +257,73 @@ class EventCommands(app_commands.Group):
                 event_id,
                 type(exc).__name__,
             )
+        # That check awaited Discord, and its own removals can retire this
+        # run: a refresh that finds the message deleted by hand persists OVER
+        # and seeds the series' next occurrence. Read the event and the run
+        # being edited back and refuse a preview over either - one drawn from
+        # the pre-check draft would offer save controls for a roster that is
+        # history, and the run it saved would no longer be the one the
+        # commander opened.
+        try:
+            current_event = self._bot.event_store.get_event(event_id)
+            current = self._bot.event_store.get_occurrence(
+                primary.occurrence_id
+            )
+        except SQLAlchemyError as exc:
+            # The interaction is already deferred, so letting this escape
+            # leaves the commander waiting on a follow-up that never comes.
+            # A store that cannot say what the run is now cannot draw a
+            # preview of it either; the check's own removals are committed
+            # and the next roster change picks them up.
+            LOGGER.error(
+                "Could not re-read the event after its roster check; "
+                "event_id=%s error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+            await interaction.followup.send(
+                "The event could not be opened for editing. Try again later.",
+                ephemeral=True,
+            )
+            return
+        # The clock moved with the lookups: a run that was minutes from its
+        # end when this command started can be past it by the time they
+        # answer, and judging it by the time the command was typed would hand
+        # back save controls for a run that is over.
+        now = datetime.now(UTC)
+        if (
+            current_event is None
+            or current_event.cancelled
+            or current is None
+            or occurrence_retired(current_event, current, now)
+        ):
+            LOGGER.debug(
+                "Event edit preview abandoned for a run retired during the "
+                "roster check; user_id=%s event_id=%s exists=%s",
+                interaction.user.id,
+                event_id,
+                current is not None,
+            )
+            await interaction.followup.send(
+                "That event does not exist or is over and can no longer be "
+                "edited.",
+                ephemeral=True,
+            )
+            return
+        # The same save can have changed the category or the duration, and the
+        # draft was built from the event as it was, so it is rebuilt here.
+        event = current_event
+        primary = current
+        roster_only = primary.start_time <= now
+        draft = draft_from_event(
+            event,
+            self._bot.event_timezone,
+            start_time_override=primary.start_time,
+            roster_only=roster_only,
+            editing_occurrence_id=(
+                primary.occurrence_id if roster_only else None
+            ),
+        )
         await send_event_preview(
             self._bot,
             interaction,

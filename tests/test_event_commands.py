@@ -16,6 +16,7 @@ from gw2bot.events.commands import EventCommands
 from gw2bot.events.posting import (
     OccurrenceCancellation,
     cancel_occurrence,
+    check_roster_membership,
     post_occurrence,
 )
 from gw2bot.config import DEFAULT_EVENT_CREATE_ROLE_ID as EVENT_CREATE_ROLE_ID
@@ -92,7 +93,12 @@ from gw2bot.events.views import (
     start_signup_flow,
 )
 
-from factories import default_config, forbidden_error, not_found_error
+from factories import (
+    FakeGuild,
+    default_config,
+    forbidden_error,
+    not_found_error,
+)
 from test_event_posting import FakeBot, FakeChannel, FakeThread, FakeUser
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
@@ -143,28 +149,6 @@ def preview_kwargs(interaction: Any) -> Any:
     """The preview /event edit sent; it defers first, so it is a follow-up."""
     assert interaction.followup.send.await_args is not None
     return interaction.followup.send.await_args.kwargs
-
-
-class FakeGuild:
-    """Answers member lookups the way Discord does for a bot without the intent.
-
-    The member cache is always empty, so every lookup is a fetch, and a member
-    who has left raises NotFound.
-    """
-
-    def __init__(self, members: dict[int, str]):
-        self._members = members
-        self.fetched: list[int] = []
-
-    def get_member(self, user_id: int) -> Any:
-        return None
-
-    async def fetch_member(self, user_id: int) -> Any:
-        self.fetched.append(user_id)
-        name = self._members.get(user_id)
-        if name is None:
-            raise not_found_error()
-        return SimpleNamespace(id=user_id, display_name=name)
 
 
 class TestEventCommandGroup:
@@ -1801,6 +1785,170 @@ class TestSignOutFlow:
         assert "You were removed from the event." in kwargs["content"]
         assert "Automatic sign-up is still on" in kwargs["content"]
 
+    async def test_sign_out_reports_a_run_retired_during_the_check(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        # Somebody deleted the event post, so refreshing it after the check's
+        # own removal answers NotFound - which retires the run outright, well
+        # before its scheduled end.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        fake_bot.guild = FakeGuild({42: "User 42"})
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # The roster was left alone, which is not the same as never having
+        # been on it - and the scheduled end has not passed, so only the
+        # stored status can say so.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "already ended" in content
+        assert "not signed up" not in content
+
+    async def test_sign_out_reports_a_duration_saved_during_the_check(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A run that is under way, so a shorter duration can put its end
+        # behind us while the membership lookups are in flight.
+        started = datetime.now(UTC) - timedelta(minutes=10)
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=7,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, started)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({42: "User 42"})
+        real_fetch = guild.fetch_member
+
+        async def shorten_the_event(user_id: int) -> Any:
+            store.update_event(
+                event_id=event.event_id,
+                category=event.category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=1,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = shorten_the_event  # type: ignore[method-assign]
+        fake_bot.guild = guild
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        # The removal refused because the run is over by the duration the
+        # event carries now. Judged by the one this view opened with, the
+        # member would be told they were never signed up - with their signup
+        # still sitting on the roster.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "already ended" in content
+        assert "not signed up" not in content
+
+    async def test_sign_out_answers_when_the_run_reread_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        fake_bot.guild = FakeGuild({42: "User 42"})
+        real_get_event = store.get_event
+        calls = {"count": 0}
+
+        def refuse_after_the_check(event_id: int) -> Any:
+            # The removal's own re-read is the first, and the view's
+            # classification follows it.
+            calls["count"] += 1
+            if calls["count"] > 1:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.get_event = (  # type: ignore[method-assign]
+            refuse_after_the_check
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        # Telling the member they were never signed up would be a guess, and
+        # their signup is still on the roster.
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "could not be read" in content
+        assert "not signed up" not in content
+
+    async def test_sign_out_does_not_call_a_refused_read_an_absence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        fake_bot.guild = FakeGuild({42: "User 42"})
+        real_get_event = store.get_event
+        calls = {"count": 0}
+
+        def refuse_the_removals_read(event_id: int) -> Any:
+            # Only the read inside remove_signup fails; every read this view
+            # makes afterwards succeeds, which is what made the old answer
+            # indistinguishable from never having signed up.
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.get_event = (  # type: ignore[method-assign]
+            refuse_the_removals_read
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "could not be read" in content
+        assert "not signed up" not in content
+
     async def test_sign_out_does_not_prompt_without_auto_signup(
         self,
         fake_bot: Any,
@@ -2113,6 +2261,69 @@ class TestAutoSignupPrompt:
         assert flow.event.category is EventCategory.DUNGEON
         assert "[REDACTED]" in console
         assert secret not in console
+
+    async def test_the_prompt_offers_what_the_seating_actually_stored(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        flow.role = EventRole.QUICKNESS_DPS
+        # Somebody is on the roster, so the seating's membership check makes
+        # a lookup to be interrupted.
+        store.add_signup(
+            occurrence_id=flow.occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        event = flow.event
+        guild = FakeGuild({11: "User 11", 21: "User 21"})
+        real_fetch = guild.fetch_member
+
+        async def change_the_category(user_id: int) -> Any:
+            # A leader saves the event as a headcount category while the
+            # seating's lookups are in flight, after this flow has already
+            # normalised the picked role against the old one.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.WVW,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = change_the_category  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        interaction = self.make_flow_interaction()
+
+        await flow.finalize(interaction)
+
+        seated = store.get_signup(flow.occurrence.occurrence_id, 21)
+        assert seated is not None
+        assert seated.role is None
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        view = await_args.kwargs["view"]
+        assert isinstance(view, AutoSignupChoiceView)
+        await view.auto_yes.callback(self.make_flow_interaction())
+
+        # The prompt writes the flow's own fields, so a role the event can
+        # no longer seat would be seeded into every future run of the
+        # series - the seating having just dropped it from this one.
+        auto = store.get_auto_signup(event.event_id, 21)
+        assert auto is not None
+        assert auto.choice is AutoSignupChoice.YES
+        assert auto.role is None
+        assert auto.flex_roles == ()
 
     async def test_prompts_again_after_a_plain_no(
         self,
@@ -2620,6 +2831,44 @@ class TestEditSignupFlow:
         assert not updated.waitlisted
         assert updated.signed_up_at == original.signed_up_at
 
+    async def test_edit_says_when_the_automatic_signup_kept_old_roles(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        store.set_auto_signup = refuse  # type: ignore[method-assign]
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        # The edit applied, so the member is told that and not that it
+        # failed - along with the one thing they have to put right, since
+        # next week's roster is seeded from that snapshot.
+        updated = store.get_signup(occurrence.occurrence_id, 42)
+        assert updated is not None
+        assert updated.role is EventRole.ALACRITY_DPS
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Your signup was updated" in kwargs["content"]
+        assert "still holds your previous roles" in kwargs["content"]
+
     async def test_edit_normalizes_a_stale_role_after_category_change(
         self,
         fake_bot: Any,
@@ -2795,6 +3044,71 @@ class TestEditSignupFlow:
             "updated"
             in second.response.edit_message.await_args.kwargs["content"]
         )
+
+    async def test_the_remembered_prompt_offers_what_the_edit_stored(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.QUICKNESS_DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        guild = FakeGuild({42: "User 42"})
+        real_fetch = guild.fetch_member
+
+        async def change_the_category(user_id: int) -> Any:
+            # A leader saves the event as a dungeon while the edit's
+            # membership lookups are in flight, after this flow has already
+            # normalised the picked role against the old category.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.DUNGEON,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = change_the_category  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_HEAL
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        edited = store.get_signup(occurrence.occurrence_id, 42)
+        assert edited is not None
+        assert edited.role is EventRole.DPS
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        prompt = await_args.kwargs["view"]
+        assert isinstance(prompt, UpdateRememberedRolesView)
+        await prompt.update.callback(
+            make_interaction(message=ephemeral_message())
+        )
+
+        # The prompt writes the flow's own fields, so remembering the role
+        # the dungeon cannot seat would hand it straight back to the
+        # member's next sign-up for this event.
+        preference = store.get_signup_preference(event.event_id, 42)
+        assert preference is not None
+        assert preference.role is EventRole.DPS
+        assert preference.flex_roles == ()
 
     async def test_remembered_roles_can_be_kept_as_they_were(
         self,
@@ -3350,6 +3664,144 @@ class TestEditCommandOngoing:
         assert "<@7>" in rendered
         assert "<@8>" not in rendered
 
+    async def test_edit_stops_when_the_check_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        for user_id in (7, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # 8 has left, and the post their removal refreshes was deleted by
+        # hand: the NotFound behind that retires this run and seeds the
+        # series' next one, mid-check.
+        guild = FakeGuild({7: "Still Here"})
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=guild,
+        )
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # A preview here would offer save controls for a roster that is
+        # history, against a draft holding the retired run's start time.
+        assert interaction.followup.send.await_args is not None
+        answer = interaction.followup.send.await_args
+        assert "can no longer be edited" in answer.args[0]
+        assert "view" not in answer.kwargs
+
+    async def test_edit_answers_a_refused_reread_instead_of_hanging(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        for user_id in (7, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # 8 has left, and the store starts refusing reads once their removal
+        # is committed - which is exactly where the preview reads the event
+        # back.
+        guild = FakeGuild({7: "Still Here"})
+        real_get_event = store.get_event
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(event_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_event = refuse_once_armed  # type: ignore[method-assign]
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=guild,
+        )
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        # The interaction is deferred by then, so an escaping error would
+        # leave the commander waiting on a follow-up that never comes.
+        assert interaction.followup.send.await_args is not None
+        answer = interaction.followup.send.await_args
+        assert "could not be opened" in answer.args[0]
+
+    async def test_edit_judges_the_run_by_the_clock_after_the_lookups(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ongoing_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({7: "Still Here"})
+        real_fetch = guild.fetch_member
+
+        async def end_the_run(user_id: int) -> Any:
+            # The run reaches its end while the lookups are in flight: its end
+            # lands after the moment the command was typed and before the
+            # answer comes back.
+            store.set_occurrence_start_time(
+                occurrence.occurrence_id,
+                datetime.now(UTC)
+                - timedelta(minutes=event.duration_minutes),
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = end_the_run  # type: ignore[method-assign]
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            guild=guild,
+        )
+
+        await cast(Any, group.edit.callback)(
+            group, interaction, event.event_id
+        )
+
+        # Judged by the clock as it was when the command was typed, the run
+        # still looks live, and the commander gets save controls for an event
+        # that is over.
+        assert interaction.followup.send.await_args is not None
+        answer = interaction.followup.send.await_args
+        assert "can no longer be edited" in answer.args[0]
+
     async def test_edit_keeps_the_roster_when_lookups_fail(
         self,
         fake_bot: Any,
@@ -3452,6 +3904,65 @@ class TestEditCommandOngoing:
             signup.discord_user_id
             for signup in store.get_signups(successor.occurrence_id)
         ] == [8]
+
+    async def test_roster_removal_reads_the_event_back_after_checking(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_ongoing_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({7: "User 7"})
+        real_fetch = guild.fetch_member
+
+        async def shorten_the_event(user_id: int) -> Any:
+            # Another leader ends the run early while the picker's member
+            # lookups are in flight.
+            store.update_event(
+                event_id=event.event_id,
+                category=event.category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=5,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = shorten_the_event  # type: ignore[method-assign]
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+            roster_only=True,
+        )
+        view = EventRosterEditView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=guild,
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        # The run's end is read off the event, so judging it by the one this
+        # picker opened with would draw removal controls over a roster that
+        # has already ended and refuse the next click.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "already ended" in kwargs["content"]
 
     async def test_roster_removal_stays_available_while_running(
         self,
@@ -3906,6 +4417,312 @@ class TestEventEditConfirmView:
         content = interaction.edit_original_response.await_args.kwargs["content"]
         assert "already started" in content
         assert "/event delete" in content
+
+    def make_waitlisted_fractal(self, store: EventStore) -> Any:
+        """A full healer seat with somebody waiting behind it."""
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Deep Dive",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=12,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        return event, occurrence
+
+    def make_category_change(self, fake_bot: Any, event: Any, occurrence: Any):
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.RAID
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        return view, interaction
+
+    async def test_category_change_announces_a_check_the_reseat_lost(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event, occurrence = self.make_waitlisted_fractal(store)
+        # 11 has left, so the check frees the healer seat 12 is waiting for.
+        fake_bot.guild = FakeGuild({12: "User 12"})
+
+        def refuse(*_args: Any, **_kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        monkeypatch.setattr(
+            "gw2bot.events.posting.rebalance_occurrence_roster",
+            refuse,
+        )
+        view, interaction = self.make_category_change(
+            fake_bot, event, occurrence
+        )
+        channel.thread.send.reset_mock()
+
+        await view.save_changes.callback(interaction)
+
+        promoted = store.get_signup(occurrence.occurrence_id, 12)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        # The re-seat failed, but the promotion the check made is committed,
+        # and nothing after this would have said so - the channel is not
+        # changing, so no re-post carries the update on.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+
+    async def test_category_change_survives_a_refused_occurrence_reread(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_waitlisted_fractal(store)
+        fake_bot.guild = FakeGuild({12: "User 12"})
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # The prune switches a removed member's automatic sign-up off
+            # last, so the next occurrence read is the one the rebalance
+            # takes after the check.
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view, interaction = self.make_category_change(
+            fake_bot, event, occurrence
+        )
+        channel.thread.send.reset_mock()
+
+        await view.save_changes.callback(interaction)
+
+        # The event row is already saved by then, so letting the read escape
+        # would leave the commander on "Saving your changes" for good - and
+        # lose the promotion the check had committed.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "Saving your changes" not in (kwargs.get("content") or "")
+
+    async def test_category_change_reports_a_stale_post_when_a_read_fails(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_waitlisted_fractal(store)
+        fake_bot.guild = FakeGuild({12: "User 12"})
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view, interaction = self.make_category_change(
+            fake_bot, event, occurrence
+        )
+
+        await view.save_changes.callback(interaction)
+
+        # The post is still carrying the old category, so saying the event
+        # was updated would leave it that way. It is reported as stale and
+        # marked for the scheduler to retry.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "may be out of date" in kwargs["content"]
+        stored = real_get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        assert stored.needs_refresh
+
+    async def test_category_change_reseats_without_who_has_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border Push",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        for user_id in range(1, 8):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        # 1 and 2 have left since the preview drew this roster. The channel is
+        # not changing, so nothing else on this path asks the server.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (3, 4, 5, 6, 7)}
+        )
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        on_roster = [signup.discord_user_id for signup in signups]
+        seated = [
+            signup.discord_user_id
+            for signup in signups
+            if not signup.waitlisted
+        ]
+        # The fractal's four DPS seats go to members who can still see the
+        # event; seating the two who left would hold two of them for a squad
+        # they are not in, and leave their automatic sign-up on.
+        assert 1 not in on_roster
+        assert 2 not in on_roster
+        assert seated == [3, 4, 5, 6]
+
+    async def test_category_change_renders_the_event_as_it_was_saved_last(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border Push",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({1: "User 1"})
+        real_fetch = guild.fetch_member
+
+        async def rename_the_event(user_id: int) -> Any:
+            # Another leader saves the event while this edit's roster check
+            # is asking Discord about every member.
+            saved = store.get_event(event.event_id)
+            assert saved is not None
+            store.update_event(
+                event_id=saved.event_id,
+                category=saved.category,
+                title="Renamed Mid-Check",
+                description=saved.description,
+                channel_id=saved.channel_id,
+                leader_discord_id=saved.leader_discord_id,
+                start_time=saved.start_time,
+                duration_minutes=saved.duration_minutes,
+                repeat_frequency=saved.repeat_frequency,
+                repeat_days=saved.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = rename_the_event  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # The stored event is the other leader's by now, so rendering the
+        # one this edit saved would leave the public post disagreeing with
+        # the row nobody is going to correct.
+        edit = channel.partial_message.edit.await_args
+        assert edit is not None
+        assert "Renamed Mid-Check" in edit.kwargs["embed"].title
 
     async def test_category_change_reseats_the_roster(
         self,
@@ -5883,6 +6700,513 @@ class TestRemoveSignups:
         assert isinstance(kwargs["view"], EventEditConfirmView)
         assert len(kwargs["embeds"]) == 2
 
+    async def test_removal_frees_the_seat_to_someone_still_here(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # The picker was drawn from a check that found everyone present.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in range(1, 8)}
+        )
+        await check_roster_membership(
+            fake_bot, event, occurrence, force=True
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # 6 - first in the queue - leaves while the picker sits open.
+        fake_bot.guild = FakeGuild(
+            {
+                user_id: f"User {user_id}"
+                for user_id in (1, 2, 3, 4, 5, 7)
+            }
+        )
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Answering the removal from the picker's own check would hand the
+        # freed seat to a member who has left the server.
+        assert store.get_signup(occurrence.occurrence_id, 6) is None
+        promoted = store.get_signup(occurrence.occurrence_id, 7)
+        assert promoted is not None
+        assert not promoted.waitlisted
+
+    async def test_removal_stops_when_a_removal_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # The event post is gone, so the first pick's own removal refreshes a
+        # message that answers NotFound - and that retires the run, well
+        # before its scheduled end.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        # The clock has not passed, so only the stored status says the run is
+        # over. Judging the loop on the schedule alone would report 3 as never
+        # signed up while their row is still there, and rebuild the edit
+        # preview over a roster that is history.
+        assert store.get_signup(occurrence.occurrence_id, 3) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "<@3>" in kwargs["content"]
+        assert "ended before" in kwargs["content"]
+        assert "not signed up" not in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_a_pick_the_check_took_off_is_not_also_kept(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # 5 has left, so the batch's check takes them off before the loop.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 6)}
+        )
+        real_remove = store.remove_signup
+
+        def end_the_event_after_the_first_pick(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            signup = real_remove(occurrence_id, discord_user_id)
+            if discord_user_id == 2:
+                store.set_occurrence_start_time(
+                    occurrence_id,
+                    datetime.now(UTC)
+                    - timedelta(minutes=event.duration_minutes + 1),
+                )
+            return signup
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            end_the_event_after_the_first_pick
+        )
+        interaction = self.make_remove_interaction()
+
+        # 5 is picked after 2, so an unfiltered batch would still be holding
+        # them when the event ends and count them among the kept.
+        await view.remove(interaction, picked_users(2, 5, 3))
+
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        # 5 went because they had left, 3 was kept because the event ended.
+        # Claiming both of 5 would be the summary contradicting itself.
+        assert "left the server" in content
+        assert "ended before" in content
+        kept = content.split("ended before")[1]
+        assert "<@3>" in kept
+        assert "<@5>" not in kept
+
+    async def test_removal_credits_a_pick_the_check_took_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        # 5 leaves while the picker sits open, so the batch's own check is
+        # what takes them off rather than the removal below.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 6)}
+        )
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(5))
+
+        assert store.get_signup(occurrence.occurrence_id, 5) is None
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        # The commander asked for them off and they are off; saying they were
+        # never signed up would deny the removal this confirmation made.
+        assert "left the server" in content
+        assert "not signed up" not in content
+
+    async def test_removal_stops_when_the_check_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # 6 has left, and the post they would be removed from is gone: the
+        # refresh answers NotFound and retires the occurrence mid-check.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5)}
+        )
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Continuing would report every pick as "not signed up" - which is
+        # what each removal answers on a retired roster - and rebuild the
+        # edit preview over a run that has already been replaced.
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_picker_stops_when_the_check_retires_the_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # 1 has left, and the post their removal refreshes is gone: the
+        # NotFound behind that retires the run before the picker is drawn.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild(
+                {user_id: f"User {user_id}" for user_id in (2, 3, 4, 5, 6)}
+            ),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        # The picker would only be refused on submission; there is no reason
+        # to offer a roster that is already history.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_removal_judges_the_end_by_a_duration_saved_mid_check(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A run that is under way, so a shorter duration can put its end
+        # behind us while the lookups are in flight.
+        event, occurrence = make_ongoing_edit_event(store)
+        for user_id, role, waitlisted in (
+            (1, EventRole.QUICKNESS_HEAL, False),
+            (2, EventRole.DPS, False),
+            (3, EventRole.DPS, False),
+            (4, EventRole.DPS, False),
+            (5, EventRole.DPS, False),
+            (6, EventRole.DPS, True),
+        ):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=None if waitlisted else role,
+                flex_roles=(),
+                waitlisted=waitlisted,
+            )
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        real_fetch = guild.fetch_member
+
+        async def shorten_the_event(user_id: int) -> Any:
+            # Another leader saves a one-minute duration while the batch's
+            # lookups are in flight, which puts this run behind us.
+            store.update_event(
+                event_id=event.event_id,
+                category=event.category,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=1,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = shorten_the_event  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Judged by the duration the event carries now, the run is over, so
+        # nobody comes off a roster that is history.
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "already ended" in kwargs["content"]
+
+    async def test_removal_offers_no_preview_when_the_last_one_retires_it(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        # The post was deleted by hand, so the one removal in this batch
+        # refreshes a message that is gone and retires the run - with no
+        # iteration behind it to notice.
+        channel.partial_message.edit = AsyncMock(side_effect=not_found_error())
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        retired = store.get_occurrence(occurrence.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        # The removal itself stands; what must not follow it is an edit
+        # preview over a run that has been replaced.
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert kwargs["embeds"] == []
+
+    async def test_removal_answers_when_the_run_reread_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        # 5 has left, so the check frees the DPS seat 6 is waiting for.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 6)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+        channel.thread.send.reset_mock()
+
+        await view.remove(interaction, picked_users(2))
+
+        # The message already said the removals were under way, so an error
+        # escaping here would leave the commander on it - and lose the
+        # promotion the check committed.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@6>" in channel.thread.send.await_args.args[0]
+
+    async def test_picker_answers_when_the_roster_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        # 1 has left; reads start failing once their removal is committed.
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild(
+                {user_id: f"User {user_id}" for user_id in (2, 3, 4, 5, 6)}
+            ),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        # The response already said the roster was loading, so an error
+        # escaping here would leave the commander on it for good.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_removal_keeps_what_it_did_when_a_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_remove = store.remove_signup
+        refusing = False
+
+        def arm_the_refusal(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            # Reads start failing once the first pick is off the roster.
+            nonlocal refusing
+            result = real_remove(occurrence_id, discord_user_id)
+            refusing = True
+            return result
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.remove_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2, 3))
+
+        # The first removal stands; the second is reported as kept rather
+        # than the response sitting on "Removing…" for good, and the wording
+        # says the store would not answer rather than that the event ended.
+        assert store.get_signup(occurrence.occurrence_id, 2) is None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@3>" in kwargs["content"]
+        assert kwargs["view"] is None
+
+    async def test_removal_does_not_call_a_refused_read_an_absence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        real_get_event = store.get_event
+        calls = {"count": 0}
+
+        def refuse_the_removals_read(event_id: int) -> Any:
+            # The batch's own reads keep working; only the one inside
+            # remove_signup fails.
+            calls["count"] += 1
+            if calls["count"] == 4:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.get_event = (  # type: ignore[method-assign]
+            refuse_the_removals_read
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Their signup is still on the roster, so "was not signed up" would
+        # be the wrong thing to tell the commander about it.
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@2>" in kwargs["content"]
+        assert "not signed up" not in kwargs["content"]
+
+    async def test_picker_is_built_from_what_a_partial_prune_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        real_remove = store.remove_signup
+        removals = 0
+
+        def fail_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            nonlocal removals
+            removals += 1
+            if removals > 1:
+                raise SQLAlchemyError("boom")
+            return real_remove(occurrence_id, discord_user_id)
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            fail_after_the_first
+        )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        view = EventEditConfirmView(fake_bot, draft)
+        # 1 and 5 have left. The first removal commits, the second refuses,
+        # and the check reports nothing because it could not finish.
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+            guild=FakeGuild(
+                {user_id: f"User {user_id}" for user_id in (2, 3, 4, 6)}
+            ),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.remove_signups.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 1) is None
+        assert interaction.edit_original_response.await_args is not None
+        picker = interaction.edit_original_response.await_args.kwargs["view"]
+        # Offering a seat that is already vacant would remove nobody and
+        # report the pick as never having been signed up.
+        assert "1" not in select_option_values(picker)
+
     async def test_removal_takes_several_members_at_once(
         self,
         fake_bot: Any,
@@ -6038,7 +7362,6 @@ class TestRemoveSignups:
         self,
         fake_bot: Any,
         store: EventStore,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # The end check runs once before the loop, but remove_signup awaits
         # Discord I/O between members, so the event can cross its end partway
@@ -6046,18 +7369,22 @@ class TestRemoveSignups:
         event, occurrence = self.make_full_roster(store)
         view = self.make_remove_view(fake_bot, event, occurrence)
         interaction = self.make_remove_interaction()
+        real_remove = store.remove_signup
 
-        # False for the pre-loop check and the first iteration, then True: the
-        # event ends right after the first member is removed.
-        calls = {"count": 0}
+        def end_the_event_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            signup = real_remove(occurrence_id, discord_user_id)
+            store.set_occurrence_start_time(
+                occurrence_id,
+                datetime.now(UTC)
+                - timedelta(minutes=event.duration_minutes + 1),
+            )
+            return signup
 
-        def fake_ended(_event: Any, _occurrence: Any, _now: Any) -> bool:
-            calls["count"] += 1
-            return calls["count"] > 2
-
-        monkeypatch.setattr(
-            "gw2bot.events.views.occurrence_has_ended",
-            fake_ended,
+        store.remove_signup = (  # type: ignore[method-assign]
+            end_the_event_after_the_first
         )
 
         await view.remove(interaction, picked_users(2, 3, 4))
@@ -6074,6 +7401,64 @@ class TestRemoveSignups:
         assert "ended before" in kwargs["content"]
         assert "<@3>" in kwargs["content"]
         assert "<@4>" in kwargs["content"]
+
+    async def test_removal_reads_the_event_back_between_members(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The run's end is the event's duration, not the occurrence's, so a
+        # leader shortening it mid-batch is only visible to a re-read of the
+        # event itself.
+        event, occurrence = self.make_full_roster(store)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(minutes=30),
+        )
+        running = store.get_occurrence(occurrence.occurrence_id)
+        assert running is not None
+        view = self.make_remove_view(fake_bot, event, running)
+        interaction = self.make_remove_interaction()
+        real_remove = store.remove_signup
+
+        def shorten_the_event_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            signup = real_remove(occurrence_id, discord_user_id)
+            saved = store.get_event(event.event_id)
+            assert saved is not None
+            store.update_event(
+                event_id=saved.event_id,
+                category=saved.category,
+                title=saved.title,
+                description=saved.description,
+                channel_id=saved.channel_id,
+                leader_discord_id=saved.leader_discord_id,
+                start_time=saved.start_time,
+                duration_minutes=5,
+                repeat_frequency=saved.repeat_frequency,
+                repeat_days=saved.repeat_days,
+            )
+            return signup
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            shorten_the_event_after_the_first
+        )
+
+        await view.remove(interaction, picked_users(2, 3, 4))
+
+        # The members pending when the run ended are kept, and told so:
+        # judging the end by the duration this batch opened with would have
+        # each removal refused a level down and reported as somebody who was
+        # never signed up.
+        assert store.get_signup(running.occurrence_id, 2) is None
+        assert store.get_signup(running.occurrence_id, 3) is not None
+        assert store.get_signup(running.occurrence_id, 4) is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "ended before" in kwargs["content"]
+        assert "not signed up" not in kwargs["content"]
 
     async def test_removal_reports_a_deleted_event(
         self,
@@ -6840,6 +8225,586 @@ class TestAddSignups:
         assert "Added <@11> to the roster." not in content
         # They are still told, because they are on the event either way.
         fake_bot.users[11].send.assert_awaited_once()
+
+    async def test_an_addition_seats_against_a_freshly_checked_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        # /event edit checked this roster before drawing the picker, and
+        # found everyone present.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 11)}
+        )
+        await check_roster_membership(
+            fake_bot, event, occurrence, force=True
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        # 5 leaves while the picker and its role step sit open.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 11)}
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # Seating against the preview's answer would spend the batch's one
+        # free seat on somebody who is no longer in the server.
+        assert store.get_signup(occurrence.occurrence_id, 5) is None
+        added = store.get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert not added.waitlisted
+
+    async def test_an_addition_answers_when_the_run_reread_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        # 5 has left, so the batch's own check takes them off - and the store
+        # starts refusing reads the moment that removal is committed.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 11)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The response already said the members were being added, so an error
+        # escaping here would leave the commander on it.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@11>" in kwargs["content"]
+
+    async def test_an_addition_reports_what_it_did_when_a_read_fails(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 11)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_add_signup = store.add_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # Seating the picked member is the last thing the loop does, so
+            # this pins the failure to the reads that come after it.
+            nonlocal refusing
+            result = real_add_signup(*args, **kwargs)
+            refusing = True
+            return result
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.add_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The seat is committed, so the summary has to go out rather than the
+        # error taking it, the notices and the announcement with it.
+        assert real_get_occurrence(occurrence.occurrence_id) is not None
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "<@11>" in kwargs["content"]
+        assert "could not be read" in kwargs["content"]
+
+    async def test_an_addition_answers_when_the_seat_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 11)}
+        )
+        real_fetch = guild.fetch_member
+        real_get_signup = store.get_signup
+        refusing = False
+
+        async def arm_the_refusal(user_id: int) -> Any:
+            # By the time the check's lookups run, the next seat read is the
+            # one the loop takes to see whether this member is already on.
+            nonlocal refusing
+            refusing = True
+            return await real_fetch(user_id)
+
+        def refuse_once_armed(occurrence_id: int, discord_user_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        guild.fetch_member = arm_the_refusal  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The response already says the members are being added, so this has
+        # to answer rather than escape.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@11>" in kwargs["content"]
+
+    async def test_an_addition_reports_the_notices_a_refused_read_lost(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        real_get_signup = store.get_signup
+        refusing = False
+        recipient = await fake_bot.fetch_user(11)
+
+        async def arm_the_refusal(*args: Any, **kwargs: Any) -> None:
+            # The first notice has gone out, so the read that refuses is the
+            # one the loop takes to see the second member is still seated.
+            nonlocal refusing
+            refusing = True
+
+        recipient.send = AsyncMock(side_effect=arm_the_refusal)
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            nonlocal refusing
+            if refusing:
+                refusing = False
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # Both seats are committed, so the refusal costs the one notice it
+        # stopped rather than the summary that has to report it.
+        assert real_get_signup(occurrence.occurrence_id, 11) is not None
+        assert real_get_signup(occurrence.occurrence_id, 12) is not None
+        fake_bot.users[12].send.assert_not_awaited()
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11>, <@12> to the roster." in content
+        assert "Could not send a direct message to <@12>" in content
+
+    async def test_an_addition_answers_when_the_waitlist_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        real_get_signup = store.get_signup
+        refusing = False
+        recipient = await fake_bot.fetch_user(11)
+
+        async def arm_the_refusal(*args: Any, **kwargs: Any) -> None:
+            # The only notice has gone out, so the seat reads left are the
+            # ones that work out who ended up on the waitlist.
+            nonlocal refusing
+            refusing = True
+
+        recipient.send = AsyncMock(side_effect=arm_the_refusal)
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        with caplog.at_level("ERROR"):
+            await view.pick(interaction, [11])
+
+        # The seat is committed and the member has been told, so a store
+        # that will not say who is on the waitlist costs that line alone.
+        assert real_get_signup(occurrence.occurrence_id, 11) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "Added <@11> to the roster." in content
+        assert "waitlist" not in content
+        assert (
+            "Could not read back who a roster addition waitlisted"
+            in caplog.text
+        )
+
+    async def test_a_refused_waitlist_read_keeps_what_the_seats_said(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        real_get_signup = store.get_signup
+        refusing = False
+        recipient = await fake_bot.fetch_user(11)
+
+        async def arm_the_refusal(*args: Any, **kwargs: Any) -> None:
+            # The notice has gone out, so the seat reads left are the ones
+            # that work out who ended up on the waitlist.
+            nonlocal refusing
+            refusing = True
+
+        recipient.send = AsyncMock(side_effect=arm_the_refusal)
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The seating already said this member went to the waitlist.
+        # Forgetting that would tell the commander the full event seated
+        # them.
+        added = real_get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert added.waitlisted
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert (
+            "The event is full, so <@11> was added to the waitlist." in content
+        )
+        assert "Added <@11> to the roster." not in content
+
+    async def test_an_addition_links_each_notice_to_the_run_as_it_stands(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        moved = FakeChannel(4321, FakeThread(888))
+        fake_bot._channels[moved.id] = moved
+        fake_bot._channels[moved.thread.id] = moved.thread
+        first = await fake_bot.fetch_user(11)
+        real_send = first.send
+
+        async def move_the_event(*args: Any, **kwargs: Any) -> Any:
+            # Another leader moves the event to a new channel between the
+            # first notice and the second.
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                moved.id,
+                999,
+                moved.thread.id,
+            )
+            return await real_send(*args, **kwargs)
+
+        first.send = AsyncMock(side_effect=move_the_event)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # The first notice was right when it went out; the second must not
+        # send its member to the post the run has just left.
+        sent = first.send.await_args
+        assert sent is not None
+        assert "/9876/1234/555)" in sent.args[0]
+        second = fake_bot.users[12].send.await_args
+        assert second is not None
+        assert "/9876/4321/999)" in second.args[0]
+
+    async def test_a_retired_run_outranks_a_category_change_mid_notice(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        first = await fake_bot.fetch_user(11)
+        real_send = first.send
+
+        async def retire_and_change(*args: Any, **kwargs: Any) -> Any:
+            # The save that changed the category refreshed a message
+            # somebody had deleted, which retires the run - both land
+            # between the first notice and the second.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.FRACTAL,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            store.set_occurrence_status(
+                occurrence.occurrence_id,
+                EventStatus.OVER,
+            )
+            return await real_send(*args, **kwargs)
+
+        first.send = AsyncMock(side_effect=retire_and_change)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # The category change only stops the seating; the run being over is
+        # what decides whether the notices still owed carry a link, so it is
+        # the reason that has to reach both the member and the commander.
+        second = fake_bot.users[12].send.await_args
+        assert second is not None
+        assert "discord.com/channels" not in second.args[0]
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "no longer available" in content
+
+    async def test_a_notice_follows_a_move_that_changed_the_category_too(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        moved = FakeChannel(4321, FakeThread(888))
+        fake_bot._channels[moved.id] = moved
+        fake_bot._channels[moved.thread.id] = moved.thread
+        first = await fake_bot.fetch_user(11)
+        real_send = first.send
+
+        async def change_and_move(*args: Any, **kwargs: Any) -> Any:
+            # One save, two changes: the category the batch was seating
+            # against, and the channel its post lives in.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.FRACTAL,
+                title=event.title,
+                description=event.description,
+                channel_id=moved.id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                moved.id,
+                999,
+                moved.thread.id,
+            )
+            return await real_send(*args, **kwargs)
+
+        first.send = AsyncMock(side_effect=change_and_move)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # The category change stops the batch, but it does not say where the
+        # post went: the second notice must not point at the message the
+        # move deleted.
+        second = fake_bot.users[12].send.await_args
+        assert second is not None
+        assert "/9876/4321/999)" in second.args[0]
+
+    async def test_an_addition_announces_into_the_thread_a_move_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A fractal seats one quickness, so seating a Quickness DPS flexes
+        # the quickness healer onto their alacrity flex - a move this batch
+        # owes the thread.
+        event, occurrence = self.make_event(store)
+        self.seat(
+            store,
+            occurrence,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            flex_roles=(EventRole.ALACRITY_HEAL,),
+        )
+        moved = FakeChannel(4321, FakeThread(888))
+        fake_bot._channels[moved.id] = moved
+        fake_bot._channels[moved.thread.id] = moved.thread
+        recipient = await fake_bot.fetch_user(11)
+
+        async def move_the_event(*args: Any, **kwargs: Any) -> None:
+            # Another leader moves the event to a new channel while the one
+            # notice this batch owes is going out.
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                moved.id,
+                999,
+                moved.thread.id,
+            )
+
+        recipient.send = AsyncMock(side_effect=move_the_event)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        channel.thread.send.reset_mock()
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_DPS)
+
+        # The thread the flex belongs in is the one the run has now; the
+        # one it was moved out of is gone as far as its members are
+        # concerned.
+        flexed = store.get_signup(occurrence.occurrence_id, 1)
+        assert flexed is not None
+        assert flexed.assigned_role is EventRole.ALACRITY_HEAL
+        moved.thread.send.assert_awaited_once()
+        announcement = moved.thread.send.await_args
+        assert announcement is not None
+        assert "<@1>" in announcement.args[0]
+        channel.thread.send.assert_not_awaited()
+
+    async def test_an_addition_announces_the_batch_once(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A raid seats two quickness, so adding a third flexes the quickness
+        # DPS onto their plain-DPS flex - a move of the batch's own, on top
+        # of the promotion the check makes.
+        event, occurrence = self.make_event(store, EventCategory.RAID)
+        self.seat(store, occurrence, 1, EventRole.DPS)
+        self.seat(
+            store,
+            occurrence,
+            2,
+            EventRole.QUICKNESS_DPS,
+            (EventRole.DPS,),
+        )
+        self.seat(store, occurrence, 7, EventRole.QUICKNESS_HEAL)
+        self.seat(store, occurrence, 6, EventRole.DPS, waitlisted=True)
+        # 1 has left, so the check takes their seat back and the waitlist
+        # moves up into it.
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (2, 6, 7, 11)}
+        )
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        channel.thread.send.reset_mock()
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_DPS)
+
+        promoted = store.get_signup(occurrence.occurrence_id, 6)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        flexed = store.get_signup(occurrence.occurrence_id, 2)
+        assert flexed is not None
+        assert flexed.assigned_role is EventRole.DPS
+        # One commander action says one thing about each member: the check's
+        # promotion and the seating's flex arrive together, not one after the
+        # other.
+        assert channel.thread.send.await_count == 1
 
     async def test_stale_commander_role_is_normalized_after_category_change(
         self,

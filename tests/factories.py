@@ -149,6 +149,12 @@ def config_from_env(values: Mapping[str, str]) -> Config:
     return compose_config(bootstrap, raw_values)
 
 
+# The server every fake bot and interaction is in. Membership checks resolve
+# the guild off the config, so a guild double has to carry the same id the
+# config names or the bot would never find it.
+COMMAND_GUILD_ID = 5678
+
+
 def default_config(**overrides: Any) -> Config:
     """Config carrying the shipped defaults for every Discord role and channel.
 
@@ -157,8 +163,45 @@ def default_config(**overrides: Any) -> Config:
     driving one of those commands needs a config to read them from.
     """
     overrides.setdefault("discord_token", "discord-token")
-    overrides.setdefault("discord_command_guild_id", 5678)
+    overrides.setdefault("discord_command_guild_id", COMMAND_GUILD_ID)
     return Config(**overrides)
+
+
+class FakeGuild:
+    """Answers member lookups the way Discord does for a bot without the intent.
+
+    The member cache is always empty, so every lookup is a fetch, and a member
+    who has left raises NotFound. ``fetched`` records those lookups in order,
+    which is how a test tells one round of them from several.
+    """
+
+    def __init__(
+        self,
+        members: Mapping[int, str],
+        guild_id: int = COMMAND_GUILD_ID,
+        fetch_error: Exception | None = None,
+    ):
+        self.id = guild_id
+        self._members = dict(members)
+        # What a member this guild does not list raises. "Unknown member" by
+        # default, which is the one answer that proves somebody has left; pass
+        # another to exercise a 404 that says nothing about them.
+        self._fetch_error = fetch_error
+        self.fetched: list[int] = []
+
+    def get_member(self, user_id: int) -> Any:
+        return None
+
+    async def fetch_member(self, user_id: int) -> Any:
+        self.fetched.append(user_id)
+        name = self._members.get(user_id)
+        if name is None:
+            raise (
+                self._fetch_error
+                if self._fetch_error is not None
+                else not_found_error()
+            )
+        return SimpleNamespace(id=user_id, display_name=name)
 
 
 def configured_bot(**attributes: Any) -> SimpleNamespace:
@@ -199,6 +242,19 @@ def not_found_error() -> discord.NotFound:
     return discord.NotFound(
         response,  # type: ignore[arg-type]
         {"code": 10007, "message": "Unknown Member"},
+    )
+
+
+def unknown_guild_error() -> discord.NotFound:
+    """The other 404 a member lookup can answer with.
+
+    Discord says it does not know the guild, not that it does not know this
+    member in it - so it says nothing about whether they have left.
+    """
+    response = SimpleNamespace(status=404, reason="Not Found")
+    return discord.NotFound(
+        response,  # type: ignore[arg-type]
+        {"code": 10004, "message": "Unknown Guild"},
     )
 
 

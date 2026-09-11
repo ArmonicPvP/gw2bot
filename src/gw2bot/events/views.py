@@ -1663,8 +1663,76 @@ async def open_roster_removal(
         event,
         occurrence,
     )
-    if departed_note is not None:
-        signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    # The check can also retire the run outright - its own removal refreshes a
+    # message somebody may have deleted, and the NotFound behind that persists
+    # OVER - so the occurrence is read back before a picker is drawn over a
+    # roster that has become history. RemoveSignupsView.remove refuses one on
+    # submission; there is no reason to offer it first.
+    from gw2bot.events.posting import occurrence_finished
+
+    # Both reads are store calls, and the response already says the roster is
+    # loading: a refusal has to answer rather than escape and leave the
+    # commander on it. The departures the check made are committed either way,
+    # and the next look at this roster shows them.
+    try:
+        live_occurrence = bot.event_store.get_occurrence(
+            occurrence.occurrence_id
+        )
+        # The event comes back with it. The end check below reads the run's
+        # duration off the event, and a leader can shorten an ongoing one
+        # while the lookups run: judged against the event this picker opened
+        # with, the controls would be drawn over a roster that has already
+        # ended, only to be refused on the commander's next click. The draft
+        # is left as it is - it is this commander's unsaved edit, not the
+        # other leader's save.
+        live_event = bot.event_store.get_event(editing_event_id)
+        signups = (
+            bot.event_store.get_signups(occurrence.occurrence_id)
+            if live_occurrence is not None
+            else []
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster back after checking it; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "The roster could not be read just now. Try again in a "
+                "moment."
+            ),
+            embeds=[],
+            view=None,
+        )
+        return
+    if (
+        live_occurrence is None
+        or live_event is None
+        or occurrence_finished(live_event, live_occurrence)
+    ):
+        LOGGER.debug(
+            "Roster removal found the occurrence retired while checking it; "
+            "occurrence_id=%s user_id=%s exists=%s event_exists=%s",
+            occurrence.occurrence_id,
+            interaction.user.id,
+            live_occurrence is not None,
+            live_event is not None,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "This event has already ended, so its roster can no longer "
+                "be edited."
+            ),
+            embeds=[],
+            view=None,
+        )
+        return
+    # The roster was read back above whatever the check reported. A prune that
+    # fails partway still commits the removals it had made and cannot report
+    # them, so the list read before it can offer seats that are already vacant
+    # - or be non-empty for a roster the prune has emptied.
     if not signups:
         LOGGER.debug(
             "Roster removal emptied the roster by pruning departed members; "
@@ -1705,12 +1773,15 @@ async def prune_departed_members(
 
     Returns the line describing who went (None when nobody did) and the
     display names of the whole roster, which the caller reuses so one round of
-    member lookups serves both the check and whatever it renders next.
+    member lookups serves both the check and whatever it renders next. Those
+    same lookups are handed to the shared check, which therefore spends none
+    of its own.
+
+    A commander who has just opened the roster is asking about it now, so the
+    check is forced rather than answered from the one a sign-up may have made
+    moments ago.
     """
-    from gw2bot.events.posting import (
-        notify_roster_update,
-        prune_departed_signups,
-    )
+    from gw2bot.events.posting import check_roster_membership
 
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not signups:
@@ -1724,15 +1795,15 @@ async def prune_departed_members(
         user_id: membership.display_name
         for user_id, membership in memberships.items()
     }
-    departed, update = await prune_departed_signups(
+    departed, _ = await check_roster_membership(
         bot,
         event,
         occurrence,
-        memberships,
+        memberships=memberships,
+        force=True,
     )
     if not departed:
         return None, names
-    await notify_roster_update(bot, occurrence, update)
     return _departed_summary(departed, names), names
 
 
@@ -1986,8 +2057,11 @@ class RemoveSignupsView(discord.ui.View):
         user_ids: list[int],
     ) -> None:
         from gw2bot.events.posting import (
+            RosterUnreadable,
+            check_roster_membership,
             merge_roster_updates,
             notify_roster_update,
+            occurrence_finished,
             remove_signup,
         )
 
@@ -2006,37 +2080,173 @@ class RemoveSignupsView(discord.ui.View):
             embeds=[],
             view=None,
         )
+        # The picker was drawn from a check, and that answer stands for a
+        # minute: a member who left while it sat open would still be holding
+        # a seat here, and the removals below would hand one to them off the
+        # waitlist. Ask once for the batch; the removals are answered from
+        # this rather than sweeping the roster per member. Quietly, for the
+        # same reason the additions do: the removals below are announced once
+        # at the end, and this half belongs in that.
+        departed, checked = await check_roster_membership(
+            self._bot,
+            event,
+            occurrence,
+            force=True,
+            notify=False,
+        )
+        # That check can retire the occurrence itself: the removal it makes
+        # refreshes a message that may have been deleted by hand, and the
+        # NotFound behind that persists OVER and seeds the series' next run.
+        # Read the row back and stop, rather than reporting every pick as "not
+        # signed up" - which is what each removal would answer - and rebuilding
+        # the edit preview over a roster that is history.
+        #
+        # The event comes back with it. Another leader can save a shorter
+        # duration or a different category while the lookups are in flight,
+        # and the batch judges the run's end by that duration, hands the event
+        # to every removal, and tells each member about it.
+        try:
+            current = self._bot.event_store.get_occurrence(
+                occurrence.occurrence_id
+            )
+            edited = self._bot.event_store.get_event(event.event_id)
+        except SQLAlchemyError as exc:
+            # The message already says the removals are under way, so this
+            # answers rather than escaping. The check's own removals are
+            # committed and nothing below is going to announce them.
+            LOGGER.error(
+                "Could not re-read the run after a removal batch's check; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            await notify_roster_update(self._bot, occurrence, checked)
+            await interaction.edit_original_response(
+                content=(
+                    "The roster could not be read just now, so nobody was "
+                    "removed. Try again in a moment."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
+        if (
+            current is None
+            or edited is None
+            or occurrence_finished(edited, current)
+        ):
+            LOGGER.debug(
+                "Roster removal found the occurrence retired; "
+                "occurrence_id=%s user_id=%s exists=%s event_exists=%s",
+                occurrence.occurrence_id,
+                interaction.user.id,
+                current is not None,
+                edited is not None,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "This event has already ended, so its roster can no "
+                    "longer be changed."
+                ),
+                embeds=[],
+                view=None,
+            )
+            return
+        occurrence = current
+        event = edited
         removed: list[int] = []
         skipped: list[int] = []
-        updates: list[RosterUpdate] = []
+        # Picks the check took off because they had left the server. They are
+        # off the roster, which is what the commander asked for, but reporting
+        # them as never having been signed up would deny the removal this very
+        # confirmation made. Taken out of the batch as well as counted: the
+        # loop has nothing left to do for them, and leaving them in it would
+        # let the remainder below claim they were kept for an event that ended
+        # after they had already gone.
+        departed_ids = set(departed)
+        picked = list(user_ids)
+        gone = [user_id for user_id in picked if user_id in departed_ids]
+        user_ids = [user_id for user_id in picked if user_id not in gone]
+        updates: list[RosterUpdate] = [checked]
         kept_after_end: list[int] = []
+        unread: list[int] = []
         undelivered: list[int] = []
         for index, user_id in enumerate(user_ids):
             # The picker holds several members and remove_signup awaits Discord
             # I/O between each, so the event can cross its end partway through
-            # the loop even though the pre-loop check passed. Re-check every
-            # iteration and stop the moment it has ended, so no removal (and no
-            # waitlist promotion behind it) ever lands on a finished roster.
-            if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+            # the loop even though the pre-loop check passed. Re-read the row
+            # every iteration and stop the moment it is history, so no removal
+            # (and no waitlist promotion behind it) ever lands on a finished
+            # roster. The clock is not the only way it gets there: a removal
+            # that refreshes a message somebody deleted retires the run
+            # outright, so one of these removals can be what ends it.
+            try:
+                live = self._bot.event_store.get_occurrence(
+                    occurrence.occurrence_id
+                )
+                # The event comes back with it, because the run's end is
+                # judged by its duration: a leader shortening an event while
+                # these removals go out would otherwise be read against the
+                # duration this batch opened with, and every removal past
+                # the new end refused a level down and reported as a member
+                # who was never signed up.
+                live_event = self._bot.event_store.get_event(event.event_id)
+            except SQLAlchemyError as exc:
+                # A store that will not answer cannot be asked to remove the
+                # rest either. Stop with what landed rather than letting this
+                # escape and leave the commander on "Removing…".
+                unread = list(user_ids[index:])
+                LOGGER.error(
+                    "Could not read the run mid-removal; stopping; "
+                    "occurrence_id=%s kept=%s error_type=%s",
+                    occurrence.occurrence_id,
+                    len(unread),
+                    type(exc).__name__,
+                )
+                break
+            if (
+                live is None
+                or live_event is None
+                or occurrence_finished(live_event, live)
+            ):
                 kept_after_end = list(user_ids[index:])
                 LOGGER.debug(
                     "Event ended mid-removal; stopping; occurrence_id=%s "
-                    "user_id=%s kept=%s",
+                    "user_id=%s kept=%s exists=%s event_exists=%s",
                     occurrence.occurrence_id,
                     interaction.user.id,
                     len(kept_after_end),
+                    live is not None,
+                    live_event is not None,
                 )
                 break
+            occurrence = live
+            event = live_event
             # Notification is deferred to a single merged announcement after
             # the loop: per-removal pings would post one thread message per
             # member for what the leader sees as a single edit.
-            signup, update = await remove_signup(
-                self._bot,
-                event,
-                occurrence,
-                user_id,
-                notify=False,
-            )
+            try:
+                signup, update = await remove_signup(
+                    self._bot,
+                    event,
+                    occurrence,
+                    user_id,
+                    notify=False,
+                )
+            except RosterUnreadable:
+                # The removal could not read the run, which says nothing
+                # about this member's seat: counting them as never signed up
+                # would deny a signup that is still there. Stops the batch
+                # like the read above, since the rest would fare no better.
+                unread = list(user_ids[index:])
+                LOGGER.error(
+                    "Could not read the run for a removal; stopping; "
+                    "occurrence_id=%s user_id=%s kept=%s",
+                    occurrence.occurrence_id,
+                    interaction.user.id,
+                    len(unread),
+                )
+                break
             if signup is None:
                 skipped.append(user_id)
                 continue
@@ -2058,19 +2268,20 @@ class RemoveSignupsView(discord.ui.View):
         # each user's changes into one line and drops the ones who ended up off
         # the roster, so the announcement and the summary below both describe
         # the net result.
-        merged = merge_roster_updates(updates, removed)
+        merged = merge_roster_updates(updates, [*removed, *gone])
         await notify_roster_update(self._bot, occurrence, merged)
         promoted = [signup.discord_user_id for signup in merged.promoted]
         LOGGER.debug(
             "Applied roster removal; event_id=%s occurrence_id=%s user_id=%s "
-            "picked=%s removed=%s not_signed_up=%s promoted=%s kept=%s "
-            "undelivered=%s",
+            "picked=%s removed=%s not_signed_up=%s departed=%s promoted=%s "
+            "kept=%s undelivered=%s",
             event.event_id,
             occurrence.occurrence_id,
             interaction.user.id,
-            len(user_ids),
+            len(picked),
             len(removed),
             len(skipped),
+            len(gone),
             len(promoted),
             len(kept_after_end),
             len(undelivered),
@@ -2081,12 +2292,33 @@ class RemoveSignupsView(discord.ui.View):
             promoted,
             kept_after_end,
             undelivered,
+            gone,
+            unread,
         )
-        if kept_after_end:
-            # The event ended partway through, so the edit session is no longer
-            # valid (an ended event cannot be edited). Report what was applied
-            # and stop, rather than re-showing an edit preview that can no
-            # longer be saved.
+        # The guard above runs before each removal, so the last one is not
+        # covered by it: a removal that refreshes a message somebody deleted
+        # retires the run, and with nothing left to iterate there is no next
+        # pass to notice. Read the row once more before offering a preview. A
+        # store that cannot answer is treated the same way, because a preview
+        # drawn from what it could not read is worse than none.
+        try:
+            settled = self._bot.event_store.get_occurrence(
+                occurrence.occurrence_id
+            )
+            retired = settled is None or occurrence_finished(event, settled)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after a removal batch; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            retired = True
+        if kept_after_end or unread or retired:
+            # The event ended partway through, or one of these removals ended
+            # it, so the edit session is no longer valid (an ended event
+            # cannot be edited). Report what was applied and stop, rather than
+            # re-showing an edit preview that can no longer be saved.
             await interaction.edit_original_response(
                 content=summary,
                 embeds=[],
@@ -2173,12 +2405,22 @@ def _removal_summary(
     promoted: list[int],
     kept_after_end: list[int] | None = None,
     undelivered: list[int] | None = None,
+    departed: list[int] | None = None,
+    unread: list[int] | None = None,
 ) -> str:
     lines: list[str] = []
     if removed:
         lines.append(f"Removed {_mention_list(removed)} from the roster.")
-    else:
+    elif not departed:
         lines.append("Nobody was removed from the roster.")
+    if departed:
+        # Off the roster either way, but by the membership check rather than
+        # by this removal - so they were never sent the direct message the
+        # others get, and the commander should know why.
+        lines.append(
+            _mention_list(departed)
+            + " had left the server, so they were taken off the roster."
+        )
     if skipped:
         lines.append(
             f"{_mention_list(skipped)} was not signed up for this event."
@@ -2192,6 +2434,16 @@ def _removal_summary(
             "The event ended before the rest could be removed, so "
             + _mention_list(kept_after_end)
             + (" was kept." if len(kept_after_end) == 1 else " were kept.")
+        )
+    if unread:
+        # A different stop from the one above: the run did not end, the store
+        # simply would not answer, and trying again in a moment is the right
+        # advice rather than "the event is over".
+        lines.append(
+            "The roster could not be read, so "
+            + _mention_list(unread)
+            + (" was kept." if len(unread) == 1 else " were kept.")
+            + " Try again in a moment."
         )
     if undelivered:
         # The removal itself went through; only the courtesy DM did not, which
@@ -2503,15 +2755,16 @@ def _addition_dm_content(
 class _AdditionStop(StrEnum):
     """Why a batch addition stopped before it reached every picked member.
 
-    The three read very differently to the commander: an event that finished
-    is nobody's fault, a retired occurrence means its post was deleted and is
-    worth chasing, and a concurrent edit means the batch can simply be run
-    again.
+    They read very differently to the commander: an event that finished is
+    nobody's fault, a retired occurrence means its post was deleted and is
+    worth chasing, a concurrent edit means the batch can simply be run again,
+    and a roster the store would not read is worth trying again in a moment.
     """
 
     ENDED = "ended"
     RETIRED = "retired"
     CHANGED = "changed"
+    UNREADABLE = "unreadable"
 
 
 @dataclass
@@ -2528,12 +2781,27 @@ class _AdditionOutcome:
     stop: _AdditionStop | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _AdditionTarget:
+    """The rows a batch addition works on, and why it must stop, if it must.
+
+    The two are not alternatives. A save that changes the category and the
+    channel together stops the seating and moves the post in one go, and the
+    notices still owed have to point at where it went - so the rows come back
+    with the reason whenever they were readable at all.
+    """
+
+    event: Event | None = None
+    occurrence: EventOccurrence | None = None
+    stop: _AdditionStop | None = None
+
+
 def _addition_target(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
-) -> tuple[Event, EventOccurrence] | _AdditionStop:
-    """Re-read the rows a batch addition works on, or say why it must stop.
+) -> _AdditionTarget:
+    """Re-read the rows a batch addition works on, and say if it must stop.
 
     seat_signup awaits Discord I/O, so both rows can go out from under a batch
     between one member and the next, in three ways worth telling apart:
@@ -2553,16 +2821,20 @@ def _addition_target(
         occurrence.occurrence_id
     )
     if fresh_event is None or fresh_occurrence is None:
-        return _AdditionStop.RETIRED
-    if fresh_event.category is not event.category:
-        return _AdditionStop.CHANGED
-    # Checked before the stored status, so an occurrence that is OVER because
+        return _AdditionTarget(stop=_AdditionStop.RETIRED)
+    stop: _AdditionStop | None = None
+    # A run that is over is reported as over even when the same save changed
+    # the category: it decides whether the notices still owed carry a link at
+    # all, while a category change only stops the seating. The clock is
+    # checked before the stored status, so an occurrence that is OVER because
     # it genuinely finished is not reported as a deleted post.
     if occurrence_has_ended(fresh_event, fresh_occurrence, datetime.now(UTC)):
-        return _AdditionStop.ENDED
-    if fresh_occurrence.status is EventStatus.OVER:
-        return _AdditionStop.RETIRED
-    return fresh_event, fresh_occurrence
+        stop = _AdditionStop.ENDED
+    elif fresh_occurrence.status is EventStatus.OVER:
+        stop = _AdditionStop.RETIRED
+    elif fresh_event.category is not event.category:
+        stop = _AdditionStop.CHANGED
+    return _AdditionTarget(fresh_event, fresh_occurrence, stop)
 
 
 async def _drop_departed_picks(
@@ -2615,6 +2887,7 @@ async def apply_roster_addition(
 ) -> None:
     """Sign the picked members up, then report what the roster did."""
     from gw2bot.events.posting import (
+        check_roster_membership,
         merge_roster_updates,
         notify_roster_update,
         seat_signup,
@@ -2686,29 +2959,87 @@ async def apply_roster_addition(
         interaction,
         user_ids,
     )
+    # The picks are checked above; this checks the roster they are being
+    # seated alongside. The preview behind this picker already asked about it,
+    # and its answer stands for a minute, so the seats would otherwise be
+    # solved against a roster read before the commander opened the picker -
+    # and a member who left while it sat open would hold one of them. Once
+    # for the batch: the seatings below each ask too, and are answered from
+    # this one rather than sweeping the roster per member.
+    #
+    # Quietly: the additions below collect their own moves for a single
+    # announcement at the end, and a member the check promotes can be moved
+    # again by a seating in the same batch. One commander action says one
+    # thing about each member, so the check's half is folded in rather than
+    # sent ahead of it.
+    _, checked = await check_roster_membership(
+        bot,
+        event,
+        current,
+        force=True,
+        notify=False,
+    )
+    updates.append(checked)
     for index, user_id in enumerate(user_ids):
         # Re-read both rows rather than trusting the ones the batch started
         # with. The member being seated when a change lands is already past
         # this check and keeps whatever seat the old state gave them; stopping
         # here bounds that to one member instead of the whole batch.
-        target = _addition_target(bot, event, current)
-        if isinstance(target, _AdditionStop):
-            outcome.stop = target
+        #
+        # A store that refuses those reads has to answer rather than escape:
+        # the response already says the members are being added, and the
+        # check's own departures are committed with nothing to announce them
+        # if this call never reaches the end of the batch, which is where the
+        # one merged announcement goes out.
+        try:
+            target = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back during a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.stop = _AdditionStop.UNREADABLE
+            outcome.left_off = list(user_ids[index:])
+            break
+        if target.event is not None and target.occurrence is not None:
+            event, current = target.event, target.occurrence
+        if target.stop is not None:
+            outcome.stop = target.stop
             outcome.left_off = list(user_ids[index:])
             LOGGER.debug(
                 "Stopped a roster addition; occurrence_id=%s user_id=%s "
                 "reason=%s left_off=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                target.value,
+                target.stop.value,
                 len(outcome.left_off),
             )
             break
-        event, current = target
         # add_signup would overwrite an existing row, resetting the member's
         # signed-up time and with it their seating priority, so a member who is
         # already on the roster is left exactly as they are.
-        if bot.event_store.get_signup(current.occurrence_id, user_id):
+        #
+        # Guarded like the read above it, and for the same reason: the seats
+        # already taken and the check's own departures are committed, and an
+        # escape here takes the notices, the announcement and the summary
+        # with it.
+        try:
+            already_seated = bot.event_store.get_signup(
+                current.occurrence_id, user_id
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read a member's seat during a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.stop = _AdditionStop.UNREADABLE
+            outcome.left_off = list(user_ids[index:])
+            break
+        if already_seated:
             outcome.skipped.append(user_id)
             continue
         try:
@@ -2746,29 +3077,78 @@ async def apply_roster_addition(
         # check once more, so the final member is not sent a link to a message
         # that is gone and the preview below is not offered for a roster that
         # can no longer be edited.
-        target = _addition_target(bot, event, current)
-        if isinstance(target, _AdditionStop):
-            outcome.stop = target
+        # Guarded like the one inside the loop: the seats are committed by
+        # now, and a store that will not answer must not take the notices,
+        # the announcement and the summary down with it.
+        try:
+            target = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            target = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        if target.event is not None and target.occurrence is not None:
+            event, current = target.event, target.occurrence
+        if target.stop is not None:
+            outcome.stop = target.stop
             LOGGER.debug(
                 "Roster addition finished on an event that is no longer "
                 "live; occurrence_id=%s user_id=%s reason=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                target.value,
+                target.stop.value,
             )
-        else:
-            event, current = target
     # Sent once the roster's final state is known, so a seat that retired the
     # occurrence cannot send anyone a link to the deleted message. One member
     # with closed DMs must not stop the rest, so a failed delivery is only
     # recorded for the summary.
-    link = (
-        None
-        if outcome.stop is _AdditionStop.RETIRED
-        else _event_message_link(interaction.guild_id, event, current)
-    )
-    content = _addition_dm_content(interaction.user.id, event, link)
+    def addition_notice() -> str:
+        link = (
+            None
+            if outcome.stop is _AdditionStop.RETIRED
+            else _event_message_link(interaction.guild_id, event, current)
+        )
+        return _addition_dm_content(interaction.user.id, event, link)
+
+    content = addition_notice()
     for user_id in outcome.added:
+        # Both rows are read again before each delivery, because each one
+        # awaits Discord: a channel move landing between two notices would
+        # otherwise send the rest of them a jump link to the post the run
+        # has just left, and a run retired mid-loop would keep handing out a
+        # link to a message that has gone. What the notice says is rebuilt
+        # from whatever comes back. A store that will not answer says
+        # nothing about the message, so the notice keeps the last link known
+        # to be good rather than dropping it.
+        try:
+            live = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back between addition notices; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            live = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        # Adopted whether or not it also reports a stop: a save that changes
+        # the category and the channel together answers CHANGED and moves
+        # the post in the same breath, and the notices left would otherwise
+        # carry a link to the message that move deleted.
+        if live.event is not None and live.occurrence is not None:
+            event, current = live.event, live.occurrence
+        if live.stop is not None and outcome.stop is None:
+            outcome.stop = live.stop
+            LOGGER.debug(
+                "Roster addition target went away between its notices; "
+                "occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                live.stop.value,
+            )
+        content = addition_notice()
         # These are sequential external deliveries, so /event delete can land
         # between two of them and cascade the whole roster away. The member's
         # own row is the exact question being answered: a row that has gone
@@ -2776,7 +3156,27 @@ async def apply_roster_addition(
         # wrong, while a row that survives an occurrence retired above still
         # earns its notice (without the link the check above already dropped).
         # Either way the commander is told they went unnotified.
-        if bot.event_store.get_signup(current.occurrence_id, user_id) is None:
+        #
+        # A store that will not answer is not evidence the seat has gone, and
+        # everything after this loop - the announcement and the summary - is
+        # still owed to the commander. The notices left are recorded as
+        # undelivered, which is what they are, and the rest carries on.
+        try:
+            seated = bot.event_store.get_signup(
+                current.occurrence_id, user_id
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read a seat before its addition notice; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.undelivered.extend(
+                outcome.added[outcome.added.index(user_id):]
+            )
+            break
+        if seated is None:
             LOGGER.debug(
                 "Skipped a roster addition notice for a seat that has gone; "
                 "occurrence_id=%s",
@@ -2792,15 +3192,30 @@ async def apply_roster_addition(
         # above guarded what the notices say; this one guards what is offered
         # afterwards, so edit controls are never rebuilt for a roster that has
         # since gone.
-        final = _addition_target(bot, event, current)
-        if isinstance(final, _AdditionStop):
-            outcome.stop = final
+        try:
+            final = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back after a roster addition's "
+                "notices; occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            final = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        # Adopted like the earlier verifications, and for the same reason: a
+        # channel move landing while the notices went out replaces the thread
+        # the announcement below is sent to and the message the preview is
+        # drawn from, so both must be addressed to the run as it now stands.
+        if final.event is not None and final.occurrence is not None:
+            event, current = final.event, final.occurrence
+        if final.stop is not None:
+            outcome.stop = final.stop
             LOGGER.debug(
                 "Roster addition target went away while its notices were "
                 "sent; occurrence_id=%s user_id=%s reason=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                final.value,
+                final.stop.value,
             )
     # Re-read the seats rather than trusting what each write returned. An edit
     # landing while seat_signup awaited Discord re-seats the whole roster under
@@ -2809,11 +3224,28 @@ async def apply_roster_addition(
     # rebalance has since seated them. One store read describes them all as
     # they now stand. A member whose row has gone (the event was deleted) is
     # left out of the waitlist entirely; the stop note below covers that.
-    outcome.waitlisted = [
-        user_id
-        for user_id in outcome.added
-        if _is_waitlisted(bot, current.occurrence_id, user_id)
-    ]
+    #
+    # Guarded like every other read on this path: the seats are committed and
+    # the announcement and the summary still have to go out, so a store that
+    # will not say who ended up on the waitlist costs that one line of the
+    # summary rather than the whole answer.
+    try:
+        outcome.waitlisted = [
+            user_id
+            for user_id in outcome.added
+            if _is_waitlisted(bot, current.occurrence_id, user_id)
+        ]
+    except SQLAlchemyError as exc:
+        # The assignment never happened, so what each seat_signup reported
+        # stands. It can be a capacity an edit has since replaced, but it is
+        # what this batch was told, and clearing it would tell a commander
+        # that members the event had no room for were seated.
+        LOGGER.error(
+            "Could not read back who a roster addition waitlisted; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
     # Each addition can flex seated members into another of their roles, and a
     # later addition can move someone an earlier one already moved. Merging
     # collapses each member's changes into one line describing the net result.
@@ -2886,6 +3318,11 @@ def _addition_finished_note(stop: _AdditionStop) -> str:
             "This event's post is no longer available; its message may have "
             "been deleted."
         )
+    if stop is _AdditionStop.UNREADABLE:
+        return (
+            "The roster could not be read while the members were being "
+            "added, so it may have moved on since."
+        )
     return "The event ended while the members were being added."
 
 
@@ -2909,6 +3346,11 @@ def _addition_stop_note(
         return (
             f"This event's post is no longer available, so {who} {were} left "
             "off. Its message may have been deleted."
+        )
+    if stop is _AdditionStop.UNREADABLE:
+        return (
+            f"The roster could not be read just now, so {who} {were} left "
+            "off. Try `/event edit` again in a moment."
         )
     return (
         f"The event ended before the rest could be added, so {who} {were} "
@@ -3032,7 +3474,10 @@ async def apply_event_edit(
     repost: bool,
 ) -> None:
     from gw2bot.events.posting import (
+        check_roster_membership,
+        merge_roster_updates,
         notify_roster_update,
+        occurrence_finished,
         rebalance_occurrence_roster,
         refresh_occurrence_message,
         repost_occurrence,
@@ -3159,15 +3604,105 @@ async def apply_event_edit(
             if refetched is not None:
                 current = refetched
         if category_changed:
+            # Re-seat the members who are actually still here. The preview's
+            # check can be minutes old by the time the pickers and the modal
+            # are done with, and a departed member re-seated under the new
+            # capacity would hold one of its seats - or be handed a better one
+            # - for a squad they cannot see, with their automatic sign-up
+            # still on. A move checks again after its post as well, which is a
+            # different question: who is still here to be subscribed to the
+            # thread it has just opened.
+            checked = RosterUpdate()
+            try:
+                _, checked = await check_roster_membership(
+                    bot,
+                    updated,
+                    current,
+                    force=True,
+                    notify=False,
+                )
+            except (discord.DiscordException, SQLAlchemyError) as exc:
+                # A roster the bot could not check is still a roster to
+                # re-seat; the departures wait for the next check.
+                LOGGER.error(
+                    "Could not check the roster before a category rebalance; "
+                    "occurrence_id=%s error_type=%s",
+                    current.occurrence_id,
+                    type(exc).__name__,
+                )
+            # The check removes through remove_signup, which re-solves the
+            # roster it leaves behind, so the rebalance below must see those
+            # rows rather than the ones read before it. That removal also
+            # refreshes a message somebody may have deleted, and the NotFound
+            # behind it retires the run: re-seating a roster that is history,
+            # and re-rendering a message that is gone, helps nobody. Every
+            # occurrence here is still in the future, so only that can end one.
+            try:
+                reread = bot.event_store.get_occurrence(
+                    current.occurrence_id
+                )
+                # The event comes back with it. This edit's own save is
+                # committed, but the check awaits Discord for every member,
+                # and another leader saving in that window leaves the row
+                # holding their category, title, channel and duration. The
+                # re-seat and the render below have to describe the event
+                # that is stored, or the roster and the public post are left
+                # disagreeing with it.
+                resaved = bot.event_store.get_event(updated.event_id)
+            except SQLAlchemyError as exc:
+                # The event row is already saved, so this must not escape the
+                # callback and leave the commander on "Saving your changes".
+                # A store that cannot answer cannot re-seat either.
+                #
+                # Not the same thing as a run that has gone, though, which is
+                # why this does not fall into the branch below: that message
+                # is still in its channel carrying the old category, and
+                # calling the edit applied would leave it there. Counted as a
+                # posted occurrence that failed to refresh, so the scheduler
+                # retries it, the commander is told, and a move puts the
+                # channel back rather than pointing the event at one its post
+                # never reached.
+                LOGGER.error(
+                    "Could not re-read the occurrence after its roster "
+                    "check; occurrence_id=%s error_type=%s",
+                    current.occurrence_id,
+                    type(exc).__name__,
+                )
+                await notify_roster_update(bot, current, checked)
+                if current.message_id is not None:
+                    attempted += 1
+                    _mark_occurrence_stale(bot, current)
+                continue
+            if (
+                reread is None
+                or resaved is None
+                or occurrence_finished(resaved, reread)
+            ):
+                LOGGER.debug(
+                    "Skipped a category rebalance for a run the check "
+                    "retired; occurrence_id=%s exists=%s event_exists=%s",
+                    current.occurrence_id,
+                    reread is not None,
+                    resaved is not None,
+                )
+                await notify_roster_update(bot, current, checked)
+                continue
+            current = reread
+            updated = resaved
             # The category picks the capacity the roster was seated against, so
             # changing it invalidates every stored assignment. Re-seat the roster
             # before the message is re-rendered, so the embed and the capacity
             # checks both describe the new category, and announce the moves in
             # the occurrence's thread so members learn their new seat.
             try:
-                _, roster_update = rebalance_occurrence_roster(
+                _, rebalanced = rebalance_occurrence_roster(
                     bot, updated, current
                 )
+                # The check moved the roster before the re-seat did, and it
+                # can have moved the same member: folded, they read as one
+                # move, and anybody it took off is dropped rather than given a
+                # seat in the new squad.
+                roster_update = merge_roster_updates([checked, rebalanced])
             except (SQLAlchemyError, ValueError) as exc:
                 # A stale roster must not block the rest of the edit.
                 LOGGER.error(
@@ -3176,14 +3711,17 @@ async def apply_event_edit(
                     current.occurrence_id,
                     type(exc).__name__,
                 )
-                roster_update = RosterUpdate()
-            else:
-                if not moving:
-                    # For an in-place refresh the thread is stable, so announce
-                    # the reseat now. A channel move deletes this thread and
-                    # opens a new one, so its ping is deferred to after the
-                    # repost below and re-targeted at the new thread.
-                    await notify_roster_update(bot, current, roster_update)
+                # The check's own movements are committed whatever the
+                # re-seat did, so they are still what gets announced.
+                roster_update = checked
+            if not moving:
+                # For an in-place refresh the thread is stable, so announce
+                # what moved the roster now - the re-seat and the check
+                # folded, or just the check when the re-seat failed. A channel
+                # move deletes this thread and opens a new one, so its ping is
+                # deferred to after the repost below and re-targeted at the
+                # new thread.
+                await notify_roster_update(bot, current, roster_update)
         if current.message_id is None:
             # Unposted (e.g. a recurring series' next occurrence): the
             # reschedule above is persisted and the scheduler will post it with
@@ -3198,8 +3736,28 @@ async def apply_event_edit(
                 # returns the occurrence carrying the new one, so the deferred
                 # roster ping goes there - the old thread the members were
                 # notified in no longer exists.
-                reposted = await repost_occurrence(bot, updated, current)
-                await notify_roster_update(bot, reposted, roster_update)
+                # The re-post checks the roster against the server, which
+                # can take departed members off it and re-seat the rest, so
+                # the update computed above is handed over rather than sent
+                # after it: the two are folded into one line per member,
+                # inside the thread the move has just opened.
+                reposted = await repost_occurrence(
+                    bot,
+                    updated,
+                    current,
+                    roster_update,
+                )
+                if reposted is None:
+                    # The move's own roster check retired this run - its
+                    # replacement message was gone by the time the check
+                    # refreshed it - so there is no live post in the new
+                    # channel to report as moved.
+                    LOGGER.error(
+                        "Moved occurrence retired during its roster check; "
+                        "occurrence_id=%s",
+                        current.occurrence_id,
+                    )
+                    continue
             else:
                 await refresh_occurrence_message(
                     bot,
@@ -4861,7 +5419,11 @@ class SignOutConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[SignOutConfirmView],
     ) -> None:
-        from gw2bot.events.posting import remove_signup
+        from gw2bot.events.posting import (
+            RosterUnreadable,
+            occurrence_finished,
+            remove_signup,
+        )
 
         # The event may have ended while this confirmation was open; never
         # mutate a historical roster (which could also promote a waitlisted
@@ -4887,14 +5449,71 @@ class SignOutConfirmView(discord.ui.View):
             content="Removing you from the event…",
             view=None,
         )
-        removed, update = await remove_signup(
-            self._bot,
-            self._event,
-            self._occurrence,
-            interaction.user.id,
-        )
+        try:
+            removed, update = await remove_signup(
+                self._bot,
+                self._event,
+                self._occurrence,
+                interaction.user.id,
+            )
+        except RosterUnreadable:
+            # Not the same as not being on the roster, which is what the
+            # None below means: the store would not say, and this member's
+            # signup is very likely still there.
+            LOGGER.error(
+                "Could not read the run for a sign out; occurrence_id=%s",
+                self._occurrence.occurrence_id,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "The roster could not be read just now. Try again in a "
+                    "moment."
+                ),
+                view=None,
+            )
+            return
         if removed is None:
-            content = "You were not signed up for the event."
+            # The run can also end inside the removal itself, whose roster
+            # check is Discord I/O: a roster that is history is left alone,
+            # which is not the same as never having been on it. Read the row
+            # back and count its stored status, because that check can retire
+            # the occurrence outright - refreshing a message somebody deleted
+            # answers NotFound - well before its scheduled end.
+            # The event comes back with it, because a duration saved while
+            # the lookups were in flight is what made the removal refuse:
+            # judging by the one this view opened with would tell the member
+            # they were never signed up while their signup is still there.
+            try:
+                current = self._bot.event_store.get_occurrence(
+                    self._occurrence.occurrence_id
+                )
+                edited = self._bot.event_store.get_event(
+                    self._event.event_id
+                )
+            except SQLAlchemyError as exc:
+                # The removal can refuse because the store would not answer
+                # it either, and these reads then fail the same way. Telling
+                # the member nothing was wrong with their signup would be a
+                # guess, and the wrong one.
+                LOGGER.error(
+                    "Could not read the run back after a sign out; "
+                    "occurrence_id=%s error_type=%s",
+                    self._occurrence.occurrence_id,
+                    type(exc).__name__,
+                )
+                content = (
+                    "The roster could not be read just now. Try again in a "
+                    "moment."
+                )
+            else:
+                content = (
+                    "This event has already ended, so its roster can no "
+                    "longer be changed."
+                    if current is None
+                    or edited is None
+                    or occurrence_finished(edited, current)
+                    else "You were not signed up for the event."
+                )
         else:
             content = "You were removed from the event."
         LOGGER.debug(
@@ -5139,6 +5758,32 @@ class SignupFlow:
         except ValueError as error:
             await edit(content=str(error), view=None)
             return
+        # The seating awaits its own membership lookups and re-reads the
+        # event across them, so it can normalise this selection again after
+        # the normalisation above. What it stored is what the prompts below
+        # have to carry: the automatic sign-up is written from these fields,
+        # and a role the category no longer supports would be seeded into
+        # every future run of the series. The event goes with them, since
+        # the same save decides whether that prompt is offered at all.
+        self.role = signup.role
+        self.flex_roles = signup.flex_roles
+        try:
+            seated_event = self.bot.event_store.get_event(
+                self.event.event_id
+            )
+        except SQLAlchemyError as exc:
+            # The seat is committed and the prompts are what is left, so a
+            # refusal costs the freshest description of the event rather
+            # than the answer the member is waiting for.
+            LOGGER.error(
+                "Could not read the event back after a signup; "
+                "event_id=%s error_type=%s",
+                self.event.event_id,
+                type(exc).__name__,
+            )
+            seated_event = None
+        if seated_event is not None:
+            self.event = seated_event
         content = _signup_summary(signup)
         auto = self.bot.event_store.get_auto_signup(
             self.event.event_id,
@@ -5303,7 +5948,40 @@ class EditSignupFlow(SignupFlow):
             # branch only exists to satisfy the optional type.
             await edit(content="Your signup was updated.", view=None)
             return
+        # The edit re-reads the event across its membership lookups and can
+        # normalise this selection against a category saved since, so what it
+        # stored is what the prompt below must offer: the remembered roles
+        # are written from these fields, and a role the event can no longer
+        # seat would be handed back to the member's next sign-up. The event
+        # goes with them, since it decides whether that prompt appears.
+        self.role = signup.role
+        self.flex_roles = signup.flex_roles
+        try:
+            edited_event = self.bot.event_store.get_event(self.event.event_id)
+        except SQLAlchemyError as exc:
+            # The edit is committed and only the prompt is left, so this
+            # costs the freshest description of the event rather than the
+            # answer the member is waiting for.
+            LOGGER.error(
+                "Could not read the event back after a signup edit; "
+                "event_id=%s error_type=%s",
+                self.event.event_id,
+                type(exc).__name__,
+            )
+            edited_event = None
+        if edited_event is not None:
+            self.event = edited_event
         content = _signup_edit_summary(signup)
+        if result.auto_signup_stale:
+            # The edit is on this roster, but the snapshot that seeds the
+            # next run kept the old selection and nothing retries it. Said
+            # here so the member can put it right rather than find next
+            # week's roster holding roles they changed.
+            content = (
+                f"{content}\n\nYour automatic sign-up for this event still "
+                "holds your previous roles. Edit your signup again later to "
+                "bring it across."
+            )
         preference = (
             self.bot.event_store.get_signup_preference(
                 self.event.event_id,

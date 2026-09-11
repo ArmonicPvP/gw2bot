@@ -16,7 +16,11 @@ from gw2bot.discord_utils import (
     send_interaction_notice,
 )
 
-from factories import forbidden_error, not_found_error
+from factories import (
+    forbidden_error,
+    not_found_error,
+    unknown_guild_error,
+)
 
 
 class FakeUser:
@@ -232,6 +236,22 @@ class TestResolveGuildMembership:
         )
 
         assert membership == GuildMembership("nickname", True)
+
+    async def test_an_unknown_guild_is_not_a_departure(self) -> None:
+        # A 404 carrying any other code is about the guild rather than the
+        # member - the bot removed from it, the guild gone - and every member
+        # looks equally missing, so reading it as a departure would take a
+        # whole roster off at once.
+        bot = FakeBot({7: "global"})
+        guild = FakeGuild(fetch_error=unknown_guild_error())
+
+        membership = await resolve_guild_membership(
+            cast(Any, bot),
+            cast(Any, guild),
+            7,
+        )
+
+        assert membership == GuildMembership("global", None)
 
     async def test_an_unknown_member_has_left_the_guild(self) -> None:
         # Discord answering "unknown member" for a guild it does know is proof

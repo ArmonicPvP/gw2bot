@@ -440,7 +440,10 @@ reading as open rather than full, because it is still short of a squad.
 A repeating event recurs daily, weekly on named days, or monthly on numbered
 days; a monthly day past the end of a short month lands on that month's last
 day. The next occurrence is created when the current one ends and posted by the
-maintenance pass, carrying a fresh roster.
+maintenance pass, carrying a fresh roster. That roster is checked against the
+server as the post goes out, so a member who has left does not keep a seat their
+automatic sign-up seeded (see
+[Members Who Leave The Server](#members-who-leave-the-server)).
 
 **Delete the previous post on repeat** is asked when the repeat is set up. With
 it on, posting a new occurrence removes the superseded message and its signup
@@ -468,8 +471,43 @@ given a role; the reply says who was seated and who went to the waitlist.
 
 A removed member is sent a direct message telling them so, and automatic
 sign-up for that event is switched off for them at the same time — otherwise the
-next occurrence would simply seat them again. Opening `/event edit` also checks
-the roster against the server and drops members who have left it.
+next occurrence would simply seat them again.
+
+### Members Who Leave The Server
+
+The bot is never told that a member left the server, so a roster is asked about
+again rather than waited on. A member Discord confirms has gone is taken off the
+roster, their seat handed to the waitlist exactly as a commander's own removal
+would hand it over, and their automatic sign-up switched off so the next
+occurrence does not seat them again. The check runs:
+
+- on every roster change — a sign-up, a sign-out, a signup edit, or a commander
+  adding or removing members — so a departed member never holds a seat against
+  somebody who could fill it, and is never promoted off the waitlist into a run
+  they cannot see;
+- as an occurrence is posted, which covers a repeating event's next occurrence
+  (its roster is seeded from the previous run's automatic sign-ups and nothing
+  has looked at it since) and an event moved to another channel (its roster
+  carries over to the new post). The check runs once the post is live rather
+  than before it, so there is a message to correct and a claim on the run to
+  keep; the removal refreshes the embed that has just gone out. Both ask the
+  server again rather than reusing a recent answer;
+- when `/event edit` or the **Remove sign-ups** picker is opened, and again
+  when an **Add sign-ups** or **Remove sign-ups** batch is confirmed — a
+  picker can sit open for minutes, so the seats it hands out are decided
+  against the roster as it stands at that moment.
+
+Only a definite "not a member" costs anyone their seat. A lookup that failed —
+a missing permission, an outage, a Discord the bot could not reach — proves
+nothing, so the roster is left exactly as it stands and the check is made again
+on the next change. A roster checked seconds ago is not re-checked by the
+sign-up behind it either: every member on it is a Discord lookup, so a burst of
+sign-ups on a fifty-seat roster spends one round rather than one per click.
+That only applies to members changing the roster themselves, which comes in
+bursts. Posting an occurrence, moving one to another channel, and a commander
+opening the roster or confirming an edit to it each happen once, so each asks
+the server again — and one answer covers a whole batch rather than a sweep per
+member in it.
 
 ## Guild Event Destinations
 
