@@ -2768,12 +2768,27 @@ class _AdditionOutcome:
     stop: _AdditionStop | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _AdditionTarget:
+    """The rows a batch addition works on, and why it must stop, if it must.
+
+    The two are not alternatives. A save that changes the category and the
+    channel together stops the seating and moves the post in one go, and the
+    notices still owed have to point at where it went - so the rows come back
+    with the reason whenever they were readable at all.
+    """
+
+    event: Event | None = None
+    occurrence: EventOccurrence | None = None
+    stop: _AdditionStop | None = None
+
+
 def _addition_target(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
-) -> tuple[Event, EventOccurrence] | _AdditionStop:
-    """Re-read the rows a batch addition works on, or say why it must stop.
+) -> _AdditionTarget:
+    """Re-read the rows a batch addition works on, and say if it must stop.
 
     seat_signup awaits Discord I/O, so both rows can go out from under a batch
     between one member and the next, in three ways worth telling apart:
@@ -2793,16 +2808,21 @@ def _addition_target(
         occurrence.occurrence_id
     )
     if fresh_event is None or fresh_occurrence is None:
-        return _AdditionStop.RETIRED
+        return _AdditionTarget(stop=_AdditionStop.RETIRED)
+    stop: _AdditionStop | None = None
     if fresh_event.category is not event.category:
-        return _AdditionStop.CHANGED
+        stop = _AdditionStop.CHANGED
     # Checked before the stored status, so an occurrence that is OVER because
     # it genuinely finished is not reported as a deleted post.
-    if occurrence_has_ended(fresh_event, fresh_occurrence, datetime.now(UTC)):
-        return _AdditionStop.ENDED
-    if fresh_occurrence.status is EventStatus.OVER:
-        return _AdditionStop.RETIRED
-    return fresh_event, fresh_occurrence
+    elif occurrence_has_ended(
+        fresh_event,
+        fresh_occurrence,
+        datetime.now(UTC),
+    ):
+        stop = _AdditionStop.ENDED
+    elif fresh_occurrence.status is EventStatus.OVER:
+        stop = _AdditionStop.RETIRED
+    return _AdditionTarget(fresh_event, fresh_occurrence, stop)
 
 
 async def _drop_departed_picks(
@@ -2971,19 +2991,20 @@ async def apply_roster_addition(
             outcome.stop = _AdditionStop.UNREADABLE
             outcome.left_off = list(user_ids[index:])
             break
-        if isinstance(target, _AdditionStop):
-            outcome.stop = target
+        if target.event is not None and target.occurrence is not None:
+            event, current = target.event, target.occurrence
+        if target.stop is not None:
+            outcome.stop = target.stop
             outcome.left_off = list(user_ids[index:])
             LOGGER.debug(
                 "Stopped a roster addition; occurrence_id=%s user_id=%s "
                 "reason=%s left_off=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                target.value,
+                target.stop.value,
                 len(outcome.left_off),
             )
             break
-        event, current = target
         # add_signup would overwrite an existing row, resetting the member's
         # signed-up time and with it their seating priority, so a member who is
         # already on the roster is left exactly as they are.
@@ -3056,18 +3077,18 @@ async def apply_roster_addition(
                 current.occurrence_id,
                 type(exc).__name__,
             )
-            target = _AdditionStop.UNREADABLE
-        if isinstance(target, _AdditionStop):
-            outcome.stop = target
+            target = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        if target.event is not None and target.occurrence is not None:
+            event, current = target.event, target.occurrence
+        if target.stop is not None:
+            outcome.stop = target.stop
             LOGGER.debug(
                 "Roster addition finished on an event that is no longer "
                 "live; occurrence_id=%s user_id=%s reason=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                target.value,
+                target.stop.value,
             )
-        else:
-            event, current = target
     # Sent once the roster's final state is known, so a seat that retired the
     # occurrence cannot send anyone a link to the deleted message. One member
     # with closed DMs must not stop the rest, so a failed delivery is only
@@ -3099,19 +3120,22 @@ async def apply_roster_addition(
                 current.occurrence_id,
                 type(exc).__name__,
             )
-            live = _AdditionStop.UNREADABLE
-        if isinstance(live, _AdditionStop):
-            if outcome.stop is None:
-                outcome.stop = live
-                LOGGER.debug(
-                    "Roster addition target went away between its notices; "
-                    "occurrence_id=%s user_id=%s reason=%s",
-                    current.occurrence_id,
-                    interaction.user.id,
-                    live.value,
-                )
-        else:
-            event, current = live
+            live = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        # Adopted whether or not it also reports a stop: a save that changes
+        # the category and the channel together answers CHANGED and moves
+        # the post in the same breath, and the notices left would otherwise
+        # carry a link to the message that move deleted.
+        if live.event is not None and live.occurrence is not None:
+            event, current = live.event, live.occurrence
+        if live.stop is not None and outcome.stop is None:
+            outcome.stop = live.stop
+            LOGGER.debug(
+                "Roster addition target went away between its notices; "
+                "occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                live.stop.value,
+            )
         content = addition_notice()
         # These are sequential external deliveries, so /event delete can land
         # between two of them and cascade the whole roster away. The member's
@@ -3165,23 +3189,22 @@ async def apply_roster_addition(
                 current.occurrence_id,
                 type(exc).__name__,
             )
-            final = _AdditionStop.UNREADABLE
-        if isinstance(final, _AdditionStop):
-            outcome.stop = final
+            final = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        # Adopted like the earlier verifications, and for the same reason: a
+        # channel move landing while the notices went out replaces the thread
+        # the announcement below is sent to and the message the preview is
+        # drawn from, so both must be addressed to the run as it now stands.
+        if final.event is not None and final.occurrence is not None:
+            event, current = final.event, final.occurrence
+        if final.stop is not None:
+            outcome.stop = final.stop
             LOGGER.debug(
                 "Roster addition target went away while its notices were "
                 "sent; occurrence_id=%s user_id=%s reason=%s",
                 current.occurrence_id,
                 interaction.user.id,
-                final.value,
+                final.stop.value,
             )
-        else:
-            # Adopted like the earlier verification's answer, and for the
-            # same reason: a channel move landing while the notices went out
-            # replaces the thread the announcement below is sent to and the
-            # message the preview is drawn from, so both must be addressed
-            # to the run as it now stands.
-            event, current = final
     # Re-read the seats rather than trusting what each write returned. An edit
     # landing while seat_signup awaited Discord re-seats the whole roster under
     # the new capacity, so the row a write returned can describe a capacity

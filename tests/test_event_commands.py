@@ -8545,6 +8545,54 @@ class TestAddSignups:
         assert second is not None
         assert "/9876/4321/999)" in second.args[0]
 
+    async def test_a_notice_follows_a_move_that_changed_the_category_too(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        moved = FakeChannel(4321, FakeThread(888))
+        fake_bot._channels[moved.id] = moved
+        fake_bot._channels[moved.thread.id] = moved.thread
+        first = await fake_bot.fetch_user(11)
+        real_send = first.send
+
+        async def change_and_move(*args: Any, **kwargs: Any) -> Any:
+            # One save, two changes: the category the batch was seating
+            # against, and the channel its post lives in.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.FRACTAL,
+                title=event.title,
+                description=event.description,
+                channel_id=moved.id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                moved.id,
+                999,
+                moved.thread.id,
+            )
+            return await real_send(*args, **kwargs)
+
+        first.send = AsyncMock(side_effect=change_and_move)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # The category change stops the batch, but it does not say where the
+        # post went: the second notice must not point at the message the
+        # move deleted.
+        second = fake_bot.users[12].send.await_args
+        assert second is not None
+        assert "/9876/4321/999)" in second.args[0]
+
     async def test_an_addition_announces_into_the_thread_a_move_left(
         self,
         fake_bot: Any,

@@ -4244,6 +4244,62 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    async def test_a_quiet_removal_announces_its_own_check_when_it_stops(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # 14 has left, so this removal's own check frees their seat and
+        # moves 16 up before the read that refuses.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # The one departure is dealt with by the time its automatic
+            # sign-up is switched off, so the next run read is this
+            # removal's own.
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(RosterUnreadable):
+            await remove_signup(
+                bot,
+                event,
+                occurrence,
+                13,
+                notify=False,
+            )
+
+        # notify=False hands the announcement to the caller, but a call that
+        # raises hands it nothing - and a commander's batch outlasting the
+        # freshness window makes a check of its own right here, so the
+        # promotion it committed is announced here or nowhere.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
     async def test_a_removal_the_store_refuses_announces_the_check(
         self,
         bot: Any,

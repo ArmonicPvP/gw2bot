@@ -2353,8 +2353,11 @@ async def remove_signup(
             discord_user_id,
             type(exc).__name__,
         )
-        if notify:
-            await notify_roster_update(bot, occurrence, checked)
+        # Announced whatever notify says, the same as a refused seating: a
+        # call that raises hands its caller no update to fold, and a batch
+        # whose members outlast the freshness window runs a check of its own
+        # here - so a departure it committed is announced here or nowhere.
+        await notify_roster_update(bot, occurrence, checked)
         raise RosterUnreadable from exc
     if (
         current is None
@@ -2392,8 +2395,9 @@ async def remove_signup(
             discord_user_id,
             type(exc).__name__,
         )
-        if notify:
-            await notify_roster_update(bot, occurrence, checked)
+        # Announced whatever notify says, for the reason above: this raises,
+        # so there is no update for the caller to fold into its own.
+        await notify_roster_update(bot, occurrence, checked)
         raise RosterUnreadable from exc
     if removed is None:
         # This member was not on the roster, but the check may still have
