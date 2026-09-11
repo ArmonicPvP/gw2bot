@@ -4138,6 +4138,69 @@ class TestCheckRosterMembership:
         assert result.signup.assigned_role is EventRole.DPS
         assert not result.signup.waitlisted
 
+    async def test_an_edit_hands_back_the_token_it_could_not_use(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        original = await complete_signup(
+            bot, event, occurrence, 11, EventRole.DPS, ()
+        )
+
+        def refuse(*args: Any, **kwargs: Any) -> Any:
+            raise SQLAlchemyError("boom")
+
+        # The token is spent before this write, and each store call commits
+        # on its own, so the spend outlives the edit that failed.
+        store.update_signup_roles = refuse  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError, match="could not be updated"):
+            await apply_signup_edit(
+                bot, event, occurrence, 11, EventRole.QUICKNESS_DPS, ()
+            )
+
+        # Three edits is the whole allowance, so one bought by an edit that
+        # never landed is worth handing back before telling them to retry.
+        refunded = store.get_signup(occurrence.occurrence_id, 11)
+        assert refunded is not None
+        assert refunded.role is EventRole.DPS
+        assert refunded.edit_tokens == original.edit_tokens
+
+    async def test_an_edit_whose_reseat_fails_still_stands(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.DPS, ()
+        )
+        # Nobody has left, so the check moves nothing and the only failure
+        # is the re-seat behind the edit itself.
+        bot.guild = FakeGuild({11: "User 11"})
+
+        def refuse(occurrence_id: int, assignments: Any) -> None:
+            raise SQLAlchemyError("boom")
+
+        store.apply_roster_assignments = refuse  # type: ignore[method-assign]
+
+        result = await apply_signup_edit(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_DPS, ()
+        )
+
+        # The declaration is committed by the time the re-seat runs, so
+        # reporting a failed edit would send the member back to spend
+        # another token on a change that is already theirs.
+        assert result.signup is not None
+        assert result.signup.role is EventRole.QUICKNESS_DPS
+        stored = store.get_signup(occurrence.occurrence_id, 11)
+        assert stored is not None
+        assert stored.role is EventRole.QUICKNESS_DPS
+        assert not stored.waitlisted
+        channel.partial_message.edit.assert_awaited()
+
     async def test_an_edit_the_store_refuses_announces_the_check(
         self,
         bot: Any,

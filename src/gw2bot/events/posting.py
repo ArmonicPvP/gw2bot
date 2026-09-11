@@ -3561,13 +3561,12 @@ async def apply_signup_edit(
             )
     # Everything from here is a store call on a deferred interaction that
     # only answers a ValueError, and the check before it has already taken
-    # its departures off the roster. A refusal anywhere in this phase
-    # therefore says what the check moved - nothing later will - and refuses
-    # the edit in the one way the flows above can report, rather than
-    # escaping and leaving the member on "Updating your signup...". The
-    # resettle is one transaction, so a refusal there has committed nothing
-    # of its own; a read that refuses after the declaration landed sends the
-    # member back to a retry that re-applies the same declaration.
+    # its departures off the roster. A refusal therefore says what the check
+    # moved - nothing later will - rather than escaping and leaving the
+    # member on "Updating your signup...".
+    #
+    # Each of these commits on its own, so they are guarded one at a time
+    # and answered by how far the edit actually got.
     try:
         bot.event_store.set_signup_edit_tokens(
             occurrence.occurrence_id,
@@ -3575,23 +3574,9 @@ async def apply_signup_edit(
             tokens - 1.0,
             current_time,
         )
-        # Write the new declaration, then resettle, both synchronously: the
-        # resettle re-solves the seated set (fixing an assigned role the new
-        # declaration no longer covers), seats a waitlisted editor whose new
-        # roles now fit, and offers capacity the editor vacated to the
-        # waitlist.
-        bot.event_store.update_signup_roles(
-            occurrence.occurrence_id,
-            discord_user_id,
-            role=role,
-            flex_roles=flex_roles,
-            assigned_role=current.assigned_role if keeps_seat else None,
-            waitlisted=not keeps_seat,
-        )
-        update = _resettle_roster(bot, event, occurrence)
     except SQLAlchemyError as exc:
         LOGGER.error(
-            "Could not apply a signup edit; occurrence_id=%s user_id=%s "
+            "Could not spend an edit token; occurrence_id=%s user_id=%s "
             "error_type=%s",
             occurrence.occurrence_id,
             discord_user_id,
@@ -3602,6 +3587,67 @@ async def apply_signup_edit(
             "Your signup could not be updated just now. Try again in a "
             "moment."
         ) from exc
+    try:
+        bot.event_store.update_signup_roles(
+            occurrence.occurrence_id,
+            discord_user_id,
+            role=role,
+            flex_roles=flex_roles,
+            assigned_role=current.assigned_role if keeps_seat else None,
+            waitlisted=not keeps_seat,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not write a signup edit; occurrence_id=%s user_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        # The token above is committed and bought nothing, so it is handed
+        # back before the member is sent to a retry that would spend a
+        # second one. Guarded in turn: a store refusing the write may refuse
+        # this too, and the member is owed an answer either way.
+        try:
+            bot.event_store.set_signup_edit_tokens(
+                occurrence.occurrence_id,
+                discord_user_id,
+                tokens,
+                current_time,
+            )
+        except SQLAlchemyError as refund_error:
+            LOGGER.error(
+                "Could not hand back an edit token the edit did not use; "
+                "occurrence_id=%s user_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                discord_user_id,
+                type(refund_error).__name__,
+            )
+        await notify_roster_update(bot, occurrence, checked)
+        raise ValueError(
+            "Your signup could not be updated just now. Try again in a "
+            "moment."
+        ) from exc
+    # The declaration is committed from here, so nothing below reports this
+    # edit as having failed.
+    #
+    # The resettle re-solves the seated set (fixing an assigned role the new
+    # declaration no longer covers), seats a waitlisted editor whose new
+    # roles now fit, and offers capacity the editor vacated to the waitlist.
+    # It is one transaction, so a refusal commits nothing of its own: the
+    # member keeps the seat they had under their new declaration, which the
+    # next roster change re-solves, and that is what the summary describes.
+    update = RosterUpdate()
+    try:
+        update = _resettle_roster(bot, event, occurrence)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not re-seat the roster after a signup edit; the edit "
+            "stands; occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
     # The edit is committed by here, so this read is outside the guard above:
     # answering a refusal with "try again" would spend a second edit token on
     # a change that is already on the roster, and lose the announcement and

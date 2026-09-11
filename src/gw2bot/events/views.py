@@ -5913,6 +5913,29 @@ class EditSignupFlow(SignupFlow):
             # branch only exists to satisfy the optional type.
             await edit(content="Your signup was updated.", view=None)
             return
+        # The edit re-reads the event across its membership lookups and can
+        # normalise this selection against a category saved since, so what it
+        # stored is what the prompt below must offer: the remembered roles
+        # are written from these fields, and a role the event can no longer
+        # seat would be handed back to the member's next sign-up. The event
+        # goes with them, since it decides whether that prompt appears.
+        self.role = signup.role
+        self.flex_roles = signup.flex_roles
+        try:
+            edited_event = self.bot.event_store.get_event(self.event.event_id)
+        except SQLAlchemyError as exc:
+            # The edit is committed and only the prompt is left, so this
+            # costs the freshest description of the event rather than the
+            # answer the member is waiting for.
+            LOGGER.error(
+                "Could not read the event back after a signup edit; "
+                "event_id=%s error_type=%s",
+                self.event.event_id,
+                type(exc).__name__,
+            )
+            edited_event = None
+        if edited_event is not None:
+            self.event = edited_event
         content = _signup_edit_summary(signup)
         if result.auto_signup_stale:
             # The edit is on this roster, but the snapshot that seeds the

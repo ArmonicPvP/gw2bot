@@ -3045,6 +3045,71 @@ class TestEditSignupFlow:
             in second.response.edit_message.await_args.kwargs["content"]
         )
 
+    async def test_the_remembered_prompt_offers_what_the_edit_stored(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_signed_up_event(
+            store,
+            role=EventRole.DPS,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.QUICKNESS_DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        guild = FakeGuild({42: "User 42"})
+        real_fetch = guild.fetch_member
+
+        async def change_the_category(user_id: int) -> Any:
+            # A leader saves the event as a dungeon while the edit's
+            # membership lookups are in flight, after this flow has already
+            # normalised the picked role against the old category.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.DUNGEON,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = change_the_category  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_HEAL
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        edited = store.get_signup(occurrence.occurrence_id, 42)
+        assert edited is not None
+        assert edited.role is EventRole.DPS
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        prompt = await_args.kwargs["view"]
+        assert isinstance(prompt, UpdateRememberedRolesView)
+        await prompt.update.callback(
+            make_interaction(message=ephemeral_message())
+        )
+
+        # The prompt writes the flow's own fields, so remembering the role
+        # the dungeon cannot seat would hand it straight back to the
+        # member's next sign-up for this event.
+        preference = store.get_signup_preference(event.event_id, 42)
+        assert preference is not None
+        assert preference.role is EventRole.DPS
+        assert preference.flex_roles == ()
+
     async def test_remembered_roles_can_be_kept_as_they_were(
         self,
         fake_bot: Any,
