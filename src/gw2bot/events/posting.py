@@ -59,6 +59,19 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+
+class RosterUnreadable(Exception):
+    """The store would not say what a roster is, so nothing was changed.
+
+    remove_signup answers this rather than the None that means "not on the
+    roster": its callers turn that None into "you were not signed up", which
+    would be a lie told to a member whose signup is still sitting there. The
+    store failing for one call is not evidence about anybody's seat, and this
+    says so. Whatever the roster check before it moved is announced first, so
+    raising costs nobody their notification.
+    """
+
+
 # An event can be posted into a forum post, which Discord models as a thread.
 # The bot never opens one: the post belongs to whoever created it, so the event
 # is only a message inside it. Every thread type is listed because this answers
@@ -2252,11 +2265,11 @@ async def remove_signup(
     # duration, re-seats the roster the freed seat belongs to against its
     # capacity, and re-renders the message from both.
     #
-    # Both are store calls, and neither caller catches a store error: a
-    # sign-out and a commander's batch would be left on "Removing..." for
-    # good. A store that cannot say what the run is now cannot be asked to
-    # change it either, so this reports the same nothing-removed as a roster
-    # that has become history.
+    # Both are store calls, and a store that cannot say what the run is now
+    # cannot be asked to change it either. Answered as RosterUnreadable
+    # rather than as the None that means "not on the roster": a sign-out and
+    # a commander's batch both read that None as absence and would tell
+    # somebody they were never signed up while their signup is still there.
     try:
         current = bot.event_store.get_occurrence(occurrence.occurrence_id)
         edited = bot.event_store.get_event(event.event_id)
@@ -2270,7 +2283,7 @@ async def remove_signup(
         )
         if notify:
             await notify_roster_update(bot, occurrence, checked)
-        return None, checked
+        raise RosterUnreadable from exc
     if (
         current is None
         or edited is None
@@ -2495,7 +2508,7 @@ async def prune_departed_signups(
                 user_id,
                 notify=False,
             )
-        except SQLAlchemyError as exc:
+        except (SQLAlchemyError, RosterUnreadable) as exc:
             LOGGER.error(
                 "Could not remove a departed member; stopping the prune; "
                 "occurrence_id=%s kept=%s error_type=%s",

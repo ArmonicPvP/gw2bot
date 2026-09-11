@@ -33,6 +33,7 @@ from gw2bot.events.models import (
     solve_roster,
 )
 from gw2bot.events.posting import (
+    RosterUnreadable,
     apply_auto_signups,
     apply_signup_edit,
     cancel_occurrence,
@@ -3604,18 +3605,21 @@ class TestCheckRosterMembership:
         store.get_event = refuse_once_armed  # type: ignore[method-assign]
         channel.thread.send.reset_mock()
 
-        removed, update = await remove_signup(bot, event, occurrence, 12)
+        # Answered as its own outcome, not as the None that means "not on
+        # the roster": both callers read that None as absence and would tell
+        # somebody they were never signed up while their signup is there.
+        with pytest.raises(RosterUnreadable):
+            await remove_signup(bot, event, occurrence, 12)
 
-        # Neither caller catches a store error, so this escaping would leave
-        # a member - or a commander mid-batch - on "Removing…" for good.
-        assert removed is None
-        # 11 had left and 16 has their seat: committed, and announced here
-        # because the removal this was folding into never happened.
+        assert store.get_signup(occurrence.occurrence_id, 12) is not None
+        # 11 had left and 16 has their seat: committed, and announced before
+        # the raise because the removal this was folding into never happened.
         promoted = store.get_signup(occurrence.occurrence_id, 16)
         assert promoted is not None
         assert not promoted.waitlisted
-        assert [signup.discord_user_id for signup in update.promoted] == [16]
         assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
 
     async def test_a_post_announces_the_check_when_the_reread_is_refused(
         self,

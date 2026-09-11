@@ -1917,6 +1917,38 @@ class TestSignOutFlow:
         assert "could not be read" in content
         assert "not signed up" not in content
 
+    async def test_sign_out_does_not_call_a_refused_read_an_absence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self._make_live_occurrence(store)
+        fake_bot.guild = FakeGuild({42: "User 42"})
+        real_get_event = store.get_event
+        calls = {"count": 0}
+
+        def refuse_the_removals_read(event_id: int) -> Any:
+            # Only the read inside remove_signup fails; every read this view
+            # makes afterwards succeeds, which is what made the old answer
+            # indistinguishable from never having signed up.
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.get_event = (  # type: ignore[method-assign]
+            refuse_the_removals_read
+        )
+
+        interaction = await self._sign_out(fake_bot, event, occurrence)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "could not be read" in content
+        assert "not signed up" not in content
+
     async def test_sign_out_does_not_prompt_without_auto_signup(
         self,
         fake_bot: Any,
@@ -6795,6 +6827,43 @@ class TestRemoveSignups:
         assert "could not be read" in kwargs["content"]
         assert "<@3>" in kwargs["content"]
         assert kwargs["view"] is None
+
+    async def test_removal_does_not_call_a_refused_read_an_absence(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_full_roster(store)
+        fake_bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 2, 3, 4, 5, 6)}
+        )
+        real_get_event = store.get_event
+        calls = {"count": 0}
+
+        def refuse_the_removals_read(event_id: int) -> Any:
+            # The batch's own reads keep working; only the one inside
+            # remove_signup fails.
+            calls["count"] += 1
+            if calls["count"] == 4:
+                raise SQLAlchemyError("boom")
+            return real_get_event(event_id)
+
+        store.get_event = (  # type: ignore[method-assign]
+            refuse_the_removals_read
+        )
+        view = self.make_remove_view(fake_bot, event, occurrence)
+        interaction = self.make_remove_interaction()
+
+        await view.remove(interaction, picked_users(2))
+
+        # Their signup is still on the roster, so "was not signed up" would
+        # be the wrong thing to tell the commander about it.
+        assert store.get_signup(occurrence.occurrence_id, 2) is not None
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@2>" in kwargs["content"]
+        assert "not signed up" not in kwargs["content"]
 
     async def test_picker_is_built_from_what_a_partial_prune_left(
         self,

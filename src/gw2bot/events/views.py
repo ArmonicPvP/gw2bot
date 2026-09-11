@@ -2044,6 +2044,7 @@ class RemoveSignupsView(discord.ui.View):
         user_ids: list[int],
     ) -> None:
         from gw2bot.events.posting import (
+            RosterUnreadable,
             check_roster_membership,
             merge_roster_updates,
             notify_roster_update,
@@ -2198,13 +2199,28 @@ class RemoveSignupsView(discord.ui.View):
             # Notification is deferred to a single merged announcement after
             # the loop: per-removal pings would post one thread message per
             # member for what the leader sees as a single edit.
-            signup, update = await remove_signup(
-                self._bot,
-                event,
-                occurrence,
-                user_id,
-                notify=False,
-            )
+            try:
+                signup, update = await remove_signup(
+                    self._bot,
+                    event,
+                    occurrence,
+                    user_id,
+                    notify=False,
+                )
+            except RosterUnreadable:
+                # The removal could not read the run, which says nothing
+                # about this member's seat: counting them as never signed up
+                # would deny a signup that is still there. Stops the batch
+                # like the read above, since the rest would fare no better.
+                unread = list(user_ids[index:])
+                LOGGER.error(
+                    "Could not read the run for a removal; stopping; "
+                    "occurrence_id=%s user_id=%s kept=%s",
+                    occurrence.occurrence_id,
+                    interaction.user.id,
+                    len(unread),
+                )
+                break
             if signup is None:
                 skipped.append(user_id)
                 continue
@@ -5245,6 +5261,7 @@ class SignOutConfirmView(discord.ui.View):
         button: discord.ui.Button[SignOutConfirmView],
     ) -> None:
         from gw2bot.events.posting import (
+            RosterUnreadable,
             occurrence_finished,
             remove_signup,
         )
@@ -5273,12 +5290,29 @@ class SignOutConfirmView(discord.ui.View):
             content="Removing you from the event…",
             view=None,
         )
-        removed, update = await remove_signup(
-            self._bot,
-            self._event,
-            self._occurrence,
-            interaction.user.id,
-        )
+        try:
+            removed, update = await remove_signup(
+                self._bot,
+                self._event,
+                self._occurrence,
+                interaction.user.id,
+            )
+        except RosterUnreadable:
+            # Not the same as not being on the roster, which is what the
+            # None below means: the store would not say, and this member's
+            # signup is very likely still there.
+            LOGGER.error(
+                "Could not read the run for a sign out; occurrence_id=%s",
+                self._occurrence.occurrence_id,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "The roster could not be read just now. Try again in a "
+                    "moment."
+                ),
+                view=None,
+            )
+            return
         if removed is None:
             # The run can also end inside the removal itself, whose roster
             # check is Discord I/O: a roster that is history is left alone,
