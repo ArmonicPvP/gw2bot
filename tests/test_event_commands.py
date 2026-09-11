@@ -8545,6 +8545,54 @@ class TestAddSignups:
         assert second is not None
         assert "/9876/4321/999)" in second.args[0]
 
+    async def test_a_retired_run_outranks_a_category_change_mid_notice(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        first = await fake_bot.fetch_user(11)
+        real_send = first.send
+
+        async def retire_and_change(*args: Any, **kwargs: Any) -> Any:
+            # The save that changed the category refreshed a message
+            # somebody had deleted, which retires the run - both land
+            # between the first notice and the second.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.FRACTAL,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            store.set_occurrence_status(
+                occurrence.occurrence_id,
+                EventStatus.OVER,
+            )
+            return await real_send(*args, **kwargs)
+
+        first.send = AsyncMock(side_effect=retire_and_change)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # The category change only stops the seating; the run being over is
+        # what decides whether the notices still owed carry a link, so it is
+        # the reason that has to reach both the member and the commander.
+        second = fake_bot.users[12].send.await_args
+        assert second is not None
+        assert "discord.com/channels" not in second.args[0]
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "no longer available" in content
+
     async def test_a_notice_follows_a_move_that_changed_the_category_too(
         self,
         fake_bot: Any,

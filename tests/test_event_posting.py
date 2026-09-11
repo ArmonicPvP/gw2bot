@@ -4244,6 +4244,41 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    async def test_a_removal_reports_a_member_its_own_check_took_off(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        # 13 left the server after the batch that picked them was drawn, so
+        # this removal's own check is what takes them off.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 14, 15)}
+        )
+
+        removed, _ = await remove_signup(bot, event, occurrence, 13)
+
+        # The commander asked for them off and they are off. Answering with
+        # no row reads as "they were not signed up", which denies the
+        # removal this call's own check had just made.
+        assert removed is not None
+        assert removed.discord_user_id == 13
+        assert store.get_signup(occurrence.occurrence_id, 13) is None
+
+    async def test_a_removal_still_reports_a_member_who_was_never_on(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 14, 15)}
+        )
+
+        removed, _ = await remove_signup(bot, event, occurrence, 99)
+
+        assert removed is None
+
     async def test_a_quiet_removal_announces_its_own_check_when_it_stops(
         self,
         bot: Any,

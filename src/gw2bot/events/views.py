@@ -2810,18 +2810,17 @@ def _addition_target(
     if fresh_event is None or fresh_occurrence is None:
         return _AdditionTarget(stop=_AdditionStop.RETIRED)
     stop: _AdditionStop | None = None
-    if fresh_event.category is not event.category:
-        stop = _AdditionStop.CHANGED
-    # Checked before the stored status, so an occurrence that is OVER because
+    # A run that is over is reported as over even when the same save changed
+    # the category: it decides whether the notices still owed carry a link at
+    # all, while a category change only stops the seating. The clock is
+    # checked before the stored status, so an occurrence that is OVER because
     # it genuinely finished is not reported as a deleted post.
-    elif occurrence_has_ended(
-        fresh_event,
-        fresh_occurrence,
-        datetime.now(UTC),
-    ):
+    if occurrence_has_ended(fresh_event, fresh_occurrence, datetime.now(UTC)):
         stop = _AdditionStop.ENDED
     elif fresh_occurrence.status is EventStatus.OVER:
         stop = _AdditionStop.RETIRED
+    elif fresh_event.category is not event.category:
+        stop = _AdditionStop.CHANGED
     return _AdditionTarget(fresh_event, fresh_occurrence, stop)
 
 

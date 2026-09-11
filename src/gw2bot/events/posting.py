@@ -2320,7 +2320,30 @@ async def remove_signup(
     # the member being removed can be one the check has just promoted into a
     # seat a departure freed, and telling the thread they moved up moments
     # before taking them off it says two contradictory things.
-    _, checked = await check_roster_membership(
+    #
+    # The row is read first, because that check can take this very member
+    # off itself: a commander's batch outlasting the freshness window makes
+    # one here, and a pick who left the server in the meantime is removed by
+    # the check rather than by the deletion below. A caller reads a missing
+    # row as "they were not signed up", which would deny the removal this
+    # call's own check has just made, so the row it took off is what gets
+    # reported. A refused read leaves that unanswerable and is left to the
+    # guards below, which say so properly.
+    try:
+        before = bot.event_store.get_signup(
+            occurrence.occurrence_id,
+            discord_user_id,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read a signup before removing it; occurrence_id=%s "
+            "user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        before = None
+    departed, checked = await check_roster_membership(
         bot,
         event,
         occurrence,
@@ -2400,6 +2423,21 @@ async def remove_signup(
         await notify_roster_update(bot, occurrence, checked)
         raise RosterUnreadable from exc
     if removed is None:
+        if before is not None and discord_user_id in departed:
+            # The check above took them off, which is the removal this call
+            # was asked for - it just happened a step earlier, because they
+            # had left the server. Reported as the removal it is: the row is
+            # the one the check deleted, and everything a removal does for it
+            # (the re-seat, the thread, the refresh) the check has done.
+            LOGGER.debug(
+                "Removal found its member already taken off by the check; "
+                "occurrence_id=%s user_id=%s",
+                occurrence.occurrence_id,
+                discord_user_id,
+            )
+            if notify:
+                await notify_roster_update(bot, occurrence, checked)
+            return before, checked
         # This member was not on the roster, but the check may still have
         # moved it, and that movement is real whatever this call does next.
         if notify:
