@@ -3606,6 +3606,14 @@ async def apply_event_edit(
                 reread = bot.event_store.get_occurrence(
                     current.occurrence_id
                 )
+                # The event comes back with it. This edit's own save is
+                # committed, but the check awaits Discord for every member,
+                # and another leader saving in that window leaves the row
+                # holding their category, title, channel and duration. The
+                # re-seat and the render below have to describe the event
+                # that is stored, or the roster and the public post are left
+                # disagreeing with it.
+                resaved = bot.event_store.get_event(updated.event_id)
             except SQLAlchemyError as exc:
                 # The event row is already saved, so this must not escape the
                 # callback and leave the commander on "Saving your changes".
@@ -3630,16 +3638,22 @@ async def apply_event_edit(
                     attempted += 1
                     _mark_occurrence_stale(bot, current)
                 continue
-            if reread is None or occurrence_finished(updated, reread):
+            if (
+                reread is None
+                or resaved is None
+                or occurrence_finished(resaved, reread)
+            ):
                 LOGGER.debug(
                     "Skipped a category rebalance for a run the check "
-                    "retired; occurrence_id=%s exists=%s",
+                    "retired; occurrence_id=%s exists=%s event_exists=%s",
                     current.occurrence_id,
                     reread is not None,
+                    resaved is not None,
                 )
                 await notify_roster_update(bot, current, checked)
                 continue
             current = reread
+            updated = resaved
             # The category picks the capacity the roster was seated against, so
             # changing it invalidates every stored assignment. Re-seat the roster
             # before the message is re-rendered, so the embed and the capacity
@@ -5709,6 +5723,32 @@ class SignupFlow:
         except ValueError as error:
             await edit(content=str(error), view=None)
             return
+        # The seating awaits its own membership lookups and re-reads the
+        # event across them, so it can normalise this selection again after
+        # the normalisation above. What it stored is what the prompts below
+        # have to carry: the automatic sign-up is written from these fields,
+        # and a role the category no longer supports would be seeded into
+        # every future run of the series. The event goes with them, since
+        # the same save decides whether that prompt is offered at all.
+        self.role = signup.role
+        self.flex_roles = signup.flex_roles
+        try:
+            seated_event = self.bot.event_store.get_event(
+                self.event.event_id
+            )
+        except SQLAlchemyError as exc:
+            # The seat is committed and the prompts are what is left, so a
+            # refusal costs the freshest description of the event rather
+            # than the answer the member is waiting for.
+            LOGGER.error(
+                "Could not read the event back after a signup; "
+                "event_id=%s error_type=%s",
+                self.event.event_id,
+                type(exc).__name__,
+            )
+            seated_event = None
+        if seated_event is not None:
+            self.event = seated_event
         content = _signup_summary(signup)
         auto = self.bot.event_store.get_auto_signup(
             self.event.event_id,

@@ -2262,6 +2262,69 @@ class TestAutoSignupPrompt:
         assert "[REDACTED]" in console
         assert secret not in console
 
+    async def test_the_prompt_offers_what_the_seating_actually_stored(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = await self.make_flow(fake_bot, store, 21)
+        flow.role = EventRole.QUICKNESS_DPS
+        # Somebody is on the roster, so the seating's membership check makes
+        # a lookup to be interrupted.
+        store.add_signup(
+            occurrence_id=flow.occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        event = flow.event
+        guild = FakeGuild({11: "User 11", 21: "User 21"})
+        real_fetch = guild.fetch_member
+
+        async def change_the_category(user_id: int) -> Any:
+            # A leader saves the event as a headcount category while the
+            # seating's lookups are in flight, after this flow has already
+            # normalised the picked role against the old one.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.WVW,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = change_the_category  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        interaction = self.make_flow_interaction()
+
+        await flow.finalize(interaction)
+
+        seated = store.get_signup(flow.occurrence.occurrence_id, 21)
+        assert seated is not None
+        assert seated.role is None
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        view = await_args.kwargs["view"]
+        assert isinstance(view, AutoSignupChoiceView)
+        await view.auto_yes.callback(self.make_flow_interaction())
+
+        # The prompt writes the flow's own fields, so a role the event can
+        # no longer seat would be seeded into every future run of the
+        # series - the seating having just dropped it from this one.
+        auto = store.get_auto_signup(event.event_id, 21)
+        assert auto is not None
+        assert auto.choice is AutoSignupChoice.YES
+        assert auto.role is None
+        assert auto.flex_roles == ()
+
     async def test_prompts_again_after_a_plain_no(
         self,
         fake_bot: Any,
@@ -4522,6 +4585,79 @@ class TestEventEditConfirmView:
         assert 1 not in on_roster
         assert 2 not in on_roster
         assert seated == [3, 4, 5, 6]
+
+    async def test_category_change_renders_the_event_as_it_was_saved_last(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border Push",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        guild = FakeGuild({1: "User 1"})
+        real_fetch = guild.fetch_member
+
+        async def rename_the_event(user_id: int) -> Any:
+            # Another leader saves the event while this edit's roster check
+            # is asking Discord about every member.
+            saved = store.get_event(event.event_id)
+            assert saved is not None
+            store.update_event(
+                event_id=saved.event_id,
+                category=saved.category,
+                title="Renamed Mid-Check",
+                description=saved.description,
+                channel_id=saved.channel_id,
+                leader_discord_id=saved.leader_discord_id,
+                start_time=saved.start_time,
+                duration_minutes=saved.duration_minutes,
+                repeat_frequency=saved.repeat_frequency,
+                repeat_days=saved.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = rename_the_event  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.category = EventCategory.FRACTAL
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        # The stored event is the other leader's by now, so rendering the
+        # one this edit saved would leave the public post disagreeing with
+        # the row nobody is going to correct.
+        edit = channel.partial_message.edit.await_args
+        assert edit is not None
+        assert "Renamed Mid-Check" in edit.kwargs["embed"].title
 
     async def test_category_change_reseats_the_roster(
         self,
