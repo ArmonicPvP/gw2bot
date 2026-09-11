@@ -1989,6 +1989,12 @@ __DAYS_PAGES_BOTTOM__
     // The window the server served is the one it remembered, so the header
     // and the address bar follow it rather than the other way round.
     state.window = { since: data.window.start, until: data.window.end };
+    // A window the server remembered as a length has no button to light, so
+    // it comes back drawn in the date fields. Keeping the length is what
+    // stops the dates it happens to cover today from replacing it: taking
+    // the window from the answer works either way round, whether the length
+    // arrived in a link or was waiting against this member's account.
+    linkedDays = data.rolling_days === undefined ? null : data.rolling_days;
     adoptRange(data.range, data.window.start, data.window.end);
     if (data.remembered_window) {
       writeStoredRange(data.key_generation);

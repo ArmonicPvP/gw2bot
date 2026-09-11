@@ -271,6 +271,12 @@ class TestProfitPage:
             'history.replaceState(null, "", "/profit" + windowQuery());'
         ) in PROFIT_PAGE
         assert "days: linkedDays," in PROFIT_PAGE
+        # The length comes from the answer, so a window remembered as one is
+        # kept as one even on a browser that has never seen it before.
+        assert (
+            "linkedDays = data.rolling_days === undefined "
+            "? null : data.rolling_days;"
+        ) in PROFIT_PAGE
         # Picking a window replaces the length a link gave the reader.
         assert "function refresh() {\n    linkedDays = null;" in PROFIT_PAGE
         # A length one of the buttons stands for is that button instead.

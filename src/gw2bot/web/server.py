@@ -128,12 +128,19 @@ class _Window:
     from the member's stored choice rather than from the request, which is
     what lets the page mark the button it was given rather than the one it
     asked for.
+
+    ``picked_until`` is the far edge the reader asked for before it was cut
+    back to the present, which is the edge their choice is remembered by: a
+    window ending today is being asked for the whole of today, and freezing
+    it at the moment they pressed Apply would leave the rest of the day out
+    of every later visit.
     """
 
     key: str
     since: float
     until: float
     remembered: bool = False
+    picked_until: float | None = None
 
 
 def _redirect(location: str) -> web.Response:
@@ -1112,14 +1119,19 @@ class WebServer:
     ) -> None:
         """Keep the window a member just picked for their next visit.
 
-        The window stored is the one that was served rather than the one that
-        was asked for, so a custom pair reaching past the present is reopened
-        as the stretch it actually drew.
+        A custom pair is stored by the edges the reader picked rather than by
+        the stretch that was drawn between them: a pair closing at the end of
+        today is drawn out to the present, and storing that instant would
+        reopen the window there tomorrow instead of covering the day they
+        asked for.
         """
+        picked_end = window.until if window.picked_until is None else (
+            window.picked_until
+        )
         stored = StoredRange(
             key=window.key,
             start=int(window.since) if window.key == CUSTOM_RANGE else None,
-            end=int(window.until) if window.key == CUSTOM_RANGE else None,
+            end=int(picked_end) if window.key == CUSTOM_RANGE else None,
         )
         try:
             await asyncio.to_thread(
@@ -1165,7 +1177,10 @@ class WebServer:
         if until <= since:
             LOGGER.debug("Rejected %s request; reason=custom-order", subject)
             return self._json({"error": "invalid range"}, status=400)
-        if until - since > MAX_CUSTOM_WINDOW_SECONDS:
+        # The edge the reader picked is the one held to the ceiling, because
+        # it is the one that is remembered; the stretch drawn today is only
+        # as much of it as has happened.
+        if requested_end - since > MAX_CUSTOM_WINDOW_SECONDS:
             LOGGER.debug("Rejected %s request; reason=custom-span", subject)
             return self._json({"error": "invalid range"}, status=400)
         LOGGER.debug(
@@ -1174,7 +1189,12 @@ class WebServer:
             int((until - since) // 86400),
             until < requested_end,
         )
-        return _Window(key=CUSTOM_RANGE, since=since, until=until)
+        return _Window(
+            key=CUSTOM_RANGE,
+            since=since,
+            until=until,
+            picked_until=requested_end,
+        )
 
     async def _food_data(self, request: web.Request) -> web.StreamResponse:
         denied = await self._require_food_access(request)

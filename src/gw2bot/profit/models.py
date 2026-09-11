@@ -244,6 +244,21 @@ class ReportWindow:
                 return key
         return CUSTOM_RANGE
 
+    @property
+    def rolling_days(self) -> int | None:
+        """The length this window has to be named by, when it has only one.
+
+        A preset is named by its button and a picked pair by its two dates.
+        A rolling run of days that is neither is drawn in the date fields
+        because there is nowhere else to draw it, and a page that took those
+        dates for the window itself would freeze it on them: the next visit
+        would ask for the stretch it covered today rather than for the last
+        sixty days. This is what the page keeps naming it by instead.
+        """
+        if self.custom or self.range_key != CUSTOM_RANGE:
+            return None
+        return self.days
+
     def span(self, now: datetime) -> ReportSpan:
         """The instants this window covers, as read at ``now``.
 
@@ -285,6 +300,11 @@ class ProfitReport:
     # The name the dashboard knows this window by, so the page marks the
     # button the report was built for rather than guessing it from the dates.
     range_key: str
+    # The rolling length behind a window no button stands for, or None when
+    # the window is a preset or a pair of dates the member picked. Without it
+    # a remembered rolling window comes back looking like the dates it covers
+    # today, and the next visit asks for those instead.
+    rolling_days: int | None
     window_start: datetime
     window_end: datetime
     buy_transaction_count: int

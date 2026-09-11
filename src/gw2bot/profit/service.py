@@ -353,6 +353,7 @@ class ProfitService:
         report = ProfitReport(
             days=days,
             range_key=window.range_key,
+            rolling_days=window.rolling_days,
             window_start=window_start,
             window_end=span.end,
             buy_transaction_count=buy_count,
@@ -1125,6 +1126,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
         # custom window's date fields are filled from these, so a member who
         # comes back to a remembered pair of dates sees the pair they picked.
         "range": report.range_key,
+        # Set only for a rolling window no button stands for: the page keeps
+        # naming it by this rather than by the dates it happens to cover
+        # today, so a reload asks for the same rolling stretch again.
+        "rolling_days": report.rolling_days,
         "window": {
             "start_date": report.window_start.date().isoformat(),
             "end_date": report.window_end.date().isoformat(),

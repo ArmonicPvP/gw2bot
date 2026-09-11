@@ -60,10 +60,12 @@ def profit_report(
     days: int = 30,
     range_key: str = "30d",
     window_end: datetime = datetime(2026, 8, 21, 18, 30, tzinfo=UTC),
+    rolling_days: int | None = None,
 ) -> ProfitReport:
     return ProfitReport(
         days=days,
         range_key=range_key,
+        rolling_days=rolling_days,
         window_start=(
             window_end.replace(hour=0, minute=0) - timedelta(days=days - 1)
         ),
@@ -1007,7 +1009,7 @@ class TestProfitPage:
         other_user_id = 202
         guild.members[other_user_id] = member("Other Kitty")
         bot.profit_service.load_report.return_value = profit_report(
-            60, "custom"
+            60, "custom", rolling_days=60
         )
 
         response = await client.get(
@@ -1019,8 +1021,11 @@ class TestProfitPage:
         assert response.status == 200
         payload = await response.json()
         assert payload["days"] == 60
-        # Sixty days is no button, so the page draws it in the date fields.
+        # Sixty days is no button, so the page draws it in the date fields -
+        # and is told the length, so a reload asks for the last sixty days
+        # rather than for the dates they covered.
         assert payload["range"] == "custom"
+        assert payload["rolling_days"] == 60
         assert payload["summary"]["profit"] == 140
         assert payload["summary"]["roi_percent"] == 70
         assert payload["window"] == {
@@ -1328,6 +1333,31 @@ class TestProfitPage:
             ReportWindow(days=30, start=since, end=until),
             force=False,
         )
+
+    async def test_a_remembered_length_is_served_as_a_length(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        # A page opening with no window at all is the path a member takes
+        # from a browser that has never seen their choice. Sixty days lights
+        # no button, so it is drawn in the date fields - and the length comes
+        # with it, or the next visit would ask for those dates instead.
+        remembered = ReportWindow(days=60)
+        bot.profit_service.resolve_report_window.side_effect = None
+        bot.profit_service.resolve_report_window.return_value = ResolvedWindow(
+            remembered, True
+        )
+        bot.profit_service.load_report.return_value = profit_report(
+            60, "custom", rolling_days=60
+        )
+
+        response = await client.get("/api/profit", headers=self._headers())
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert payload["rolling_days"] == 60
 
     @pytest.mark.parametrize(
         "params",
@@ -2941,6 +2971,46 @@ class TestRememberedDashboardWindows:
             float(since),
             float(until),
         )
+
+    @pytest.mark.parametrize(
+        ("path", "dashboard"),
+        [("/api/food", "food"), ("/api/roster", "roster"),
+         ("/api/gold", "gold")],
+    )
+    async def test_a_pair_ending_today_is_remembered_by_the_day_it_names(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        path: str,
+        dashboard: str,
+    ) -> None:
+        now = time.time()
+        since = int(now - 2 * 86400)
+        # The last second of today, which is what the picker sends for a
+        # window ending on today's date.
+        end_of_today = int(now + 3600)
+
+        response = await client.get(
+            path,
+            params={
+                "range": "custom",
+                "start": str(since),
+                "end": str(end_of_today),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        # Only as much of today as has happened is drawn...
+        assert payload["now"] <= time.time()
+        # ...but the day the member asked for is what is remembered, so the
+        # rest of it is there on their next visit instead of the window
+        # stopping at the moment they pressed Apply.
+        assert raffle_store.get_dashboard_range(
+            SESSION_USER_ID, dashboard
+        ) == StoredRange("custom", since, end_of_today)
 
     @pytest.mark.parametrize(
         "path", ["/api/food", "/api/roster", "/api/gold"]

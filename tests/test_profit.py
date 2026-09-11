@@ -284,6 +284,7 @@ class TestProfitCalculation:
         report = ProfitReport(
             days=30,
             range_key="30d",
+            rolling_days=None,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=2,
@@ -483,6 +484,7 @@ class TestProfitCalculation:
         report = ProfitReport(
             days=30,
             range_key="30d",
+            rolling_days=None,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=0,
@@ -595,6 +597,7 @@ class TestOneSidedMarketQuotes:
         report = ProfitReport(
             days=30,
             range_key="30d",
+            rolling_days=None,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=0,
@@ -974,6 +977,29 @@ class TestReportWindow:
         # Sixty days is no button, so the page draws it in the date fields
         # instead; what is stored stays a rolling window all the same.
         assert ReportWindow(days=days).range_key == key
+
+    @pytest.mark.parametrize(
+        ("window", "expected"),
+        [
+            pytest.param(ReportWindow(days=7), None, id="preset"),
+            pytest.param(ReportWindow(days=60), 60, id="no-button"),
+            pytest.param(
+                ReportWindow.between(1_780_000_000, 1_782_000_000),
+                None,
+                id="picked-pair",
+            ),
+        ],
+    )
+    def test_only_a_length_with_no_button_is_named_by_its_length(
+        self,
+        window: ReportWindow,
+        expected: int | None,
+    ) -> None:
+        # A preset has a button and a picked pair has its dates. A rolling
+        # run of days that is neither is drawn in the date fields, so the
+        # page is told the length as well - otherwise the next visit asks for
+        # the dates it covered today and the window stops rolling.
+        assert window.rolling_days == expected
 
     def test_a_rolling_window_runs_back_from_the_present(self) -> None:
         now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
