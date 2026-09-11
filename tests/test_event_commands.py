@@ -8153,6 +8153,120 @@ class TestAddSignups:
             in caplog.text
         )
 
+    async def test_a_refused_waitlist_read_keeps_what_the_seats_said(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        for user_id in (2, 3, 4, 5):
+            self.seat(store, occurrence, user_id, EventRole.DPS)
+        real_get_signup = store.get_signup
+        refusing = False
+        recipient = await fake_bot.fetch_user(11)
+
+        async def arm_the_refusal(*args: Any, **kwargs: Any) -> None:
+            # The notice has gone out, so the seat reads left are the ones
+            # that work out who ended up on the waitlist.
+            nonlocal refusing
+            refusing = True
+
+        recipient.send = AsyncMock(side_effect=arm_the_refusal)
+
+        def refuse_once_armed(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The seating already said this member went to the waitlist.
+        # Forgetting that would tell the commander the full event seated
+        # them.
+        added = real_get_signup(occurrence.occurrence_id, 11)
+        assert added is not None
+        assert added.waitlisted
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert (
+            "The event is full, so <@11> was added to the waitlist." in content
+        )
+        assert "Added <@11> to the roster." not in content
+
+    async def test_an_addition_announces_into_the_thread_a_move_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A fractal seats one quickness, so seating a Quickness DPS flexes
+        # the quickness healer onto their alacrity flex - a move this batch
+        # owes the thread.
+        event, occurrence = self.make_event(store)
+        self.seat(
+            store,
+            occurrence,
+            1,
+            EventRole.QUICKNESS_HEAL,
+            flex_roles=(EventRole.ALACRITY_HEAL,),
+        )
+        moved = FakeChannel(4321, FakeThread(888))
+        fake_bot._channels[moved.id] = moved
+        fake_bot._channels[moved.thread.id] = moved.thread
+        recipient = await fake_bot.fetch_user(11)
+
+        async def move_the_event(*args: Any, **kwargs: Any) -> None:
+            # Another leader moves the event to a new channel while the one
+            # notice this batch owes is going out.
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                moved.id,
+                999,
+                moved.thread.id,
+            )
+
+        recipient.send = AsyncMock(side_effect=move_the_event)
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        channel.thread.send.reset_mock()
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.QUICKNESS_DPS)
+
+        # The thread the flex belongs in is the one the run has now; the
+        # one it was moved out of is gone as far as its members are
+        # concerned.
+        flexed = store.get_signup(occurrence.occurrence_id, 1)
+        assert flexed is not None
+        assert flexed.assigned_role is EventRole.ALACRITY_HEAL
+        moved.thread.send.assert_awaited_once()
+        announcement = moved.thread.send.await_args
+        assert announcement is not None
+        assert "<@1>" in announcement.args[0]
+        channel.thread.send.assert_not_awaited()
+
     async def test_an_addition_announces_the_batch_once(
         self,
         fake_bot: Any,

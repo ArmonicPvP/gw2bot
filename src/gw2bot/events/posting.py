@@ -2188,10 +2188,31 @@ async def seat_signup(
             # leaves a roster that still respects every cap (the movers
             # vacated the contested seats before the newcomer exists) and is
             # re-canonicalised by the next mutation.
-            bot.event_store.apply_roster_assignments(
-                occurrence.occurrence_id,
-                assignments,
-            )
+            #
+            # A store that refuses that write leaves the roster as the check
+            # left it: its departures are committed, and the member is still
+            # waiting on a deferred interaction that only answers a
+            # ValueError. Say what the check moved - nothing else will, and
+            # this call hands its caller no update to fold - and refuse the
+            # seating in the one way the flows above know how to report.
+            try:
+                bot.event_store.apply_roster_assignments(
+                    occurrence.occurrence_id,
+                    assignments,
+                )
+            except SQLAlchemyError as exc:
+                LOGGER.error(
+                    "Could not re-seat the roster for a signup; "
+                    "occurrence_id=%s user_id=%s error_type=%s",
+                    occurrence.occurrence_id,
+                    discord_user_id,
+                    type(exc).__name__,
+                )
+                await notify_roster_update(bot, occurrence, checked)
+                raise ValueError(
+                    "The roster could not be updated just now. Try again "
+                    "in a moment."
+                ) from exc
             update = RosterUpdate(reassigned=tuple(changes))
     else:
         waitlisted = is_roster_full(event.capacity, signups)
@@ -2204,14 +2225,36 @@ async def seat_signup(
         assigned_role.value if assigned_role is not None else None,
         len(update.reassigned),
     )
-    signup = bot.event_store.add_signup(
-        occurrence_id=occurrence.occurrence_id,
-        discord_user_id=discord_user_id,
-        role=role,
-        assigned_role=assigned_role,
-        flex_roles=flex_roles,
-        waitlisted=waitlisted,
-    )
+    # Guarded like the re-seat above it. The reshuffle that made room for
+    # this member is committed by now, so what goes out is that as well as
+    # the check's own departures: those members really did move, even though
+    # the newcomer they moved for never arrived.
+    try:
+        signup = bot.event_store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=discord_user_id,
+            role=role,
+            assigned_role=assigned_role,
+            flex_roles=flex_roles,
+            waitlisted=waitlisted,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not seat a signup; occurrence_id=%s user_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        await notify_roster_update(
+            bot,
+            occurrence,
+            merge_roster_updates([checked, update]),
+        )
+        raise ValueError(
+            "The roster could not be updated just now. Try again in a "
+            "moment."
+        ) from exc
     # The check moved the roster before this seating did, and a member it
     # promoted can be one the seating then flexes. Folded, they read as one
     # move apiece.
@@ -3353,6 +3396,16 @@ async def apply_signup_edit(
         # here, so this forces a confirmation rather than every edit.
         force=allow_waitlist,
     )
+    # Asked again of the event the check read back. A commander saving a
+    # category change while the lookups ran can have made this a headcount
+    # event, which has no role to persist: going on would spend one of the
+    # member's three edit tokens writing a choice the event cannot honour,
+    # and leave it waiting on the roster for a category change back. Refused
+    # exactly as it would have been a moment earlier, except that the check
+    # has committed its departures since, so they are announced here.
+    if not event.capacity.has_roles:
+        await notify_roster_update(bot, occurrence, checked)
+        raise ValueError("This event has no roles to edit.")
     current = next(
         (
             signup

@@ -4019,6 +4019,157 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    async def test_a_seating_the_store_refuses_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # 14 has left, so the check frees their seat and moves 16 up into
+        # it; the store then refuses the newcomer's own row.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 13, 15, 16)}
+        )
+        real_add_signup = store.add_signup
+
+        def refuse_the_newcomer(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("discord_user_id") == 17:
+                raise SQLAlchemyError("boom")
+            return real_add_signup(*args, **kwargs)
+
+        store.add_signup = refuse_the_newcomer  # type: ignore[method-assign]
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(ValueError, match="could not be updated"):
+            await seat_signup(bot, event, occurrence, 17, EventRole.DPS, ())
+
+        # The member is on a deferred interaction that only answers a
+        # ValueError, and the promotion the check made is committed, so it
+        # is announced here rather than escaping with the write.
+        assert store.get_signup(occurrence.occurrence_id, 17) is None
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
+    async def test_a_reseat_the_store_refuses_announces_the_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A fractal seats one quickness in total, so 12 sits on their
+        # alacrity flex while 11 holds it.
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_DPS, ()
+        )
+        await complete_signup(
+            bot,
+            event,
+            occurrence,
+            12,
+            EventRole.QUICKNESS_HEAL,
+            (EventRole.ALACRITY_HEAL,),
+        )
+        # 11 has left, so the check takes their seat back and 12 moves to
+        # the quickness role they asked for in the first place.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 17)}
+        )
+        real_apply = store.apply_roster_assignments
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            # The one departure is dealt with by the time its automatic
+            # sign-up is switched off, so the next re-seat is the seating's.
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(*args: Any, **kwargs: Any) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_apply(*args, **kwargs)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.apply_roster_assignments = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(ValueError, match="could not be updated"):
+            await seat_signup(bot, event, occurrence, 17, EventRole.DPS, ())
+
+        assert store.get_signup(occurrence.occurrence_id, 17) is None
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@12>" in channel.thread.send.await_args.args[0]
+
+    async def test_an_edit_refuses_a_category_change_made_mid_check(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        waiting = await complete_signup(
+            bot, event, occurrence, 16, EventRole.DPS, ()
+        )
+        assert waiting.waitlisted
+        # 11 has left, so the check frees the healer seat and 16 moves up.
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 13, 14, 15, 16)}
+        )
+        real_fetch = guild.fetch_member
+
+        async def change_the_category(user_id: int) -> Any:
+            # A commander saves the event as a headcount category while the
+            # lookups are in flight.
+            store.update_event(
+                event_id=event.event_id,
+                category=EventCategory.WVW,
+                title=event.title,
+                description=event.description,
+                channel_id=event.channel_id,
+                leader_discord_id=event.leader_discord_id,
+                start_time=event.start_time,
+                duration_minutes=event.duration_minutes,
+                repeat_frequency=event.repeat_frequency,
+                repeat_days=event.repeat_days,
+            )
+            return await real_fetch(user_id)
+
+        guild.fetch_member = change_the_category  # type: ignore[method-assign]
+        bot.guild = guild
+        channel.thread.send.reset_mock()
+
+        with pytest.raises(ValueError, match="no roles to edit"):
+            await apply_signup_edit(
+                bot,
+                event,
+                occurrence,
+                13,
+                EventRole.QUICKNESS_HEAL,
+                (),
+            )
+
+        # The event has no roles to hold this choice, so it is refused
+        # rather than written and left waiting for a category change back.
+        edited = store.get_signup(occurrence.occurrence_id, 13)
+        assert edited is not None
+        assert edited.role is EventRole.DPS
+        # The check's own movement is committed, and this exit is the last
+        # chance to say so.
+        assert channel.thread.send.await_count == 1
+        assert channel.thread.send.await_args is not None
+        assert "<@16>" in channel.thread.send.await_args.args[0]
+
     async def test_an_occurrence_read_that_fails_keeps_the_removals_made(
         self,
         bot: Any,

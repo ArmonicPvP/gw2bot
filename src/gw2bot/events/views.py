@@ -3128,6 +3128,13 @@ async def apply_roster_addition(
                 interaction.user.id,
                 final.value,
             )
+        else:
+            # Adopted like the earlier verification's answer, and for the
+            # same reason: a channel move landing while the notices went out
+            # replaces the thread the announcement below is sent to and the
+            # message the preview is drawn from, so both must be addressed
+            # to the run as it now stands.
+            event, current = final
     # Re-read the seats rather than trusting what each write returned. An edit
     # landing while seat_signup awaited Discord re-seats the whole roster under
     # the new capacity, so the row a write returned can describe a capacity
@@ -3147,13 +3154,16 @@ async def apply_roster_addition(
             if _is_waitlisted(bot, current.occurrence_id, user_id)
         ]
     except SQLAlchemyError as exc:
+        # The assignment never happened, so what each seat_signup reported
+        # stands. It can be a capacity an edit has since replaced, but it is
+        # what this batch was told, and clearing it would tell a commander
+        # that members the event had no room for were seated.
         LOGGER.error(
             "Could not read back who a roster addition waitlisted; "
             "occurrence_id=%s error_type=%s",
             current.occurrence_id,
             type(exc).__name__,
         )
-        outcome.waitlisted = []
     # Each addition can flex seated members into another of their roles, and a
     # later addition can move someone an earlier one already moved. Merging
     # collapses each member's changes into one line describing the net result.
