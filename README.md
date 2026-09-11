@@ -1480,7 +1480,9 @@ picked pair is stored as those two dates. A window named in the URL — the one
 `/profit view 60` links to — still wins and becomes the new remembered window,
 while `/profit view` with no argument links without one and leaves the saved
 window alone. A length that is none of the three presets, such as that 60, is
-shown in the date fields, because there is no button that means it.
+shown in the date fields, because there is no button that means it — but it
+stays a length everywhere else, so reloading the page keeps asking for the
+last 60 days rather than freezing on the dates they happened to cover.
 
 The browser keeps a copy of that choice as a repair kit. If the account comes
 back without a stored window — a database restored from before the choice, say

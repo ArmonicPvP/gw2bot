@@ -204,10 +204,25 @@ class ReportWindow:
 
     @classmethod
     def between(cls, start: int, end: int) -> ReportWindow:
-        """The window a picked pair of epoch-second bounds describes."""
+        """The window a picked pair of epoch-second bounds describes.
+
+        Every table and chart the report draws is grouped by whole UTC date,
+        so the pair is snapped to the dates it lands in: the first opens at
+        midnight and the last closes on its final second. A bound falling
+        mid-day would otherwise cut the transaction counts there while the
+        stored daily results carried the whole of that date.
+        """
         first = datetime.fromtimestamp(start, UTC).date()
         last = datetime.fromtimestamp(end, UTC).date()
-        return cls(days=(last - first).days + 1, start=start, end=end)
+        opening = datetime(first.year, first.month, first.day, tzinfo=UTC)
+        closing = datetime(
+            last.year, last.month, last.day, tzinfo=UTC
+        ) + timedelta(days=1)
+        return cls(
+            days=(last - first).days + 1,
+            start=int(opening.timestamp()),
+            end=int(closing.timestamp()) - 1,
+        )
 
     @property
     def custom(self) -> bool:

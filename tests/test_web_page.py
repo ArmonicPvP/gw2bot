@@ -236,7 +236,7 @@ class TestProfitPage:
             "adoptRange(data.range, data.window.start, data.window.end);"
         ) in PROFIT_PAGE
         assert (
-            'history.replaceState(null, "", "/profit" + rangeQuery());'
+            'history.replaceState(null, "", "/profit" + windowQuery());'
         ) in PROFIT_PAGE
         assert "function load(forced)" in PROFIT_PAGE
         # The first load names no window at all, which is what asks for the
@@ -260,9 +260,21 @@ class TestProfitPage:
         assert "date.getUTCFullYear() + \"-\" +" in PROFIT_PAGE
         # A picked pair is named by its dates; a preset by its length.
         assert 'var windowLabel = data.range === "custom"' in PROFIT_PAGE
-        # The days a /profit view link names is not one of the buttons, so it
-        # is sent as it stands and the answer decides what lights up.
-        assert '"days=" + encodeURIComponent(String(pendingDays))' in (
+        # A length no button stands for stays a length - in the request, in
+        # the address bar and in the browser's copy - so a reload keeps asking
+        # for the last sixty days rather than for the dates they fell on.
+        assert '"?days=" + encodeURIComponent(String(linkedDays))' in (
+            PROFIT_PAGE
+        )
+        assert "function windowQuery()" in PROFIT_PAGE
+        assert (
+            'history.replaceState(null, "", "/profit" + windowQuery());'
+        ) in PROFIT_PAGE
+        assert "days: linkedDays," in PROFIT_PAGE
+        # Picking a window replaces the length a link gave the reader.
+        assert "function refresh() {\n    linkedDays = null;" in PROFIT_PAGE
+        # A length one of the buttons stands for is that button instead.
+        assert 'var PRESET_DAYS = { "24h": 1, "7d": 7, "30d": 30 };' in (
             PROFIT_PAGE
         )
 
@@ -324,7 +336,7 @@ class TestProfitPage:
             '("click", function () {\n    load(true);'
         ) in PROFIT_PAGE
         # Picking a window is not asking for a live read of the Trading Post.
-        assert "function refresh() {\n    load(false);" in PROFIT_PAGE
+        assert "    linkedDays = null;\n    load(false);" in PROFIT_PAGE
         assert "  load(false);\n}());" in PROFIT_PAGE
         assert "        load(false);\n        return;" in PROFIT_PAGE
 

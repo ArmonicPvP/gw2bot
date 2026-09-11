@@ -1000,6 +1000,24 @@ class TestReportWindow:
         assert span.start == datetime(2026, 6, 1, tzinfo=UTC)
         assert span.end == datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC)
 
+    def test_a_pair_landing_mid_day_covers_that_whole_date(self) -> None:
+        # Every table the report draws is grouped by whole UTC date, so a
+        # bound falling mid-day is snapped to the date it lands in. Left as
+        # it was, the transaction counts would stop at that instant while the
+        # stored daily results carried the whole of the date.
+        window = ReportWindow.between(
+            int(datetime(2026, 6, 1, 9, 30, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 6, 30, 9, 30, tzinfo=UTC).timestamp()),
+        )
+
+        assert window.days == 30
+        assert window.start == int(
+            datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+        )
+        assert window.end == int(
+            datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()
+        )
+
     def test_a_picked_pair_reaching_past_today_stops_at_the_present(
         self,
     ) -> None:

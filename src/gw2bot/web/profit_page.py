@@ -656,9 +656,16 @@ __DAYS_PAGES_BOTTOM__
   var missingKey = false;
   var restoredWindow = false;
   // A window a /profit view link names by its length rather than by one of
-  // the buttons. It is sent as it stands on the first load, and the window
-  // that comes back decides which button the header lights up.
-  var pendingDays = null;
+  // the buttons. No button can express it, so the page keeps naming it that
+  // way - in its requests, in the address bar and in the local copy below -
+  // until the reader picks a window of their own. Serializing it as the two
+  // dates it happens to cover today would freeze it there: a reload would
+  // ask for those dates instead of for the last sixty days.
+  var linkedDays = null;
+
+  // The lengths the three buttons stand for, so a link naming one of them by
+  // its number of days lights that button instead.
+  var PRESET_DAYS = { "24h": 1, "7d": 7, "30d": 30 };
   // How often the open orders follow the market. The GW2 API declares its
   // prices good for two minutes, and the server holds each reading for one,
   // so this is as live as the data can honestly be.
@@ -677,6 +684,12 @@ __DAYS_PAGES_BOTTOM__
         // clears the window on purpose, so the copy must not put it back.
         return null;
       }
+      // A length stays a length, so a window put back from here rolls on the
+      // way the one it copied did.
+      if (Number.isInteger(saved.days)) {
+        return saved.days >= 1 && saved.days <= MAX_CUSTOM_DAYS
+          ? saved : null;
+      }
       if (saved.range !== "custom") {
         return typeof saved.range === "string" && saved.range ? saved : null;
       }
@@ -691,6 +704,7 @@ __DAYS_PAGES_BOTTOM__
     try {
       localStorage.setItem(STORED_RANGE_KEY, JSON.stringify({
         range: state.range,
+        days: linkedDays,
         start: customWindow === null ? null : customWindow.since,
         end: customWindow === null ? null : customWindow.until,
         key: keyGeneration
@@ -703,6 +717,7 @@ __DAYS_PAGES_BOTTOM__
   // Whether a saved window and the one the server just served are the same
   // stretch of trading, which is what decides there is nothing to repair.
   function sameStoredRange(saved, data) {
+    if (Number.isInteger(saved.days)) { return saved.days === data.days; }
     if (saved.range !== data.range) { return false; }
     return saved.range !== "custom"
       || (saved.start === data.window.start && saved.end === data.window.end);
@@ -711,8 +726,9 @@ __DAYS_PAGES_BOTTOM__
   // Put a saved window back into the header, so the request that follows
   // names it and the member lands where they left off.
   function restoreStoredRange(saved) {
-    state.range = saved.range;
-    if (saved.range === "custom") {
+    linkedDays = Number.isInteger(saved.days) ? saved.days : null;
+    state.range = saved.range || null;
+    if (saved.range === "custom" && linkedDays === null) {
       customWindow = { since: saved.start, until: saved.end };
       customStart.value = dayValue(new Date(saved.start * 1000));
       customEnd.value = dayValue(new Date(saved.end * 1000));
@@ -1997,7 +2013,7 @@ __DAYS_PAGES_BOTTOM__
       ? shortDate(
         historyStart, spansYears(historyStart, data.window.end_date))
       : null;
-    history.replaceState(null, "", "/profit" + rangeQuery());
+    history.replaceState(null, "", "/profit" + windowQuery());
     renderSummary(data);
     renderCharts(data);
     picksData = data.picks;
@@ -2047,10 +2063,21 @@ __DAYS_PAGES_BOTTOM__
       ? 0 : state.window.until - state.window.since;
   }
 
+  // How the window on screen is named: by one of the buttons, by the pair of
+  // dates behind Custom, or by the length a link gave it.
+  function windowQuery() {
+    return linkedDays === null
+      ? rangeQuery()
+      : "?days=" + encodeURIComponent(String(linkedDays));
+  }
+
   // What the picker calls once a window is picked. Naming a window is not
   // asking for a live re-read of the Trading Post, so this takes the cached
-  // path; only Reload forces one.
+  // path; only Reload forces one. A window the reader picks replaces the
+  // length a link gave them, which is what stops the two naming different
+  // stretches of trading.
   function refresh() {
+    linkedDays = null;
     load(false);
   }
 """
@@ -2116,7 +2143,16 @@ __DAYS_PAGES_BOTTOM__
     }
     var days = Number(params.get("days"));
     if (Number.isInteger(days) && days >= 1 && days <= MAX_CUSTOM_DAYS) {
-      pendingDays = days;
+      // A length one of the buttons stands for is that button; one that no
+      // button stands for stays a length.
+      var button = PRESET_RANGES.filter(function (key) {
+        return PRESET_DAYS[key] === days;
+      })[0];
+      if (button) {
+        state.range = button;
+      } else {
+        linkedDays = days;
+      }
       trace("window-from-link", days);
     }
   }
@@ -2125,13 +2161,10 @@ __DAYS_PAGES_BOTTOM__
     // Asking without a window lets the server answer with the one this member
     // last chose; the page only names a window when they just picked one, or
     // when the link they followed named one.
-    // rangeQuery opens with a "?" and is empty when the page is asking for
+    // windowQuery opens with a "?" and is empty when the page is asking for
     // the remembered window, so the mark comes off and the rest joins the
     // other query values below.
-    var chosen = pendingDays === null
-      ? rangeQuery().slice(1)
-      : "days=" + encodeURIComponent(String(pendingDays));
-    pendingDays = null;
+    var chosen = windowQuery().slice(1);
     status.className = "";
     status.textContent = "Loading\u2026";
     reports.hidden = false;
