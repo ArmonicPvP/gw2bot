@@ -4244,6 +4244,85 @@ class TestCheckRosterMembership:
         assert channel.thread.send.await_args is not None
         assert "<@16>" in channel.thread.send.await_args.args[0]
 
+    async def test_a_removal_says_so_when_it_cannot_read_the_seat(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        # 13 left the server, so the check takes them off - and the read
+        # that would have said what it took off is refused.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 14, 15)}
+        )
+        real_get_signup = store.get_signup
+        refusing = True
+
+        def refuse_the_first_read(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            nonlocal refusing
+            if refusing and discord_user_id == 13:
+                refusing = False
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        store.get_signup = refuse_the_first_read  # type: ignore[method-assign]
+
+        with pytest.raises(RosterUnreadable):
+            await remove_signup(bot, event, occurrence, 13)
+
+        # They are off the roster, so answering "not signed up" would deny
+        # the removal the check made; the store not saying is what happened.
+        assert real_get_signup(occurrence.occurrence_id, 13) is None
+
+    async def test_a_check_that_stops_partway_is_asked_again(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        # 11 and 13 have both left; the store refuses the read that opens
+        # the second removal, so the sweep stops with one of them still on.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (12, 14, 15)}
+        )
+        real_get_occurrence = store.get_occurrence
+        real_set_auto_signup = store.set_auto_signup
+        refusing = False
+
+        def arm_the_refusal(*args: Any, **kwargs: Any) -> Any:
+            nonlocal refusing
+            refusing = True
+            return real_set_auto_signup(*args, **kwargs)
+
+        def refuse_once_armed(occurrence_id: int) -> Any:
+            nonlocal refusing
+            if refusing:
+                refusing = False
+                raise SQLAlchemyError("boom")
+            return real_get_occurrence(occurrence_id)
+
+        store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
+        store.get_occurrence = (  # type: ignore[method-assign]
+            refuse_once_armed
+        )
+
+        first, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+        assert first == [11]
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+
+        # The answer only stands for a minute when the roster is actually
+        # clean: a sign-up moments later must not be seated around a seat
+        # the sweep never freed.
+        second, _ = await check_roster_membership(bot, event, occurrence)
+
+        assert second == [13]
+        assert store.get_signup(occurrence.occurrence_id, 13) is None
+
     async def test_a_removal_reports_a_member_its_own_check_took_off(
         self,
         bot: Any,

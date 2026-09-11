@@ -2423,6 +2423,20 @@ async def remove_signup(
         await notify_roster_update(bot, occurrence, checked)
         raise RosterUnreadable from exc
     if removed is None:
+        if before is None and discord_user_id in departed:
+            # The check took them off, and the read that would have said
+            # what it took off is the one that refused. Absence is the one
+            # answer this cannot be: it would deny that removal. Answered as
+            # the store declining to say, which every caller of this already
+            # handles, with what the check moved announced first.
+            LOGGER.error(
+                "Could not say what a check's own removal took off; "
+                "occurrence_id=%s user_id=%s",
+                occurrence.occurrence_id,
+                discord_user_id,
+            )
+            await notify_roster_update(bot, occurrence, checked)
+            raise RosterUnreadable
         if before is not None and discord_user_id in departed:
             # The check above took them off, which is the removal this call
             # was asked for - it just happened a step earlier, because they
@@ -2833,6 +2847,33 @@ def _event_guild(bot: Gw2Bot) -> discord.Guild | None:
     return bot.get_guild(bot._config.discord_command_guild_id)
 
 
+def _roster_swept(
+    bot: Gw2Bot,
+    occurrence_id: int,
+    memberships: Mapping[int, GuildMembership],
+) -> bool:
+    """Whether the roster is left with nobody the server has disowned.
+
+    Asked of the rows rather than of the prune, because the prune stops on a
+    store failure the same way it stops on a finished run - by reporting what
+    it committed - and both leave departures behind that the next roster
+    change must ask about again. Members who signed up while the lookups ran
+    are not in the answer and count as present, which is what they are until
+    a check of their own says otherwise.
+    """
+    try:
+        remaining = bot.event_store.get_signups(occurrence_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster back after checking it; "
+            "occurrence_id=%s error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+        return False
+    return not departed_roster_members(remaining, memberships)
+
+
 async def check_roster_membership(
     bot: Gw2Bot,
     event: Event,
@@ -2956,9 +2997,25 @@ async def check_roster_membership(
         )
         if departed and notify:
             await notify_roster_update(bot, occurrence, update)
-    except (discord.DiscordException, SQLAlchemyError) as exc:
+    except discord.DiscordException as exc:
         # A roster the bot could not check is still a roster: report nothing
         # removed and let the sign-up, removal or post behind this carry on.
+        LOGGER.error(
+            "Could not check the roster against the server; occurrence_id=%s "
+            "error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+        # Recorded for this one alone: a check that failed against an
+        # unreachable Discord must not be retried by every click behind it,
+        # which would spend the same failing lookups over and over.
+        checks.checked_at[occurrence_id] = time.monotonic()
+        return [], RosterUpdate()
+    except SQLAlchemyError as exc:
+        # Not recorded: the store refusing says nothing about who is still in
+        # the server, and whatever this sweep did not take off is still
+        # sitting on the roster. Standing the answer down for a minute would
+        # let every click behind it seat members around those seats.
         LOGGER.error(
             "Could not check the roster against the server; occurrence_id=%s "
             "error_type=%s",
@@ -2968,9 +3025,12 @@ async def check_roster_membership(
         return [], RosterUpdate()
     finally:
         checks.in_flight.discard(occurrence_id)
-        # Recorded whatever the outcome. A check that failed against an
-        # unreachable Discord must not be retried by every click behind it,
-        # which would spend the same failing lookups over and over.
+    # An answer stands for a minute, so it is only worth standing when the
+    # roster really is clean. The prune stops on a store failure and reports
+    # what it committed rather than raising, so a departure it never made
+    # would otherwise sit unasked-about for the window's length with every
+    # click behind it skipping the check.
+    if _roster_swept(bot, occurrence_id, resolved):
         checks.checked_at[occurrence_id] = time.monotonic()
     LOGGER.debug(
         "Checked the roster against the server; event_id=%s occurrence_id=%s "
