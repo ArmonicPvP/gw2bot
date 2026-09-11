@@ -8013,6 +8013,54 @@ class TestAddSignups:
         assert "<@11>" in kwargs["content"]
         assert "could not be read" in kwargs["content"]
 
+    async def test_an_addition_answers_when_the_seat_read_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
+        guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (1, 11)}
+        )
+        real_fetch = guild.fetch_member
+        real_get_signup = store.get_signup
+        refusing = False
+
+        async def arm_the_refusal(user_id: int) -> Any:
+            # By the time the check's lookups run, the next seat read is the
+            # one the loop takes to see whether this member is already on.
+            nonlocal refusing
+            refusing = True
+            return await real_fetch(user_id)
+
+        def refuse_once_armed(occurrence_id: int, discord_user_id: int) -> Any:
+            if refusing:
+                raise SQLAlchemyError("boom")
+            return real_get_signup(occurrence_id, discord_user_id)
+
+        guild.fetch_member = arm_the_refusal  # type: ignore[method-assign]
+        fake_bot.guild = guild
+        store.get_signup = refuse_once_armed  # type: ignore[method-assign]
+        role_view = AddSignupsRoleView(
+            fake_bot,
+            self.make_draft(event, occurrence),
+            occurrence,
+            event,
+            store.get_signups(occurrence.occurrence_id),
+            [11],
+        )
+        interaction = self.make_add_interaction()
+
+        await role_view.pick(interaction, EventRole.DPS)
+
+        # The response already says the members are being added, so this has
+        # to answer rather than escape.
+        assert interaction.edit_original_response.await_args is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "could not be read" in kwargs["content"]
+        assert "<@11>" in kwargs["content"]
+
     async def test_an_addition_announces_the_batch_once(
         self,
         fake_bot: Any,

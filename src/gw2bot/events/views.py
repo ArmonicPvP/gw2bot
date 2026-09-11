@@ -2974,7 +2974,26 @@ async def apply_roster_addition(
         # add_signup would overwrite an existing row, resetting the member's
         # signed-up time and with it their seating priority, so a member who is
         # already on the roster is left exactly as they are.
-        if bot.event_store.get_signup(current.occurrence_id, user_id):
+        #
+        # Guarded like the read above it, and for the same reason: the seats
+        # already taken and the check's own departures are committed, and an
+        # escape here takes the notices, the announcement and the summary
+        # with it.
+        try:
+            already_seated = bot.event_store.get_signup(
+                current.occurrence_id, user_id
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read a member's seat during a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.stop = _AdditionStop.UNREADABLE
+            outcome.left_off = list(user_ids[index:])
+            break
+        if already_seated:
             outcome.skipped.append(user_id)
             continue
         try:
