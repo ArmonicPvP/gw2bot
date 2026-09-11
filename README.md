@@ -1330,7 +1330,9 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   can only show what has been collected so far. Left empty, the link names no
   window and the page reopens the one the member last used, defaulting to 30
   days until they pick one. If the web session has expired, Discord sign-in
-  returns the member to that same profit window.
+  returns the member to that same profit window. The page itself offers the
+  24-hour, 7-day, 30-day and custom windows the other dashboards do; this
+  argument is the way to name a length none of those buttons covers.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
   data, remembered report window, and hidden Open Orders items. It cannot
   affect any other member's key, cache, or choices. Replacing a key with
@@ -1455,13 +1457,30 @@ from a sync of this section's own, so it stays the one-request section it has
 always been. A member whose history has never been read sees the market columns
 and dashes where the cost would be, and the costs appear on their next visit.
 
-The window in the header is remembered the same way: whenever a member loads a
-report the chosen number of days is stored against their Discord account, and
-opening `/profit` without a `days` value in the URL reopens that window instead
-of the 30-day default. A `days` value in the URL — the one `/profit view 60`
-links to — still wins and becomes the new remembered window, while
-`/profit view` with no argument links without one and leaves the saved window
-alone.
+#### Choosing the window
+
+The header carries the same four buttons every other dashboard has: **24h**,
+**7d**, **30d** and **Custom**. The three presets are the last 1, 7 and 30
+whole UTC dates, ending at the moment the page is opened. **Custom** opens a
+pair of date fields beside them, and the window they describe is drawn once
+**Apply** is pressed — the preset buttons keep working until then. Those dates
+are UTC calendar dates, because every table and chart below them groups by UTC
+sale date. A pair running past today stops at the present, and one wider than
+3650 days, or ending before it starts, is refused with the reason in the header
+rather than loaded. **Reload** beside the buttons is the only control that
+re-reads the Trading Post; picking a window draws it from what is already
+stored. The summary's **Window** row names a preset by its length and a picked
+pair by its two dates.
+
+The window is remembered: whenever a member loads a report the window they
+picked is stored against their Discord account, and opening `/profit` without
+one in the URL reopens it instead of the 30-day default. A preset is stored as
+the rolling window it is, so it still means "the last 7 days" tomorrow; a
+picked pair is stored as those two dates. A window named in the URL — the one
+`/profit view 60` links to — still wins and becomes the new remembered window,
+while `/profit view` with no argument links without one and leaves the saved
+window alone. A length that is none of the three presets, such as that 60, is
+shown in the date fields, because there is no button that means it.
 
 The browser keeps a copy of that choice as a repair kit. If the account comes
 back without a stored window — a database restored from before the choice, say
@@ -1577,8 +1596,8 @@ Once a day the bot reads every member's Trading Post data in the background,
 so a dashboard opened between passes reads the database rather than the GW2
 API. The same pass stores the name of every item in the game — about 74,000 of
 them, in half a minute, and nothing at all on later passes — so no report ever
-waits on a name lookup. Pressing **Load** still forces a live read for a member
-who wants the last few minutes too.
+waits on a name lookup. Pressing **Reload** still forces a live read for a
+member who wants the last few minutes too.
 
 Market prices are shared: they are public, so the highest buy order for Wool
 Scrap is one lookup for the whole guild rather than one per member. **Open
@@ -1587,7 +1606,7 @@ every minute without a page reload, and pause while the tab is in the
 background. That beat is a public price lookup and nothing more: the box
 itself is held for five minutes, the way a transaction snapshot is, so an open
 tab does not ask the member's own account for its delivery box every minute.
-Pressing **Load** bypasses both caches.
+Pressing **Reload** bypasses both caches.
 
 The rest of the caching:
 
@@ -1655,6 +1674,14 @@ the present, because nothing has been recorded for a day that has not happened,
 and a range wider than 366 days or ending before it starts is refused with the
 reason in the header rather than loaded.
 
+Whichever window a member picks is remembered, the way the profit dashboard's
+is: it is stored against their Discord account rather than in the browser, so
+the page reopens on it from wherever they sign in next. A preset is kept as the
+rolling window it is, so **7d** still means the last seven days tomorrow, while
+a picked pair is kept as those two dates. A member who has never picked one
+opens on **24h**. Each dashboard remembers its own window, and each member
+theirs.
+
 Access is narrower than the calendar's: on top of being a signed-in guild
 member, the viewer must hold role `1317124663847157880`, the role that also
 gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
@@ -1674,7 +1701,8 @@ the chart every change in the window is listed newest first, with who did the
 kicking where the guild log named them.
 
 **Custom** opens the same pair of date fields the feast dashboard has, with the
-same whole-day window, the same **Apply**, and the same limits. A window that
+same whole-day window, the same **Apply**, the same limits, and the same
+remembering. A window that
 closes in the past is counted back from the last member count the bot observed,
 so its right-hand edge reads the roster as it stood then rather than as it
 stands now; the count beside the heading says "at the end" instead of "now"
@@ -1736,7 +1764,8 @@ beside each one. Above it are the window's totals: deposited, withdrawn, and
 the net between them.
 
 **Custom** opens the same pair of date fields the other two dashboards have,
-with the same whole-day window, the same **Apply**, and the same limits. A
+with the same whole-day window, the same **Apply**, the same limits, and the
+same remembering. A
 window that closes in the past is measured back from the last balance the bot
 observed, so its right-hand edge reads the bank as it stood then rather than as
 it stands now; the figure beside the heading says "at the end" instead of "now"

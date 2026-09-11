@@ -27,6 +27,7 @@ from gw2bot.logging_setup import SecretRegistry
 from gw2bot.profit.models import (
     BuyLot,
     ItemDayProfit,
+    ReportWindow,
     Transaction,
     parse_gw2_time,
 )
@@ -201,12 +202,27 @@ class ProfitStore:
         )
         return removed
 
-    def get_report_days(self, discord_user_id: int) -> int | None:
-        """Return the member's remembered report window, if they set one."""
+    def get_report_window(self, discord_user_id: int) -> ReportWindow | None:
+        """Return the member's remembered report window, if they set one.
+
+        A row carrying both custom bounds is the pair of dates they picked;
+        one carrying neither is the rolling run of days a preset button or a
+        ``/profit view`` link asked for. A half-written pair, or a day count
+        no report would serve, is read as no choice at all rather than served
+        as something the member never chose.
+        """
         with self._sessions() as session:
             record = session.get(ProfitPreferenceRecord, discord_user_id)
-        days = None if record is None else record.report_days
-        if days is not None and not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
+        if record is None:
+            LOGGER.debug(
+                "Read profit report window; user_id=%s stored=False",
+                discord_user_id,
+            )
+            return None
+        days = record.report_days
+        start = record.custom_start
+        end = record.custom_end
+        if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
             # A row written by another release, or edited by hand. Read it as
             # unset rather than serving a window the report would refuse.
             LOGGER.warning(
@@ -214,41 +230,76 @@ class ProfitStore:
                 "reason=out-of-range",
                 discord_user_id,
             )
-            days = None
+            return None
+        if (start is None) != (end is None):
+            LOGGER.warning(
+                "Ignored the bounds of a stored profit report window; "
+                "user_id=%s reason=half-written",
+                discord_user_id,
+            )
+            start = end = None
+        if start is not None and end is not None and (
+            start < 0 or end <= start or end - start > MAX_REPORT_DAYS * 86400
+        ):
+            # A pair edited outside the page: running backwards, reaching
+            # before the epoch, or wider than any report. The day count beside
+            # it is still a window, so only the bounds are dropped.
+            LOGGER.warning(
+                "Ignored the bounds of a stored profit report window; "
+                "user_id=%s reason=unservable",
+                discord_user_id,
+            )
+            start = end = None
+        window = ReportWindow(days=days, start=start, end=end)
         LOGGER.debug(
-            "Read profit report window; user_id=%s stored=%s",
+            "Read profit report window; user_id=%s stored=True custom=%s",
             discord_user_id,
-            days is not None,
+            window.custom,
         )
-        return days
+        return window
 
-    def set_report_days(
+    def set_report_window(
         self,
         discord_user_id: int,
-        days: int,
+        window: ReportWindow,
         *,
         now: datetime | None = None,
     ) -> None:
-        if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
-            raise ValueError("Profit report days must be between 1 and 90")
+        if not MIN_REPORT_DAYS <= window.days <= MAX_REPORT_DAYS:
+            raise ValueError(
+                "Profit report days must be between "
+                f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
+            )
+        if (window.start is None) != (window.end is None):
+            raise ValueError("A custom profit window needs both bounds")
         updated_at = (datetime.now(UTC) if now is None else now).isoformat()
+        # A rolling window is measured back from whenever the page is opened,
+        # so bounds left over from an earlier pair of dates are cleared with
+        # it rather than kept beside a length that does not use them.
+        start = window.start if window.custom else None
+        end = window.end if window.custom else None
         with self._sessions.begin() as session:
             record = session.get(ProfitPreferenceRecord, discord_user_id)
             if record is None:
                 session.add(
                     ProfitPreferenceRecord(
                         discord_user_id=discord_user_id,
-                        report_days=days,
+                        report_days=window.days,
+                        custom_start=start,
+                        custom_end=end,
                         updated_at=updated_at,
                     )
                 )
             else:
-                record.report_days = days
+                record.report_days = window.days
+                record.custom_start = start
+                record.custom_end = end
                 record.updated_at = updated_at
         LOGGER.debug(
-            "Stored profit report window; user_id=%s days=%s",
+            "Stored profit report window; user_id=%s days=%s custom=%s",
             discord_user_id,
-            days,
+            window.days,
+            window.custom,
         )
 
     def get_excluded_order_items(self, discord_user_id: int) -> frozenset[int]:
@@ -1104,8 +1155,19 @@ class ProfitStore:
         self,
         discord_user_id: int,
         cutoff: datetime,
+        until: datetime | None = None,
     ) -> list[tuple[int, str, ItemDayProfit]]:
-        """Read the precomputed results from ``cutoff`` onwards."""
+        """Read the precomputed results from ``cutoff`` onwards.
+
+        A window the member closed in the past passes ``until`` as well, and
+        the sale date it falls on is the last one read: a sale after it
+        belongs to no part of the report being built.
+        """
+        window = [ProfitRollupRecord.sold_day >= cutoff.date().isoformat()]
+        if until is not None:
+            window.append(
+                ProfitRollupRecord.sold_day <= until.date().isoformat()
+            )
         with self._sessions() as session:
             records = list(
                 session.scalars(
@@ -1113,8 +1175,7 @@ class ProfitStore:
                     .where(
                         ProfitRollupRecord.discord_user_id
                         == discord_user_id,
-                        ProfitRollupRecord.sold_day
-                        >= cutoff.date().isoformat(),
+                        *window,
                     )
                     .order_by(ProfitRollupRecord.sold_day)
                 )
@@ -1177,9 +1238,15 @@ class ProfitStore:
         discord_user_id: int,
         transaction_kind: str,
         cutoff: datetime,
+        until: datetime | None = None,
     ) -> int:
         """Count rows in a window without reading them into memory."""
         _require_kind(transaction_kind)
+        window = [ProfitTransactionRecord.occurred_at >= cutoff.isoformat()]
+        if until is not None:
+            window.append(
+                ProfitTransactionRecord.occurred_at <= until.isoformat()
+            )
         with self._sessions() as session:
             total = session.scalar(
                 select(func.count())
@@ -1189,8 +1256,7 @@ class ProfitStore:
                     == discord_user_id,
                     ProfitTransactionRecord.transaction_kind
                     == transaction_kind,
-                    ProfitTransactionRecord.occurred_at
-                    >= cutoff.isoformat(),
+                    *window,
                 )
             )
         return int(total or 0)

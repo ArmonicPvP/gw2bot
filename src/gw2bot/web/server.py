@@ -15,6 +15,15 @@ from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config
+from gw2bot.dashboard_ranges import (
+    CUSTOM_RANGE,
+    DEFAULT_RANGE,
+    FOOD_DASHBOARD,
+    GOLD_DASHBOARD,
+    ROSTER_DASHBOARD,
+    StoredRange,
+    is_servable,
+)
 from gw2bot.discord_utils import resolve_display_name, user_has_role
 from gw2bot.feast_stock import (
     FEAST_USAGE_RANGES,
@@ -25,6 +34,7 @@ from gw2bot.feast_stock import (
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
 from gw2bot.profit.api import ProfitApiError
+from gw2bot.profit.models import PRESET_REPORT_RANGES, ReportWindow
 from gw2bot.profit.store import MAX_REPORT_DAYS, MIN_REPORT_DAYS
 from gw2bot.profit.service import (
     MissingProfitApiKey,
@@ -59,13 +69,10 @@ LOGGER = logging.getLogger(__name__)
 MAX_RANGE_DAYS = 62
 NAME_CACHE_TTL_SECONDS = 3600
 
-# The ``range`` value both dashboards send when the reader picked their own
-# dates instead of one of the preset windows.
-CUSTOM_RANGE = "custom"
-
-# The longest custom window either dashboard will serve. A hand-typed range is
-# otherwise unbounded, and every row between its edges is read into memory
-# before anything is drawn.
+# The longest custom window the history dashboards will serve. A hand-typed
+# range is otherwise unbounded, and every row between its edges is read into
+# memory before anything is drawn. The profit report is bounded by how long
+# the bot has been collecting for that member instead.
 MAX_CUSTOM_WINDOW_SECONDS = 366 * 24 * 60 * 60
 
 # A session cookie only proves the holder was a guild member when they signed
@@ -117,12 +124,16 @@ class _Window:
     """The stretch of history one dashboard request asks to be drawn.
 
     ``key`` is echoed back to the page as the range it got, which is the
-    preset's own name or ``CUSTOM_RANGE``.
+    preset's own name or ``CUSTOM_RANGE``. ``remembered`` says the window came
+    from the member's stored choice rather than from the request, which is
+    what lets the page mark the button it was given rather than the one it
+    asked for.
     """
 
     key: str
     since: float
     until: float
+    remembered: bool = False
 
 
 def _redirect(location: str) -> web.Response:
@@ -715,34 +726,25 @@ class WebServer:
         return self._html(PROFIT_PAGE)
 
     async def _profit_data(self, request: web.Request) -> web.StreamResponse:
-        # The window is optional now. A page opened without one is served the
+        # The window is optional. A page opened without one is served the
         # window the member last chose, so the dashboard reopens where they
         # left it instead of falling back to the 30-day default.
-        raw_days = request.query.get("days")
-        requested_days: int | None = None
-        if raw_days is not None:
-            try:
-                requested_days = int(raw_days)
-            except ValueError:
-                LOGGER.debug("Rejected profit report; reason=days-malformed")
-                return self._json({"error": "invalid days"}, status=400)
-            if not MIN_REPORT_DAYS <= requested_days <= MAX_REPORT_DAYS:
-                LOGGER.debug("Rejected profit report; reason=days-range")
-                return self._json({"error": "invalid days"}, status=400)
+        requested = self._requested_report_window(request)
+        if isinstance(requested, web.Response):
+            return requested
         service = self._bot.profit_service
         if service is None:
             LOGGER.error("Could not serve profit report; service=unavailable")
             return self._json({"error": "unavailable"}, status=503)
         session = request[SESSION_KEY]
         try:
-            window = await service.resolve_report_days(
+            resolved = await service.resolve_report_window(
                 session.user_id,
-                requested_days,
+                requested,
             )
-            days = window.days
             report = await service.load_report(
                 session.user_id,
-                days,
+                resolved.window,
                 force=self._forced(request),
             )
         except MissingProfitApiKey:
@@ -766,17 +768,93 @@ class WebServer:
             )
             return self._json({"error": "report unavailable"}, status=500)
         payload = serialize_profit_report(report)
-        payload["remembered_days"] = window.remembered
+        payload["remembered_window"] = resolved.remembered
         LOGGER.debug(
-            "Served profit report; user_id=%s days=%s remembered_window=%s "
-            "realized_items=%s unrealized_items=%s",
+            "Served profit report; user_id=%s days=%s range=%s "
+            "remembered_window=%s realized_items=%s unrealized_items=%s",
             session.user_id,
-            days,
-            requested_days is None,
+            report.days,
+            report.range_key,
+            requested is None,
             len(report.realized.items),
             len(report.unrealized.items),
         )
         return self._json(payload)
+
+    def _requested_report_window(
+        self,
+        request: web.Request,
+    ) -> ReportWindow | web.Response | None:
+        """The window a profit request names, or the refusal to serve it.
+
+        ``None`` means the request named none at all, which is what a page
+        opening on the member's remembered window sends. A ``range`` is one of
+        the three preset buttons or a pair of picked dates; ``days`` is the
+        rolling window a ``/profit view 60`` link carries, kept because a link
+        already in a member's Discord history must keep working.
+        """
+        range_key = request.query.get("range")
+        if range_key == CUSTOM_RANGE:
+            return self._custom_report_window(request)
+        if range_key is not None:
+            preset = PRESET_REPORT_RANGES.get(range_key)
+            if preset is None:
+                LOGGER.debug("Rejected profit report; reason=range")
+                return self._json({"error": "invalid range"}, status=400)
+            return ReportWindow(days=preset)
+        raw_days = request.query.get("days")
+        if raw_days is None:
+            return None
+        try:
+            days = int(raw_days)
+        except ValueError:
+            LOGGER.debug("Rejected profit report; reason=days-malformed")
+            return self._json({"error": "invalid days"}, status=400)
+        if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
+            LOGGER.debug("Rejected profit report; reason=days-range")
+            return self._json({"error": "invalid days"}, status=400)
+        return ReportWindow(days=days)
+
+    def _custom_report_window(
+        self,
+        request: web.Request,
+    ) -> ReportWindow | web.Response:
+        """The window a picked pair of dates asks the profit report for.
+
+        Both bounds are whole seconds the page computed from the UTC dates the
+        member picked, so the pair is read as integers and anything else is
+        refused rather than coerced. The report is bounded by how long the bot
+        has been collecting rather than by the year the other dashboards cap
+        at, so the widest pair accepted here is the widest report there is.
+        """
+        try:
+            since = int(request.query["start"])
+            until = int(request.query["end"])
+        except (KeyError, ValueError):
+            LOGGER.debug("Rejected profit report; reason=custom-bounds")
+            return self._json({"error": "invalid range"}, status=400)
+        now = int(datetime.now(UTC).timestamp())
+        # Nothing has been traded in a moment that has not happened, so a
+        # window opening after the present is refused rather than drawn empty.
+        # Nothing was traded before the epoch either, and both bounds become
+        # datetimes below, so a number no calendar can hold is refused here
+        # rather than raising its way out of the report.
+        if since < 0 or until <= since or min(until, now) <= since:
+            LOGGER.debug("Rejected profit report; reason=custom-order")
+            return self._json({"error": "invalid range"}, status=400)
+        if until - since > MAX_REPORT_DAYS * 86400:
+            LOGGER.debug("Rejected profit report; reason=custom-span")
+            return self._json({"error": "invalid range"}, status=400)
+        window = ReportWindow.between(since, until)
+        if not MIN_REPORT_DAYS <= window.days <= MAX_REPORT_DAYS:
+            LOGGER.debug("Rejected profit report; reason=custom-span")
+            return self._json({"error": "invalid range"}, status=400)
+        LOGGER.debug(
+            "Accepted a custom profit window; days=%s ended_early=%s",
+            window.days,
+            until > now,
+        )
+        return window
 
     @staticmethod
     def _forced(request: web.Request) -> bool:
@@ -922,26 +1000,143 @@ class WebServer:
             return denied
         return self._html(FOOD_PAGE)
 
-    def _resolve_window(
+    async def _resolve_window(
         self,
         request: web.Request,
         ranges: Mapping[str, int],
         subject: str,
+        dashboard: str,
     ) -> _Window | web.Response:
         """The window a dashboard request asks for, or the refusal to serve it.
+
+        A request naming no range is asking for the window this member last
+        picked, which is what a page opening for the first time sends; naming
+        one both draws it and becomes the choice the next visit reopens on.
 
         ``subject`` names the dashboard in the debug trace and nothing else; no
         part of the query reaches the log.
         """
-        range_key = request.query.get("range", "24h")
+        session = request[SESSION_KEY]
         now = datetime.now(UTC).timestamp()
+        range_key = request.query.get("range")
+        if range_key is None:
+            return await self._remembered_window(
+                session.user_id, ranges, subject, dashboard, now
+            )
         if range_key == CUSTOM_RANGE:
-            return self._custom_window(request, now, subject)
-        window = ranges.get(range_key)
-        if window is None:
-            LOGGER.debug("Rejected %s request; reason=range", subject)
-            return self._json({"error": "invalid range"}, status=400)
-        return _Window(key=range_key, since=now - window, until=now)
+            window = self._custom_window(request, now, subject)
+        else:
+            span = ranges.get(range_key)
+            if span is None:
+                LOGGER.debug("Rejected %s request; reason=range", subject)
+                return self._json({"error": "invalid range"}, status=400)
+            window = _Window(key=range_key, since=now - span, until=now)
+        if isinstance(window, web.Response):
+            return window
+        await self._remember_window(session.user_id, dashboard, window)
+        return window
+
+    async def _remembered_window(
+        self,
+        user_id: int,
+        ranges: Mapping[str, int],
+        subject: str,
+        dashboard: str,
+        now: float,
+    ) -> _Window:
+        """The window this member last picked, or the default they get first.
+
+        A stored row naming a preset this page no longer offers, or a custom
+        pair that no longer covers anything, is read as no choice at all: the
+        page opens on the default rather than on a window nobody chose.
+        """
+        try:
+            stored = await asyncio.to_thread(
+                self._bot.raffle_store.get_dashboard_range,
+                user_id,
+                dashboard,
+            )
+        except SQLAlchemyError as exc:
+            # Remembering is a convenience; failing to read it must not cost
+            # the reader the page itself.
+            LOGGER.warning(
+                "Could not read a remembered %s window; user_id=%s "
+                "error_type=%s",
+                subject,
+                user_id,
+                type(exc).__name__,
+            )
+            stored = None
+        if stored is not None and is_servable(stored, ranges):
+            if not stored.custom:
+                return _Window(
+                    key=stored.key,
+                    since=now - ranges[stored.key],
+                    until=now,
+                    remembered=True,
+                )
+            since = float(stored.start or 0)
+            until = min(float(stored.end or 0), now)
+            # The same ceiling a window asked for by hand is held to: a row
+            # edited outside the page must not turn a page load into a read
+            # of the whole history.
+            if until > since and until - since <= MAX_CUSTOM_WINDOW_SECONDS:
+                LOGGER.debug(
+                    "Reopened a remembered %s window; user_id=%s custom=True",
+                    subject,
+                    user_id,
+                )
+                return _Window(
+                    key=CUSTOM_RANGE,
+                    since=since,
+                    until=until,
+                    remembered=True,
+                )
+        LOGGER.debug(
+            "Served the default %s window; user_id=%s stored=%s",
+            subject,
+            user_id,
+            stored is not None,
+        )
+        return _Window(
+            key=DEFAULT_RANGE,
+            since=now - ranges[DEFAULT_RANGE],
+            until=now,
+        )
+
+    async def _remember_window(
+        self,
+        user_id: int,
+        dashboard: str,
+        window: _Window,
+    ) -> None:
+        """Keep the window a member just picked for their next visit.
+
+        The window stored is the one that was served rather than the one that
+        was asked for, so a custom pair reaching past the present is reopened
+        as the stretch it actually drew.
+        """
+        stored = StoredRange(
+            key=window.key,
+            start=int(window.since) if window.key == CUSTOM_RANGE else None,
+            end=int(window.until) if window.key == CUSTOM_RANGE else None,
+        )
+        try:
+            await asyncio.to_thread(
+                self._bot.raffle_store.set_dashboard_range,
+                user_id,
+                dashboard,
+                stored,
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            # As above: the reader still gets the window they picked, they
+            # just will not be put back on it next time.
+            LOGGER.warning(
+                "Could not remember a %s window; user_id=%s error_type=%s",
+                dashboard,
+                user_id,
+                type(exc).__name__,
+            )
 
     def _custom_window(
         self,
@@ -985,8 +1180,8 @@ class WebServer:
         denied = await self._require_food_access(request)
         if denied is not None:
             return denied
-        window = self._resolve_window(
-            request, FEAST_USAGE_RANGES, "feast usage"
+        window = await self._resolve_window(
+            request, FEAST_USAGE_RANGES, "feast usage", FOOD_DASHBOARD
         )
         if isinstance(window, web.Response):
             return window
@@ -1011,6 +1206,10 @@ class WebServer:
         return self._json(
             {
                 "range": window.key,
+                # Whether this is the window the member last picked rather
+                # than the default, so the page can adopt it without asking
+                # for one it already had.
+                "remembered": window.remembered,
                 "since": window.since,
                 "now": window.until,
                 "feasts": payload,
@@ -1057,8 +1256,8 @@ class WebServer:
         denied = await self._require_roster_access(request)
         if denied is not None:
             return denied
-        window = self._resolve_window(
-            request, ROSTER_RANGES, "roster history"
+        window = await self._resolve_window(
+            request, ROSTER_RANGES, "roster history", ROSTER_DASHBOARD
         )
         if isinstance(window, web.Response):
             return window
@@ -1101,6 +1300,10 @@ class WebServer:
         return self._json(
             {
                 "range": window.key,
+                # Whether this is the window the member last picked rather
+                # than the default, so the page can adopt it without asking
+                # for one it already had.
+                "remembered": window.remembered,
                 "since": window.since,
                 "now": window.until,
                 # The count as it stood at the window's end, or None when none
@@ -1265,7 +1468,9 @@ class WebServer:
         denied = await self._require_gold_access(request)
         if denied is not None:
             return denied
-        window = self._resolve_window(request, GOLD_RANGES, "gold history")
+        window = await self._resolve_window(
+            request, GOLD_RANGES, "gold history", GOLD_DASHBOARD
+        )
         if isinstance(window, web.Response):
             return window
 
@@ -1304,6 +1509,10 @@ class WebServer:
         return self._json(
             {
                 "range": window.key,
+                # Whether this is the window the member last picked rather
+                # than the default, so the page can adopt it without asking
+                # for one it already had.
+                "remembered": window.remembered,
                 "since": window.since,
                 "now": window.until,
                 # The balance as it stood at the window's end, or None when

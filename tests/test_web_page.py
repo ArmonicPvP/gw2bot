@@ -230,13 +230,41 @@ class TestProfitPage:
         assert 'svgNode("line", {x1: 2, y1: 2, x2: 22, y2: 22})' in PROFIT_PAGE
 
     def test_report_window_follows_the_remembered_choice(self) -> None:
-        assert "daysInput.value = String(data.days);" in PROFIT_PAGE
-        assert 'history.replaceState(\n      null, "", "/profit?days=" +' in (
+        # The header follows the window the server served rather than the
+        # other way round, and the address bar carries it afterwards.
+        assert (
+            "adoptRange(data.range, data.window.start, data.window.end);"
+        ) in PROFIT_PAGE
+        assert (
+            'history.replaceState(null, "", "/profit" + rangeQuery());'
+        ) in PROFIT_PAGE
+        assert "function load(forced)" in PROFIT_PAGE
+        # The first load names no window at all, which is what asks for the
+        # remembered one.
+        assert "  load(false);\n}());" in PROFIT_PAGE
+        assert "function readInitialRange()" in PROFIT_PAGE
+
+    def test_the_report_offers_the_same_windows_as_every_other_page(
+        self,
+    ) -> None:
+        for key in ("24h", "7d", "30d", "custom"):
+            assert f'data-range="{key}"' in PROFIT_PAGE
+        assert 'id="custom-start"' in PROFIT_PAGE
+        assert 'id="custom-end"' in PROFIT_PAGE
+        assert 'id="custom-apply"' in PROFIT_PAGE
+        # The realized tables group by UTC sale date, so the picker works in
+        # UTC days rather than the reader's own.
+        assert "return new Date(Date.UTC(year, month - 1, day));" in (
             PROFIT_PAGE
         )
-        assert "function load(useRemembered, forced)" in PROFIT_PAGE
-        assert "load(!requested, false);" in PROFIT_PAGE
-        assert "load(false, true);" in PROFIT_PAGE
+        assert "date.getUTCFullYear() + \"-\" +" in PROFIT_PAGE
+        # A picked pair is named by its dates; a preset by its length.
+        assert 'var windowLabel = data.range === "custom"' in PROFIT_PAGE
+        # The days a /profit view link names is not one of the buttons, so it
+        # is sent as it stands and the answer decides what lights up.
+        assert '"days=" + encodeURIComponent(String(pendingDays))' in (
+            PROFIT_PAGE
+        )
 
     def test_each_section_loads_on_its_own_with_a_spinner(self) -> None:
         assert PROFIT_PAGE.count('class="section-spinner"') == 8
@@ -260,7 +288,7 @@ class TestProfitPage:
         # A hidden tab costs nothing, and coming back catches up at once.
         assert "if (missingKey || document.hidden) { return; }" in PROFIT_PAGE
         assert 'addEventListener("visibilitychange"' in PROFIT_PAGE
-        # The beat rides the cache; only Load asks for a live read.
+        # The beat rides the cache; only Reload asks for a live read.
         assert 'beat("/api/profit/orders", "orders"' in PROFIT_PAGE
         # Delivery carries live market columns now, so it rides the beat too.
         assert 'beat("/api/profit/delivery", "delivery"' in PROFIT_PAGE
@@ -286,14 +314,19 @@ class TestProfitPage:
         )
         assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
 
-    def test_only_the_load_button_asks_for_a_live_read(self) -> None:
+    def test_only_the_reload_button_asks_for_a_live_read(self) -> None:
         # The address bar carries a window after every render, so naming one
         # must not be what decides a forced refresh.
         assert 'var refresh = forced ? "refresh=1" : "";' in PROFIT_PAGE
-        assert "function load(useRemembered, forced)" in PROFIT_PAGE
-        assert "load(false, true);" in PROFIT_PAGE
-        assert "load(!requested, false);" in PROFIT_PAGE
-        assert "load(false, false);" in PROFIT_PAGE
+        assert "function load(forced)" in PROFIT_PAGE
+        assert (
+            'document.getElementById("reload").addEventListener'
+            '("click", function () {\n    load(true);'
+        ) in PROFIT_PAGE
+        # Picking a window is not asking for a live read of the Trading Post.
+        assert "function refresh() {\n    load(false);" in PROFIT_PAGE
+        assert "  load(false);\n}());" in PROFIT_PAGE
+        assert "        load(false);\n        return;" in PROFIT_PAGE
 
     def test_unrealized_profit_is_not_described_as_windowed(self) -> None:
         assert "from all your stored history" in PROFIT_PAGE
@@ -302,13 +335,17 @@ class TestProfitPage:
         )
 
     def test_a_lost_window_is_restored_from_the_browser(self) -> None:
-        assert 'STORED_DAYS_KEY = "gw2bot-profit-days"' in PROFIT_PAGE
-        assert "function readStoredDays(keyGeneration)" in PROFIT_PAGE
-        assert "function writeStoredDays(days, keyGeneration)" in PROFIT_PAGE
+        assert 'STORED_RANGE_KEY = "gw2bot-profit-range"' in PROFIT_PAGE
+        assert "function readStoredRange(keyGeneration)" in PROFIT_PAGE
+        assert "function writeStoredRange(keyGeneration)" in PROFIT_PAGE
+        # A pair of dates is put back as the pair it was, not as a window of
+        # the same length.
+        assert "function restoreStoredRange(saved)" in PROFIT_PAGE
+        assert "function sameStoredRange(saved, data)" in PROFIT_PAGE
         # A window saved under a deleted key is not put back: deletekey is
         # documented to forget it.
         assert "saved.key !== keyGeneration" in PROFIT_PAGE
-        assert "if (data.remembered_days) {" in PROFIT_PAGE
+        assert "if (data.remembered_window) {" in PROFIT_PAGE
         # One repair per page load, so a storage write that silently fails
         # cannot put the page in a loop.
         assert "restoredWindow = true;" in PROFIT_PAGE
@@ -318,11 +355,12 @@ class TestProfitPage:
 
     def test_the_window_reaches_past_the_gw2_history_limit(self) -> None:
         # The page and the API have to agree, so the bound is stamped in from
-        # the store rather than written twice.
-        assert 'max="3650"' in PROFIT_PAGE
-        assert "var maxDays = 3650;" in PROFIT_PAGE
+        # the store rather than written twice. The report reaches as far back
+        # as the bot has collected, so its custom pair is not held to the
+        # year the history dashboards cap at.
+        assert "var MAX_CUSTOM_DAYS = 3650;" in PROFIT_PAGE
         assert "__MAX_DAYS__" not in PROFIT_PAGE
-        assert "days <= maxDays" in PROFIT_PAGE
+        assert "days <= MAX_CUSTOM_DAYS" in PROFIT_PAGE
         assert "historyStart = data.history_start_date;" in PROFIT_PAGE
 
     def test_dates_are_short_and_carry_a_year_only_across_years(self) -> None:
@@ -1285,11 +1323,18 @@ class TestCustomRangePicker:
 
     def test_a_picked_pair_covers_whole_local_days(self) -> None:
         # The window opens at midnight on the first day and closes on the last
-        # second of the second, so one day picked twice is that whole day.
+        # second of the second, so one day picked twice is that whole day. The
+        # day after is built from its own parts rather than added on in
+        # seconds, because a local day is 23 or 25 hours long where clocks
+        # change.
         for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
             assert "var since = Math.floor(from.getTime() / 1000);" in page
             assert (
-                "to.getFullYear(), to.getMonth(), to.getDate() + 1"
+                "var until = Math.floor(nextDay(to).getTime() / 1000) - 1;"
+            ) in page
+            assert (
+                "return new Date("
+                "date.getFullYear(), date.getMonth(), date.getDate() + 1);"
             ) in page
 
     def test_a_range_that_cannot_be_drawn_is_named_not_fetched(self) -> None:
@@ -1334,6 +1379,11 @@ class TestCustomRangePicker:
                     '"ok"',
                     "Math.round((picked.until - picked.since) / 86400)",
                 ],
+                [
+                    '"reopen"',
+                    'key === "custom" ? "dates" : "preset"',
+                    "Math.round((until - since) / 86400)",
+                ],
             ], traced
             # Every way pickedWindow can refuse names itself, so none of them
             # reaches the trace as an undefined reason.
@@ -1351,10 +1401,12 @@ class TestCustomRangePicker:
         # picked dates and the sentence shown to the reader stay out of it.
         allowed = re.compile(
             r"""^(
-                "(refuse|apply|ok)"
+                "(refuse|apply|ok|reopen)"
                 | picked\.reason
                 | 0
+                | key\ ===\ "custom"\ \?\ "dates"\ :\ "preset"
                 | Math\.round\(\(picked\.until\ -\ picked\.since\)\ /\ 86400\)
+                | Math\.round\(\(until\ -\ since\)\ /\ 86400\)
             )$""",
             re.X,
         )
@@ -1363,6 +1415,34 @@ class TestCustomRangePicker:
                 assert len(call) == 3, call
                 for arg in call:
                     assert allowed.match(arg), arg
+
+    def test_the_first_load_asks_for_the_remembered_window(self) -> None:
+        # No range until the server answers: naming one would write the
+        # default over the choice the member made last time.
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+            assert "range: null, data: null" in page
+            assert "if (state.range === null) { return \"\"; }" in page
+            assert (
+                "adoptRange(payload.range, payload.since, payload.now);"
+            ) in page
+
+    def test_a_remembered_window_is_adopted_once_and_only_once(self) -> None:
+        # The answer to a request that named a window is not a window to
+        # adopt, so the reader's own dates are never rewritten under them.
+        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE, PROFIT_PAGE):
+            assert "function adoptRange(key, since, until) {" in page
+            adopt = page.split("function adoptRange(key, since, until) {", 1)
+            adopt = adopt[1].split("\n  }", 1)[0]
+            assert "if (state.range !== null) { return; }" in adopt
+            # A remembered pair of dates comes back with the panel open and
+            # the fields holding the days it was picked for.
+            assert "customStart.value = dayValue(new Date(since * 1000));" in (
+                adopt
+            )
+            assert "customEnd.value = dayValue(new Date(until * 1000));" in (
+                adopt
+            )
+            assert "toggleCustomPanel(true);" in adopt
 
     def test_the_picker_mirrors_the_servers_own_ceiling(self) -> None:
         for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):

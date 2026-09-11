@@ -10,8 +10,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.config import same_guild_id
+from gw2bot.dashboard_ranges import StoredRange
 from gw2bot.database import (
     PENDING_LEGACY_TOTALS_KEY,
+    DashboardRangeRecord,
     FeastAlertRecord,
     FeastStockLogRecord,
     GuildInviteRecord,
@@ -1034,6 +1036,86 @@ class RaffleStore:
                 )
             else:
                 record.username = username
+
+    def get_dashboard_range(
+        self,
+        discord_user_id: int,
+        dashboard: str,
+    ) -> StoredRange | None:
+        """Return the window this member last picked on ``dashboard``.
+
+        Nothing is validated here beyond the row being present: which presets
+        a dashboard offers is the page's business, and a row naming one it no
+        longer does is refused by the caller rather than rewritten.
+        """
+        with self._sessions() as session:
+            record = session.get(
+                DashboardRangeRecord, (discord_user_id, dashboard)
+            )
+            window = (
+                None
+                if record is None
+                else StoredRange(
+                    key=record.range_key,
+                    start=record.custom_start,
+                    end=record.custom_end,
+                )
+            )
+        LOGGER.debug(
+            "Read a remembered dashboard window; user_id=%s dashboard=%s "
+            "stored=%s custom=%s",
+            discord_user_id,
+            dashboard,
+            window is not None,
+            window is not None and window.custom,
+        )
+        return window
+
+    def set_dashboard_range(
+        self,
+        discord_user_id: int,
+        dashboard: str,
+        window: StoredRange,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Remember the window this member just picked on ``dashboard``."""
+        if window.custom and (window.start is None or window.end is None):
+            raise ValueError("A custom dashboard window needs both bounds")
+        updated_at = (datetime.now(UTC) if now is None else now).isoformat()
+        # A preset is measured back from whenever the page is opened, so any
+        # bounds left over from an earlier custom window are cleared with it
+        # rather than kept beside a key that does not use them.
+        start = window.start if window.custom else None
+        end = window.end if window.custom else None
+        with self._sessions.begin() as session:
+            record = session.get(
+                DashboardRangeRecord, (discord_user_id, dashboard)
+            )
+            if record is None:
+                session.add(
+                    DashboardRangeRecord(
+                        discord_user_id=discord_user_id,
+                        dashboard=dashboard,
+                        range_key=window.key,
+                        custom_start=start,
+                        custom_end=end,
+                        updated_at=updated_at,
+                    )
+                )
+            else:
+                record.range_key = window.key
+                record.custom_start = start
+                record.custom_end = end
+                record.updated_at = updated_at
+        LOGGER.debug(
+            "Stored a dashboard window; user_id=%s dashboard=%s range=%s "
+            "custom=%s",
+            discord_user_id,
+            dashboard,
+            window.key,
+            window.custom,
+        )
 
     def add_manual_ticket(
         self,

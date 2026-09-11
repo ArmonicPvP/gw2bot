@@ -238,12 +238,44 @@ class ProfitPreferenceRecord(Base):
     opened /profit without one was put back on the default window. It is kept
     here instead, beside the excluded items below, so the dashboard opens the
     way the member left it on any browser they sign in from.
+
+    ``report_days`` holds a rolling window's length: the preset buttons and
+    the ``days`` a ``/profit view`` link carries are all a run of whole UTC
+    days ending at the present. The two bounds below are set together, and
+    only when the member picked a pair of dates instead; ``report_days`` then
+    holds how many days those dates span, so a release that reads only the
+    column still opens on a window of the right size.
     """
 
     __tablename__ = "gw2_profit_preferences"
 
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     report_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    custom_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    custom_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class DashboardRangeRecord(Base):
+    """One member's remembered window on one dashboard.
+
+    The feast usage, roster and gold pages each open on the window their
+    reader last picked rather than on the 24-hour default. The choice is kept
+    here, against the Discord account rather than in the browser, so it
+    follows the member to any browser they sign in from - the way the profit
+    dashboard's window already does.
+
+    ``range_key`` is the preset's own name, or ``custom``; a custom window
+    also carries the whole epoch seconds the reader's two dates worked out to.
+    """
+
+    __tablename__ = "gw2_dashboard_ranges"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dashboard: Mapped[str] = mapped_column(String, primary_key=True)
+    range_key: Mapped[str] = mapped_column(String, nullable=False)
+    custom_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    custom_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
@@ -826,6 +858,24 @@ def initialize_database(engine: Engine) -> set[str]:
             # rows stay marked un-backfilled and the next report walks the
             # whole history once to fill in what retention had dropped.
             added_columns.add("backfilled")
+
+        preference_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                ProfitPreferenceRecord.__tablename__
+            )
+        }
+        for column_name in ("custom_start", "custom_end"):
+            if column_name in preference_columns:
+                continue
+            # Nothing to backfill: every window stored before this release was
+            # a rolling run of days, which is what a row with neither bound
+            # set still means.
+            operations.add_column(
+                ProfitPreferenceRecord.__tablename__,
+                Column(column_name, Integer, nullable=True),
+            )
+            added_columns.add(column_name)
 
         occurrence_columns = {
             column["name"]

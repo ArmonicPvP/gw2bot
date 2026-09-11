@@ -127,6 +127,7 @@ Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 | `guild_log.py`, `guild_storage.py`, `guild_stash.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
 | `pending_invites.py` | The accounts invited in-game that have not accepted: the report behind `/pending` and the roster page's section. |
 | `anchored_series.py` | Deriving a running total from an observed value and the changes around it, shared by the roster and gold histories. |
+| `dashboard_ranges.py` | The window a dashboard draws and the one a member last picked: the custom range's name, the default, and the remembered choice every page but `/profit` stores. |
 | `notifications.py`, `poll_status.py` | Delivery to the notification channel, plus the `diag` previews. |
 | `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
 | `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import` from the log channel. |

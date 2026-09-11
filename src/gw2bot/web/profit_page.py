@@ -1,7 +1,15 @@
 """Static browser dashboard for a member's Trading Post profit reports."""
 
 from gw2bot.profit.store import MAX_REPORT_DAYS
-from gw2bot.web.page import _DASHBOARD_HEADER_STYLE, _SHARED_STYLE
+from gw2bot.web.page import (
+    _CUSTOM_RANGE_PANEL,
+    _DASHBOARD_HEADER_STYLE,
+    _RANGE_PICKER_LISTENERS_JS,
+    _RANGE_PICKER_NAV,
+    _RANGE_PICKER_STYLE,
+    _SHARED_STYLE,
+    _range_picker_js,
+)
 
 # Rows per page a paginated table opens on, and the largest it will accept.
 PAGE_SIZE_DEFAULT = 10
@@ -68,9 +76,17 @@ _PROFIT_PAGE_TEMPLATE = (
 <style>"""
     + _SHARED_STYLE
     + _DASHBOARD_HEADER_STYLE
+    + _RANGE_PICKER_STYLE
     + """
 body { display: flex; flex-direction: column; }
-#range-form { align-items: center; gap: 0.45rem; }
+/* The range buttons and the reload beside them travel together, so they move
+   to their own header row on a narrow screen as one block. */
+.controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
 label { color: var(--muted); font-size: 0.85rem; }
 input {
   width: 4.6rem;
@@ -83,6 +99,9 @@ input {
   font-size: 0.85rem;
 }
 .primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* The narrow width above is meant for the paginator's number boxes; a date
+   field needs whatever its browser's spelling of a date takes. */
+.custom input[type="date"] { width: auto; }
 main { width: 100%; margin: 0; padding: 1rem; }
 #status {
   color: var(--muted);
@@ -346,7 +365,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   font-variant-numeric: tabular-nums;
 }
 @media (max-width: 640px) {
-  #range-form {
+  .controls {
     grid-column: 1 / -1;
     grid-row: 2;
     justify-self: center;
@@ -362,11 +381,12 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
 <body>
 <header>
   <h1 id="brand">Trading Post Profit</h1>
-  <form id="range-form">
-    <label for="days">Days</label>
-    <input id="days" name="days" type="number" min="1" max="__MAX_DAYS__" value="30" required>
-    <button class="primary" type="submit">Load</button>
-  </form>
+  <div class="controls">
+"""
+    + _RANGE_PICKER_NAV
+    + """
+    <button class="primary" type="button" id="reload">Reload</button>
+  </div>
   <span class="spacer"></span>
   <a href="/">Calendar</a>
   <span id="whoami"></span>
@@ -382,6 +402,9 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       <span class="signout-label">Sign out</span>
     </button>
   </form>
+"""
+    + _CUSTOM_RANGE_PANEL
+    + """
 </header>
 <main>
   <div id="status" role="status" aria-live="polite">Loading&hellip;</div>
@@ -587,8 +610,9 @@ __DAYS_PAGES_BOTTOM__
 <script>
 (function () {
   "use strict";
-  var rangeForm = document.getElementById("range-form");
-  var daysInput = document.getElementById("days");
+  // What the shared range picker reads and writes: the window the header is
+  // showing, and the bounds of the report drawn under it.
+  var state = { range: null, window: null };
   var status = document.getElementById("status");
   var reports = document.getElementById("reports");
   var keyHelp = document.getElementById("key-help");
@@ -602,7 +626,6 @@ __DAYS_PAGES_BOTTOM__
     items: { page: 1, size: 10, pages: 1, body: "items-body" },
     days: { page: 1, size: 10, pages: 1, body: "days-body" }
   };
-  var maxDays = __MAX_DAYS__;
   var historyStart = null;
   var historyStartLabel = null;
   // Whether dates carry their year. Decided once per report from the window:
@@ -632,6 +655,10 @@ __DAYS_PAGES_BOTTOM__
   }
   var missingKey = false;
   var restoredWindow = false;
+  // A window a /profit view link names by its length rather than by one of
+  // the buttons. It is sent as it stands on the first load, and the window
+  // that comes back decides which button the header lights up.
+  var pendingDays = null;
   // How often the open orders follow the market. The GW2 API declares its
   // prices good for two minutes, and the server holds each reading for one,
   // so this is as live as the data can honestly be.
@@ -640,32 +667,60 @@ __DAYS_PAGES_BOTTOM__
   // repair kit: if the account ever comes back without one - a rebuilt
   // database, or a release that overwrote it - the browser puts back what
   // the member last picked instead of dropping them on the default.
-  var STORED_DAYS_KEY = "gw2bot-profit-days";
+  var STORED_RANGE_KEY = "gw2bot-profit-range";
 
-  function readStoredDays(keyGeneration) {
+  function readStoredRange(keyGeneration) {
     try {
-      var saved = JSON.parse(localStorage.getItem(STORED_DAYS_KEY) || "null");
+      var saved = JSON.parse(localStorage.getItem(STORED_RANGE_KEY) || "null");
       if (!saved || saved.key !== keyGeneration) {
         // Saved under a key this member has since deleted. /profit deletekey
         // clears the window on purpose, so the copy must not put it back.
         return null;
       }
-      var stored = Number(saved.days);
-      return Number.isInteger(stored) && stored >= 1 && stored <= maxDays
-        ? stored : null;
+      if (saved.range !== "custom") {
+        return typeof saved.range === "string" && saved.range ? saved : null;
+      }
+      return Number.isInteger(saved.start) && Number.isInteger(saved.end)
+        && saved.end > saved.start ? saved : null;
     } catch (error) {
       return null;
     }
   }
 
-  function writeStoredDays(days, keyGeneration) {
+  function writeStoredRange(keyGeneration) {
     try {
-      localStorage.setItem(
-        STORED_DAYS_KEY,
-        JSON.stringify({ days: days, key: keyGeneration }));
+      localStorage.setItem(STORED_RANGE_KEY, JSON.stringify({
+        range: state.range,
+        start: customWindow === null ? null : customWindow.since,
+        end: customWindow === null ? null : customWindow.until,
+        key: keyGeneration
+      }));
     } catch (error) {
       trace("window-not-stored", 0);
     }
+  }
+
+  // Whether a saved window and the one the server just served are the same
+  // stretch of trading, which is what decides there is nothing to repair.
+  function sameStoredRange(saved, data) {
+    if (saved.range !== data.range) { return false; }
+    return saved.range !== "custom"
+      || (saved.start === data.window.start && saved.end === data.window.end);
+  }
+
+  // Put a saved window back into the header, so the request that follows
+  // names it and the member lands where they left off.
+  function restoreStoredRange(saved) {
+    state.range = saved.range;
+    if (saved.range === "custom") {
+      customWindow = { since: saved.start, until: saved.end };
+      customStart.value = dayValue(new Date(saved.start * 1000));
+      customEnd.value = dayValue(new Date(saved.end * 1000));
+      toggleCustomPanel(true);
+    } else {
+      customWindow = null;
+    }
+    syncRangeButtons();
   }
 
   function trace(action, rows) {
@@ -1491,8 +1546,15 @@ __DAYS_PAGES_BOTTOM__
     var worstItem = extreme(data.items, false);
     var bestDay = extreme(data.days_table, true);
     var worstDay = extreme(data.days_table, false);
+    // A rolling window is named by its length, because that is what the
+    // member asked for; a picked pair is named by the dates themselves,
+    // which is what they asked for instead.
+    var windowLabel = data.range === "custom"
+      ? shortDate(data.window.start_date, showYear) + " \u2013 "
+        + shortDate(data.window.end_date, showYear)
+      : "Last " + data.days + " day" + (data.days === 1 ? "" : "s");
     var rows = [
-      ["Window", "Last " + data.days + " day" + (data.days === 1 ? "" : "s")],
+      ["Window", windowLabel],
       ["Buy transactions", summary.buy_transactions],
       ["Sell transactions", summary.sell_transactions],
       ["Matched units", summary.matched_units],
@@ -1908,27 +1970,24 @@ __DAYS_PAGES_BOTTOM__
   }
 
   function renderReport(data) {
-    // The window the server served is the one it remembered, so the control
+    // The window the server served is the one it remembered, so the header
     // and the address bar follow it rather than the other way round.
-    daysInput.value = String(data.days);
-    if (data.remembered_days) {
-      writeStoredDays(data.days, data.key_generation);
+    state.window = { since: data.window.start, until: data.window.end };
+    adoptRange(data.range, data.window.start, data.window.end);
+    if (data.remembered_window) {
+      writeStoredRange(data.key_generation);
     } else if (!restoredWindow) {
-      var local = readStoredDays(data.key_generation);
-      if (local !== null && local !== data.days) {
+      var saved = readStoredRange(data.key_generation);
+      if (saved !== null && !sameStoredRange(saved, data)) {
         restoredWindow = true;
-        daysInput.value = String(local);
-        trace("window-restored", local);
+        restoreStoredRange(saved);
+        trace("window-restored", 0);
         // Putting a window back is the page correcting itself, not the
         // member asking for fresh data.
-        load(false, false);
+        load(false);
         return;
       }
-      writeStoredDays(data.days, data.key_generation);
-    }
-    if (data.max_days) {
-      maxDays = data.max_days;
-      daysInput.max = String(maxDays);
+      writeStoredRange(data.key_generation);
     }
     historyStart = data.history_start_date;
     showYear = spansYears(data.window.start_date, data.window.end_date);
@@ -1938,8 +1997,7 @@ __DAYS_PAGES_BOTTOM__
       ? shortDate(
         historyStart, spansYears(historyStart, data.window.end_date))
       : null;
-    history.replaceState(
-      null, "", "/profit?days=" + encodeURIComponent(String(data.days)));
+    history.replaceState(null, "", "/profit" + rangeQuery());
     renderSummary(data);
     renderCharts(data);
     picksData = data.picks;
@@ -1982,12 +2040,24 @@ __DAYS_PAGES_BOTTOM__
     trace("section-" + source, state === "ready" ? 1 : 0);
   }
 
-  function selectedDays() {
-    var days = Number(daysInput.value);
-    return Number.isInteger(days) && days >= 1 && days <= maxDays
-      ? days : null;
+  // What the shared range picker fills its empty date fields from: the span
+  // of the report on screen, in seconds.
+  function windowSpan() {
+    return state.window === null
+      ? 0 : state.window.until - state.window.since;
   }
 
+  // What the picker calls once a window is picked. Naming a window is not
+  // asking for a live re-read of the Trading Post, so this takes the cached
+  // path; only Reload forces one.
+  function refresh() {
+    load(false);
+  }
+"""
+    + _range_picker_js(
+        "profit", max_custom_days=MAX_REPORT_DAYS, utc_days=True
+    )
+    + """
   function fetchSection(source, url, render) {
     markSection(source, "loading");
     return fetch(url).then(function (response) {
@@ -2017,20 +2087,51 @@ __DAYS_PAGES_BOTTOM__
     });
   }
 
-  function load(useRemembered, forced) {
-    // Asking without a window lets the server answer with the one this member
-    // last chose; the page only names a window when they just picked one.
-    var days = null;
-    if (!useRemembered) {
-      days = selectedDays();
-      if (days === null) {
-        status.className = "error";
-        status.textContent =
-          "Choose a number of days from 1 through " + maxDays + ".";
-        trace("refuse-range", 0);
-        return;
+  // The window the address bar names, if it names one. A link from
+  // /profit view, or the address this page wrote itself on its last render,
+  // both land here: what they name is asked for and becomes the window this
+  // member is put back on next time, exactly as picking it would.
+  function readInitialRange() {
+    var params = new URLSearchParams(location.search);
+    var picked = params.get("range");
+    if (picked === "custom") {
+      var since = Number(params.get("start"));
+      var until = Number(params.get("end"));
+      if (Number.isInteger(since) && Number.isInteger(until)
+          && until > since) {
+        customWindow = { since: since, until: until };
+        customStart.value = dayValue(new Date(since * 1000));
+        customEnd.value = dayValue(new Date(until * 1000));
+        state.range = "custom";
+        trace("window-from-link", 0);
       }
+      return;
     }
+    if (picked !== null) {
+      if (PRESET_RANGES.indexOf(picked) !== -1) {
+        state.range = picked;
+        trace("window-from-link", 0);
+      }
+      return;
+    }
+    var days = Number(params.get("days"));
+    if (Number.isInteger(days) && days >= 1 && days <= MAX_CUSTOM_DAYS) {
+      pendingDays = days;
+      trace("window-from-link", days);
+    }
+  }
+
+  function load(forced) {
+    // Asking without a window lets the server answer with the one this member
+    // last chose; the page only names a window when they just picked one, or
+    // when the link they followed named one.
+    // rangeQuery opens with a "?" and is empty when the page is asking for
+    // the remembered window, so the mark comes off and the rest joins the
+    // other query values below.
+    var chosen = pendingDays === null
+      ? rangeQuery().slice(1)
+      : "days=" + encodeURIComponent(String(pendingDays));
+    pendingDays = null;
     status.className = "";
     status.textContent = "Loading\u2026";
     reports.hidden = false;
@@ -2038,14 +2139,11 @@ __DAYS_PAGES_BOTTOM__
     missingKey = false;
     // Three independent requests, in flight together. Each section draws as
     // soon as its own answer arrives instead of waiting for the slowest.
-    // Only pressing Load asks for a live read. Naming a window does not:
+    // Only pressing Reload asks for a live read. Naming a window does not:
     // the address bar carries one after every render, so treating that as a
     // forced refresh would make each ordinary reload bypass every cache.
     var refresh = forced ? "refresh=1" : "";
-    var reportQuery = [
-      days === null ? "" : "days=" + encodeURIComponent(String(days)),
-      refresh
-    ].filter(Boolean).join("&");
+    var reportQuery = [chosen, refresh].filter(Boolean).join("&");
     Promise.all([
       fetchSection("report", "/api/profit"
         + (reportQuery ? "?" + reportQuery : ""), renderReport),
@@ -2119,10 +2217,12 @@ __DAYS_PAGES_BOTTOM__
     if (!document.hidden) { refreshPrices(); }
   });
 
-  rangeForm.addEventListener("submit", function (event) {
-    event.preventDefault();
-    load(false, true);
+  document.getElementById("reload").addEventListener("click", function () {
+    load(true);
   });
+"""
+    + _RANGE_PICKER_LISTENERS_JS
+    + """
   document.getElementById("orders-menu").addEventListener(
     "click", openHiddenItems);
   document.getElementById("hidden-close").addEventListener(
@@ -2142,18 +2242,14 @@ __DAYS_PAGES_BOTTOM__
     });
   initializePagers();
   initializeSorters();
-  var initial = Number(new URLSearchParams(location.search).get("days"));
-  var requested = Number.isInteger(initial)
-    && initial >= 1 && initial <= maxDays;
-  if (requested) {
-    daysInput.value = String(initial);
-  }
+  readInitialRange();
+  syncRangeButtons();
   fetch("/api/me")
     .then(function (response) { return response.ok ? response.json() : null; })
     .then(function (identity) {
       if (identity) { document.getElementById("whoami").textContent = identity.name; }
     });
-  load(!requested, false);
+  load(false);
 }());
 </script>
 </body>
@@ -2162,12 +2258,11 @@ __DAYS_PAGES_BOTTOM__
 )
 
 # The window the page offers has to match the one the API will accept, so the
-# bound is written once, in the store, and stamped into the page here. The
-# pagination bars are stamped in the same way, one shared control serving both
-# paginated tables above and below their rows.
+# bound is written once, in the store, and handed to the range picker above.
+# The pagination bars are stamped into the template here, one shared control
+# serving both paginated tables above and below their rows.
 PROFIT_PAGE = (
-    _PROFIT_PAGE_TEMPLATE.replace("__MAX_DAYS__", str(MAX_REPORT_DAYS))
-    .replace(
+    _PROFIT_PAGE_TEMPLATE.replace(
         "__ITEMS_PAGES_TOP__",
         _pagination_nav("items", "top", "Realized profit by item pages"),
     )
