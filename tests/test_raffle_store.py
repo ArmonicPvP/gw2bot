@@ -17,6 +17,7 @@ from sqlalchemy import (
     select,
 )
 
+from gw2bot.dashboard_ranges import StoredRange
 from gw2bot.settings.crypto import SettingsCipher
 from gw2bot.settings.store import SettingsStore
 from gw2bot.raffle import (
@@ -1893,4 +1894,60 @@ class TestRaffleExclusions:
 
             totals = {total.username: total for total in store.get_totals()}
             assert totals["Allowed.5678"].raffle_tickets > 1
+            store.close()
+
+
+class TestRememberedDashboardWindows:
+    """The window each dashboard reopens on, kept against the Discord ID."""
+
+    def test_each_member_and_dashboard_keeps_its_own_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            assert store.get_dashboard_range(101, "food") is None
+
+            store.set_dashboard_range(101, "food", StoredRange("7d"))
+            store.set_dashboard_range(101, "gold", StoredRange("30d"))
+            store.set_dashboard_range(202, "food", StoredRange("24h"))
+
+            assert store.get_dashboard_range(101, "food") == StoredRange("7d")
+            assert store.get_dashboard_range(101, "gold") == StoredRange("30d")
+            assert store.get_dashboard_range(202, "food") == StoredRange("24h")
+            assert store.get_dashboard_range(202, "gold") is None
+            store.close()
+
+    def test_a_pair_of_dates_is_kept_with_both_of_its_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            picked = StoredRange("custom", 1_700_000_000, 1_700_600_000)
+
+            store.set_dashboard_range(101, "roster", picked)
+
+            assert store.get_dashboard_range(101, "roster") == picked
+            store.close()
+
+    def test_a_preset_clears_the_edges_of_the_pair_before_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.set_dashboard_range(
+                101, "food", StoredRange("custom", 1_700_000_000, 1_700_600_000)
+            )
+
+            store.set_dashboard_range(101, "food", StoredRange("7d"))
+
+            # A preset is measured back from whenever the page is opened, so
+            # the bounds it does not use do not stay beside it.
+            assert store.get_dashboard_range(101, "food") == StoredRange("7d")
+            store.close()
+
+    def test_refuses_a_pair_of_dates_missing_an_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            with pytest.raises(ValueError):
+                store.set_dashboard_range(
+                    101, "food", StoredRange("custom", 1_700_000_000, None)
+                )
+
+            assert store.get_dashboard_range(101, "food") is None
             store.close()

@@ -11,6 +11,7 @@ import aiohttp
 import discord
 import pytest
 from cryptography.fernet import Fernet
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine
 
 from factories import default_config
 from gw2bot.database import create_database_engine
@@ -39,6 +40,7 @@ from gw2bot.profit.models import (
     OpenOrdersReport,
     ProfitReport,
     RealizedProfit,
+    ReportWindow,
     Transaction,
     UnrealizedItemProfit,
     UnrealizedProfit,
@@ -51,7 +53,7 @@ from gw2bot.profit.models import (
 from gw2bot.profit.service import (
     MissingProfitApiKey,
     ProfitService,
-    ReportWindow,
+    ResolvedWindow,
     serialize_delivery,
     serialize_open_orders,
     serialize_profit_report,
@@ -281,6 +283,8 @@ class TestProfitCalculation:
         realized = calculate_realized_profit(buys, sells)
         report = ProfitReport(
             days=30,
+            range_key="30d",
+            rolling_days=None,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=2,
@@ -479,6 +483,8 @@ class TestProfitCalculation:
         undefined_name = "undefined-roi-pick-secret"
         report = ProfitReport(
             days=30,
+            range_key="30d",
+            rolling_days=None,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=0,
@@ -590,6 +596,8 @@ class TestOneSidedMarketQuotes:
         # the sell side must survive the missing buy side.
         report = ProfitReport(
             days=30,
+            range_key="30d",
+            rolling_days=None,
             window_start=datetime(2026, 8, 1, tzinfo=UTC),
             window_end=datetime(2026, 8, 31, tzinfo=UTC),
             buy_transaction_count=0,
@@ -904,6 +912,153 @@ class TestMarketPriceCache:
 
         fresh, _stale = cache.read({1, 2}, now=now + timedelta(seconds=61))
         assert set(fresh) == {2}
+
+
+class TestProfitPreferenceMigration:
+    def test_a_database_without_the_date_columns_reads_as_rolling(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A window stored before dates could be picked is still a window.
+
+        The two bound columns were added beside ``report_days``; a row written
+        without them is the rolling run of days it always was, and opening the
+        store adds the columns rather than refusing the database.
+        """
+        database = tmp_path / "gw2bot.db"
+        engine = create_engine(f"sqlite:///{database}")
+        metadata = MetaData()
+        legacy = Table(
+            "gw2_profit_preferences",
+            metadata,
+            Column("discord_user_id", Integer, primary_key=True),
+            Column("report_days", Integer, nullable=False),
+            Column("updated_at", String, nullable=False),
+        )
+        metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                legacy.insert().values(
+                    discord_user_id=101,
+                    report_days=14,
+                    updated_at="2026-08-01T00:00:00+00:00",
+                )
+            )
+        engine.dispose()
+
+        store = ProfitStore(
+            str(database), SettingsCipher(Fernet.generate_key())
+        )
+
+        assert store.get_report_window(101) == ReportWindow(days=14)
+
+        picked = ReportWindow.between(
+            int(datetime(2026, 6, 1, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+        store.set_report_window(101, picked)
+
+        assert store.get_report_window(101) == picked
+        store.close()
+
+
+class TestReportWindow:
+    """The stretch a report covers, however the member named it."""
+
+    @pytest.mark.parametrize(
+        ("days", "key"),
+        [(1, "24h"), (7, "7d"), (30, "30d"), (60, "custom")],
+    )
+    def test_a_rolling_window_is_named_by_the_button_it_matches(
+        self,
+        days: int,
+        key: str,
+    ) -> None:
+        # Sixty days is no button, so the page draws it in the date fields
+        # instead; what is stored stays a rolling window all the same.
+        assert ReportWindow(days=days).range_key == key
+
+    @pytest.mark.parametrize(
+        ("window", "expected"),
+        [
+            pytest.param(ReportWindow(days=7), None, id="preset"),
+            pytest.param(ReportWindow(days=60), 60, id="no-button"),
+            pytest.param(
+                ReportWindow.between(1_780_000_000, 1_782_000_000),
+                None,
+                id="picked-pair",
+            ),
+        ],
+    )
+    def test_only_a_length_with_no_button_is_named_by_its_length(
+        self,
+        window: ReportWindow,
+        expected: int | None,
+    ) -> None:
+        # A preset has a button and a picked pair has its dates. A rolling
+        # run of days that is neither is drawn in the date fields, so the
+        # page is told the length as well - otherwise the next visit asks for
+        # the dates it covered today and the window stops rolling.
+        assert window.rolling_days == expected
+
+    def test_a_rolling_window_runs_back_from_the_present(self) -> None:
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+
+        span = ReportWindow(days=7).span(now)
+
+        assert span.days == 7
+        assert span.start == datetime(2026, 8, 15, tzinfo=UTC)
+        assert span.end == now
+
+    def test_a_picked_pair_covers_the_whole_utc_days_it_names(self) -> None:
+        since = int(datetime(2026, 6, 1, tzinfo=UTC).timestamp())
+        until = int(
+            datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()
+        )
+
+        window = ReportWindow.between(since, until)
+
+        assert window.custom
+        assert window.range_key == "custom"
+        assert window.days == 30
+        span = window.span(datetime(2026, 8, 21, 18, 30, tzinfo=UTC))
+        assert span.days == 30
+        assert span.start == datetime(2026, 6, 1, tzinfo=UTC)
+        assert span.end == datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC)
+
+    def test_a_pair_landing_mid_day_covers_that_whole_date(self) -> None:
+        # Every table the report draws is grouped by whole UTC date, so a
+        # bound falling mid-day is snapped to the date it lands in. Left as
+        # it was, the transaction counts would stop at that instant while the
+        # stored daily results carried the whole of the date.
+        window = ReportWindow.between(
+            int(datetime(2026, 6, 1, 9, 30, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 6, 30, 9, 30, tzinfo=UTC).timestamp()),
+        )
+
+        assert window.days == 30
+        assert window.start == int(
+            datetime(2026, 6, 1, tzinfo=UTC).timestamp()
+        )
+        assert window.end == int(
+            datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()
+        )
+
+    def test_a_picked_pair_reaching_past_today_stops_at_the_present(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 10, 9, 15, tzinfo=UTC)
+        window = ReportWindow.between(
+            int(datetime(2026, 6, 1, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+
+        span = window.span(now)
+
+        # Nothing has been traded in a day that has not happened, so the
+        # window closes at the present and counts only the days it reached.
+        assert span.end == now
+        assert span.days == 10
 
 
 class TestProfitStore:
@@ -1237,14 +1392,14 @@ class TestProfitStore:
     ) -> None:
         store, _, _ = profit_store
 
-        assert store.get_report_days(101) is None
+        assert store.get_report_window(101) is None
 
-        store.set_report_days(101, 60)
-        store.set_report_days(202, 7)
-        store.set_report_days(101, 14)
+        store.set_report_window(101, ReportWindow(days=60))
+        store.set_report_window(202, ReportWindow(days=7))
+        store.set_report_window(101, ReportWindow(days=14))
 
-        assert store.get_report_days(101) == 14
-        assert store.get_report_days(202) == 7
+        assert store.get_report_window(101) == ReportWindow(days=14)
+        assert store.get_report_window(202) == ReportWindow(days=7)
 
     @pytest.mark.parametrize("days", [0, 3651, -1])
     def test_refuses_a_report_window_outside_the_served_range(
@@ -1255,16 +1410,16 @@ class TestProfitStore:
         store, _, _ = profit_store
 
         with pytest.raises(ValueError):
-            store.set_report_days(101, days)
+            store.set_report_window(101, ReportWindow(days=days))
 
-        assert store.get_report_days(101) is None
+        assert store.get_report_window(101) is None
 
     def test_reads_an_out_of_range_stored_window_as_unset(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, database = profit_store
-        store.set_report_days(101, 30)
+        store.set_report_window(101, ReportWindow(days=30))
         engine = create_database_engine(str(database))
         with engine.begin() as connection:
             connection.exec_driver_sql(
@@ -1272,7 +1427,69 @@ class TestProfitStore:
             )
         engine.dispose()
 
-        assert store.get_report_days(101) is None
+        assert store.get_report_window(101) is None
+
+    def test_remembers_a_picked_pair_of_dates_with_both_its_edges(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        picked = ReportWindow.between(
+            int(datetime(2026, 6, 1, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+
+        store.set_report_window(101, picked)
+
+        assert store.get_report_window(101) == picked
+
+        # A preset after it is measured back from whenever the page is
+        # opened, so the bounds it does not use do not stay beside it.
+        store.set_report_window(101, ReportWindow(days=7))
+
+        assert store.get_report_window(101) == ReportWindow(days=7)
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            pytest.param(400, 200, id="backwards"),
+            pytest.param(-86_400, 200, id="before-the-epoch"),
+            pytest.param(0, 3651 * 86_400, id="wider-than-any-report"),
+        ],
+    )
+    def test_reads_stored_bounds_it_cannot_serve_as_a_rolling_window(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        start: int,
+        end: int,
+    ) -> None:
+        store, _, database = profit_store
+        store.set_report_window(101, ReportWindow(days=30))
+        engine = create_database_engine(str(database))
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE gw2_profit_preferences "
+                "SET custom_start = ?, custom_end = ?",
+                (start, end),
+            )
+        engine.dispose()
+
+        # The day count beside the bounds is still a window a report can be
+        # built for, so only the pair of dates is dropped.
+        assert store.get_report_window(101) == ReportWindow(days=30)
+
+    def test_refuses_a_picked_pair_missing_an_edge(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+
+        with pytest.raises(ValueError):
+            store.set_report_window(
+                101, ReportWindow(days=30, start=1_700_000_000)
+            )
+
+        assert store.get_report_window(101) is None
 
     def test_excluded_order_items_stay_with_the_member_who_set_them(
         self,
@@ -1313,12 +1530,12 @@ class TestProfitStore:
     ) -> None:
         store, _, _ = profit_store
         store.set_api_key(101, "first-member-secret")
-        store.set_report_days(101, 60)
+        store.set_report_window(101, ReportWindow(days=60))
         store.set_order_exclusion(101, 19_721, True)
 
         store.set_api_key(101, "replacement-member-secret")
 
-        assert store.get_report_days(101) == 60
+        assert store.get_report_window(101) == ReportWindow(days=60)
         assert store.get_excluded_order_items(101) == frozenset({19_721})
 
     def test_deleting_a_key_takes_the_window_and_exclusions_with_it(
@@ -1327,17 +1544,17 @@ class TestProfitStore:
     ) -> None:
         store, _, _ = profit_store
         store.set_api_key(101, "member-secret")
-        store.set_report_days(101, 60)
+        store.set_report_window(101, ReportWindow(days=60))
         store.set_order_exclusion(101, 19_721, True)
         store.set_api_key(202, "other-member-secret")
-        store.set_report_days(202, 7)
+        store.set_report_window(202, ReportWindow(days=7))
         store.set_order_exclusion(202, 8_871, True)
 
         assert store.delete_api_key(101)
 
-        assert store.get_report_days(101) is None
+        assert store.get_report_window(101) is None
         assert store.get_excluded_order_items(101) == frozenset()
-        assert store.get_report_days(202) == 7
+        assert store.get_report_window(202) == ReportWindow(days=7)
         assert store.get_excluded_order_items(202) == frozenset({8_871})
 
 
@@ -1406,8 +1623,8 @@ class TestProfitService:
         )
         service._api = api  # type: ignore[assignment]
 
-        first = await service.load_report(101, 30, now=now)
-        second = await service.load_report(101, 30, now=now)
+        first = await service.load_report(101, ReportWindow(days=30), now=now)
+        second = await service.load_report(101, ReportWindow(days=30), now=now)
 
         assert first == second
         assert first.window_start == datetime(2026, 7, 23, tzinfo=UTC)
@@ -1856,7 +2073,7 @@ class TestProfitService:
         service._api = api  # type: ignore[assignment]
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
-            report = await service.load_report(101, 30, now=now)
+            report = await service.load_report(101, ReportWindow(days=30), now=now)
 
         assert report.realized.total_profit == 350
         assert api.fetch_transactions.await_count == 6
@@ -1891,7 +2108,7 @@ class TestProfitService:
         )
 
         with pytest.raises(MissingProfitApiKey):
-            await service.load_report(202, 30)
+            await service.load_report(202, ReportWindow(days=30))
 
     async def test_refreshes_an_expired_item_name(
         self,
@@ -1939,7 +2156,7 @@ class TestProfitService:
         )
         service._api = api  # type: ignore[assignment]
 
-        report = await service.load_report(101, 30, now=now)
+        report = await service.load_report(101, ReportWindow(days=30), now=now)
 
         assert report.item_names == {1: "New Name"}
         api.fetch_transactions.assert_not_awaited()
@@ -2166,7 +2383,81 @@ class TestProfitService:
         )
 
         with pytest.raises(ProfitApiAuthorizationError):
-            await service.load_report(101, 30, now=now)
+            await service.load_report(101, ReportWindow(days=30), now=now)
+
+    async def test_a_window_closed_in_the_past_leaves_out_what_came_after(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                "buy",
+                price=100,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+            )
+        ]
+        sells = [
+            transaction(
+                "sell-inside",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 5, tzinfo=UTC),
+            ),
+            # After the window's last day, so it belongs to no part of it.
+            transaction(
+                "sell-after",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+        picked = ReportWindow.between(
+            int(datetime(2026, 8, 1, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 8, 10, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+
+        report = await service.load_report(101, picked, now=now)
+
+        assert report.days == 10
+        assert report.range_key == "custom"
+        assert report.window_start == datetime(2026, 8, 1, tzinfo=UTC)
+        assert report.window_end == datetime(
+            2026, 8, 10, 23, 59, 59, tzinfo=UTC
+        )
+        # The first sale only: 5 units at 200 less the Trading Post's cut,
+        # against the 100 each cost to buy.
+        assert list(report.realized.days) == ["2026-08-05"]
+        assert report.sell_transaction_count == 1
+        assert report.buy_transaction_count == 1
 
     async def test_report_window_is_remembered_once_a_member_picks_one(
         self,
@@ -2181,18 +2472,44 @@ class TestProfitService:
 
         # An unremembered window is served as the default and says so, which
         # is what lets the page put a lost choice back from the browser.
-        assert await service.resolve_report_days(101, None) == ReportWindow(
-            30, False
+        assert await service.resolve_report_window(101, None) == ResolvedWindow(
+            ReportWindow(days=30), False
         )
-        assert await service.resolve_report_days(101, 60) == ReportWindow(
-            60, True
+        assert await service.resolve_report_window(
+            101, ReportWindow(days=60)
+        ) == ResolvedWindow(ReportWindow(days=60), True)
+        assert await service.resolve_report_window(101, None) == ResolvedWindow(
+            ReportWindow(days=60), True
         )
-        assert await service.resolve_report_days(101, None) == ReportWindow(
-            60, True
+        assert await service.resolve_report_window(202, None) == ResolvedWindow(
+            ReportWindow(days=30), False
         )
-        assert await service.resolve_report_days(202, None) == ReportWindow(
-            30, False
+
+    async def test_a_picked_pair_of_dates_is_remembered_as_it_was_picked(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
         )
+        picked = ReportWindow.between(
+            int(datetime(2026, 6, 1, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+
+        assert await service.resolve_report_window(
+            101, picked
+        ) == ResolvedWindow(picked, True)
+
+        # The dates come back as they were picked, not as a rolling window of
+        # the same length: the member asked for June, not for thirty days.
+        reopened = await service.resolve_report_window(101, None)
+        assert reopened == ResolvedWindow(picked, True)
+        assert reopened.window.custom
+        assert reopened.window.days == 30
 
     async def test_report_window_refuses_a_value_outside_the_range(
         self,
@@ -2206,9 +2523,9 @@ class TestProfitService:
         )
 
         with pytest.raises(ValueError):
-            await service.resolve_report_days(101, 3651)
+            await service.resolve_report_window(101, ReportWindow(days=3651))
 
-        assert store.get_report_days(101) is None
+        assert store.get_report_window(101) is None
 
     async def test_order_exclusions_are_stored_through_the_service(
         self,
@@ -2262,7 +2579,7 @@ class TestRollupStore:
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
-        first = await service.load_report(101, 30, now=now)
+        first = await service.load_report(101, ReportWindow(days=30), now=now)
         assert store.get_rollup_state(101).computed_through == datetime(
             2026, 8, 2, tzinfo=UTC
         )
@@ -2272,7 +2589,7 @@ class TestRollupStore:
         # Nothing new arrived, so nothing is matched again.
         rebuilt = await service._ensure_rollups(101, now)
         assert not rebuilt
-        second = await service.load_report(101, 30, now=now)
+        second = await service.load_report(101, ReportWindow(days=30), now=now)
         assert second.realized.total_profit == first.realized.total_profit
 
         # A later sale moves the watermark and the rollups follow it.
@@ -2291,7 +2608,7 @@ class TestRollupStore:
             now=now,
         )
         assert await service._ensure_rollups(101, now)
-        third = await service.load_report(101, 30, now=now)
+        third = await service.load_report(101, ReportWindow(days=30), now=now)
         assert third.realized.total_profit > first.realized.total_profit
         assert sorted(
             row[1]
@@ -2704,14 +3021,14 @@ class TestRollupRefreshIsNotARewind:
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
-        original = await service.load_report(101, 30, now=now)
+        original = await service.load_report(101, ReportWindow(days=30), now=now)
         assert original.key_generation
 
         # Replacing a key keeps the member's settings, so the token holds.
         store.set_api_key(101, "replacement-member-secret")
         for kind in TRANSACTION_PATHS:
             store.touch_cache(101, kind, now=now)
-        replaced = await service.load_report(101, 30, now=now)
+        replaced = await service.load_report(101, ReportWindow(days=30), now=now)
         assert replaced.key_generation == original.key_generation
 
         # Deleting one throws them away, so the token must not survive it.
@@ -2719,7 +3036,7 @@ class TestRollupRefreshIsNotARewind:
         store.set_api_key(101, "a-fresh-start-secret")
         for kind in TRANSACTION_PATHS:
             store.touch_cache(101, kind, now=now)
-        fresh = await service.load_report(101, 30, now=now)
+        fresh = await service.load_report(101, ReportWindow(days=30), now=now)
         assert fresh.key_generation != original.key_generation
 
     async def test_a_corrected_row_is_still_a_late_arrival(

@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from factories import config_from_env, forbidden_error, not_found_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
+from gw2bot.dashboard_ranges import StoredRange
 from gw2bot.events.models import EventCategory, RepeatFrequency
 from gw2bot.events.store import EventStore
 from gw2bot.raffle import RaffleStore
@@ -35,18 +36,19 @@ from gw2bot.profit import (
     OpenOrdersReport,
     ProfitReport,
     RealizedProfit,
+    ReportWindow,
     UnrealizedItemProfit,
     UnrealizedProfit,
 )
 from gw2bot.profit.api import ProfitApiError
-from gw2bot.profit.service import MissingProfitApiKey, ReportWindow
+from gw2bot.profit.service import MissingProfitApiKey, ResolvedWindow
 from gw2bot.guild_members import TrialMemberReportEntry
 from gw2bot.pending_invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
 from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.web.server import WebServer
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 GUILD_ID = 5678
 CLIENT_SECRET = "client-secret-value"
@@ -54,10 +56,16 @@ SESSION_SECRET = "session-secret-value-0123456789abcdef"
 SESSION_USER_ID = 1
 
 
-def profit_report(days: int = 30) -> ProfitReport:
-    window_end = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+def profit_report(
+    days: int = 30,
+    range_key: str = "30d",
+    window_end: datetime = datetime(2026, 8, 21, 18, 30, tzinfo=UTC),
+    rolling_days: int | None = None,
+) -> ProfitReport:
     return ProfitReport(
         days=days,
+        range_key=range_key,
+        rolling_days=rolling_days,
         window_start=(
             window_end.replace(hour=0, minute=0) - timedelta(days=days - 1)
         ),
@@ -176,9 +184,10 @@ class FakeBot:
             load_report=AsyncMock(return_value=profit_report()),
             load_delivery=AsyncMock(return_value=delivery_report()),
             load_open_orders=AsyncMock(return_value=orders_report()),
-            resolve_report_days=AsyncMock(
-                side_effect=lambda user_id, days: ReportWindow(
-                    30 if days is None else days, days is not None
+            resolve_report_window=AsyncMock(
+                side_effect=lambda user_id, window: ResolvedWindow(
+                    ReportWindow(days=30) if window is None else window,
+                    window is not None,
                 )
             ),
             set_order_exclusion=AsyncMock(return_value=True),
@@ -999,7 +1008,9 @@ class TestProfitPage:
     ) -> None:
         other_user_id = 202
         guild.members[other_user_id] = member("Other Kitty")
-        bot.profit_service.load_report.return_value = profit_report(60)
+        bot.profit_service.load_report.return_value = profit_report(
+            60, "custom", rolling_days=60
+        )
 
         response = await client.get(
             "/api/profit",
@@ -1010,11 +1021,20 @@ class TestProfitPage:
         assert response.status == 200
         payload = await response.json()
         assert payload["days"] == 60
+        # Sixty days is no button, so the page draws it in the date fields -
+        # and is told the length, so a reload asks for the last sixty days
+        # rather than for the dates they covered.
+        assert payload["range"] == "custom"
+        assert payload["rolling_days"] == 60
         assert payload["summary"]["profit"] == 140
         assert payload["summary"]["roi_percent"] == 70
         assert payload["window"] == {
             "start_date": "2026-06-23",
             "end_date": "2026-08-21",
+            # The same two dates in whole epoch seconds, which is what the
+            # page fills its date fields from.
+            "start": 1_782_172_800,
+            "end": 1_787_337_000,
         }
         assert payload["items"][0]["name"] == "Realized Item"
         assert payload["items"][0]["hold_seconds"] == 86_400
@@ -1035,13 +1055,13 @@ class TestProfitPage:
         assert payload["max_days"] == 3650
         bot.profit_service.load_delivery.assert_not_awaited()
         bot.profit_service.load_open_orders.assert_not_awaited()
-        bot.profit_service.resolve_report_days.assert_awaited_once_with(
+        bot.profit_service.resolve_report_window.assert_awaited_once_with(
             other_user_id,
-            60,
+            ReportWindow(days=60),
         )
         bot.profit_service.load_report.assert_awaited_once_with(
             other_user_id,
-            60,
+            ReportWindow(days=60),
             force=False,
         )
 
@@ -1052,14 +1072,14 @@ class TestProfitPage:
     ) -> None:
         response = await client.get(
             "/api/profit",
-            params={"days": "30", "refresh": "1"},
+            params={"range": "30d", "refresh": "1"},
             headers=self._headers(),
         )
 
         assert response.status == 200
         bot.profit_service.load_report.assert_awaited_once_with(
             SESSION_USER_ID,
-            30,
+            ReportWindow(days=30),
             force=True,
         )
 
@@ -1230,27 +1250,194 @@ class TestProfitPage:
         client: TestClient,
         bot: FakeBot,
     ) -> None:
-        bot.profit_service.resolve_report_days.side_effect = None
-        bot.profit_service.resolve_report_days.return_value = ReportWindow(
-            14, True
+        remembered = ReportWindow(days=14)
+        bot.profit_service.resolve_report_window.side_effect = None
+        bot.profit_service.resolve_report_window.return_value = ResolvedWindow(
+            remembered, True
         )
-        bot.profit_service.load_report.return_value = profit_report(14)
+        bot.profit_service.load_report.return_value = profit_report(
+            14, "custom"
+        )
 
         response = await client.get("/api/profit", headers=self._headers())
 
         assert response.status == 200
         payload = await response.json()
         assert payload["days"] == 14
-        assert payload["remembered_days"] is True
-        bot.profit_service.resolve_report_days.assert_awaited_once_with(
+        assert payload["remembered_window"] is True
+        bot.profit_service.resolve_report_window.assert_awaited_once_with(
             SESSION_USER_ID,
             None,
         )
         bot.profit_service.load_report.assert_awaited_once_with(
             SESSION_USER_ID,
-            14,
+            remembered,
             force=False,
         )
+
+    @pytest.mark.parametrize(
+        ("range_key", "days"), [("24h", 1), ("7d", 7), ("30d", 30)]
+    )
+    async def test_each_preset_asks_for_its_own_run_of_days(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        range_key: str,
+        days: int,
+    ) -> None:
+        response = await client.get(
+            "/api/profit",
+            params={"range": range_key},
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        bot.profit_service.load_report.assert_awaited_once_with(
+            SESSION_USER_ID,
+            ReportWindow(days=days),
+            force=False,
+        )
+
+    async def test_a_picked_pair_of_dates_is_sent_as_the_window_it_names(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        since = int(datetime(2026, 6, 1, tzinfo=UTC).timestamp())
+        until = int(
+            datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp()
+        )
+        bot.profit_service.load_report.return_value = profit_report(
+            30,
+            "custom",
+            datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC),
+        )
+
+        response = await client.get(
+            "/api/profit",
+            params={
+                "range": "custom",
+                "start": str(since),
+                "end": str(until),
+            },
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert payload["window"]["start_date"] == "2026-06-01"
+        assert payload["window"]["end_date"] == "2026-06-30"
+        bot.profit_service.load_report.assert_awaited_once_with(
+            SESSION_USER_ID,
+            ReportWindow(days=30, start=since, end=until),
+            force=False,
+        )
+
+    async def test_a_remembered_length_is_served_as_a_length(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        # A page opening with no window at all is the path a member takes
+        # from a browser that has never seen their choice. Sixty days lights
+        # no button, so it is drawn in the date fields - and the length comes
+        # with it, or the next visit would ask for those dates instead.
+        remembered = ReportWindow(days=60)
+        bot.profit_service.resolve_report_window.side_effect = None
+        bot.profit_service.resolve_report_window.return_value = ResolvedWindow(
+            remembered, True
+        )
+        bot.profit_service.load_report.return_value = profit_report(
+            60, "custom", rolling_days=60
+        )
+
+        response = await client.get("/api/profit", headers=self._headers())
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        assert payload["rolling_days"] == 60
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"range": "90d"}, id="unknown-preset"),
+            pytest.param({"range": "custom"}, id="no-bounds"),
+            pytest.param({"range": "custom", "start": "100"}, id="one-bound"),
+            pytest.param(
+                {"range": "custom", "start": "abc", "end": "200"},
+                id="unreadable",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "100.5", "end": "200"},
+                id="fractional",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "400", "end": "200"},
+                id="backwards",
+            ),
+            pytest.param(
+                {"range": "custom", "start": "200", "end": "200"},
+                id="empty",
+            ),
+        ],
+    )
+    async def test_rejects_a_window_it_cannot_report_on(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        params: dict[str, str],
+    ) -> None:
+        response = await client.get(
+            "/api/profit",
+            params=params,
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+        bot.profit_service.load_report.assert_not_awaited()
+
+    async def test_rejects_a_pair_of_dates_wider_than_the_report_reaches(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+
+        response = await client.get(
+            "/api/profit",
+            params={
+                "range": "custom",
+                "start": str(now - 3651 * 86400),
+                "end": str(now),
+            },
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        bot.profit_service.load_report.assert_not_awaited()
+
+    async def test_a_pair_of_dates_opening_after_the_present_is_refused(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+
+        response = await client.get(
+            "/api/profit",
+            params={
+                "range": "custom",
+                "start": str(now + 86400),
+                "end": str(now + 3 * 86400),
+            },
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        bot.profit_service.load_report.assert_not_awaited()
 
     async def test_exclusion_is_stored_for_the_signed_in_member_only(
         self,
@@ -2697,3 +2884,287 @@ class TestGoldApi:
 
         assert response.status == 503
         assert await response.json() == {"error": "unavailable"}
+
+
+class TestRememberedDashboardWindows:
+    """The window a member picks on a dashboard is the one it reopens on.
+
+    Every history dashboard reads the same way, so each case runs against all
+    three rather than being written out once for the feast page and trusted
+    for the other two.
+    """
+
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    @pytest.mark.parametrize(
+        ("path", "dashboard"),
+        [("/api/food", "food"), ("/api/roster", "roster"),
+         ("/api/gold", "gold")],
+    )
+    async def test_a_picked_preset_is_stored_and_reopened(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        path: str,
+        dashboard: str,
+    ) -> None:
+        headers = self._officer_headers(guild)
+
+        picked = await client.get(path, params={"range": "7d"}, headers=headers)
+
+        assert picked.status == 200
+        assert (await picked.json())["range"] == "7d"
+        assert raffle_store.get_dashboard_range(
+            SESSION_USER_ID, dashboard
+        ) == StoredRange("7d")
+
+        # A page opening without a window asks for the stored one, and is told
+        # that is what it got.
+        reopened = await client.get(path, headers=headers)
+
+        assert reopened.status == 200
+        payload = await reopened.json()
+        assert payload["range"] == "7d"
+        assert payload["remembered"] is True
+        assert payload["now"] - payload["since"] == pytest.approx(
+            7 * 24 * 60 * 60, abs=5
+        )
+
+    @pytest.mark.parametrize(
+        "path", ["/api/food", "/api/roster", "/api/gold"]
+    )
+    async def test_a_picked_pair_of_dates_is_reopened_as_it_was_served(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        path: str,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        now = time.time()
+        since = int(now - 5 * 86400)
+        until = int(now - 86400)
+
+        picked = await client.get(
+            path,
+            params={
+                "range": "custom",
+                "start": str(since),
+                "end": str(until),
+            },
+            headers=headers,
+        )
+
+        assert picked.status == 200
+
+        reopened = await client.get(path, headers=headers)
+
+        assert reopened.status == 200
+        payload = await reopened.json()
+        assert payload["range"] == "custom"
+        assert payload["remembered"] is True
+        # The same two edges, so the page fills its date fields with the pair
+        # the member picked rather than with a window of the same width.
+        assert (payload["since"], payload["now"]) == (
+            float(since),
+            float(until),
+        )
+
+    @pytest.mark.parametrize(
+        ("path", "dashboard"),
+        [("/api/food", "food"), ("/api/roster", "roster"),
+         ("/api/gold", "gold")],
+    )
+    async def test_a_pair_ending_today_is_remembered_by_the_day_it_names(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        path: str,
+        dashboard: str,
+    ) -> None:
+        now = time.time()
+        since = int(now - 2 * 86400)
+        # The last second of today, which is what the picker sends for a
+        # window ending on today's date.
+        end_of_today = int(now + 3600)
+
+        response = await client.get(
+            path,
+            params={
+                "range": "custom",
+                "start": str(since),
+                "end": str(end_of_today),
+            },
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        # Only as much of today as has happened is drawn...
+        assert payload["now"] <= time.time()
+        # ...but the day the member asked for is what is remembered, so the
+        # rest of it is there on their next visit instead of the window
+        # stopping at the moment they pressed Apply.
+        assert raffle_store.get_dashboard_range(
+            SESSION_USER_ID, dashboard
+        ) == StoredRange("custom", since, end_of_today)
+
+    @pytest.mark.parametrize(
+        "path", ["/api/food", "/api/roster", "/api/gold"]
+    )
+    async def test_a_first_visit_gets_the_default_and_says_so(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        path: str,
+    ) -> None:
+        response = await client.get(
+            path, headers=self._officer_headers(guild)
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "24h"
+        # Nothing was picked, so nothing is claimed to have been remembered.
+        assert payload["remembered"] is False
+
+    @pytest.mark.parametrize(
+        ("path", "dashboard"),
+        [("/api/food", "food"), ("/api/roster", "roster"),
+         ("/api/gold", "gold")],
+    )
+    async def test_windows_are_kept_per_member_and_per_dashboard(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        path: str,
+        dashboard: str,
+    ) -> None:
+        other_user_id = 202
+        guild.members[other_user_id] = member("Other Kitty", officer=True)
+        await client.get(
+            path,
+            params={"range": "30d"},
+            headers=self._officer_headers(guild),
+        )
+
+        # Another member on the same dashboard, and this member on another
+        # one, are both untouched by that choice.
+        assert raffle_store.get_dashboard_range(other_user_id, dashboard) is (
+            None
+        )
+        for other in ("food", "roster", "gold"):
+            if other == dashboard:
+                continue
+            assert raffle_store.get_dashboard_range(
+                SESSION_USER_ID, other
+            ) is None
+
+    @pytest.mark.parametrize(
+        ("dashboard", "path", "stored"),
+        [
+            ("food", "/api/food", StoredRange("90d")),
+            ("roster", "/api/roster", StoredRange("")),
+            ("gold", "/api/gold", StoredRange("custom", 400, 200)),
+        ],
+    )
+    async def test_a_stored_window_it_cannot_draw_falls_back_to_the_default(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        dashboard: str,
+        path: str,
+        stored: StoredRange,
+    ) -> None:
+        # A row written by another release, or edited by hand: a preset this
+        # page does not offer, a window named nothing at all, and a pair that
+        # runs backwards.
+        raffle_store.set_dashboard_range(SESSION_USER_ID, dashboard, stored)
+
+        response = await client.get(
+            path, headers=self._officer_headers(guild)
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "24h"
+        assert payload["remembered"] is False
+
+    async def test_a_stored_pair_that_has_been_overtaken_stops_at_the_present(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.set_dashboard_range(
+            SESSION_USER_ID,
+            "food",
+            StoredRange("custom", int(now - 86400), int(now + 30 * 86400)),
+        )
+
+        response = await client.get(
+            "/api/food", headers=self._officer_headers(guild)
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "custom"
+        # Nothing has been recorded for a moment that has not happened.
+        assert payload["now"] <= time.time()
+
+    async def test_a_refused_window_is_not_remembered(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        headers = self._officer_headers(guild)
+        await client.get("/api/food", params={"range": "7d"}, headers=headers)
+
+        refused = await client.get(
+            "/api/food", params={"range": "90d"}, headers=headers
+        )
+
+        assert refused.status == 400
+        # The window that was drawn is still the one that is kept.
+        assert raffle_store.get_dashboard_range(
+            SESSION_USER_ID, "food"
+        ) == StoredRange("7d")
+
+    async def test_a_database_failure_still_serves_the_page(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store = cast(RaffleStore, bot.raffle_store)
+        headers = self._officer_headers(guild)
+        with caplog.at_level(logging.WARNING):
+            with patch.object(
+                store,
+                "set_dashboard_range",
+                side_effect=SQLAlchemyError("no"),
+            ):
+                picked = await client.get(
+                    "/api/food", params={"range": "7d"}, headers=headers
+                )
+            with patch.object(
+                store,
+                "get_dashboard_range",
+                side_effect=SQLAlchemyError("no"),
+            ):
+                reopened = await client.get("/api/food", headers=headers)
+
+        assert picked.status == 200
+        assert (await picked.json())["range"] == "7d"
+        assert reopened.status == 200
+        assert (await reopened.json())["range"] == "24h"
+        assert "Could not remember a food window" in caplog.text
+        assert "Could not read a remembered feast usage window" in caplog.text

@@ -4,11 +4,18 @@ import logging
 import math
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+
+from gw2bot.dashboard_ranges import CUSTOM_RANGE
 
 LOGGER = logging.getLogger(__name__)
 
 MIN_FLIP_QUANTITY = 5
+
+# The preset windows the profit dashboard offers, mapped to the whole UTC
+# dates each covers. They are the three buttons the feast usage, roster and
+# gold dashboards carry, so every page on the site reads the same way.
+PRESET_REPORT_RANGES: dict[str, int] = {"24h": 1, "7d": 7, "30d": 30}
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +172,123 @@ class OpenBuyOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportSpan:
+    """The two instants one report was built between.
+
+    ``days`` is how many whole UTC sale dates fall between them, which is the
+    number of buckets every daily table and chart draws.
+    """
+
+    days: int
+    start: datetime
+    end: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReportWindow:
+    """The stretch of trading a report is asked to cover.
+
+    A window is either rolling - the last ``days`` whole UTC dates, ending
+    whenever the report is read - or a pair of dates the member picked, in
+    which case both bounds are set and ``days`` is how many whole UTC dates
+    they span. The three preset buttons are rolling windows of 1, 7 and 30
+    days, so a preset costs nothing to store beyond its length.
+    """
+
+    days: int
+    # Whole epoch seconds, set together, when the member picked dates rather
+    # than a preset: midnight on the first day and the last second of the
+    # last one.
+    start: int | None = None
+    end: int | None = None
+
+    @classmethod
+    def between(cls, start: int, end: int) -> ReportWindow:
+        """The window a picked pair of epoch-second bounds describes.
+
+        Every table and chart the report draws is grouped by whole UTC date,
+        so the pair is snapped to the dates it lands in: the first opens at
+        midnight and the last closes on its final second. A bound falling
+        mid-day would otherwise cut the transaction counts there while the
+        stored daily results carried the whole of that date.
+        """
+        first = datetime.fromtimestamp(start, UTC).date()
+        last = datetime.fromtimestamp(end, UTC).date()
+        opening = datetime(first.year, first.month, first.day, tzinfo=UTC)
+        closing = datetime(
+            last.year, last.month, last.day, tzinfo=UTC
+        ) + timedelta(days=1)
+        return cls(
+            days=(last - first).days + 1,
+            start=int(opening.timestamp()),
+            end=int(closing.timestamp()) - 1,
+        )
+
+    @property
+    def custom(self) -> bool:
+        return self.start is not None and self.end is not None
+
+    @property
+    def range_key(self) -> str:
+        """The button the dashboard shows as chosen for this window.
+
+        A rolling window that is none of the three presets - the ``days`` a
+        ``/profit view 60`` link carries - has no button of its own, so the
+        page shows it as a custom window over the same dates. What is stored
+        stays rolling; only the picker it is drawn in is borrowed.
+        """
+        if self.custom:
+            return CUSTOM_RANGE
+        for key, days in PRESET_REPORT_RANGES.items():
+            if days == self.days:
+                return key
+        return CUSTOM_RANGE
+
+    @property
+    def rolling_days(self) -> int | None:
+        """The length this window has to be named by, when it has only one.
+
+        A preset is named by its button and a picked pair by its two dates.
+        A rolling run of days that is neither is drawn in the date fields
+        because there is nowhere else to draw it, and a page that took those
+        dates for the window itself would freeze it on them: the next visit
+        would ask for the stretch it covered today rather than for the last
+        sixty days. This is what the page keeps naming it by instead.
+        """
+        if self.custom or self.range_key != CUSTOM_RANGE:
+            return None
+        return self.days
+
+    def span(self, now: datetime) -> ReportSpan:
+        """The instants this window covers, as read at ``now``.
+
+        A rolling window ends at the present. A picked pair ends at the last
+        second of its last day, or at the present when that day has not
+        finished yet: nothing has been recorded for a moment that has not
+        happened, and a window drawn out to one would trail a flat run.
+        """
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.start is None or self.end is None:
+            return ReportSpan(
+                days=self.days,
+                start=midnight - timedelta(days=self.days - 1),
+                end=now,
+            )
+        first = datetime.fromtimestamp(self.start, UTC).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        closed = min(datetime.fromtimestamp(self.end, UTC), now)
+        return ReportSpan(
+            days=max((closed.date() - first.date()).days + 1, 1),
+            start=first,
+            end=closed,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProfitReport:
     """The parts of the dashboard built from a member's trade history.
 
@@ -173,6 +297,14 @@ class ProfitReport:
     """
 
     days: int
+    # The name the dashboard knows this window by, so the page marks the
+    # button the report was built for rather than guessing it from the dates.
+    range_key: str
+    # The rolling length behind a window no button stands for, or None when
+    # the window is a preset or a pair of dates the member picked. Without it
+    # a remembered rolling window comes back looking like the dates it covers
+    # today, and the next visit asks for those instead.
+    rolling_days: int | None
     window_start: datetime
     window_end: datetime
     buy_transaction_count: int

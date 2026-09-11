@@ -22,6 +22,7 @@ from gw2bot.profit.models import (
     OpenBuyOrder,
     OpenOrdersReport,
     ProfitReport,
+    ReportWindow,
     Transaction,
     BuyLot,
     ItemDayProfit,
@@ -83,10 +84,10 @@ class _DeliverySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class ReportWindow:
+class ResolvedWindow:
     """The window a request resolved to, and whether it was a stored choice."""
 
-    days: int
+    window: ReportWindow
     remembered: bool
 
 
@@ -111,44 +112,47 @@ class ProfitService:
         LOGGER.debug("Member profit API key validation completed; valid=%s", valid)
         return valid
 
-    async def resolve_report_days(
+    async def resolve_report_window(
         self,
         discord_user_id: int,
-        requested_days: int | None,
-    ) -> ReportWindow:
+        requested: ReportWindow | None,
+    ) -> ResolvedWindow:
         """Return the window to report, remembering an explicit choice.
 
-        A member who picks a window keeps it: the page opens on it again on
-        their next visit, from any browser, because the choice is stored
-        against their Discord ID rather than left in the URL they came from.
+        A member who picks a window keeps it, whichever way they picked it:
+        the page opens on that preset, or on those two dates, again on their
+        next visit from any browser, because the choice is stored against
+        their Discord ID rather than left in the URL they came from.
         """
-        if requested_days is not None:
-            if not MIN_REPORT_DAYS <= requested_days <= MAX_REPORT_DAYS:
+        if requested is not None:
+            if not MIN_REPORT_DAYS <= requested.days <= MAX_REPORT_DAYS:
                 raise ValueError(
                     "Profit report days must be between "
                     f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
                 )
             await asyncio.to_thread(
-                self._store.set_report_days,
+                self._store.set_report_window,
                 discord_user_id,
-                requested_days,
+                requested,
             )
-            return ReportWindow(requested_days, True)
+            return ResolvedWindow(requested, True)
         stored = await asyncio.to_thread(
-            self._store.get_report_days,
+            self._store.get_report_window,
             discord_user_id,
         )
         LOGGER.debug(
-            "Resolved profit report window; user_id=%s remembered=%s",
+            "Resolved profit report window; user_id=%s remembered=%s "
+            "custom=%s",
             discord_user_id,
             stored is not None,
+            stored is not None and stored.custom,
         )
         # Saying which answer this is lets the page tell a member's stored
         # window from the fallback, and put a lost one back from the copy the
         # browser keeps.
         if stored is None:
-            return ReportWindow(DEFAULT_REPORT_DAYS, False)
-        return ReportWindow(stored, True)
+            return ResolvedWindow(ReportWindow(days=DEFAULT_REPORT_DAYS), False)
+        return ResolvedWindow(stored, True)
 
     async def set_order_exclusion(
         self,
@@ -280,27 +284,31 @@ class ProfitService:
     async def load_report(
         self,
         discord_user_id: int,
-        days: int,
+        window: ReportWindow,
         *,
         force: bool = False,
         now: datetime | None = None,
     ) -> ProfitReport:
-        if not MIN_REPORT_DAYS <= days <= MAX_REPORT_DAYS:
+        if not MIN_REPORT_DAYS <= window.days <= MAX_REPORT_DAYS:
             raise ValueError(
                 "Profit report days must be between "
                 f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
             )
         loaded_at = datetime.now(UTC) if now is None else now
-        window_start = loaded_at.replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        ) - timedelta(days=days - 1)
+        span = window.span(loaded_at)
+        days = span.days
+        window_start = span.start
+        # A window the member closed in the past needs its far bound read
+        # too. One running to the present does not, and leaving it off is
+        # what keeps a trade timestamped a moment ahead of this clock in the
+        # report it belongs to rather than in none.
+        window_until = span.end if span.end < loaded_at else None
         LOGGER.debug(
-            "Loading profit report; user_id=%s days=%s",
+            "Loading profit report; user_id=%s days=%s range=%s closed=%s",
             discord_user_id,
             days,
+            window.range_key,
+            window_until is not None,
         )
         snapshot = await self._require_api_key(discord_user_id)
         await self._refresh_transactions(
@@ -321,6 +329,7 @@ class ProfitService:
             self._read_windowed_report,
             discord_user_id,
             window_start,
+            window_until,
         )
         unrealized = await asyncio.to_thread(
             calculate_unrealized_profit,
@@ -343,8 +352,10 @@ class ProfitService:
 
         report = ProfitReport(
             days=days,
+            range_key=window.range_key,
+            rolling_days=window.rolling_days,
             window_start=window_start,
-            window_end=loaded_at,
+            window_end=span.end,
             buy_transaction_count=buy_count,
             sell_transaction_count=sell_count,
             realized=realized,
@@ -691,6 +702,7 @@ class ProfitService:
         self,
         discord_user_id: int,
         cutoff: datetime,
+        until: datetime | None = None,
     ) -> tuple[
         RealizedProfit,
         list[Transaction],
@@ -698,7 +710,7 @@ class ProfitService:
         int,
         int,
     ]:
-        rollups = self._store.get_rollups(discord_user_id, cutoff)
+        rollups = self._store.get_rollups(discord_user_id, cutoff, until)
         realized = aggregate_rollups(
             rollups,
             self._store.get_open_lots(discord_user_id),
@@ -706,13 +718,16 @@ class ProfitService:
         )
         return (
             realized,
+            # What is listed for sale now, which is a reading of the present
+            # rather than of the window: a member's held stock is theirs
+            # today whichever dates the report covers.
             self._store.get_transactions(discord_user_id, "current_sells"),
             self._store.get_earliest_transaction_at(discord_user_id),
             self._store.count_transactions(
-                discord_user_id, "history_buys", cutoff
+                discord_user_id, "history_buys", cutoff, until
             ),
             self._store.count_transactions(
-                discord_user_id, "history_sells", cutoff
+                discord_user_id, "history_sells", cutoff, until
             ),
         )
 
@@ -1107,9 +1122,19 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
     )
     return {
         "days": report.days,
+        # The button the page marks as chosen, and the bounds behind it: a
+        # custom window's date fields are filled from these, so a member who
+        # comes back to a remembered pair of dates sees the pair they picked.
+        "range": report.range_key,
+        # Set only for a rolling window no button stands for: the page keeps
+        # naming it by this rather than by the dates it happens to cover
+        # today, so a reload asks for the same rolling stretch again.
+        "rolling_days": report.rolling_days,
         "window": {
             "start_date": report.window_start.date().isoformat(),
             "end_date": report.window_end.date().isoformat(),
+            "start": int(report.window_start.timestamp()),
+            "end": int(report.window_end.timestamp()),
         },
         "summary": {
             "buy_transactions": report.buy_transaction_count,
