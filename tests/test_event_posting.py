@@ -4277,6 +4277,37 @@ class TestCheckRosterMembership:
         # the removal the check made; the store not saying is what happened.
         assert real_get_signup(occurrence.occurrence_id, 13) is None
 
+    async def test_a_check_with_unknown_answers_is_asked_again(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.fill_fractal(bot, store)
+        # 13's lookup is refused, which proves nothing about them; everyone
+        # else answers definitely.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 14, 15)},
+            fetch_error=forbidden_error(50001),
+        )
+
+        first, _ = await check_roster_membership(
+            bot, event, occurrence, force=True
+        )
+
+        assert first == []
+        assert store.get_signup(occurrence.occurrence_id, 13) is not None
+        # Discord answers this time, and 13 really has left.
+        bot.guild = FakeGuild(
+            {user_id: f"User {user_id}" for user_id in (11, 12, 14, 15)}
+        )
+
+        second, _ = await check_roster_membership(bot, event, occurrence)
+
+        # The window stands an answer down for a minute, and no answer was
+        # established about the seat 13 is holding - so the next roster
+        # change asks again rather than seating around them.
+        assert second == [13]
+
     async def test_a_check_that_stops_partway_is_asked_again(
         self,
         bot: Any,

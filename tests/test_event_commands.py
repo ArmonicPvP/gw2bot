@@ -7402,6 +7402,64 @@ class TestRemoveSignups:
         assert "<@3>" in kwargs["content"]
         assert "<@4>" in kwargs["content"]
 
+    async def test_removal_reads_the_event_back_between_members(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The run's end is the event's duration, not the occurrence's, so a
+        # leader shortening it mid-batch is only visible to a re-read of the
+        # event itself.
+        event, occurrence = self.make_full_roster(store)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(minutes=30),
+        )
+        running = store.get_occurrence(occurrence.occurrence_id)
+        assert running is not None
+        view = self.make_remove_view(fake_bot, event, running)
+        interaction = self.make_remove_interaction()
+        real_remove = store.remove_signup
+
+        def shorten_the_event_after_the_first(
+            occurrence_id: int,
+            discord_user_id: int,
+        ) -> Any:
+            signup = real_remove(occurrence_id, discord_user_id)
+            saved = store.get_event(event.event_id)
+            assert saved is not None
+            store.update_event(
+                event_id=saved.event_id,
+                category=saved.category,
+                title=saved.title,
+                description=saved.description,
+                channel_id=saved.channel_id,
+                leader_discord_id=saved.leader_discord_id,
+                start_time=saved.start_time,
+                duration_minutes=5,
+                repeat_frequency=saved.repeat_frequency,
+                repeat_days=saved.repeat_days,
+            )
+            return signup
+
+        store.remove_signup = (  # type: ignore[method-assign]
+            shorten_the_event_after_the_first
+        )
+
+        await view.remove(interaction, picked_users(2, 3, 4))
+
+        # The members pending when the run ended are kept, and told so:
+        # judging the end by the duration this batch opened with would have
+        # each removal refused a level down and reported as somebody who was
+        # never signed up.
+        assert store.get_signup(running.occurrence_id, 2) is None
+        assert store.get_signup(running.occurrence_id, 3) is not None
+        assert store.get_signup(running.occurrence_id, 4) is not None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert "ended before" in kwargs["content"]
+        assert "not signed up" not in kwargs["content"]
+
     async def test_removal_reports_a_deleted_event(
         self,
         fake_bot: Any,

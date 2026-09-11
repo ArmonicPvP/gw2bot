@@ -2847,19 +2847,24 @@ def _event_guild(bot: Gw2Bot) -> discord.Guild | None:
     return bot.get_guild(bot._config.discord_command_guild_id)
 
 
-def _roster_swept(
+def _answer_stands(
     bot: Gw2Bot,
     occurrence_id: int,
     memberships: Mapping[int, GuildMembership],
 ) -> bool:
-    """Whether the roster is left with nobody the server has disowned.
+    """Whether this check's answer is worth standing for the whole window.
 
     Asked of the rows rather than of the prune, because the prune stops on a
     store failure the same way it stops on a finished run - by reporting what
     it committed - and both leave departures behind that the next roster
-    change must ask about again. Members who signed up while the lookups ran
-    are not in the answer and count as present, which is what they are until
-    a check of their own says otherwise.
+    change must ask about again.
+
+    Every seated member the sweep asked about has to have been answered for.
+    A definite departure still sitting there means the prune stopped before
+    reaching them; an unknown means a lookup failed and nothing was
+    established about the seat they are holding. Members who signed up while
+    the lookups ran were not part of the question, and a check of their own
+    will ask it.
     """
     try:
         remaining = bot.event_store.get_signups(occurrence_id)
@@ -2871,7 +2876,24 @@ def _roster_swept(
             type(exc).__name__,
         )
         return False
-    return not departed_roster_members(remaining, memberships)
+    asked = [
+        memberships[signup.discord_user_id]
+        for signup in remaining
+        if signup.discord_user_id in memberships
+    ]
+    if not any(membership.in_guild is not None for membership in asked):
+        # Nothing definite came back about anybody still seated, which is how
+        # a bot that may not look members up answers every lookup it makes.
+        # That is the unreachable server the window is a backoff for, not a
+        # sweep worth making again on the very next click.
+        LOGGER.debug(
+            "Kept a roster check that established nothing; occurrence_id=%s "
+            "seated=%s",
+            occurrence_id,
+            len(asked),
+        )
+        return True
+    return all(membership.in_guild is True for membership in asked)
 
 
 async def check_roster_membership(
@@ -3030,7 +3052,7 @@ async def check_roster_membership(
     # what it committed rather than raising, so a departure it never made
     # would otherwise sit unasked-about for the window's length with every
     # click behind it skipping the check.
-    if _roster_swept(bot, occurrence_id, resolved):
+    if _answer_stands(bot, occurrence_id, resolved):
         checks.checked_at[occurrence_id] = time.monotonic()
     LOGGER.debug(
         "Checked the roster against the server; event_id=%s occurrence_id=%s "

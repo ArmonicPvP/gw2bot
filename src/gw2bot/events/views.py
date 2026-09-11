@@ -2184,6 +2184,13 @@ class RemoveSignupsView(discord.ui.View):
                 live = self._bot.event_store.get_occurrence(
                     occurrence.occurrence_id
                 )
+                # The event comes back with it, because the run's end is
+                # judged by its duration: a leader shortening an event while
+                # these removals go out would otherwise be read against the
+                # duration this batch opened with, and every removal past
+                # the new end refused a level down and reported as a member
+                # who was never signed up.
+                live_event = self._bot.event_store.get_event(event.event_id)
             except SQLAlchemyError as exc:
                 # A store that will not answer cannot be asked to remove the
                 # rest either. Stop with what landed rather than letting this
@@ -2197,18 +2204,24 @@ class RemoveSignupsView(discord.ui.View):
                     type(exc).__name__,
                 )
                 break
-            if live is None or occurrence_finished(event, live):
+            if (
+                live is None
+                or live_event is None
+                or occurrence_finished(live_event, live)
+            ):
                 kept_after_end = list(user_ids[index:])
                 LOGGER.debug(
                     "Event ended mid-removal; stopping; occurrence_id=%s "
-                    "user_id=%s kept=%s exists=%s",
+                    "user_id=%s kept=%s exists=%s event_exists=%s",
                     occurrence.occurrence_id,
                     interaction.user.id,
                     len(kept_after_end),
                     live is not None,
+                    live_event is not None,
                 )
                 break
             occurrence = live
+            event = live_event
             # Notification is deferred to a single merged announcement after
             # the loop: per-removal pings would post one thread message per
             # member for what the leader sees as a single edit.
