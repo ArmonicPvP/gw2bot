@@ -3474,6 +3474,28 @@ async def apply_signup_edit(
     if not event.capacity.has_roles:
         await notify_roster_update(bot, occurrence, checked)
         raise ValueError("This event has no roles to edit.")
+    # Having roles is not the same as having these roles: a dungeon is still
+    # role-based and seats no healer at all. Normalised against the capacity
+    # the check read back, exactly as a signup is, so the selection is not
+    # judged infeasible - offering the waitlist over seats standing open -
+    # and then stored as a role this category cannot assign.
+    settled_role, settled_flex = normalize_stored_roles(
+        event.capacity,
+        role,
+        flex_roles,
+    )
+    if settled_role is not role or settled_flex != flex_roles:
+        LOGGER.debug(
+            "Normalized a signup edit's roles after an event changed "
+            "category; occurrence_id=%s user_id=%s category=%s "
+            "normalized_role=%s normalized_flex_count=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            event.category.value,
+            settled_role.value,
+            len(settled_flex),
+        )
+    role, flex_roles = settled_role, settled_flex
     current = next(
         (
             signup

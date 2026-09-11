@@ -8306,6 +8306,44 @@ class TestAddSignups:
         )
         assert "Added <@11> to the roster." not in content
 
+    async def test_an_addition_links_each_notice_to_the_run_as_it_stands(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, EventCategory.WVW)
+        moved = FakeChannel(4321, FakeThread(888))
+        fake_bot._channels[moved.id] = moved
+        fake_bot._channels[moved.thread.id] = moved.thread
+        first = await fake_bot.fetch_user(11)
+        real_send = first.send
+
+        async def move_the_event(*args: Any, **kwargs: Any) -> Any:
+            # Another leader moves the event to a new channel between the
+            # first notice and the second.
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                moved.id,
+                999,
+                moved.thread.id,
+            )
+            return await real_send(*args, **kwargs)
+
+        first.send = AsyncMock(side_effect=move_the_event)
+        view = self.make_add_view(fake_bot, event, occurrence)
+        interaction = self.make_add_interaction()
+
+        await view.pick(interaction, [11, 12])
+
+        # The first notice was right when it went out; the second must not
+        # send its member to the post the run has just left.
+        sent = first.send.await_args
+        assert sent is not None
+        assert "/9876/1234/555)" in sent.args[0]
+        second = fake_bot.users[12].send.await_args
+        assert second is not None
+        assert "/9876/4321/999)" in second.args[0]
+
     async def test_an_addition_announces_into_the_thread_a_move_left(
         self,
         fake_bot: Any,

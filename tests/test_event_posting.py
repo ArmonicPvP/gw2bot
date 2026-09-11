@@ -4105,6 +4105,39 @@ class TestCheckRosterMembership:
         assert signup.assigned_role is EventRole.DPS
         assert not signup.waitlisted
 
+    async def test_an_edit_normalizes_a_role_the_new_category_dropped(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.DPS, ()
+        )
+        guild = FakeGuild({11: "User 11"})
+        changer = self.category_changer(
+            store,
+            event,
+            guild,
+            EventCategory.DUNGEON,
+        )
+        guild.fetch_member = changer  # type: ignore[method-assign]
+        bot.guild = guild
+
+        result = await apply_signup_edit(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_HEAL, ()
+        )
+
+        # A dungeon is still role-based, so the guard above lets this
+        # through; it seats no healer, so judging the selection as it stands
+        # would offer the waitlist over a DPS seat standing open and then
+        # store a role the category cannot assign.
+        assert not result.needs_waitlist_confirmation
+        assert result.signup is not None
+        assert result.signup.role is EventRole.DPS
+        assert result.signup.assigned_role is EventRole.DPS
+        assert not result.signup.waitlisted
+
     async def test_an_edit_the_store_refuses_announces_the_check(
         self,
         bot: Any,

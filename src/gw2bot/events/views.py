@@ -3072,13 +3072,47 @@ async def apply_roster_addition(
     # occurrence cannot send anyone a link to the deleted message. One member
     # with closed DMs must not stop the rest, so a failed delivery is only
     # recorded for the summary.
-    link = (
-        None
-        if outcome.stop is _AdditionStop.RETIRED
-        else _event_message_link(interaction.guild_id, event, current)
-    )
-    content = _addition_dm_content(interaction.user.id, event, link)
+    def addition_notice() -> str:
+        link = (
+            None
+            if outcome.stop is _AdditionStop.RETIRED
+            else _event_message_link(interaction.guild_id, event, current)
+        )
+        return _addition_dm_content(interaction.user.id, event, link)
+
+    content = addition_notice()
     for user_id in outcome.added:
+        # Both rows are read again before each delivery, because each one
+        # awaits Discord: a channel move landing between two notices would
+        # otherwise send the rest of them a jump link to the post the run
+        # has just left, and a run retired mid-loop would keep handing out a
+        # link to a message that has gone. What the notice says is rebuilt
+        # from whatever comes back. A store that will not answer says
+        # nothing about the message, so the notice keeps the last link known
+        # to be good rather than dropping it.
+        try:
+            live = _addition_target(bot, event, current)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read the run back between addition notices; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            live = _AdditionStop.UNREADABLE
+        if isinstance(live, _AdditionStop):
+            if outcome.stop is None:
+                outcome.stop = live
+                LOGGER.debug(
+                    "Roster addition target went away between its notices; "
+                    "occurrence_id=%s user_id=%s reason=%s",
+                    current.occurrence_id,
+                    interaction.user.id,
+                    live.value,
+                )
+        else:
+            event, current = live
+        content = addition_notice()
         # These are sequential external deliveries, so /event delete can land
         # between two of them and cascade the whole roster away. The member's
         # own row is the exact question being answered: a row that has gone
