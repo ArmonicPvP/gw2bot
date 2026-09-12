@@ -625,12 +625,33 @@ class TestProfitPage:
             "expectedStart.getUTCDate() - data.days + 1);"
         ) in PROFIT_PAGE
         assert (
-            "for (var bucket = 0; bucket < data.days; bucket += 1)"
+            "for (var bucket = 0; bucket < buckets; bucket += 1)"
             in PROFIT_PAGE
         )
-        assert "rollingTotal / 7" in PROFIT_PAGE
-        assert "cumulative += point.profit;" in PROFIT_PAGE
+        assert "cumulative += profit;" in PROFIT_PAGE
         assert 'document.createElementNS(SVG_NS, name)' in PROFIT_PAGE
+
+    def test_the_rolling_average_starts_on_the_windows_first_date(
+        self,
+    ) -> None:
+        # The dates before the window are read into the same profit map and
+        # walked before it, so every date the window draws has a whole week
+        # behind it rather than only its seventh onwards.
+        assert "var ROLLING_DAYS = 7;" in PROFIT_PAGE
+        assert "(data.lead_in_days || []).forEach(function (day) {" in (
+            PROFIT_PAGE
+        )
+        assert (
+            "cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));"
+            in PROFIT_PAGE
+        )
+        assert "var buckets = data.days + ROLLING_DAYS - 1;" in PROFIT_PAGE
+        assert "if (trailing.length > ROLLING_DAYS) {" in PROFIT_PAGE
+        assert "rolling: trailingTotal / ROLLING_DAYS," in PROFIT_PAGE
+        assert "if (bucket >= ROLLING_DAYS - 1) {" in PROFIT_PAGE
+        # Nothing is drawn a week in any more, so the chart no longer has a
+        # message for a window too short to fill one.
+        assert "Seven date buckets are needed." not in PROFIT_PAGE
 
     def test_profit_dashboard_and_charts_fill_the_available_width(self) -> None:
         assert "main { width: 100%; margin: 0; padding: 1rem; }" in PROFIT_PAGE

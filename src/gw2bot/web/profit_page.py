@@ -433,7 +433,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         </figure>
         <figure class="chart-panel">
           <h3>7-Day Rolling Average</h3>
-          <p>Trailing mean across seven UTC date buckets.</p>
+          <p>Trailing mean across seven UTC date buckets, including the six dates before the window.</p>
           <div class="profit-chart"><svg id="rolling-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Seven-day rolling average realized profit"></svg></div>
         </figure>
         <figure class="chart-panel">
@@ -1028,6 +1028,9 @@ __DAYS_PAGES_BOTTOM__
   }
 
   var SVG_NS = "http://www.w3.org/2000/svg";
+  // The trailing average's width, matching ROLLING_AVERAGE_DAYS on the
+  // server: it decides how many dates before the window the report sends.
+  var ROLLING_DAYS = 7;
   var chartHoverCleanups = [];
 
   function svgNode(name, attributes, textValue) {
@@ -1048,6 +1051,12 @@ __DAYS_PAGES_BOTTOM__
     data.days_table.forEach(function (day) {
       profitByDate[day.date] = day.profit;
     });
+    // The dates before the window carry no bar and no cumulative total of
+    // their own; they are here so the trailing average has a full week
+    // behind the window's first date rather than behind its seventh.
+    (data.lead_in_days || []).forEach(function (day) {
+      profitByDate[day.date] = day.profit;
+    });
     var start = new Date(data.window.start_date + "T00:00:00Z");
     var end = new Date(data.window.end_date + "T00:00:00Z");
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())
@@ -1062,30 +1071,35 @@ __DAYS_PAGES_BOTTOM__
       return [];
     }
     var points = [];
+    var trailing = [];
+    var trailingTotal = 0;
+    var cumulative = 0;
+    // Walk the lead-in dates first so the trailing sum is already a whole
+    // week wide by the time the window's own first date is plotted. Only
+    // the window's dates become points; the lead-in only feeds that sum.
     var cursor = new Date(start.getTime());
-    for (var bucket = 0; bucket < data.days; bucket += 1) {
+    cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));
+    var buckets = data.days + ROLLING_DAYS - 1;
+    for (var bucket = 0; bucket < buckets; bucket += 1) {
       var date = isoDay(cursor);
-      points.push({
-        date: date,
-        profit: Object.prototype.hasOwnProperty.call(profitByDate, date)
-          ? profitByDate[date] : 0,
-        rolling: null,
-        cumulative: 0
-      });
+      var profit = Object.prototype.hasOwnProperty.call(profitByDate, date)
+        ? profitByDate[date] : 0;
+      trailing.push(profit);
+      trailingTotal += profit;
+      if (trailing.length > ROLLING_DAYS) {
+        trailingTotal -= trailing.shift();
+      }
+      if (bucket >= ROLLING_DAYS - 1) {
+        cumulative += profit;
+        points.push({
+          date: date,
+          profit: profit,
+          rolling: trailingTotal / ROLLING_DAYS,
+          cumulative: cumulative
+        });
+      }
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
-    var cumulative = 0;
-    points.forEach(function (point, index) {
-      cumulative += point.profit;
-      point.cumulative = cumulative;
-      if (index >= 6) {
-        var rollingTotal = 0;
-        for (var offset = index - 6; offset <= index; offset += 1) {
-          rollingTotal += points[offset].profit;
-        }
-        point.rolling = rollingTotal / 7;
-      }
-    });
     return points;
   }
 
@@ -1506,7 +1520,7 @@ __DAYS_PAGES_BOTTOM__
       "rolling-profit-chart", points, "rolling", "chart-rolling",
       "chart-point-rolling", "Seven-day rolling average realized profit",
       "7-day average", "#58a6ff",
-      "Seven date buckets are needed.");
+      "No realized profit in this window.");
     renderLineChart(
       "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
       "chart-point-cumulative", "Cumulative realized profit",

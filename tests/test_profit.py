@@ -2459,6 +2459,85 @@ class TestProfitService:
         assert report.sell_transaction_count == 1
         assert report.buy_transaction_count == 1
 
+    async def test_the_six_dates_before_a_window_are_read_for_the_average(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                "buy",
+                price=100,
+                quantity=15,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+            )
+        ]
+        sells = [
+            # Before the seven dates the average reaches back through, so it
+            # belongs to no part of the report.
+            transaction(
+                "sell-before-the-lead-in",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 5, tzinfo=UTC),
+            ),
+            # Inside them: no bar of its own, but the average on the
+            # window's first dates is built from it.
+            transaction(
+                "sell-in-the-lead-in",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 12, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-in-the-window",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 18, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+
+        report = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        # The window itself is unchanged: its first date is the 15th, and
+        # only sales on or after it are drawn and summed.
+        assert report.window_start == datetime(2026, 8, 15, tzinfo=UTC)
+        assert list(report.realized.days) == ["2026-08-18"]
+        # The six dates behind it carry the sale on the 12th and stop short
+        # of the one on the 5th, which no date in this window trails.
+        assert list(report.lead_in_days) == ["2026-08-12"]
+        assert (
+            report.lead_in_days["2026-08-12"]
+            == report.realized.days["2026-08-18"].profit
+        )
+
     async def test_report_window_is_remembered_once_a_member_picks_one(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],

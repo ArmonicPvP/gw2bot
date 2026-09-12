@@ -1542,11 +1542,17 @@ much further back than the window does.
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window
-daily average, the trailing seven-day average once seven date buckets are
-available, and cumulative realized profit. Hover anywhere in a chart's plot to
-snap to the nearest date and see its exact value (and the daily average where
-applicable). On a touch screen, tap a bar or dot to pin the same reading; it
-stays open until another reading is tapped, the page is tapped elsewhere, the
+daily average, the trailing seven-day average, and cumulative realized profit.
+The trailing average has a reading on the window's own first date: the report
+carries realized profit for the six UTC dates before the window so every date
+drawn has a whole week behind it, rather than the line starting six dates in
+and a seven-day window showing a single dot. Those six dates are summed under
+the same five-unit flip rule the window uses, read across the stretch the
+charts cover, and are drawn nowhere else — no bar, no cumulative total, and no
+row in the daily table. Hover anywhere in a chart's plot to snap to the
+nearest date and see its exact value (and the daily average where applicable).
+On a touch screen, tap a bar or dot to pin the same reading; it stays open
+until another reading is tapped, the page is tapped elsewhere, the
 page scrolls, the window loses focus, or Escape is pressed.
 
 #### How the dashboard loads
