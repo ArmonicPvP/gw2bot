@@ -102,6 +102,9 @@ from factories import (
 from test_event_posting import FakeBot, FakeChannel, FakeThread, FakeUser
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
+# A commander id distinctive enough to register as a secret and look
+# for in console output without matching anything else in a log line.
+EVENT_LOG_USER_ID = 987654321
 
 
 def make_bot() -> Any:
@@ -2325,6 +2328,30 @@ class TestAutoSignupPrompt:
         assert auto.role is None
         assert auto.flex_roles == ()
 
+    async def test_a_retired_run_stores_no_automatic_signup(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The prompt sits open after the seat is taken, so a commander can
+        # delete the event before it is answered. Deletion keeps the event
+        # row when it has finished runs to show, so the event still being
+        # there says nothing about whether this choice has a run to serve.
+        flow = await self.make_flow(fake_bot, store, 21)
+        store.retire_event(
+            flow.event.event_id,
+            [flow.occurrence.occurrence_id],
+        )
+        interaction = self.make_flow_interaction()
+
+        await AutoSignupChoiceView(flow).auto_yes.callback(interaction)
+
+        assert store.get_auto_signup(flow.event.event_id, 21) is None
+        content = interaction.response.edit_message.await_args.kwargs[
+            "content"
+        ]
+        assert "no longer there" in content
+
     async def test_prompts_again_after_a_plain_no(
         self,
         fake_bot: Any,
@@ -2531,6 +2558,35 @@ class TestRememberedRolesPerEvent:
         assert preference.mode is PreferenceMode.REMEMBER
         assert preference.role is EventRole.QUICKNESS_DPS
         assert store.get_signup_preference(other.event_id, 42) is None
+
+    async def test_a_retired_run_remembers_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The remember prompt can sit open until it times out, and deleting
+        # the event drops the memories it had. Keeping the event row for the
+        # runs it has finished must not let a late answer put one back.
+        event, occurrence = self.make_role_event(store, "Retired")
+        finished = store.create_occurrence(
+            event.event_id,
+            datetime.now(UTC) - timedelta(days=1),
+        )
+        store.set_occurrence_message(finished.occurrence_id, 1234, 556, 778)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.QUICKNESS_DPS
+        store.retire_event(event.event_id, [occurrence.occurrence_id])
+
+        await RememberChoiceView(flow).remember_yes.callback(
+            self.make_flow_interaction()
+        )
+
+        assert store.get_signup_preference(event.event_id, 42) is None
+        # The event row is still there for its finished run, so the write was
+        # stopped by the run being gone rather than by the store's own guard
+        # against an event that has been removed outright.
+        assert store.get_event(event.event_id) is not None
 
     async def test_never_ask_again_covers_only_its_own_event(
         self,
@@ -6377,6 +6433,76 @@ class TestEventDeleteConfirmView:
         assert store.get_occurrence(pending.occurrence_id) is None
         assert store.get_occurrence(finished.occurrence_id) is not None
         assert channel.sent == []
+
+    async def test_deletion_console_logs_redact_secrets(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Deletion logs along three new paths - the split, the retirement and
+        # the view's own report - so it gets its own proof that none of them
+        # puts the event's content on the console. The commander's id is
+        # registered as well: it is a value these lines do emit, so seeing it
+        # redacted pins the assertion to this workflow rather than to some
+        # other line in the run.
+        event, finished, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        secret = str(EVENT_LOG_USER_ID)
+        event = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title="SECRET EVENT TITLE",
+            description="SECRET EVENT DESCRIPTION",
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.user = SimpleNamespace(
+            id=EVENT_LOG_USER_ID,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+        interaction.edit_original_response = AsyncMock()
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret,)))
+
+            await view.delete.callback(interaction)
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        # The workflow ran and reported itself on the console.
+        assert store.get_occurrence(finished.occurrence_id) is not None
+        assert "Split an event's runs for deletion" in console
+        assert "Retired event, keeping the runs it has finished" in console
+        assert "Deleted event" in console
+        # The formatter is in these log calls' path: the one registered value
+        # they emit comes out redacted.
+        assert "user_id=[REDACTED]" in console
+        assert secret not in console
+        # And nothing of the event itself reaches them.
+        assert "SECRET EVENT TITLE" not in console
+        assert "SECRET EVENT DESCRIPTION" not in console
 
     async def test_delete_rejects_users_without_the_role(
         self,

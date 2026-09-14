@@ -5709,6 +5709,30 @@ class SignupFlow:
         self.flex_roles: tuple[EventRole, ...] = ()
         self.skip_remember_prompt = False
 
+    def still_has_its_run(self) -> bool:
+        """Whether the run behind this flow's prompts is still there.
+
+        Both prompts below the picker can sit open until they time out, and
+        `/event delete` calls off the runs still to come while keeping the
+        event row when it has finished ones to show. The event still being
+        there is therefore no longer proof that a per-event choice has
+        anywhere to land: one stored now would put back exactly what the
+        deletion cleared, on a series that will never run again.
+        """
+        occurrence = self.bot.event_store.get_occurrence(
+            self.occurrence.occurrence_id
+        )
+        if occurrence is not None:
+            return True
+        LOGGER.debug(
+            "Skipped a signup choice whose run is gone; event_id=%s "
+            "occurrence_id=%s user_id=%s",
+            self.event.event_id,
+            self.occurrence.occurrence_id,
+            self.discord_user_id,
+        )
+        return False
+
     def roster_for_labels(self) -> list[EventSignup]:
         # The signups the role-picker labels are computed against; an edit
         # flow narrows this (see EditSignupFlow).
@@ -6298,20 +6322,37 @@ class RememberChoiceView(discord.ui.View):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._flow = flow
 
+    async def _answer(
+        self,
+        interaction: discord.Interaction,
+        role: EventRole | None,
+        flex_roles: tuple[EventRole, ...],
+        mode: PreferenceMode,
+    ) -> None:
+        # Nothing is remembered for a run that went while the prompt sat
+        # open; the seating below is what reports that to the member.
+        if self._flow.still_has_its_run():
+            self._flow.bot.event_store.set_signup_preference(
+                self._flow.event.event_id,
+                self._flow.discord_user_id,
+                role,
+                flex_roles,
+                mode,
+            )
+        await self._flow.finalize(interaction)
+
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
     async def remember_yes(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button[RememberChoiceView],
     ) -> None:
-        self._flow.bot.event_store.set_signup_preference(
-            self._flow.event.event_id,
-            self._flow.discord_user_id,
+        await self._answer(
+            interaction,
             self._flow.role,
             self._flow.flex_roles,
             PreferenceMode.REMEMBER,
         )
-        await self._flow.finalize(interaction)
 
     @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
     async def remember_no(
@@ -6319,14 +6360,7 @@ class RememberChoiceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[RememberChoiceView],
     ) -> None:
-        self._flow.bot.event_store.set_signup_preference(
-            self._flow.event.event_id,
-            self._flow.discord_user_id,
-            None,
-            (),
-            PreferenceMode.ASK,
-        )
-        await self._flow.finalize(interaction)
+        await self._answer(interaction, None, (), PreferenceMode.ASK)
 
     @discord.ui.button(
         label="No, never ask again for this event",
@@ -6337,14 +6371,7 @@ class RememberChoiceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[RememberChoiceView],
     ) -> None:
-        self._flow.bot.event_store.set_signup_preference(
-            self._flow.event.event_id,
-            self._flow.discord_user_id,
-            None,
-            (),
-            PreferenceMode.NEVER_ASK,
-        )
-        await self._flow.finalize(interaction)
+        await self._answer(interaction, None, (), PreferenceMode.NEVER_ASK)
 
 
 class AutoSignupChoiceView(discord.ui.View):
@@ -6358,6 +6385,16 @@ class AutoSignupChoiceView(discord.ui.View):
         choice: AutoSignupChoice,
         confirmation: str,
     ) -> None:
+        if not self._flow.still_has_its_run():
+            # The run this prompt was offered after has been called off,
+            # taking the seat with it. Storing the choice would put back what
+            # the deletion cleared and promise sign-ups for runs that are
+            # never coming, so say what happened instead.
+            await interaction.response.edit_message(
+                content="That run is no longer there, so nothing was saved.",
+                view=None,
+            )
+            return
         self._flow.bot.event_store.set_auto_signup(
             self._flow.event.event_id,
             self._flow.discord_user_id,

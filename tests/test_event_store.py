@@ -1643,6 +1643,9 @@ class TestEventStoreLoggingSafety:
                 waitlisted=False,
             )
             store.remove_signup(occurrence.occurrence_id, 1)
+            # Retirement logs its own counts, so it gets the same proof that
+            # nothing of the event itself reaches them.
+            store.retire_event(event.event_id, [occurrence.occurrence_id])
 
         assert title not in caplog.text
         assert description not in caplog.text

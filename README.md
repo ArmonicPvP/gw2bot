@@ -460,7 +460,9 @@ prompt can be answered with "never ask again for this event". Remembered roles
 are re-applied when a new occurrence is seeded, subject to the same capacity
 rules as a manual sign-up, so a member can still land on the waitlist. Both
 settings are visible and resettable behind the ⚙️ button, and a preference
-stored for an event that is later deleted is dropped with it.
+stored for an event that is later deleted is dropped with it. Either prompt can
+sit open until it times out, so one answered after the run behind it has been
+called off stores nothing and says so.
 
 ### Editing A Roster
 

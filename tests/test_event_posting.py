@@ -8864,11 +8864,11 @@ class TestPostingLoggingSafety:
                 (),
             )
             await remove_signup(bot, event, occurrence, 11)
-            await delete_event_posts(
-                bot,
-                event,
-                store.get_event_occurrences(event.event_id),
-            )
+            occurrences = store.get_event_occurrences(event.event_id)
+            # The split decides what a deletion keeps and logs its counts, so
+            # it runs here too rather than only under the delete below.
+            split_event_history(event, occurrences, START + timedelta(days=1))
+            await delete_event_posts(bot, event, occurrences)
 
         assert title not in caplog.text
         assert description not in caplog.text
