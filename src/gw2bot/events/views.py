@@ -4041,33 +4041,40 @@ class EventDeleteConfirmView(discord.ui.View):
                 type(exc).__name__,
             )
             return
+        # Read after the acknowledgement, not before: that await is a Discord
+        # round-trip, and an edit landing inside it would make a read taken
+        # first stale by the time the deletion runs. The event this view was
+        # opened with is a snapshot, and an edit is allowed through while the
+        # confirmation sits open - the duration decides which runs count as
+        # finished and the channel decides where their posts are addressed, so
+        # both have to be the event's as it stands now. An event that has gone
+        # in the meantime keeps the snapshot: its rows are gone with it, so
+        # everything below finds nothing to do and says so.
+        try:
+            stored = self._bot.event_store.get_event(self._event.event_id)
+        except SQLAlchemyError as exc:
+            self._deleting = False
+            LOGGER.error(
+                "Could not re-read an event before deleting; event_id=%s "
+                "error_type=%s",
+                self._event.event_id,
+                type(exc).__name__,
+            )
+            await _send_flow_result(
+                interaction,
+                "The event could not be deleted. Try again later.",
+                workflow="event deletion failure",
+                event_id=self._event.event_id,
+            )
+            return
+        event = stored if stored is not None else self._event
         if self._only_while_one_off:
-            # Checked after the acknowledgement, not before: that await is a
-            # Discord round-trip, and an edit landing inside it would make a
-            # check taken first stale by the time the deletion runs.
             from gw2bot.events.posting import leading_occurrence
 
-            try:
-                stored = self._bot.event_store.get_event(self._event.event_id)
-                still_upcoming = stored is not None and (
-                    leading_occurrence(self._bot, stored, datetime.now(UTC))
-                    is not None
-                )
-            except SQLAlchemyError as exc:
-                self._deleting = False
-                LOGGER.error(
-                    "Could not re-read an event before deleting; event_id=%s "
-                    "error_type=%s",
-                    self._event.event_id,
-                    type(exc).__name__,
-                )
-                await _send_flow_result(
-                    interaction,
-                    "The event could not be deleted. Try again later.",
-                    workflow="event deletion failure",
-                    event_id=self._event.event_id,
-                )
-                return
+            still_upcoming = stored is not None and (
+                leading_occurrence(self._bot, stored, datetime.now(UTC))
+                is not None
+            )
             refusal: str | None = None
             reason = ""
             if stored is not None and not still_upcoming:
@@ -4118,7 +4125,7 @@ class EventDeleteConfirmView(discord.ui.View):
         # has nothing to keep goes entirely, rather than leaving a row behind
         # that nothing would ever show.
         kept, removed = split_event_history(
-            self._event,
+            event,
             occurrences,
             datetime.now(UTC),
         )
@@ -4144,7 +4151,7 @@ class EventDeleteConfirmView(discord.ui.View):
                 event_id=self._event.event_id,
             )
             return
-        await delete_event_posts(self._bot, self._event, removed)
+        await delete_event_posts(self._bot, event, removed)
         LOGGER.debug(
             "Deleted event; event_id=%s occurrences_removed=%s "
             "occurrences_kept=%s user_id=%s",
@@ -5063,6 +5070,13 @@ def _describe_signup_settings(
             "or role memory."
         )
         return "\n".join(lines)
+    if not _series_has_runs_left(bot, event):
+        # The panel offers no controls in this state, so it has to say why.
+        lines.append(
+            "This event has no runs left, so its automatic sign-up and role "
+            "memory no longer apply."
+        )
+        return "\n".join(lines)
     auto = bot.event_store.get_auto_signup(
         event.event_id,
         discord_user_id,
@@ -5109,6 +5123,30 @@ class _SignupSettingsButton(discord.ui.Button["SignupSettingsView"]):
             await view._reset_preference(interaction)
 
 
+def _series_has_runs_left(bot: Gw2Bot, event: Event) -> bool:
+    """Whether a series still has a run for its sign-up settings to serve.
+
+    Automatic sign-up and role memory only ever feed a run still to come, and
+    `/event delete` clears both while keeping the event row when it has
+    finished runs to show - which leaves those posts standing, and the ⚙️
+    button on them. The event being there is therefore not enough: a choice
+    made from one of those posts would be stored for a series that will never
+    run again, under a panel telling the member they are signed up for runs
+    that are not coming.
+
+    Judged on the stored status rather than the clock, because that is what
+    retirement sets: a live series always holds a successor that has not
+    reached OVER, while a run whose end no maintenance pass has caught up
+    with yet is still one this event is about.
+    """
+    return any(
+        occurrence.status is not EventStatus.OVER
+        for occurrence in bot.event_store.get_event_occurrences(
+            event.event_id
+        )
+    )
+
+
 class SignupSettingsView(discord.ui.View):
     def __init__(
         self,
@@ -5138,7 +5176,9 @@ class SignupSettingsView(discord.ui.View):
                     "edit_signup",
                 )
             )
-        if event.repeat_frequency is not RepeatFrequency.NONE:
+        if event.repeat_frequency is not RepeatFrequency.NONE and (
+            _series_has_runs_left(bot, event)
+        ):
             self.add_item(
                 _SignupSettingsButton(
                     "Enable auto sign-up",
@@ -5220,7 +5260,30 @@ class SignupSettingsView(discord.ui.View):
             view=RolePickView(flow),
         )
 
+    async def _series_ended(self, interaction: discord.Interaction) -> bool:
+        # The panel is ephemeral but can sit open, so its controls can outlive
+        # the runs they were offered for: a deletion keeping an event's
+        # finished runs takes every run still to come with it.
+        if _series_has_runs_left(self._bot, self._event):
+            return False
+        LOGGER.debug(
+            "Refused a sign-up setting for a series with no runs left; "
+            "event_id=%s user_id=%s",
+            self._event.event_id,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "This event has no runs left, so its automatic sign-up and "
+                "role memory no longer apply."
+            ),
+            view=None,
+        )
+        return True
+
     async def _enable_auto(self, interaction: discord.Interaction) -> None:
+        if await self._series_ended(interaction):
+            return
         signup = self._bot.event_store.get_signup(
             self._occurrence.occurrence_id,
             interaction.user.id,
@@ -5269,6 +5332,8 @@ class SignupSettingsView(discord.ui.View):
         # off while that seat stands.
         from gw2bot.events.posting import disable_auto_signup
 
+        if await self._series_ended(interaction):
+            return
         result = disable_auto_signup(
             self._bot,
             self._event,
@@ -5297,6 +5362,8 @@ class SignupSettingsView(discord.ui.View):
         self,
         interaction: discord.Interaction,
     ) -> None:
+        if await self._series_ended(interaction):
+            return
         self._bot.event_store.set_signup_preference(
             self._event.event_id,
             interaction.user.id,

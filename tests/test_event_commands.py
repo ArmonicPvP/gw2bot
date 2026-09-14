@@ -2823,6 +2823,61 @@ class TestEditSignupFlow:
         # A role-less roster has nothing to edit.
         assert "Edit my signup" not in self.settings_buttons(view)
 
+    def test_a_retired_series_offers_no_sign_up_settings(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The ⚙️ button lives on every post, and deleting an event keeps
+        # the posts of the runs it has finished. Those settings only ever feed
+        # a run still to come, so a panel opened from one of them offers none
+        # and says why.
+        event, finished, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+        stored = store.get_occurrence(finished.occurrence_id)
+        assert stored is not None
+
+        view = SignupSettingsView(fake_bot, event, stored, 42)
+
+        buttons = self.settings_buttons(view)
+        assert "Enable auto sign-up" not in buttons
+        assert "Disable auto sign-up" not in buttons
+        assert "Reset role memory for this event" not in buttons
+        description = _describe_signup_settings(fake_bot, event, 42)
+        assert "no runs left" in description
+
+    async def test_a_retired_series_stores_no_setting_from_an_open_panel(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The panel was opened while the series was still running, so it
+        # carries the controls; the deletion lands before the member clicks.
+        event, finished, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        store.add_signup(
+            occurrence_id=upcoming.occurrence_id,
+            discord_user_id=42,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        stored = store.get_occurrence(upcoming.occurrence_id)
+        assert stored is not None
+        view = SignupSettingsView(fake_bot, event, stored, 42)
+        button = self.settings_buttons(view)["Enable auto sign-up"]
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+        interaction = make_interaction(message=ephemeral_message())
+
+        await button.callback(interaction)
+
+        assert store.get_auto_signup(event.event_id, 42) is None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "no runs left" in kwargs["content"]
+        assert kwargs["view"] is None
+
     async def test_edit_button_opens_the_role_picker(
         self,
         fake_bot: Any,
@@ -6503,6 +6558,58 @@ class TestEventDeleteConfirmView:
         # And nothing of the event itself reaches them.
         assert "SECRET EVENT TITLE" not in console
         assert "SECRET EVENT DESCRIPTION" not in console
+
+    async def test_delete_splits_on_the_event_as_it_now_stands(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The confirmation can sit open while an edit lands, and the duration
+        # is what decides whether a run has finished. Judged by the snapshot
+        # this view was opened with, the run below ended a minute ago and
+        # would be kept as history - posted, and marked OVER on a series that
+        # is about to start.
+        started = datetime.now(UTC) - timedelta(minutes=2)
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Extended",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=started,
+            duration_minutes=1,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, started)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        view = EventDeleteConfirmView(fake_bot, event)
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=180,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        # Under the event as it stands the run has not finished, so it is
+        # called off with the rest of the event rather than kept.
+        assert store.get_event(event.event_id) is None
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+        channel.partial_message.delete.assert_awaited_once()
 
     async def test_delete_rejects_users_without_the_role(
         self,

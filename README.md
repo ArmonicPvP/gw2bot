@@ -462,7 +462,9 @@ rules as a manual sign-up, so a member can still land on the waitlist. Both
 settings are visible and resettable behind the ⚙️ button, and a preference
 stored for an event that is later deleted is dropped with it. Either prompt can
 sit open until it times out, so one answered after the run behind it has been
-called off stores nothing and says so.
+called off stores nothing and says so. The ⚙️ panel goes the same way once a
+series has no runs left: it offers neither setting and says why, because a
+deleted event's finished posts keep their button.
 
 ### Editing A Roster
 
