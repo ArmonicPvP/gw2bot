@@ -1114,55 +1114,146 @@ __DAYS_PAGES_BOTTOM__
     }, message));
   }
 
+  // The denominations an axis can be drawn in, largest first, and what each
+  // is worth in copper. A chart is labelled in the largest one its own
+  // numbers reach, so a window that never made a gold reads in silver
+  // rather than as a column of roundings to "0g".
+  var COPPER_PER_SILVER = 100;
+  var COPPER_PER_GOLD = 100 * COPPER_PER_SILVER;
+  var AXIS_UNITS = [
+    { copper: COPPER_PER_GOLD, suffix: "g" },
+    { copper: COPPER_PER_SILVER, suffix: "s" },
+    { copper: 1, suffix: "c" }
+  ];
+  // The gaps between the four gridlines every chart draws: zero and three
+  // steps, shared out between what the series reached above zero and what
+  // it reached below it.
+  var AXIS_INTERVALS = 3;
+  // What a step may be, at each power of ten of the chart's own
+  // denomination. A multiplier that would make the step a fraction of a
+  // coin is skipped where it falls, so 1.5g is never a step and 15g is.
+  var STEP_MULTIPLIERS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+
+  function axisUnit(reach) {
+    for (var index = 0; index < AXIS_UNITS.length; index += 1) {
+      if (reach >= AXIS_UNITS[index].copper) { return AXIS_UNITS[index]; }
+    }
+    return AXIS_UNITS[AXIS_UNITS.length - 1];
+  }
+
+  // Every step this denomination allows, in copper and smallest first: a
+  // whole number of coins, and a round one, so the gridlines land on 5g or
+  // 250s rather than on whatever a third of the highest reading came to.
+  function axisSteps(unit) {
+    var steps = [];
+    for (var power = 0; power <= 9; power += 1) {
+      var magnitude = Math.pow(10, power);
+      for (var index = 0; index < STEP_MULTIPLIERS.length; index += 1) {
+        var coins = STEP_MULTIPLIERS[index] * magnitude;
+        if (coins !== Math.round(coins)) { continue; }
+        var step = coins * unit.copper;
+        if (steps[steps.length - 1] !== step) { steps.push(step); }
+      }
+    }
+    return steps;
+  }
+
+  // The scale one chart is drawn on: four gridlines a round step apart with
+  // zero always among them. The smallest step that fits the series into
+  // three gaps wins, which is what keeps the padding above the highest
+  // reading to the rounding up and no more.
+  function axisScale(values) {
+    var above = Math.max.apply(null, [0].concat(values));
+    var below = -Math.min.apply(null, [0].concat(values));
+    var unit = axisUnit(Math.max(above, below));
+    var steps = axisSteps(unit);
+    var step = steps[steps.length - 1];
+    for (var index = 0; index < steps.length; index += 1) {
+      if (Math.ceil(above / steps[index])
+        + Math.ceil(below / steps[index]) <= AXIS_INTERVALS) {
+        step = steps[index];
+        break;
+      }
+    }
+    var under = Math.ceil(below / step);
+    var over = AXIS_INTERVALS - under;
+    var ticks = [];
+    for (var line = -under; line <= over; line += 1) {
+      ticks.push(line * step);
+    }
+    return {
+      unit: unit,
+      step: step,
+      ticks: ticks,
+      minimum: -under * step,
+      maximum: over * step
+    };
+  }
+
+  // A gridline is a whole number of the chart's own coin, so its label is
+  // that count and the coin's letter: "5g", "250s", "-40c".
+  function axisLabel(value, unit) {
+    return Math.round(value / unit.copper).toLocaleString() + unit.suffix;
+  }
+
+  // How wide a label actually renders. A chart measured while hidden
+  // reports nothing, so an estimate from the character count stands in.
+  function labelWidth(svg, text) {
+    var node = svgNode(
+      "text", { x: 0, y: 0, "class": "chart-label" }, text);
+    svg.appendChild(node);
+    var measured = node.getComputedTextLength
+      ? node.getComputedTextLength() : 0;
+    svg.removeChild(node);
+    return measured > 0 ? measured : text.length * 6.5;
+  }
+
   function chartFrame(svg, points, values, title) {
     var width = 640;
     var height = 220;
-    var left = 62;
     var right = 16;
     var top = 14;
     var bottom = 34;
+    var scale = axisScale(values);
+
+    svg.replaceChildren();
+    svg.appendChild(svgNode("title", {}, title));
+    var labels = scale.ticks.map(function (value) {
+      return axisLabel(value, scale.unit);
+    });
+    // The gutter is cut to the labels this chart actually has rather than
+    // to a fixed width every long reading spilled out of: one wider than
+    // the space left for it used to be drawn off the edge of the viewBox
+    // and clipped, and the type is already as small as it reads.
+    var left = Math.max(40, Math.min(112, Math.ceil(labels.reduce(
+      function (measured, text) {
+        return Math.max(measured, labelWidth(svg, text));
+      }, 0)) + 12));
     var plotWidth = width - left - right;
     var plotHeight = height - top - bottom;
-    var minimum = Math.min.apply(null, [0].concat(values));
-    var maximum = Math.max.apply(null, [0].concat(values));
-    if (minimum === maximum) {
-      minimum -= 1;
-      maximum += 1;
-    }
     var y = function (value) {
-      return top + (maximum - value) / (maximum - minimum) * plotHeight;
+      return top + (scale.maximum - value)
+        / (scale.maximum - scale.minimum) * plotHeight;
     };
     var x = function (index) {
       return left + (index + 0.5) / points.length * plotWidth;
     };
 
-    svg.replaceChildren();
-    svg.appendChild(svgNode("title", {}, title));
-    [maximum, (maximum + minimum) / 2, minimum].forEach(function (value) {
+    scale.ticks.forEach(function (value, index) {
       svg.appendChild(svgNode("line", {
         x1: left,
         y1: y(value),
         x2: width - right,
         y2: y(value),
-        "class": Math.abs(value) < 0.0001
-          ? "chart-zero" : "chart-gridline"
+        "class": value === 0 ? "chart-zero" : "chart-gridline"
       }));
       svg.appendChild(svgNode("text", {
         x: left - 7,
         y: y(value) + 4,
         "text-anchor": "end",
         "class": "chart-label"
-      }, coin(Math.round(value))));
+      }, labels[index]));
     });
-    if (minimum < 0 && maximum > 0) {
-      svg.appendChild(svgNode("line", {
-        x1: left,
-        y1: y(0),
-        x2: width - right,
-        y2: y(0),
-        "class": "chart-zero"
-      }));
-    }
     svg.appendChild(svgNode("text", {
       x: left,
       y: height - 8,

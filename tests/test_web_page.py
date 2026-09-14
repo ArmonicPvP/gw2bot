@@ -653,6 +653,44 @@ class TestProfitPage:
         # message for a window too short to fill one.
         assert "Seven date buckets are needed." not in PROFIT_PAGE
 
+    def test_chart_axes_are_round_coin_steps_that_fit_their_gutter(
+        self,
+    ) -> None:
+        # Four gridlines a round step apart, with zero always one of them,
+        # in the largest denomination the chart's own numbers reach.
+        assert "var AXIS_INTERVALS = 3;" in PROFIT_PAGE
+        assert (
+            "var STEP_MULTIPLIERS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];"
+            in PROFIT_PAGE
+        )
+        # A multiplier that would make the step a fraction of a coin is
+        # skipped rather than rounded, so 1.5g never becomes a step.
+        assert "if (coins !== Math.round(coins)) { continue; }" in PROFIT_PAGE
+        assert 'suffix: "g" }' in PROFIT_PAGE
+        assert 'suffix: "s" }' in PROFIT_PAGE
+        assert 'suffix: "c" }' in PROFIT_PAGE
+        assert (
+            "Math.round(value / unit.copper).toLocaleString() + unit.suffix"
+            in PROFIT_PAGE
+        )
+        # The three gaps are shared between what the series reached above
+        # zero and what it reached below it.
+        assert "var under = Math.ceil(below / step);" in PROFIT_PAGE
+        assert "var over = AXIS_INTERVALS - under;" in PROFIT_PAGE
+        assert '"class": value === 0 ? "chart-zero" : "chart-gridline"' in (
+            PROFIT_PAGE
+        )
+        # The gutter is measured from the labels, so a long reading widens
+        # it instead of being drawn off the edge of the viewBox.
+        assert "function labelWidth(svg, text) {" in PROFIT_PAGE
+        assert "node.getComputedTextLength" in PROFIT_PAGE
+        assert "var left = Math.max(40, Math.min(112, Math.ceil(" in (
+            PROFIT_PAGE
+        )
+        # The old scale drew the highest, halfway and lowest readings with
+        # their whole copper tails, which is what overran the gutter.
+        assert "coin(Math.round(value))" not in PROFIT_PAGE
+
     def test_profit_dashboard_and_charts_fill_the_available_width(self) -> None:
         assert "main { width: 100%; margin: 0; padding: 1rem; }" in PROFIT_PAGE
         assert "width: min(100%, 88rem)" not in PROFIT_PAGE
@@ -1707,6 +1745,18 @@ class TestGoldPage:
         assert "function formatAxisCoins(copper)" in GOLD_PAGE
         assert "yLabel.textContent = formatAxisCoins(" in GOLD_PAGE
         assert "yLabel.textContent = formatCoins(" not in GOLD_PAGE
+        # A bank in six figures of gold outgrows the fixed margin, so the
+        # margin is widened to the labels rather than cutting them off at
+        # the edge of the viewBox. It is only ever widened, and the widening
+        # lands before the first coordinate reads it.
+        assert "var Y_LABEL_CHAR_WIDTH = 6.6;" in GOLD_PAGE
+        assert (
+            "M.left = Math.max(M.left, "
+            "Math.ceil(widest * Y_LABEL_CHAR_WIDTH) + 10);"
+        ) in GOLD_PAGE
+        assert GOLD_PAGE.index("M.left = Math.max(M.left,") < GOLD_PAGE.index(
+            'x1: M.left, y1: y, x2: M.left + plotW(), y2: y'
+        )
 
     def test_table_amount_is_only_an_ascii_sign_and_value(self) -> None:
         assert 'operation === "withdraw" ? "-" : "+"' in GOLD_PAGE

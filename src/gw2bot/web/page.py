@@ -4113,6 +4113,11 @@ button:focus-visible {
       w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 64, ticks: 6
     };
   }
+  // How wide one character of an axis label runs at the 11px the chart
+  // draws them in, rounded up from the widest digit: the label is measured
+  // by its length because the chart is laid out before it is on the page,
+  // and an unrendered text node reports no width at all.
+  var Y_LABEL_CHAR_WIDTH = 6.6;
   var M = metrics();
   function plotW() { return M.w - M.left - M.right; }
   function plotH() { return M.h - M.top - M.bottom; }
@@ -4311,6 +4316,19 @@ button:focus-visible {
     // label claims.
     var lines = Math.round(
       (state.scale.high - state.scale.low) / state.scale.step);
+    // A bank in six figures of gold carries a label wider than the margin
+    // left for it, and one drawn past the edge of the viewBox is cut rather
+    // than merely cramped. The margin is widened to whatever the labels
+    // need, never narrowed, so an ordinary balance is laid out as before.
+    // Everything positioned reads M.left at call time, so this has to land
+    // before the first coordinate is computed.
+    var widest = 0;
+    for (var line = 0; line <= lines; line += 1) {
+      widest = Math.max(widest, formatAxisCoins(
+        (state.scale.low + state.scale.step * line) * COPPER_PER_GOLD
+      ).length);
+    }
+    M.left = Math.max(M.left, Math.ceil(widest * Y_LABEL_CHAR_WIDTH) + 10);
     for (var i = 0; i <= lines; i += 1) {
       var value = state.scale.low + state.scale.step * i;
       var y = scaleY(value * COPPER_PER_GOLD);
