@@ -6,7 +6,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from gw2bot.events.formatting import next_occurrence_start
-from gw2bot.events.models import Event, RepeatFrequency, count_roster
+from gw2bot.events.models import (
+    Event,
+    EventStatus,
+    RepeatFrequency,
+    count_roster,
+)
 from gw2bot.events.posting import occurrence_status
 from gw2bot.events.store import EventStore
 
@@ -90,7 +95,17 @@ def calendar_entries(
         signups = signups_by_occurrence.get(occurrence.occurrence_id, [])
         counts = count_roster(signups)
         capacity = event.capacity
-        status = occurrence_status(event, occurrence, signups, now)
+        # The stored status counts as well as the clock, the way the bot's own
+        # "is this run finished" test does: an occurrence retires early when
+        # its message turns out to be gone, and a run deriving its status from
+        # the schedule alone would advertise itself as open until its original
+        # end time - for good, once a deleted event's kept runs leave the
+        # maintenance pass.
+        status = (
+            EventStatus.OVER
+            if occurrence.status is EventStatus.OVER
+            else occurrence_status(event, occurrence, signups, now)
+        )
         key = (event.event_id, int(occurrence.start_time.timestamp()))
         entries[key] = CalendarEntry(
             event_id=event.event_id,

@@ -769,7 +769,9 @@ finished on the way out, since nothing looks at it again afterwards.
 An event that keeps runs that way is retired rather than removed: it is no
 longer offered by the `/event` autocompletes, cannot be edited, cancelled or
 reminded, projects no further occurrences onto the calendar, and is never
-posted or repeated again. Deleting it a second time therefore removes nothing
+posted or repeated again. An edit preview or sign-up prompt still open when it
+is deleted saves nothing and says so, rather than writing back into a series
+that will not run. Deleting it a second time therefore removes nothing
 more. An event with nothing to keep — one deleted before any of its runs
 finished — is removed outright, rows and all.
 

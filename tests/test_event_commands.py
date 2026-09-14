@@ -2054,6 +2054,36 @@ class TestSignOutFlow:
         content = interaction.response.edit_message.await_args.kwargs["content"]
         assert "Automatic sign-up is off" in content
 
+    async def test_disable_button_skips_a_series_with_no_runs_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The prompt sat open until the run ended and the event was deleted,
+        # which cleared the automatic sign-ups along with the runs to come.
+        # Storing the choice would put a row back for a series that will not
+        # sign anybody up again.
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.retire_event(event.event_id, [])
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.disable_auto.callback(interaction)
+
+        assert store.get_auto_signup(event.event_id, 42) is None
+        content = interaction.response.edit_message.await_args.kwargs[
+            "content"
+        ]
+        assert "no runs left" in content
+
     async def test_disable_button_withdraws_a_seat_seeded_meanwhile(
         self,
         fake_bot: Any,
@@ -3249,6 +3279,33 @@ class TestEditSignupFlow:
         assert preference is not None
         assert preference.role is EventRole.DPS
         assert preference.flex_roles == ()
+
+    async def test_remembered_roles_skip_a_series_with_no_runs_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # This prompt follows a signup edit and can sit open just as the ones
+        # below a fresh signup do, so it needs the same guard: a memory saved
+        # after the event was deleted would put back what the deletion
+        # cleared.
+        event, occurrence = self.make_signed_up_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        prompt = UpdateRememberedRolesView(flow)
+        store.retire_event(event.event_id, [])
+        interaction = make_interaction(message=ephemeral_message())
+
+        await prompt.update.callback(interaction)
+
+        assert store.get_signup_preference(event.event_id, 42) is None
+        content = interaction.response.edit_message.await_args.kwargs[
+            "content"
+        ]
+        assert "no runs left" in content
 
     async def test_remembered_roles_can_be_kept_as_they_were(
         self,
@@ -6695,6 +6752,42 @@ class TestEventDeleteConfirmView:
         await view.delete.callback(interaction)
 
         channel.partial_message.edit.assert_not_awaited()
+
+    async def test_a_retired_event_cannot_be_edited_from_a_stale_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The preview was opened while the series was live and the deletion
+        # landed before Save changes. The event row survives for the runs it
+        # keeps, so the save's own existence check passes - and rewriting the
+        # title now would change what the calendar shows for runs that already
+        # happened, under posts that nothing refreshes again.
+        event, finished, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=upcoming.start_time,
+        )
+        draft.title = "Renamed after the fact"
+        view = EventEditConfirmView(fake_bot, draft)
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        stored = store.get_event(event.event_id)
+        assert stored is not None
+        assert stored.title == event.title
+        reported = interaction.edit_original_response.await_args
+        assert reported is not None
+        assert "no runs left" in reported.kwargs["content"]
+        assert store.get_occurrence(finished.occurrence_id) is not None
 
     async def test_delete_rejects_users_without_the_role(
         self,
