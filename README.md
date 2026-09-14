@@ -1544,12 +1544,18 @@ window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window
 daily average, the trailing seven-day average, and cumulative realized profit.
 The trailing average has a reading on the window's own first date: the report
-carries realized profit for the six UTC dates before the window so every date
-drawn has a whole week behind it, rather than the line starting six dates in
-and a seven-day window showing a single dot. Those six dates are summed under
-the same five-unit flip rule the window uses, read across the stretch the
-charts cover, and are drawn nowhere else — no bar, no cumulative total, and no
-row in the daily table.
+carries a series of its own, covering the six UTC dates before the window as
+well as the window itself, so every date drawn has a whole week behind it
+rather than the line starting six dates in and a seven-day window showing a
+single dot. That series is summed in one pass across the whole stretch it
+covers, so every date in it passes the same five-unit flip rule; the daily
+table is summed over the window alone, so an item that only clears five units
+once the dates behind the window are counted lifts the average a little above
+the bars. The six dates behind the window are drawn nowhere else — no bar, no
+cumulative total, and no row in the daily table. Because the average is a
+reading of the week behind each of its dates rather than of the window, a
+quiet window that follows a profitable one still draws it, with the other two
+charts reporting no realized profit.
 
 Each chart is drawn on four gridlines: zero and three round steps. The step is
 always a whole number of one coin — 5g, 250s, 40c, never a fraction of one —

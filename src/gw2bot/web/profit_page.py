@@ -1051,11 +1051,14 @@ __DAYS_PAGES_BOTTOM__
     data.days_table.forEach(function (day) {
       profitByDate[day.date] = day.profit;
     });
-    // The dates before the window carry no bar and no cumulative total of
-    // their own; they are here so the trailing average has a full week
-    // behind the window's first date rather than behind its seventh.
-    (data.lead_in_days || []).forEach(function (day) {
-      profitByDate[day.date] = day.profit;
+    // The trailing average reads its own series, which covers the six dates
+    // before the window as well as the window itself so the average has a
+    // full week behind its first date rather than behind its seventh. It is
+    // summed over that whole stretch in one pass, so it can sit a little
+    // above the bars, which are summed over the window alone.
+    var trailingByDate = Object.create(null);
+    (data.trailing_days || []).forEach(function (day) {
+      trailingByDate[day.date] = day.profit;
     });
     var start = new Date(data.window.start_date + "T00:00:00Z");
     var end = new Date(data.window.end_date + "T00:00:00Z");
@@ -1074,22 +1077,25 @@ __DAYS_PAGES_BOTTOM__
     var trailing = [];
     var trailingTotal = 0;
     var cumulative = 0;
-    // Walk the lead-in dates first so the trailing sum is already a whole
-    // week wide by the time the window's own first date is plotted. Only
-    // the window's dates become points; the lead-in only feeds that sum.
+    // Walk the six dates behind the window first so the trailing sum is
+    // already a whole week wide by the time the window's own first date is
+    // plotted. Only the window's dates become points; those six feed the
+    // sum and are drawn nowhere.
     var cursor = new Date(start.getTime());
     cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));
     var buckets = data.days + ROLLING_DAYS - 1;
     for (var bucket = 0; bucket < buckets; bucket += 1) {
       var date = isoDay(cursor);
-      var profit = Object.prototype.hasOwnProperty.call(profitByDate, date)
-        ? profitByDate[date] : 0;
-      trailing.push(profit);
-      trailingTotal += profit;
+      var trailed = Object.prototype.hasOwnProperty.call(trailingByDate, date)
+        ? trailingByDate[date] : 0;
+      trailing.push(trailed);
+      trailingTotal += trailed;
       if (trailing.length > ROLLING_DAYS) {
         trailingTotal -= trailing.shift();
       }
       if (bucket >= ROLLING_DAYS - 1) {
+        var profit = Object.prototype.hasOwnProperty.call(profitByDate, date)
+          ? profitByDate[date] : 0;
         cumulative += profit;
         points.push({
           date: date,
@@ -1593,30 +1599,40 @@ __DAYS_PAGES_BOTTOM__
     chartHoverCleanups.forEach(function (cleanup) { cleanup(); });
     chartHoverCleanups = [];
     var points = buildDailySeries(data);
-    if (!points.length || !data.days_table.length) {
+    // The bars and the running total are readings of the window, and the
+    // trailing average is a reading of the week behind each of its dates.
+    // A quiet window after a profitable one has an average worth drawing
+    // and nothing else, so the two are decided apart.
+    var hasWindow = points.length && data.days_table.length;
+    var hasTrailing = points.length && (data.trailing_days || []).length;
+    if (!hasWindow) {
       emptyChart(
         document.getElementById("daily-profit-chart"),
         "No realized profit in this window.");
       emptyChart(
-        document.getElementById("rolling-profit-chart"),
-        "No realized profit in this window.");
-      emptyChart(
         document.getElementById("cumulative-profit-chart"),
         "No realized profit in this window.");
-      trace("charts-empty", points.length);
-      return;
+      trace("charts-window-empty", points.length);
+    } else {
+      renderDailyProfitChart(points, data.summary.profit / data.days);
+      renderLineChart(
+        "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
+        "chart-point-cumulative", "Cumulative realized profit",
+        "Cumulative profit", "#74dc9a",
+        "No cumulative profit in this window.");
     }
-    renderDailyProfitChart(points, data.summary.profit / data.days);
-    renderLineChart(
-      "rolling-profit-chart", points, "rolling", "chart-rolling",
-      "chart-point-rolling", "Seven-day rolling average realized profit",
-      "7-day average", "#58a6ff",
-      "No realized profit in this window.");
-    renderLineChart(
-      "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
-      "chart-point-cumulative", "Cumulative realized profit",
-      "Cumulative profit", "#74dc9a",
-      "No cumulative profit in this window.");
+    if (!hasTrailing) {
+      emptyChart(
+        document.getElementById("rolling-profit-chart"),
+        "No realized profit in the seven days behind this window.");
+      trace("charts-trailing-empty", points.length);
+    } else {
+      renderLineChart(
+        "rolling-profit-chart", points, "rolling", "chart-rolling",
+        "chart-point-rolling", "Seven-day rolling average realized profit",
+        "7-day average", "#58a6ff",
+        "No realized profit in the seven days behind this window.");
+    }
     trace("charts-render", points.length);
   }
 

@@ -322,7 +322,7 @@ class ProfitService:
         await self._ensure_rollups(discord_user_id, loaded_at)
         (
             realized,
-            lead_in_days,
+            trailing_days,
             current_sells,
             history_start,
             buy_count,
@@ -364,7 +364,7 @@ class ProfitService:
             unrealized=unrealized,
             item_names=item_names,
             market_prices=market_prices,
-            lead_in_days=lead_in_days,
+            trailing_days=trailing_days,
             history_start=history_start,
             key_generation=snapshot.origin,
         )
@@ -714,12 +714,12 @@ class ProfitService:
         int,
         int,
     ]:
-        # The dates the trailing average needs behind the window are read in
-        # the same pass: one query for the stretch the charts cover rather
-        # than a second one for its first week.
-        lead_in_start = cutoff - timedelta(days=ROLLING_AVERAGE_DAYS - 1)
+        # The dates behind the window that the trailing average needs are
+        # read in the same pass: one query for the whole stretch the charts
+        # cover rather than a second one for its first week.
+        trailing_start = cutoff - timedelta(days=ROLLING_AVERAGE_DAYS - 1)
         rollups = self._store.get_rollups(
-            discord_user_id, lead_in_start, until
+            discord_user_id, trailing_start, until
         )
         opening_day = cutoff.date().isoformat()
         open_lots = self._store.get_open_lots(discord_user_id)
@@ -728,30 +728,32 @@ class ProfitService:
             open_lots,
             minimum_flip_quantity=MIN_FLIP_QUANTITY,
         )
-        # The lead-in dates are summed under the same five-unit flip rule,
-        # but read across the whole stretch the charts cover rather than the
-        # window alone: an item the window keeps is then drawn on both sides
-        # of its first date rather than appearing at it.
-        lead_in_days = {
+        # The trailing average reads its own series, summed in one pass over
+        # the whole stretch it covers. The five-unit flip rule is a question
+        # about the stretch it is applied to, so applying it to the window
+        # and to the dates behind it separately would count an item that
+        # cleared five units across the two on one side of the window's first
+        # date and not on the other, and the average would step at that date
+        # for no reason a reader could see.
+        trailing_days = {
             sold_day: totals.profit
             for sold_day, totals in aggregate_rollups(
                 rollups,
                 open_lots,
                 minimum_flip_quantity=MIN_FLIP_QUANTITY,
             ).days.items()
-            if sold_day < opening_day
         }
         LOGGER.debug(
             "Read windowed profit report; user_id=%s rollups=%s "
-            "window_days=%s lead_in_days=%s",
+            "window_days=%s trailing_days=%s",
             discord_user_id,
             len(rollups),
             len(realized.days),
-            len(lead_in_days),
+            len(trailing_days),
         )
         return (
             realized,
-            lead_in_days,
+            trailing_days,
             # What is listed for sale now, which is a reading of the present
             # rather than of the window: a member's held stock is theirs
             # today whichever dates the report covers.
@@ -1185,13 +1187,16 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
         "items": items,
         "picks": picks,
         "days_table": day_rows,
-        # The whole UTC dates immediately before the window, so the trailing
-        # seven-day average has a reading on the window's first date instead
-        # of starting six dates into it. Nothing else on the page draws them,
-        # and a date without a matched sale is left out and read as zero.
-        "lead_in_days": [
+        # The series the trailing seven-day average is drawn from: every UTC
+        # date it reads, the six behind the window included, so it has a
+        # reading on the window's first date instead of starting six dates
+        # into it. A date without a matched sale is left out and read as
+        # zero. It is summed in one pass over that whole stretch, so it can
+        # differ a little from the daily table, which is summed over the
+        # window alone; nothing else on the page draws it.
+        "trailing_days": [
             {"date": sold_day, "profit": profit}
-            for sold_day, profit in sorted(report.lead_in_days.items())
+            for sold_day, profit in sorted(report.trailing_days.items())
         ],
         "unrealized": {
             "items": unrealized_items,

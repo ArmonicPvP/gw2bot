@@ -638,7 +638,7 @@ class TestProfitPage:
         # walked before it, so every date the window draws has a whole week
         # behind it rather than only its seventh onwards.
         assert "var ROLLING_DAYS = 7;" in PROFIT_PAGE
-        assert "(data.lead_in_days || []).forEach(function (day) {" in (
+        assert "(data.trailing_days || []).forEach(function (day) {" in (
             PROFIT_PAGE
         )
         assert (
@@ -652,6 +652,32 @@ class TestProfitPage:
         # Nothing is drawn a week in any more, so the chart no longer has a
         # message for a window too short to fill one.
         assert "Seven date buckets are needed." not in PROFIT_PAGE
+
+    def test_the_rolling_chart_draws_whenever_its_own_series_has_sales(
+        self,
+    ) -> None:
+        # A quiet window after a profitable one has a trailing average worth
+        # drawing and no bars, so the average is decided apart from them.
+        assert (
+            "var hasWindow = points.length && data.days_table.length;"
+            in PROFIT_PAGE
+        )
+        assert (
+            "var hasTrailing = points.length "
+            "&& (data.trailing_days || []).length;"
+        ) in PROFIT_PAGE
+        assert "if (!hasTrailing) {" in PROFIT_PAGE
+        assert (
+            '"No realized profit in the seven days behind this window."'
+            in PROFIT_PAGE
+        )
+        # The bars read the window's own table and the average reads the
+        # series summed across the stretch behind it.
+        assert "trailingByDate[date] : 0" in PROFIT_PAGE
+        assert "profitByDate[date] : 0" in PROFIT_PAGE
+        # Each skipped chart still says so in the console.
+        assert 'trace("charts-window-empty"' in PROFIT_PAGE
+        assert 'trace("charts-trailing-empty"' in PROFIT_PAGE
 
     def test_chart_axes_are_round_coin_steps_that_fit_their_gutter(
         self,
