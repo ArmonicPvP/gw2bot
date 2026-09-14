@@ -6789,6 +6789,69 @@ class TestEventDeleteConfirmView:
         assert "no runs left" in reported.kwargs["content"]
         assert store.get_occurrence(finished.occurrence_id) is not None
 
+    async def test_retired_series_console_logs_redact_secrets(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The paths a retired series takes afterwards log their own skips -
+        # the settings panel offering nothing, and a prompt answered too late
+        # - so they get the same proof that no event content reaches the
+        # console. The member's id is registered as well: it is a value these
+        # lines do emit, so seeing it redacted pins the assertion to them.
+        event, finished, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        event = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title="SECRET EVENT TITLE",
+            description="SECRET EVENT DESCRIPTION",
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+        kept = store.get_occurrence(finished.occurrence_id)
+        assert kept is not None
+        secret = str(EVENT_LOG_USER_ID)
+        flow = SignupFlow(fake_bot, event, kept, EVENT_LOG_USER_ID)
+        flow.role = EventRole.DPS
+        root_logger = logging.getLogger()
+        app_logger = logging.getLogger("gw2bot")
+        previous_handlers = list(root_logger.handlers)
+        previous_root_level = root_logger.level
+        previous_app_level = app_logger.level
+        try:
+            configure_logging(True, SecretRegistry((secret,)))
+
+            SignupSettingsView(fake_bot, event, kept, EVENT_LOG_USER_ID)
+            assert not flow.series_has_runs_left()
+
+            console = capsys.readouterr().err
+        finally:
+            for handler in list(root_logger.handlers):
+                root_logger.removeHandler(handler)
+                handler.close()
+            for handler in previous_handlers:
+                root_logger.addHandler(handler)
+            root_logger.setLevel(previous_root_level)
+            app_logger.setLevel(previous_app_level)
+
+        assert "Offering no sign-up settings for a series with no runs" in (
+            console
+        )
+        assert "Skipped a signup choice for a series with no runs left" in (
+            console
+        )
+        assert "user_id=[REDACTED]" in console
+        assert secret not in console
+        assert "SECRET EVENT TITLE" not in console
+        assert "SECRET EVENT DESCRIPTION" not in console
+
     async def test_delete_rejects_users_without_the_role(
         self,
         fake_bot: Any,

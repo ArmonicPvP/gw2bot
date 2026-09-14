@@ -5208,9 +5208,25 @@ class SignupSettingsView(discord.ui.View):
                     "edit_signup",
                 )
             )
+        offer_series_settings = (
+            event.repeat_frequency is not RepeatFrequency.NONE
+            and _series_has_runs_left(bot, event)
+        )
         if event.repeat_frequency is not RepeatFrequency.NONE and (
-            _series_has_runs_left(bot, event)
+            not offer_series_settings
         ):
+            # A panel opened from the post of a run a deletion kept. Said out
+            # loud because the member sees a panel with controls missing, and
+            # an operator reading the log otherwise has nothing to connect
+            # that to.
+            LOGGER.debug(
+                "Offering no sign-up settings for a series with no runs "
+                "left; event_id=%s occurrence_id=%s user_id=%s",
+                event.event_id,
+                occurrence.occurrence_id,
+                discord_user_id,
+            )
+        if offer_series_settings:
             self.add_item(
                 _SignupSettingsButton(
                     "Enable auto sign-up",

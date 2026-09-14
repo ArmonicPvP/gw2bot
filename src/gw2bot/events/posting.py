@@ -1445,10 +1445,31 @@ async def refresh_retired_posts(
             not occurrence.needs_refresh
         ):
             continue
-        signups = bot.event_store.get_signups(occurrence.occurrence_id)
+        try:
+            signups = bot.event_store.get_signups(occurrence.occurrence_id)
+        except SQLAlchemyError as exc:
+            # Contained per run, like the Discord failure below: the rows are
+            # already retired, so a roster this pass cannot read must not cost
+            # the other posts their final render - nor the commander the
+            # report waiting on this call to return.
+            LOGGER.error(
+                "Could not read a kept run's roster to render it; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            continue
         # Discord refuses edits inside an archived thread, and a forum post an
         # event was sent into can have been dormant for weeks.
         await reopen_occurrence_thread(bot, occurrence)
+        # Logged before the await, not only after it: an edit that hangs, is
+        # cancelled, or is cut off by a restart reaches neither the success
+        # count nor the failure line below, and this render - the last one
+        # this post will ever get - would leave no trace at all.
+        LOGGER.debug(
+            "Rendering a kept event run as finished; occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
         try:
             channel = await resolve_channel(
                 bot,
