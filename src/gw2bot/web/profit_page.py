@@ -433,7 +433,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
         </figure>
         <figure class="chart-panel">
           <h3>7-Day Rolling Average</h3>
-          <p>Trailing mean across seven UTC date buckets.</p>
+          <p>Trailing mean across seven UTC date buckets, including the six dates before the window.</p>
           <div class="profit-chart"><svg id="rolling-profit-chart" viewBox="0 0 640 220" role="img" aria-label="Seven-day rolling average realized profit"></svg></div>
         </figure>
         <figure class="chart-panel">
@@ -1028,6 +1028,9 @@ __DAYS_PAGES_BOTTOM__
   }
 
   var SVG_NS = "http://www.w3.org/2000/svg";
+  // The trailing average's width, matching ROLLING_AVERAGE_DAYS on the
+  // server: it decides how many dates before the window the report sends.
+  var ROLLING_DAYS = 7;
   var chartHoverCleanups = [];
 
   function svgNode(name, attributes, textValue) {
@@ -1048,6 +1051,15 @@ __DAYS_PAGES_BOTTOM__
     data.days_table.forEach(function (day) {
       profitByDate[day.date] = day.profit;
     });
+    // The trailing average reads its own series, which covers the six dates
+    // before the window as well as the window itself so the average has a
+    // full week behind its first date rather than behind its seventh. It is
+    // summed over that whole stretch in one pass, so it can sit a little
+    // above the bars, which are summed over the window alone.
+    var trailingByDate = Object.create(null);
+    (data.trailing_days || []).forEach(function (day) {
+      trailingByDate[day.date] = day.profit;
+    });
     var start = new Date(data.window.start_date + "T00:00:00Z");
     var end = new Date(data.window.end_date + "T00:00:00Z");
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())
@@ -1062,30 +1074,38 @@ __DAYS_PAGES_BOTTOM__
       return [];
     }
     var points = [];
+    var trailing = [];
+    var trailingTotal = 0;
+    var cumulative = 0;
+    // Walk the six dates behind the window first so the trailing sum is
+    // already a whole week wide by the time the window's own first date is
+    // plotted. Only the window's dates become points; those six feed the
+    // sum and are drawn nowhere.
     var cursor = new Date(start.getTime());
-    for (var bucket = 0; bucket < data.days; bucket += 1) {
+    cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));
+    var buckets = data.days + ROLLING_DAYS - 1;
+    for (var bucket = 0; bucket < buckets; bucket += 1) {
       var date = isoDay(cursor);
-      points.push({
-        date: date,
-        profit: Object.prototype.hasOwnProperty.call(profitByDate, date)
-          ? profitByDate[date] : 0,
-        rolling: null,
-        cumulative: 0
-      });
+      var trailed = Object.prototype.hasOwnProperty.call(trailingByDate, date)
+        ? trailingByDate[date] : 0;
+      trailing.push(trailed);
+      trailingTotal += trailed;
+      if (trailing.length > ROLLING_DAYS) {
+        trailingTotal -= trailing.shift();
+      }
+      if (bucket >= ROLLING_DAYS - 1) {
+        var profit = Object.prototype.hasOwnProperty.call(profitByDate, date)
+          ? profitByDate[date] : 0;
+        cumulative += profit;
+        points.push({
+          date: date,
+          profit: profit,
+          rolling: trailingTotal / ROLLING_DAYS,
+          cumulative: cumulative
+        });
+      }
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
-    var cumulative = 0;
-    points.forEach(function (point, index) {
-      cumulative += point.profit;
-      point.cumulative = cumulative;
-      if (index >= 6) {
-        var rollingTotal = 0;
-        for (var offset = index - 6; offset <= index; offset += 1) {
-          rollingTotal += points[offset].profit;
-        }
-        point.rolling = rollingTotal / 7;
-      }
-    });
     return points;
   }
 
@@ -1100,55 +1120,146 @@ __DAYS_PAGES_BOTTOM__
     }, message));
   }
 
+  // The denominations an axis can be drawn in, largest first, and what each
+  // is worth in copper. A chart is labelled in the largest one its own
+  // numbers reach, so a window that never made a gold reads in silver
+  // rather than as a column of roundings to "0g".
+  var COPPER_PER_SILVER = 100;
+  var COPPER_PER_GOLD = 100 * COPPER_PER_SILVER;
+  var AXIS_UNITS = [
+    { copper: COPPER_PER_GOLD, suffix: "g" },
+    { copper: COPPER_PER_SILVER, suffix: "s" },
+    { copper: 1, suffix: "c" }
+  ];
+  // The gaps between the four gridlines every chart draws: zero and three
+  // steps, shared out between what the series reached above zero and what
+  // it reached below it.
+  var AXIS_INTERVALS = 3;
+  // What a step may be, at each power of ten of the chart's own
+  // denomination. A multiplier that would make the step a fraction of a
+  // coin is skipped where it falls, so 1.5g is never a step and 15g is.
+  var STEP_MULTIPLIERS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+
+  function axisUnit(reach) {
+    for (var index = 0; index < AXIS_UNITS.length; index += 1) {
+      if (reach >= AXIS_UNITS[index].copper) { return AXIS_UNITS[index]; }
+    }
+    return AXIS_UNITS[AXIS_UNITS.length - 1];
+  }
+
+  // Every step this denomination allows, in copper and smallest first: a
+  // whole number of coins, and a round one, so the gridlines land on 5g or
+  // 250s rather than on whatever a third of the highest reading came to.
+  function axisSteps(unit) {
+    var steps = [];
+    for (var power = 0; power <= 9; power += 1) {
+      var magnitude = Math.pow(10, power);
+      for (var index = 0; index < STEP_MULTIPLIERS.length; index += 1) {
+        var coins = STEP_MULTIPLIERS[index] * magnitude;
+        if (coins !== Math.round(coins)) { continue; }
+        var step = coins * unit.copper;
+        if (steps[steps.length - 1] !== step) { steps.push(step); }
+      }
+    }
+    return steps;
+  }
+
+  // The scale one chart is drawn on: four gridlines a round step apart with
+  // zero always among them. The smallest step that fits the series into
+  // three gaps wins, which is what keeps the padding above the highest
+  // reading to the rounding up and no more.
+  function axisScale(values) {
+    var above = Math.max.apply(null, [0].concat(values));
+    var below = -Math.min.apply(null, [0].concat(values));
+    var unit = axisUnit(Math.max(above, below));
+    var steps = axisSteps(unit);
+    var step = steps[steps.length - 1];
+    for (var index = 0; index < steps.length; index += 1) {
+      if (Math.ceil(above / steps[index])
+        + Math.ceil(below / steps[index]) <= AXIS_INTERVALS) {
+        step = steps[index];
+        break;
+      }
+    }
+    var under = Math.ceil(below / step);
+    var over = AXIS_INTERVALS - under;
+    var ticks = [];
+    for (var line = -under; line <= over; line += 1) {
+      ticks.push(line * step);
+    }
+    return {
+      unit: unit,
+      step: step,
+      ticks: ticks,
+      minimum: -under * step,
+      maximum: over * step
+    };
+  }
+
+  // A gridline is a whole number of the chart's own coin, so its label is
+  // that count and the coin's letter: "5g", "250s", "-40c".
+  function axisLabel(value, unit) {
+    return Math.round(value / unit.copper).toLocaleString() + unit.suffix;
+  }
+
+  // How wide a label actually renders. A chart measured while hidden
+  // reports nothing, so an estimate from the character count stands in.
+  function labelWidth(svg, text) {
+    var node = svgNode(
+      "text", { x: 0, y: 0, "class": "chart-label" }, text);
+    svg.appendChild(node);
+    var measured = node.getComputedTextLength
+      ? node.getComputedTextLength() : 0;
+    svg.removeChild(node);
+    return measured > 0 ? measured : text.length * 6.5;
+  }
+
   function chartFrame(svg, points, values, title) {
     var width = 640;
     var height = 220;
-    var left = 62;
     var right = 16;
     var top = 14;
     var bottom = 34;
+    var scale = axisScale(values);
+
+    svg.replaceChildren();
+    svg.appendChild(svgNode("title", {}, title));
+    var labels = scale.ticks.map(function (value) {
+      return axisLabel(value, scale.unit);
+    });
+    // The gutter is cut to the labels this chart actually has rather than
+    // to a fixed width every long reading spilled out of: one wider than
+    // the space left for it used to be drawn off the edge of the viewBox
+    // and clipped, and the type is already as small as it reads.
+    var left = Math.max(40, Math.min(112, Math.ceil(labels.reduce(
+      function (measured, text) {
+        return Math.max(measured, labelWidth(svg, text));
+      }, 0)) + 12));
     var plotWidth = width - left - right;
     var plotHeight = height - top - bottom;
-    var minimum = Math.min.apply(null, [0].concat(values));
-    var maximum = Math.max.apply(null, [0].concat(values));
-    if (minimum === maximum) {
-      minimum -= 1;
-      maximum += 1;
-    }
     var y = function (value) {
-      return top + (maximum - value) / (maximum - minimum) * plotHeight;
+      return top + (scale.maximum - value)
+        / (scale.maximum - scale.minimum) * plotHeight;
     };
     var x = function (index) {
       return left + (index + 0.5) / points.length * plotWidth;
     };
 
-    svg.replaceChildren();
-    svg.appendChild(svgNode("title", {}, title));
-    [maximum, (maximum + minimum) / 2, minimum].forEach(function (value) {
+    scale.ticks.forEach(function (value, index) {
       svg.appendChild(svgNode("line", {
         x1: left,
         y1: y(value),
         x2: width - right,
         y2: y(value),
-        "class": Math.abs(value) < 0.0001
-          ? "chart-zero" : "chart-gridline"
+        "class": value === 0 ? "chart-zero" : "chart-gridline"
       }));
       svg.appendChild(svgNode("text", {
         x: left - 7,
         y: y(value) + 4,
         "text-anchor": "end",
         "class": "chart-label"
-      }, coin(Math.round(value))));
+      }, labels[index]));
     });
-    if (minimum < 0 && maximum > 0) {
-      svg.appendChild(svgNode("line", {
-        x1: left,
-        y1: y(0),
-        x2: width - right,
-        y2: y(0),
-        "class": "chart-zero"
-      }));
-    }
     svg.appendChild(svgNode("text", {
       x: left,
       y: height - 8,
@@ -1488,30 +1599,40 @@ __DAYS_PAGES_BOTTOM__
     chartHoverCleanups.forEach(function (cleanup) { cleanup(); });
     chartHoverCleanups = [];
     var points = buildDailySeries(data);
-    if (!points.length || !data.days_table.length) {
+    // The bars and the running total are readings of the window, and the
+    // trailing average is a reading of the week behind each of its dates.
+    // A quiet window after a profitable one has an average worth drawing
+    // and nothing else, so the two are decided apart.
+    var hasWindow = points.length && data.days_table.length;
+    var hasTrailing = points.length && (data.trailing_days || []).length;
+    if (!hasWindow) {
       emptyChart(
         document.getElementById("daily-profit-chart"),
         "No realized profit in this window.");
       emptyChart(
-        document.getElementById("rolling-profit-chart"),
-        "No realized profit in this window.");
-      emptyChart(
         document.getElementById("cumulative-profit-chart"),
         "No realized profit in this window.");
-      trace("charts-empty", points.length);
-      return;
+      trace("charts-window-empty", points.length);
+    } else {
+      renderDailyProfitChart(points, data.summary.profit / data.days);
+      renderLineChart(
+        "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
+        "chart-point-cumulative", "Cumulative realized profit",
+        "Cumulative profit", "#74dc9a",
+        "No cumulative profit in this window.");
     }
-    renderDailyProfitChart(points, data.summary.profit / data.days);
-    renderLineChart(
-      "rolling-profit-chart", points, "rolling", "chart-rolling",
-      "chart-point-rolling", "Seven-day rolling average realized profit",
-      "7-day average", "#58a6ff",
-      "Seven date buckets are needed.");
-    renderLineChart(
-      "cumulative-profit-chart", points, "cumulative", "chart-cumulative",
-      "chart-point-cumulative", "Cumulative realized profit",
-      "Cumulative profit", "#74dc9a",
-      "No cumulative profit in this window.");
+    if (!hasTrailing) {
+      emptyChart(
+        document.getElementById("rolling-profit-chart"),
+        "No realized profit in the seven days behind this window.");
+      trace("charts-trailing-empty", points.length);
+    } else {
+      renderLineChart(
+        "rolling-profit-chart", points, "rolling", "chart-rolling",
+        "chart-point-rolling", "Seven-day rolling average realized profit",
+        "7-day average", "#58a6ff",
+        "No realized profit in the seven days behind this window.");
+    }
     trace("charts-render", points.length);
   }
 

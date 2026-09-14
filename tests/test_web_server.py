@@ -90,6 +90,9 @@ def profit_report(
         ),
         item_names={1: "Realized Item", 2: "Listed Item"},
         market_prices={1: MarketPrice(100, 200), 2: MarketPrice(240, 290)},
+        # One date before the window and one inside it: the series the
+        # trailing average is drawn from covers both.
+        trailing_days={"2026-06-22": 90, "2026-08-20": 140},
         history_start=datetime(2026, 5, 1, tzinfo=UTC),
     )
 
@@ -1042,6 +1045,13 @@ class TestProfitPage:
         assert payload["picks"][0]["name"] == "Realized Item"
         assert payload["picks"][0]["profit"] == 70
         assert payload["days_table"][0]["date"] == "2026-08-20"
+        # The trailing average is drawn from its own series, which reaches
+        # behind the window so the average has a full week behind the
+        # window's own first date.
+        assert payload["trailing_days"] == [
+            {"date": "2026-06-22", "profit": 90},
+            {"date": "2026-08-20", "profit": 140},
+        ]
         assert payload["unrealized"]["items"][0]["name"] == "Listed Item"
         # The member's own listing price, and what the market is asking.
         assert payload["unrealized"]["items"][0]["unit_price"] == 300

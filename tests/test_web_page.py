@@ -625,12 +625,97 @@ class TestProfitPage:
             "expectedStart.getUTCDate() - data.days + 1);"
         ) in PROFIT_PAGE
         assert (
-            "for (var bucket = 0; bucket < data.days; bucket += 1)"
+            "for (var bucket = 0; bucket < buckets; bucket += 1)"
             in PROFIT_PAGE
         )
-        assert "rollingTotal / 7" in PROFIT_PAGE
-        assert "cumulative += point.profit;" in PROFIT_PAGE
+        assert "cumulative += profit;" in PROFIT_PAGE
         assert 'document.createElementNS(SVG_NS, name)' in PROFIT_PAGE
+
+    def test_the_rolling_average_starts_on_the_windows_first_date(
+        self,
+    ) -> None:
+        # The dates before the window are read into the same profit map and
+        # walked before it, so every date the window draws has a whole week
+        # behind it rather than only its seventh onwards.
+        assert "var ROLLING_DAYS = 7;" in PROFIT_PAGE
+        assert "(data.trailing_days || []).forEach(function (day) {" in (
+            PROFIT_PAGE
+        )
+        assert (
+            "cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));"
+            in PROFIT_PAGE
+        )
+        assert "var buckets = data.days + ROLLING_DAYS - 1;" in PROFIT_PAGE
+        assert "if (trailing.length > ROLLING_DAYS) {" in PROFIT_PAGE
+        assert "rolling: trailingTotal / ROLLING_DAYS," in PROFIT_PAGE
+        assert "if (bucket >= ROLLING_DAYS - 1) {" in PROFIT_PAGE
+        # Nothing is drawn a week in any more, so the chart no longer has a
+        # message for a window too short to fill one.
+        assert "Seven date buckets are needed." not in PROFIT_PAGE
+
+    def test_the_rolling_chart_draws_whenever_its_own_series_has_sales(
+        self,
+    ) -> None:
+        # A quiet window after a profitable one has a trailing average worth
+        # drawing and no bars, so the average is decided apart from them.
+        assert (
+            "var hasWindow = points.length && data.days_table.length;"
+            in PROFIT_PAGE
+        )
+        assert (
+            "var hasTrailing = points.length "
+            "&& (data.trailing_days || []).length;"
+        ) in PROFIT_PAGE
+        assert "if (!hasTrailing) {" in PROFIT_PAGE
+        assert (
+            '"No realized profit in the seven days behind this window."'
+            in PROFIT_PAGE
+        )
+        # The bars read the window's own table and the average reads the
+        # series summed across the stretch behind it.
+        assert "trailingByDate[date] : 0" in PROFIT_PAGE
+        assert "profitByDate[date] : 0" in PROFIT_PAGE
+        # Each skipped chart still says so in the console.
+        assert 'trace("charts-window-empty"' in PROFIT_PAGE
+        assert 'trace("charts-trailing-empty"' in PROFIT_PAGE
+
+    def test_chart_axes_are_round_coin_steps_that_fit_their_gutter(
+        self,
+    ) -> None:
+        # Four gridlines a round step apart, with zero always one of them,
+        # in the largest denomination the chart's own numbers reach.
+        assert "var AXIS_INTERVALS = 3;" in PROFIT_PAGE
+        assert (
+            "var STEP_MULTIPLIERS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];"
+            in PROFIT_PAGE
+        )
+        # A multiplier that would make the step a fraction of a coin is
+        # skipped rather than rounded, so 1.5g never becomes a step.
+        assert "if (coins !== Math.round(coins)) { continue; }" in PROFIT_PAGE
+        assert 'suffix: "g" }' in PROFIT_PAGE
+        assert 'suffix: "s" }' in PROFIT_PAGE
+        assert 'suffix: "c" }' in PROFIT_PAGE
+        assert (
+            "Math.round(value / unit.copper).toLocaleString() + unit.suffix"
+            in PROFIT_PAGE
+        )
+        # The three gaps are shared between what the series reached above
+        # zero and what it reached below it.
+        assert "var under = Math.ceil(below / step);" in PROFIT_PAGE
+        assert "var over = AXIS_INTERVALS - under;" in PROFIT_PAGE
+        assert '"class": value === 0 ? "chart-zero" : "chart-gridline"' in (
+            PROFIT_PAGE
+        )
+        # The gutter is measured from the labels, so a long reading widens
+        # it instead of being drawn off the edge of the viewBox.
+        assert "function labelWidth(svg, text) {" in PROFIT_PAGE
+        assert "node.getComputedTextLength" in PROFIT_PAGE
+        assert "var left = Math.max(40, Math.min(112, Math.ceil(" in (
+            PROFIT_PAGE
+        )
+        # The old scale drew the highest, halfway and lowest readings with
+        # their whole copper tails, which is what overran the gutter.
+        assert "coin(Math.round(value))" not in PROFIT_PAGE
 
     def test_profit_dashboard_and_charts_fill_the_available_width(self) -> None:
         assert "main { width: 100%; margin: 0; padding: 1rem; }" in PROFIT_PAGE
@@ -1686,6 +1771,18 @@ class TestGoldPage:
         assert "function formatAxisCoins(copper)" in GOLD_PAGE
         assert "yLabel.textContent = formatAxisCoins(" in GOLD_PAGE
         assert "yLabel.textContent = formatCoins(" not in GOLD_PAGE
+        # A bank in six figures of gold outgrows the fixed margin, so the
+        # margin is widened to the labels rather than cutting them off at
+        # the edge of the viewBox. It is only ever widened, and the widening
+        # lands before the first coordinate reads it.
+        assert "var Y_LABEL_CHAR_WIDTH = 6.6;" in GOLD_PAGE
+        assert (
+            "M.left = Math.max(M.left, "
+            "Math.ceil(widest * Y_LABEL_CHAR_WIDTH) + 10);"
+        ) in GOLD_PAGE
+        assert GOLD_PAGE.index("M.left = Math.max(M.left,") < GOLD_PAGE.index(
+            'x1: M.left, y1: y, x2: M.left + plotW(), y2: y'
+        )
 
     def test_table_amount_is_only_an_ascii_sign_and_value(self) -> None:
         assert 'operation === "withdraw" ? "-" : "+"' in GOLD_PAGE

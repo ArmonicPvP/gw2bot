@@ -12,6 +12,11 @@ LOGGER = logging.getLogger(__name__)
 
 MIN_FLIP_QUANTITY = 5
 
+# How many whole UTC dates the dashboard's trailing average covers. The dates
+# before a window are read with it too, so the average has a reading on the
+# window's own first date rather than starting six days into it.
+ROLLING_AVERAGE_DAYS = 7
+
 # The preset windows the profit dashboard offers, mapped to the whole UTC
 # dates each covers. They are the three buttons the feast usage, roster and
 # gold dashboards carry, so every page on the site reads the same way.
@@ -313,6 +318,15 @@ class ProfitReport:
     unrealized: UnrealizedProfit
     item_names: dict[int, str]
     market_prices: dict[int, MarketPrice] = field(default_factory=dict)
+    # Realized profit per UTC date across the whole stretch the trailing
+    # average covers - the window and the six dates behind it - keyed by
+    # date. Only that average reads it: without the dates behind the window
+    # its first six have no complete week behind them and go undrawn, which
+    # leaves a seven-day window showing a single dot. It is summed in one
+    # pass over that stretch rather than beside ``realized``, so every date
+    # it reads passes the same flip rule; a date without a matched sale is
+    # left out and read as zero, the way the window's own dates are.
+    trailing_days: dict[str, int] = field(default_factory=dict)
     # The oldest purchase or sale held for this member, which is how far back
     # a window can usefully be asked to reach.
     history_start: datetime | None = None

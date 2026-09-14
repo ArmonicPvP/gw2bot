@@ -2459,6 +2459,206 @@ class TestProfitService:
         assert report.sell_transaction_count == 1
         assert report.buy_transaction_count == 1
 
+    async def test_the_six_dates_before_a_window_are_read_for_the_average(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        store, _, _ = profit_store
+        secret = "trailing-window-member-secret"
+        store.set_api_key(101, secret)
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                "buy",
+                price=100,
+                quantity=15,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+            )
+        ]
+        sells = [
+            # Before the seven dates the average reaches back through, so it
+            # belongs to no part of the report.
+            transaction(
+                "sell-before-the-trailing-stretch",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 5, tzinfo=UTC),
+            ),
+            # Inside them: no bar of its own, but the average on the
+            # window's first dates is built from it.
+            transaction(
+                "sell-behind-the-window",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 12, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-in-the-window",
+                price=200,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 18, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            report = await service.load_report(
+                101, ReportWindow(days=7), now=now
+            )
+            payload = cast(
+                dict[str, Any], serialize_profit_report(report)
+            )
+
+        # The window itself is unchanged: its first date is the 15th, and
+        # only sales on or after it are drawn and summed.
+        assert report.window_start == datetime(2026, 8, 15, tzinfo=UTC)
+        assert list(report.realized.days) == ["2026-08-18"]
+        # The series behind the average carries the sale on the 12th and the
+        # one on the 18th, and stops short of the 5th, which no date in this
+        # window trails.
+        assert list(report.trailing_days) == ["2026-08-12", "2026-08-18"]
+        assert (
+            report.trailing_days["2026-08-12"]
+            == report.realized.days["2026-08-18"].profit
+        )
+        assert payload["trailing_days"] == [
+            {
+                "date": "2026-08-12",
+                "profit": report.trailing_days["2026-08-12"],
+            },
+            {
+                "date": "2026-08-18",
+                "profit": report.trailing_days["2026-08-18"],
+            },
+        ]
+        # The read is traced by its counts, and the member's key stays out of
+        # the console the diagnostics are written to.
+        assert "Read windowed profit report;" in caplog.text
+        assert "trailing_days=2" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_the_average_reads_one_flip_rule_across_its_whole_stretch(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                "buy-straddler",
+                item_id=1,
+                price=100,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-kept",
+                item_id=2,
+                price=100,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 1, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            # One unit behind the window and four inside it: five across the
+            # stretch the average covers, and four inside the window, so the
+            # flip rule keeps this item on one reading and drops it on the
+            # other.
+            transaction(
+                "sell-straddler-behind",
+                item_id=1,
+                price=200,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 12, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-straddler-inside",
+                item_id=1,
+                price=200,
+                quantity=4,
+                occurred_at=datetime(2026, 8, 18, tzinfo=UTC),
+            ),
+            # Enough of its own to be kept either way, so neither the tables
+            # nor the charts are empty.
+            transaction(
+                "sell-kept",
+                item_id=2,
+                price=200,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 18, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_names=AsyncMock(
+                return_value={1: "Straddler", 2: "Kept Item"}
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={
+                    1: MarketPrice(100, 200),
+                    2: MarketPrice(100, 200),
+                }
+            ),
+        )
+
+        report = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        # The window's own tables drop the straddling item: four units is
+        # under the flip rule's five.
+        assert list(report.realized.items) == [2]
+        # The average reads both of its dates under one rule instead, so the
+        # four units inside the window are counted wherever its one unit
+        # behind the window was. Counting one and not the other is what put
+        # a step in the line at the window's first date.
+        behind = report.trailing_days["2026-08-12"]
+        inside = report.trailing_days["2026-08-18"]
+        assert behind > 0
+        assert inside - report.realized.days["2026-08-18"].profit == behind * 4
+
     async def test_report_window_is_remembered_once_a_member_picks_one(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],

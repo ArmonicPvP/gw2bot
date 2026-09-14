@@ -1542,11 +1542,37 @@ much further back than the window does.
 The summary names the best and worst realized item and UTC sale day in the
 window. The dashboard uses the full available browser width. Three daily charts
 fill dates without matched sales with zero: realized profit with its whole-window
-daily average, the trailing seven-day average once seven date buckets are
-available, and cumulative realized profit. Hover anywhere in a chart's plot to
-snap to the nearest date and see its exact value (and the daily average where
-applicable). On a touch screen, tap a bar or dot to pin the same reading; it
-stays open until another reading is tapped, the page is tapped elsewhere, the
+daily average, the trailing seven-day average, and cumulative realized profit.
+The trailing average has a reading on the window's own first date: the report
+carries a series of its own, covering the six UTC dates before the window as
+well as the window itself, so every date drawn has a whole week behind it
+rather than the line starting six dates in and a seven-day window showing a
+single dot. That series is summed in one pass across the whole stretch it
+covers, so every date in it passes the same five-unit flip rule; the daily
+table is summed over the window alone, so an item that only clears five units
+once the dates behind the window are counted lifts the average a little above
+the bars. The six dates behind the window are drawn nowhere else — no bar, no
+cumulative total, and no row in the daily table. Because the average is a
+reading of the week behind each of its dates rather than of the window, a
+quiet window that follows a profitable one still draws it, with the other two
+charts reporting no realized profit.
+
+Each chart is drawn on four gridlines: zero and three round steps. The step is
+always a whole number of one coin — 5g, 250s, 40c, never a fraction of one —
+and the largest denomination the chart's own numbers reach is the one it is
+labelled in, so a window that never made a gold reads in silver instead of in
+roundings to zero. The three gaps are shared between what the window made and
+what it lost, with zero always on a line, and the top line is the first round
+step at or above the highest reading, so the padding above it is the rounding
+and nothing more. The gutter beside the labels is measured from the labels
+themselves, so a long reading widens it rather than being drawn off the edge
+and clipped. The same widening applies to the guild bank chart on `/gold`,
+whose labels outgrow their margin once the bank passes six figures of gold.
+
+Hover anywhere in a chart's plot to snap to the nearest date and see its exact
+value, to the copper, along with the daily average where applicable.
+On a touch screen, tap a bar or dot to pin the same reading; it stays open
+until another reading is tapped, the page is tapped elsewhere, the
 page scrolls, the window loses focus, or Escape is pressed.
 
 #### How the dashboard loads
