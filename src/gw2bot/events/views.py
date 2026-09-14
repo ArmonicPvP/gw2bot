@@ -3946,6 +3946,21 @@ async def _send_flow_result(
         )
 
 
+def _deleted_history_note(kept: int) -> str:
+    """What a deletion reply says about the runs it left standing."""
+    if not kept:
+        return ""
+    if kept == 1:
+        return (
+            " Its one finished run was kept, so that post and its place on "
+            "the calendar still stand."
+        )
+    return (
+        f" Its {kept} finished runs were kept, so those posts and their "
+        "places on the calendar still stand."
+    )
+
+
 class EventDeleteConfirmView(discord.ui.View):
     def __init__(
         self,
@@ -3972,7 +3987,10 @@ class EventDeleteConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventDeleteConfirmView],
     ) -> None:
-        from gw2bot.events.posting import delete_event_posts
+        from gw2bot.events.posting import (
+            delete_event_posts,
+            split_event_history,
+        )
 
         # The confirmation can sit open for minutes; recheck the role before the
         # irreversible delete, mirroring the edit/post paths.
@@ -4055,8 +4073,8 @@ class EventDeleteConfirmView(discord.ui.View):
             if stored is not None and not still_upcoming:
                 # The run ended while this confirmation sat open. `/event
                 # cancel` calls off runs still to come, so deleting now would
-                # erase a finished run's roster and post through a command
-                # that never offered to.
+                # retire an event whose runs are all behind it - through a
+                # command that never offered to.
                 reason = "a finished event"
                 refusal = (
                     "That event has already run, so there is nothing left to "
@@ -4094,8 +4112,24 @@ class EventDeleteConfirmView(discord.ui.View):
         occurrences = self._bot.event_store.get_event_occurrences(
             self._event.event_id
         )
+        # The runs the event has already put on are history: they keep their
+        # posts and their rows, so the calendar still shows what the guild
+        # ran. Only what is left of the event is removed - and an event that
+        # has nothing to keep goes entirely, rather than leaving a row behind
+        # that nothing would ever show.
+        kept, removed = split_event_history(
+            self._event,
+            occurrences,
+            datetime.now(UTC),
+        )
         try:
-            self._bot.event_store.delete_event(self._event.event_id)
+            if kept:
+                self._bot.event_store.retire_event(
+                    self._event.event_id,
+                    [occurrence.occurrence_id for occurrence in removed],
+                )
+            else:
+                self._bot.event_store.delete_event(self._event.event_id)
         except SQLAlchemyError as exc:
             self._deleting = False
             LOGGER.error(
@@ -4110,16 +4144,19 @@ class EventDeleteConfirmView(discord.ui.View):
                 event_id=self._event.event_id,
             )
             return
-        await delete_event_posts(self._bot, self._event, occurrences)
+        await delete_event_posts(self._bot, self._event, removed)
         LOGGER.debug(
-            "Deleted event; event_id=%s occurrences=%s user_id=%s",
+            "Deleted event; event_id=%s occurrences_removed=%s "
+            "occurrences_kept=%s user_id=%s",
             self._event.event_id,
-            len(occurrences),
+            len(removed),
+            len(kept),
             interaction.user.id,
         )
         await _send_flow_result(
             interaction,
-            f"Event **{self._event.event_id}** was deleted.",
+            f"Event **{self._event.event_id}** was deleted."
+            + _deleted_history_note(len(kept)),
             workflow="event deletion",
             event_id=self._event.event_id,
         )

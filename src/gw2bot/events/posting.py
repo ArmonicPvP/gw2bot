@@ -1373,17 +1373,58 @@ async def _resolve_cached_channel(
     return channel
 
 
+def split_event_history(
+    event: Event,
+    occurrences: list[EventOccurrence],
+    now: datetime,
+) -> tuple[list[EventOccurrence], list[EventOccurrence]]:
+    """Split an event's runs into the history to keep and the rest to remove.
+
+    Deleting an event calls off what is still to come; it does not undo what
+    the guild already ran. A run that has finished and still has its post is
+    kept as it stands - the post stays in the channel, the row stays in the
+    store, and the calendar goes on showing the day it was run on - so only
+    the rest is removed.
+
+    "Finished" is `occurrence_finished`: the clock, or the stored status for a
+    run retired early. A row that never reached a message is removed whether
+    or not its time has passed, because there is no post to keep and the
+    maintenance pass posts a pending row it finds - which would put a fresh
+    message in the channel for an event that has just been deleted.
+
+    Returns (kept, removed), each in the order it was given.
+    """
+    kept: list[EventOccurrence] = []
+    removed: list[EventOccurrence] = []
+    for occurrence in occurrences:
+        if occurrence.message_id is not None and occurrence_finished(
+            event, occurrence, now
+        ):
+            kept.append(occurrence)
+        else:
+            removed.append(occurrence)
+    LOGGER.debug(
+        "Split an event's runs for deletion; event_id=%s kept=%s removed=%s",
+        event.event_id,
+        len(kept),
+        len(removed),
+    )
+    return kept, removed
+
+
 async def delete_event_posts(
     bot: Gw2Bot,
     event: Event,
     occurrences: list[EventOccurrence],
 ) -> int:
-    # Best-effort cleanup of the public posts (and their threads) when an event
-    # is deleted. Discord does not delete a thread when its starter message is
-    # removed, so each occurrence's thread is deleted separately below. This
-    # runs after the store rows are gone, so any message that survives a
-    # failure here just has buttons that gracefully report the event is no
-    # longer available.
+    # Best-effort cleanup of the public posts (and their threads) of the runs
+    # it is given - which on a deletion is not every run the event has had:
+    # the ones it has already put on keep their posts and are never passed
+    # here (see split_event_history). Discord does not delete a thread when
+    # its starter message is removed, so each occurrence's thread is deleted
+    # separately below. This runs after the store rows are gone, so any
+    # message that survives a failure here just has buttons that gracefully
+    # report the event is no longer available.
     #
     # Each occurrence is deleted through the channel it was posted to, not the
     # event's current one. A channel edit only re-posts the live occurrences, so

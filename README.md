@@ -329,7 +329,7 @@ sign-up buttons on a posted event are open to everyone who can see it.
 | `/event edit` | Reopens that flow for an existing event, and its roster with it. |
 | `/event remind` | Pings the next occurrence's roster on demand (see [Event Reminders](#event-reminders)). |
 | `/event cancel` | Calls off a repeating event's next occurrence (see [Cancelling An Event Occurrence](#cancelling-an-event-occurrence)). |
-| `/event delete` | Removes an event, its messages, its signup threads, and its sign-ups. |
+| `/event delete` | Ends an event: removes the run still to come and its sign-ups, and keeps the runs it has already put on (see [Deleting An Event](#deleting-an-event)). |
 
 Every subcommand except `/event new` takes an `event_id`, autocompleted from the
 active events as `[Category] Title — id N`. That id is also printed in the footer
@@ -551,12 +551,12 @@ the next maintenance pass.
 Any destination selected for an event needs `View Channel` and `Send Messages`.
 A text channel also needs `Create Public Threads` for the signup thread, and
 `Manage Threads`: moving an event to a new channel, pruning a superseded
-recurring occurrence, cancelling an occurrence, and deleting an event all
-delete that occurrence's signup thread explicitly, because Discord does not
-remove a thread on its own when its starter message is deleted. Without
-`Manage Threads` those operations still remove the message but log a `50013`
-(`missing_permissions`) error and leave the orphaned thread behind. A forum
-post destination needs `Send Messages in Threads` instead of `Send Messages`,
+recurring occurrence, cancelling an occurrence, and deleting an event (for the
+run it removes) all delete that occurrence's signup thread explicitly, because
+Discord does not remove a thread on its own when its starter message is
+deleted. Without `Manage Threads` those operations still remove the message
+but log a `50013` (`missing_permissions`) error and leave the orphaned thread
+behind. A forum post destination needs `Send Messages in Threads` instead of `Send Messages`,
 and `Manage Threads` only to reopen it once Discord has archived it.
 
 ## Event Role Pings
@@ -743,6 +743,31 @@ the channel, say — the cancellation still stands and the reply names the
 channel to check. That posting is then retried by every maintenance pass until
 it goes through, so fixing the permission is enough to bring the series back
 even though the cancellation removed its last post.
+
+## Deleting An Event
+
+`/event delete event_id:<event>` ends an event and requires the event role
+`1318357141521825872`. It confirms first, and names what it is about to keep.
+
+What it removes is what is still to come: the run the event is on now, its
+message, the signup thread the bot opened for it, and everyone's sign-ups for
+it. The event's automatic sign-ups and remembered roles go with it, and so
+does any run that never reached a message — there is no post to keep, and a
+pending run left behind would be posted by the next maintenance pass.
+
+The runs the event has already put on are kept exactly as they stand. Their
+messages stay in the channel, their rosters stay stored, and the calendar goes
+on showing them on the days they were run, so deleting a weekly raid ends the
+series without erasing the months behind it.
+
+An event that keeps runs that way is retired rather than removed: it is no
+longer offered by the `/event` autocompletes, cannot be edited, cancelled or
+reminded, projects no further occurrences onto the calendar, and is never
+posted or repeated again. Deleting it a second time therefore removes nothing
+more. An event with nothing to keep — one deleted before any of its runs
+finished — is removed outright, rows and all.
+
+A forum post the event was only posted into is kept, as everywhere else.
 
 ## Feast Stock Alerts
 
@@ -1314,7 +1339,9 @@ headings in week view and every date in month view open that date's day view.
 When a month cell cannot fit all of its events, it shows a clickable `+N`
 beside the date instead of a scrollbar. Future occurrences of repeating events
 that the scheduler has not posted yet appear with dashed borders as
-projections, and finished events stay visible dimmed on past days.
+projections, and finished events stay visible dimmed on past days. Deleting an
+event leaves those past days as they are: the runs it has already put on stay
+on the calendar (see [Deleting An Event](#deleting-an-event)).
 
 Access requires signing in with Discord. The site only requests the `identify`
 OAuth scope and then checks with the bot that the signed-in user is a member

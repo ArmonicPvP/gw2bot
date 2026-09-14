@@ -54,6 +54,7 @@ from gw2bot.events.posting import (
     remove_signup,
     repost_occurrence,
     seat_signup,
+    split_event_history,
     sweep_stale_announcement,
 )
 from gw2bot.events.formatting import roster_update_messages
@@ -7659,6 +7660,102 @@ class TestRebalanceOccurrenceRoster:
         assert [signup.role for signup in signups] == [
             EventRole.QUICKNESS_HEAL,
             EventRole.DPS,
+        ]
+
+
+class TestSplitEventHistory:
+    def test_keeps_the_finished_runs_and_removes_the_rest(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        upcoming = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        store.set_occurrence_message(upcoming.occurrence_id, 1234, 556, 778)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(
+            event,
+            occurrences,
+            START + timedelta(hours=3),
+        )
+
+        assert [occurrence.occurrence_id for occurrence in kept] == [
+            finished.occurrence_id
+        ]
+        assert [occurrence.occurrence_id for occurrence in removed] == [
+            upcoming.occurrence_id
+        ]
+
+    def test_keeps_a_run_retired_before_its_end_time(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A post someone deleted by hand retires its run as OVER while the
+        # clock still says it is running; the stored status decides.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(event, occurrences, BEFORE_START)
+
+        assert [occurrence.occurrence_id for occurrence in kept] == [
+            occurrence.occurrence_id
+        ]
+        assert removed == []
+
+    def test_removes_a_finished_run_that_never_reached_a_message(
+        self,
+        store: EventStore,
+    ) -> None:
+        # There is no post to keep, and a pending row left behind would be
+        # posted by the next maintenance pass - a fresh message for an event
+        # that has just been deleted.
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        unposted = store.create_occurrence(event.event_id, START)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(
+            event,
+            occurrences,
+            START + timedelta(hours=3),
+        )
+
+        assert kept == []
+        assert [occurrence.occurrence_id for occurrence in removed] == [
+            unposted.occurrence_id
+        ]
+
+    def test_removes_an_ongoing_run(self, store: EventStore) -> None:
+        # A run in progress is still to be finished, so deleting the event
+        # calls it off rather than keeping it as history.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.ONGOING,
+        )
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(
+            event,
+            occurrences,
+            START + timedelta(minutes=10),
+        )
+
+        assert kept == []
+        assert [occurrence.occurrence_id for occurrence in removed] == [
+            occurrence.occurrence_id
         ]
 
 

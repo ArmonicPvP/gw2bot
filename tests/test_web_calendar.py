@@ -194,6 +194,43 @@ class TestMaterializedEntries:
         assert entries[0].status == "over"
 
 
+    def test_keeps_the_runs_of_a_deleted_event(
+        self,
+        store: EventStore,
+    ) -> None:
+        # `/event delete` keeps the runs an event has already put on, so the
+        # calendar goes on showing them on the days they were run - and
+        # projects nothing further for a series that has ended.
+        anchor = datetime(2027, 1, 6, 20, 0, tzinfo=UTC)
+        event = create_event(
+            store,
+            start_time=anchor,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(2,),
+        )
+        finished = store.create_occurrence(event.event_id, anchor)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        upcoming = store.create_occurrence(
+            event.event_id,
+            anchor + timedelta(days=7),
+        )
+
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+            anchor + timedelta(days=10),
+        )
+
+        assert [entry.occurrence_id for entry in entries] == [
+            finished.occurrence_id
+        ]
+        assert not entries[0].projected
+
+
 class TestProjectedEntries:
     def test_weekly_projection_holds_local_time_across_dst(
         self,

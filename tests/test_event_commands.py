@@ -3344,6 +3344,44 @@ SERIES_ORIGIN = datetime(2107, 1, 6, 20, 0, tzinfo=UTC)
 SERIES_WEEK4 = datetime(2107, 1, 27, 20, 0, tzinfo=UTC)
 
 
+def make_event_with_history(
+    store: EventStore,
+    *,
+    finished_status: EventStatus = EventStatus.OVER,
+    upcoming: bool = True,
+) -> Any:
+    """A weekly series with last week's run behind it and this week's ahead.
+
+    Built on the real clock rather than the far-future constants above,
+    because deletion judges a run finished against ``datetime.now``.
+    """
+    now = datetime.now(UTC)
+    finished_start = now - timedelta(days=7)
+    event = store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Weekly clear",
+        description="Bring food.",
+        channel_id=1234,
+        leader_discord_id=42,
+        start_time=finished_start,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.WEEKLY,
+        repeat_days=(),
+    )
+    finished = store.create_occurrence(event.event_id, finished_start)
+    store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+    if finished_status is not EventStatus.OPEN:
+        store.set_occurrence_status(finished.occurrence_id, finished_status)
+    ahead = None
+    if upcoming:
+        ahead = store.create_occurrence(
+            event.event_id,
+            now + timedelta(days=1),
+        )
+        store.set_occurrence_message(ahead.occurrence_id, 1234, 556, 778)
+    return event, finished, ahead
+
+
 def make_advanced_recurring_event(
     store: EventStore,
     channel_id: int = 1234,
@@ -5098,6 +5136,39 @@ class TestDeleteCommand:
         assert store.get_event(event.event_id) is not None
 
 
+    async def test_delete_confirmation_names_the_runs_it_keeps(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _, _ = make_event_with_history(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        content = interaction.response.send_message.await_args.args[0]
+        assert "one finished run is kept" in content
+
+    async def test_delete_confirmation_stays_quiet_without_history(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_posted_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        content = interaction.response.send_message.await_args.args[0]
+        assert "finished run" not in content
+
+
 class TestCancelCommand:
     async def test_cancel_rejects_users_without_the_create_role(
         self,
@@ -6195,6 +6266,117 @@ class TestEventDeleteConfirmView:
             "was deleted"
             in interaction.edit_original_response.await_args.kwargs["content"]
         )
+
+    async def test_delete_keeps_the_runs_the_event_has_put_on(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, finished, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        for occurrence_id in (
+            finished.occurrence_id,
+            upcoming.occurrence_id,
+        ):
+            store.add_signup(
+                occurrence_id=occurrence_id,
+                discord_user_id=11,
+                role=EventRole.DPS,
+                assigned_role=EventRole.DPS,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        # Last week's run is history: its row, its roster and its post stand,
+        # and the event row stands with them so the calendar can still show
+        # it. Only the run still to come is called off.
+        assert store.get_event(event.event_id) is not None
+        assert store.get_occurrence(finished.occurrence_id) is not None
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(finished.occurrence_id)
+        ] == [11]
+        assert store.get_occurrence(upcoming.occurrence_id) is None
+        assert store.get_signups(upcoming.occurrence_id) == []
+        channel.partial_message.delete.assert_awaited_once()
+        assert interaction.edit_original_response.await_args is not None
+        content = interaction.edit_original_response.await_args.kwargs[
+            "content"
+        ]
+        assert "was deleted" in content
+        assert "one finished run was kept" in content
+
+    async def test_delete_stops_a_kept_run_from_restarting_the_series(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The kept run's refresh had been failing, so it is still stored as
+        # open. Left that way, the next maintenance pass would take it
+        # through OVER and seed the next occurrence of a deleted series.
+        event, finished, _ = make_event_with_history(
+            store,
+            finished_status=EventStatus.OPEN,
+            upcoming=False,
+        )
+        store.set_occurrence_needs_refresh(finished.occurrence_id, True)
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+        await run_event_maintenance(fake_bot, datetime.now(UTC))
+
+        retired = store.get_occurrence(finished.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [finished.occurrence_id]
+        # Nothing offers the event any more either, so it cannot be edited,
+        # reminded or projected onto the calendar.
+        assert store.get_active_events() == []
+
+    async def test_delete_removes_a_pending_run_it_cannot_keep(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A run that never reached a message has no post to keep, and one left
+        # behind would be posted by the next maintenance pass - a fresh
+        # message for an event that has just been deleted.
+        event, finished, _ = make_event_with_history(store, upcoming=False)
+        pending = store.create_occurrence(
+            event.event_id,
+            datetime.now(UTC) + timedelta(days=1),
+        )
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+        await run_event_maintenance(fake_bot, datetime.now(UTC))
+
+        assert store.get_occurrence(pending.occurrence_id) is None
+        assert store.get_occurrence(finished.occurrence_id) is not None
+        assert channel.sent == []
 
     async def test_delete_rejects_users_without_the_role(
         self,

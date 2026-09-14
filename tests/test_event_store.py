@@ -699,6 +699,129 @@ class TestEventStoreOccurrences:
             is not None
         )
 
+    def test_retire_event_removes_only_the_listed_occurrences(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.WEEKLY)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        store.add_signup(
+            occurrence_id=finished.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        upcoming = store.create_occurrence(
+            event.event_id,
+            START.replace(day=6, month=2),
+        )
+        store.add_signup(
+            occurrence_id=upcoming.occurrence_id,
+            discord_user_id=2,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.mark_reminders_handled(upcoming.occurrence_id, [60])
+
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+
+        # The event survives with the run it already put on, because the
+        # calendar reads an occurrence through its event.
+        assert store.get_event(event.event_id) is not None
+        assert store.get_occurrence(finished.occurrence_id) is not None
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(finished.occurrence_id)
+        ] == [1]
+        assert store.get_occurrence(upcoming.occurrence_id) is None
+        assert store.get_signups(upcoming.occurrence_id) == []
+        assert store.get_handled_reminder_offsets(upcoming.occurrence_id) == (
+            set()
+        )
+
+    def test_retire_event_ends_the_runs_it_keeps(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A run whose refresh kept failing is still reading as open when the
+        # event is deleted. Left that way, the next maintenance pass would
+        # take it through OVER and seed a successor for a deleted series.
+        event = create_event(store, repeat_frequency=RepeatFrequency.WEEKLY)
+        stale = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(stale.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_needs_refresh(stale.occurrence_id, True)
+
+        store.retire_event(event.event_id, [])
+
+        retired = store.get_occurrence(stale.occurrence_id)
+        assert retired is not None
+        assert retired.status is EventStatus.OVER
+        assert not retired.needs_refresh
+        assert store.get_posted_unfinished_occurrences() == []
+        assert store.get_active_events() == []
+
+    def test_retire_event_drops_its_auto_signups_and_memories(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.WEEKLY)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        store.set_auto_signup(
+            event.event_id,
+            1,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+        store.set_signup_preference(
+            event.event_id,
+            1,
+            EventRole.DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+
+        store.retire_event(event.event_id, [])
+
+        # Both only ever feed a run still to come, and there is none left.
+        assert store.get_auto_signup(event.event_id, 1) is None
+        assert store.get_signup_preference(event.event_id, 1) is None
+
+    def test_retire_event_leaves_other_events_alone(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        untouched = create_event(store, title="Untouched")
+        untouched_occurrence = store.create_occurrence(
+            untouched.event_id,
+            START,
+        )
+        store.set_auto_signup(
+            untouched.event_id,
+            1,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        store.retire_event(event.event_id, [])
+
+        kept = store.get_occurrence(untouched_occurrence.occurrence_id)
+        assert kept is not None
+        assert kept.status is EventStatus.OPEN
+        assert store.get_auto_signup(untouched.event_id, 1) is not None
+
     def test_delete_occurrence_removes_occurrence_and_signups(
         self,
         store: EventStore,

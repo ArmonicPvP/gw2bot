@@ -4,7 +4,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import sessionmaker
 
 from gw2bot.database import (
@@ -792,6 +792,89 @@ class EventStore:
             "occurrences=%s",
             event_id,
             len(occurrence_ids),
+        )
+
+    def retire_event(
+        self,
+        event_id: int,
+        occurrence_ids: Sequence[int],
+    ) -> None:
+        """Remove the listed runs of an event and keep the rest as history.
+
+        What `/event delete` does to an event that has already put runs on.
+        The listed occurrences go the way ``delete_event`` takes them, with
+        their signups and their reminders; everything left is a run that
+        happened and still has its post, so those rows stay - and the event
+        row with them, because the calendar reads an occurrence through its
+        event and would lose the run without it.
+
+        What stays is marked OVER, because the maintenance pass drives the end
+        of a run off the stored status: one still reading as open - a refresh
+        that kept failing, or downtime across the run's end - would seed the
+        next occurrence of a series nobody can reach any more. The per-event
+        auto-signups and remembered roles go with the removed runs, as they do
+        on a full deletion: they only ever feed a run still to come.
+        """
+        with self._sessions() as session:
+            if occurrence_ids:
+                session.execute(
+                    delete(EventSignupRecord).where(
+                        EventSignupRecord.occurrence_id.in_(occurrence_ids)
+                    )
+                )
+                session.execute(
+                    delete(EventReminderRecord).where(
+                        EventReminderRecord.occurrence_id.in_(occurrence_ids)
+                    )
+                )
+                session.execute(
+                    delete(EventOccurrenceRecord).where(
+                        EventOccurrenceRecord.occurrence_id.in_(
+                            occurrence_ids
+                        )
+                    )
+                )
+            session.execute(
+                delete(EventAutoSignupRecord).where(
+                    EventAutoSignupRecord.event_id == event_id
+                )
+            )
+            session.execute(
+                delete(EventSignupPreferenceRecord).where(
+                    EventSignupPreferenceRecord.event_id == event_id
+                )
+            )
+            # Everything the deletes above left behind is kept history, so
+            # the retirement is expressed as a predicate rather than an id
+            # list: a series with years of runs behind it would otherwise pass
+            # one bound parameter per run and hit SQLite's variable limit.
+            still_open = (
+                EventOccurrenceRecord.status != EventStatus.OVER.value
+            )
+            retired = session.scalar(
+                select(func.count())
+                .select_from(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.event_id == event_id)
+                .where(still_open)
+            )
+            session.execute(
+                update(EventOccurrenceRecord)
+                .where(EventOccurrenceRecord.event_id == event_id)
+                .where(still_open)
+                .values(
+                    status=EventStatus.OVER.value,
+                    # Nothing refreshes these posts again, so a flag left set
+                    # would describe work no pass is coming to do.
+                    needs_refresh=False,
+                )
+            )
+            session.commit()
+        LOGGER.debug(
+            "Retired event, keeping the runs it has finished; event_id=%s "
+            "occurrences_removed=%s occurrences_retired=%s",
+            event_id,
+            len(occurrence_ids),
+            retired,
         )
 
     def has_posted_occurrence(self, event_id: int) -> bool:
