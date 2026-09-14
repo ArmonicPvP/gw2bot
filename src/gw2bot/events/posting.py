@@ -1412,6 +1412,75 @@ def split_event_history(
     return kept, removed
 
 
+async def refresh_retired_posts(
+    bot: Gw2Bot,
+    event: Event,
+    occurrences: list[EventOccurrence],
+    now: datetime,
+) -> int:
+    """Show the runs a deletion keeps as the finished runs they now are.
+
+    Retiring the rows as OVER takes them out of the maintenance pass for
+    good, so this is the last chance to put that on the posts. A run whose
+    end no pass had caught up with yet - the minute after it finishes, or
+    longer behind a refresh Discord kept refusing - would otherwise stand in
+    the channel advertising itself as open for as long as the post lives,
+    which is a poor record of what the guild ran.
+
+    Deliberately not refresh_occurrence_message: that path seeds the next
+    occurrence of a recurring series on its way through OVER, which is the
+    one thing a deleted event must never do. Nothing here writes to the
+    store - the retirement already did - so a failure only costs this post
+    its final render, and one failure must not cost the others theirs.
+
+    Takes the occurrences as they were read before the retirement, which is
+    what says whether a post can be stale: one already stored as OVER was
+    rendered by the pass that persisted it, unless that pass came away dirty.
+    """
+    refreshed = 0
+    for occurrence in occurrences:
+        if occurrence.message_id is None:
+            continue
+        if occurrence.status is EventStatus.OVER and (
+            not occurrence.needs_refresh
+        ):
+            continue
+        signups = bot.event_store.get_signups(occurrence.occurrence_id)
+        # Discord refuses edits inside an archived thread, and a forum post an
+        # event was sent into can have been dormant for weeks.
+        await reopen_occurrence_thread(bot, occurrence)
+        try:
+            channel = await resolve_channel(
+                bot,
+                occurrence_channel_id(event, occurrence),
+            )
+            await channel.get_partial_message(occurrence.message_id).edit(
+                embed=occurrence_embed(event, occurrence, signups, now),
+            )
+        except discord.HTTPException as exc:
+            # NotFound included: a post somebody deleted by hand is nothing to
+            # retire, and the row stays as the record of the run either way.
+            LOGGER.error(
+                "Could not show a kept event run as finished; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            continue
+        refreshed += 1
+        # The thread name carries the status too, so it would keep announcing
+        # a run that is open. Best-effort, and independent of the edit above.
+        await _rename_occurrence_thread(bot, occurrence, EventStatus.OVER)
+    LOGGER.debug(
+        "Showed an event's kept runs as finished; event_id=%s refreshed=%s "
+        "kept=%s",
+        event.event_id,
+        refreshed,
+        len(occurrences),
+    )
+    return refreshed
+
+
 async def delete_event_posts(
     bot: Gw2Bot,
     event: Event,

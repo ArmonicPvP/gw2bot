@@ -2350,7 +2350,7 @@ class TestAutoSignupPrompt:
         content = interaction.response.edit_message.await_args.kwargs[
             "content"
         ]
-        assert "no longer there" in content
+        assert "no runs left" in content
 
     async def test_prompts_again_after_a_plain_no(
         self,
@@ -2587,6 +2587,35 @@ class TestRememberedRolesPerEvent:
         # stopped by the run being gone rather than by the store's own guard
         # against an event that has been removed outright.
         assert store.get_event(event.event_id) is not None
+
+    async def test_a_kept_run_remembers_nothing_either(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The prompt was opened moments before this run ended, and the event
+        # was deleted after the end: retirement keeps the run, so its being
+        # there says nothing. What decides is whether the series has a run
+        # left for the memory to serve.
+        event, occurrence = self.make_role_event(store, "Kept")
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(hours=3),
+        )
+        answered = store.get_occurrence(occurrence.occurrence_id)
+        assert answered is not None
+        flow = SignupFlow(fake_bot, event, answered, 42)
+        flow.role = EventRole.QUICKNESS_DPS
+        store.retire_event(event.event_id, [])
+
+        await RememberChoiceView(flow).remember_yes.callback(
+            self.make_flow_interaction()
+        )
+
+        assert store.get_signup_preference(event.event_id, 42) is None
+        # The run the prompt belongs to is still there; the series is what
+        # ended.
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
 
     async def test_never_ask_again_covers_only_its_own_event(
         self,
@@ -6610,6 +6639,62 @@ class TestEventDeleteConfirmView:
         assert store.get_event(event.event_id) is None
         assert store.get_occurrence(occurrence.occurrence_id) is None
         channel.partial_message.delete.assert_awaited_once()
+
+    async def test_delete_shows_a_kept_run_as_finished(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A run that ended in the last minute is kept, but no maintenance
+        # pass has caught up with its end: its post still advertises itself as
+        # open. Retiring the row takes it out of that pass for good, so the
+        # deletion is the last chance to render it.
+        event, finished, upcoming = make_event_with_history(
+            store,
+            finished_status=EventStatus.OPEN,
+        )
+        assert upcoming is not None
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        assert store.get_occurrence(finished.occurrence_id) is not None
+        channel.partial_message.edit.assert_awaited_once()
+        embed = channel.partial_message.edit.await_args.kwargs["embed"]
+        assert embed.color is not None
+        assert embed.color.value == STATUS_COLORS[EventStatus.OVER]
+        # The thread name carries the status too.
+        renamed = channel.thread.edit.await_args
+        assert renamed is not None
+        assert "⚫" in renamed.kwargs["name"]
+
+    async def test_delete_leaves_an_already_finished_post_alone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # A run whose end a maintenance pass already rendered needs nothing:
+        # its post says what it should, and editing it again would be an
+        # avoidable call against a message the deletion is keeping as it is.
+        event, _, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        channel.partial_message.edit.assert_not_awaited()
 
     async def test_delete_rejects_users_without_the_role(
         self,

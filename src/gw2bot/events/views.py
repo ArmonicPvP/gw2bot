@@ -3989,6 +3989,7 @@ class EventDeleteConfirmView(discord.ui.View):
     ) -> None:
         from gw2bot.events.posting import (
             delete_event_posts,
+            refresh_retired_posts,
             split_event_history,
         )
 
@@ -4152,6 +4153,15 @@ class EventDeleteConfirmView(discord.ui.View):
             )
             return
         await delete_event_posts(self._bot, event, removed)
+        # The kept runs leave the maintenance pass for good with the rows
+        # just retired, so this is the last chance to show one whose end no
+        # pass had caught up with as the finished run it is.
+        await refresh_retired_posts(
+            self._bot,
+            event,
+            kept,
+            datetime.now(UTC),
+        )
         LOGGER.debug(
             "Deleted event; event_id=%s occurrences_removed=%s "
             "occurrences_kept=%s user_id=%s",
@@ -5776,24 +5786,24 @@ class SignupFlow:
         self.flex_roles: tuple[EventRole, ...] = ()
         self.skip_remember_prompt = False
 
-    def still_has_its_run(self) -> bool:
-        """Whether the run behind this flow's prompts is still there.
+    def series_has_runs_left(self) -> bool:
+        """Whether a choice answered now still has a run to serve.
 
         Both prompts below the picker can sit open until they time out, and
-        `/event delete` calls off the runs still to come while keeping the
-        event row when it has finished ones to show. The event still being
-        there is therefore no longer proof that a per-event choice has
-        anywhere to land: one stored now would put back exactly what the
-        deletion cleared, on a series that will never run again.
+        `/event delete` clears the automatic sign-ups and remembered roles
+        while keeping the event row - and the run this flow is about, when
+        that run has finished. Neither the event nor the run being there is
+        therefore proof that the choice has anywhere to land; the series
+        having a run that has not reached OVER is (see
+        _series_has_runs_left). A run called off while the series carries on
+        is the other way round: the successor is already seeded, so what the
+        member asked to remember still serves it.
         """
-        occurrence = self.bot.event_store.get_occurrence(
-            self.occurrence.occurrence_id
-        )
-        if occurrence is not None:
+        if _series_has_runs_left(self.bot, self.event):
             return True
         LOGGER.debug(
-            "Skipped a signup choice whose run is gone; event_id=%s "
-            "occurrence_id=%s user_id=%s",
+            "Skipped a signup choice for a series with no runs left; "
+            "event_id=%s occurrence_id=%s user_id=%s",
             self.event.event_id,
             self.occurrence.occurrence_id,
             self.discord_user_id,
@@ -6396,9 +6406,9 @@ class RememberChoiceView(discord.ui.View):
         flex_roles: tuple[EventRole, ...],
         mode: PreferenceMode,
     ) -> None:
-        # Nothing is remembered for a run that went while the prompt sat
+        # Nothing is remembered for a series that ended while the prompt sat
         # open; the seating below is what reports that to the member.
-        if self._flow.still_has_its_run():
+        if self._flow.series_has_runs_left():
             self._flow.bot.event_store.set_signup_preference(
                 self._flow.event.event_id,
                 self._flow.discord_user_id,
@@ -6452,13 +6462,16 @@ class AutoSignupChoiceView(discord.ui.View):
         choice: AutoSignupChoice,
         confirmation: str,
     ) -> None:
-        if not self._flow.still_has_its_run():
-            # The run this prompt was offered after has been called off,
-            # taking the seat with it. Storing the choice would put back what
-            # the deletion cleared and promise sign-ups for runs that are
-            # never coming, so say what happened instead.
+        if not self._flow.series_has_runs_left():
+            # The series ended while this prompt sat open - deleting an event
+            # takes its automatic sign-ups with the runs still to come.
+            # Storing the choice would put back what the deletion cleared and
+            # promise sign-ups for runs that are never coming, so say what
+            # happened instead.
             await interaction.response.edit_message(
-                content="That run is no longer there, so nothing was saved.",
+                content=(
+                    "This event has no runs left, so nothing was saved."
+                ),
                 view=None,
             )
             return

@@ -759,10 +759,12 @@ it. The event's automatic sign-ups and remembered roles go with it, and so
 does any run that never reached a message — there is no post to keep, and a
 pending run left behind would be posted by the next maintenance pass.
 
-The runs the event has already put on are kept exactly as they stand. Their
-messages stay in the channel, their rosters stay stored, and the calendar goes
-on showing them on the days they were run, so deleting a weekly raid ends the
-series without erasing the months behind it.
+The runs the event has already put on are kept. Their messages stay in the
+channel, their rosters stay stored, and the calendar goes on showing them on the
+days they were run, so deleting a weekly raid ends the series without erasing
+the months behind it. A run that finished in the last minute — before the
+maintenance pass caught up with its end — has its post and thread rendered as
+finished on the way out, since nothing looks at it again afterwards.
 
 An event that keeps runs that way is retired rather than removed: it is no
 longer offered by the `/event` autocompletes, cannot be edited, cancelled or
