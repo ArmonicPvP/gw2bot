@@ -753,16 +753,17 @@ even though the cancellation removed its last post.
 `/event delete event_id:<event>` ends an event and requires the event role
 `1318357141521825872`. It confirms first, and names what it is about to keep.
 
-What it removes is what is still to come: the run the event is on now, its
-message, the signup thread the bot opened for it, and everyone's sign-ups for
-it. The event's automatic sign-ups and remembered roles go with it, and so
+What it removes is every run that has not finished, the one in progress
+included: their messages, the signup threads the bot opened for them, and
+everyone's sign-ups for them. The event's automatic sign-ups and remembered roles go with it, and so
 does any run that never reached a message — there is no post to keep, and a
 pending run left behind would be posted by the next maintenance pass.
 
-The runs the event has already put on are kept. Their messages stay in the
-channel, their rosters stay stored, and the calendar goes on showing them on the
-days they were run, so deleting a weekly raid ends the series without erasing
-the months behind it. A run that finished in the last minute — before the
+The runs the event has already put on are kept. Their posts are left alone,
+their rosters stay stored, and the calendar goes on showing them on the days
+they were run, so deleting a weekly raid ends the series without erasing the
+months behind it. (A run whose message somebody had already deleted keeps its
+row and its roster; there is no post left to leave alone.) A run that finished in the last minute — before the
 maintenance pass caught up with its end — has its post and thread rendered as
 finished on the way out, since nothing looks at it again afterwards.
 

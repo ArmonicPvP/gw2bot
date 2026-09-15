@@ -2054,6 +2054,34 @@ class TestSignOutFlow:
         content = interaction.response.edit_message.await_args.kwargs["content"]
         assert "Automatic sign-up is off" in content
 
+    async def test_keep_button_promises_nothing_once_the_series_ends(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Declining writes nothing, but it does promise a next occurrence -
+        # which a deletion has taken along with the setting itself.
+        event, occurrence = self._make_live_occurrence(store)
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+        view = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.retire_event(event.event_id, [])
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.keep_auto.callback(interaction)
+
+        content = interaction.response.edit_message.await_args.kwargs[
+            "content"
+        ]
+        assert "no runs left" in content
+        assert "next occurrence" not in content
+
     async def test_disable_button_skips_a_series_with_no_runs_left(
         self,
         fake_bot: Any,
@@ -3279,6 +3307,37 @@ class TestEditSignupFlow:
         assert preference is not None
         assert preference.role is EventRole.DPS
         assert preference.flex_roles == ()
+
+    async def test_keeping_old_roles_reports_a_series_that_ended(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # "Left unchanged" would describe roles the deletion already cleared.
+        event, occurrence = self.make_signed_up_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.set_signup_preference(
+            event.event_id,
+            42,
+            EventRole.QUICKNESS_DPS,
+            (),
+            PreferenceMode.REMEMBER,
+        )
+        flow = EditSignupFlow(fake_bot, event, occurrence, 42)
+        flow.role = EventRole.ALACRITY_DPS
+        prompt = UpdateRememberedRolesView(flow)
+        store.retire_event(event.event_id, [])
+        interaction = make_interaction(message=ephemeral_message())
+
+        await prompt.keep.callback(interaction)
+
+        content = interaction.response.edit_message.await_args.kwargs[
+            "content"
+        ]
+        assert "no runs left" in content
+        assert "left unchanged" not in content
 
     async def test_remembered_roles_skip_a_series_with_no_runs_left(
         self,
@@ -5348,6 +5407,25 @@ class TestDeleteCommand:
 
         content = interaction.response.send_message.await_args.args[0]
         assert "one finished run is kept" in content
+
+    async def test_delete_confirmation_names_the_run_in_progress(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A run in progress is removed like any unfinished one, so the
+        # confirmation must not read as sparing it.
+        group = EventCommands(fake_bot)
+        event, _ = make_ongoing_edit_event(store)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.delete.callback)(
+            group, interaction, event.event_id
+        )
+
+        content = interaction.response.send_message.await_args.args[0]
+        assert "every run that has not finished" in content
+        assert "in progress" in content
 
     async def test_delete_confirmation_stays_quiet_without_history(
         self,

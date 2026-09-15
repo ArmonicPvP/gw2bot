@@ -3969,17 +3969,25 @@ async def _send_flow_result(
 
 
 def _deleted_history_note(kept: int) -> str:
-    """What a deletion reply says about the runs it left standing."""
+    """What a deletion reply says about the runs it left standing.
+
+    It promises what the deletion itself decides - the runs stay, with their
+    rosters and their place on the calendar, and their posts were not touched
+    - rather than that the posts are still there. A run retires early when its
+    message turns out to be gone, keeping the row and the id of a message
+    Discord no longer has, so "its post is still up" is not the deletion's to
+    promise.
+    """
     if not kept:
         return ""
     if kept == 1:
         return (
-            " Its one finished run was kept, so that post and its place on "
-            "the calendar still stand."
+            " Its one finished run was kept, with its place on the calendar, "
+            "and its post was left alone."
         )
     return (
-        f" Its {kept} finished runs were kept, so those posts and their "
-        "places on the calendar still stand."
+        f" Its {kept} finished runs were kept, with their places on the "
+        "calendar, and their posts were left alone."
     )
 
 
@@ -5562,6 +5570,25 @@ class DisableAutoSignupView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[DisableAutoSignupView],
     ) -> None:
+        # Declining writes nothing, but it does promise a next occurrence, so
+        # it needs the same check as the button beside it: the series can have
+        # been deleted while this sat open, taking both the setting and the
+        # runs the promise is about.
+        if not _series_has_runs_left(self._bot, self._event):
+            LOGGER.debug(
+                "Kept auto signup for a series with no runs left; "
+                "event_id=%s user_id=%s",
+                self._event.event_id,
+                self._discord_user_id,
+            )
+            await interaction.response.edit_message(
+                content=(
+                    "This event has no runs left, so it will not sign you up "
+                    "again either way."
+                ),
+                view=None,
+            )
+            return
         LOGGER.debug(
             "Kept auto signup after sign out; event_id=%s user_id=%s",
             self._event.event_id,
@@ -6300,6 +6327,18 @@ class UpdateRememberedRolesView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[UpdateRememberedRolesView],
     ) -> None:
+        # Nothing is written either way, but "left unchanged" would describe
+        # roles a deletion has already cleared, so it answers the same
+        # question the button beside it does.
+        if not self._flow.series_has_runs_left():
+            await interaction.response.edit_message(
+                content=(
+                    "This event has no runs left, so it no longer remembers "
+                    "any roles."
+                ),
+                view=None,
+            )
+            return
         await interaction.response.edit_message(
             content=(
                 "Your remembered roles for this event were left unchanged."
