@@ -15,7 +15,6 @@ from gw2bot.profit.api import (
     ProfitApiError,
 )
 from gw2bot.profit.models import (
-    MIN_FLIP_QUANTITY,
     ROLLING_AVERAGE_DAYS,
     DeliveryItem,
     DeliveryReport,
@@ -164,6 +163,20 @@ class ProfitService:
         """Exclude or restore one item in the member's Open Orders table."""
         return await asyncio.to_thread(
             self._store.set_order_exclusion,
+            discord_user_id,
+            item_id,
+            excluded,
+        )
+
+    async def set_item_exclusion(
+        self,
+        discord_user_id: int,
+        item_id: int,
+        excluded: bool,
+    ) -> bool:
+        """Exclude or restore one item in the member's realized profit."""
+        return await asyncio.to_thread(
+            self._store.set_item_exclusion,
             discord_user_id,
             item_id,
             excluded,
@@ -323,6 +336,7 @@ class ProfitService:
         (
             realized,
             trailing_days,
+            excluded_items,
             current_sells,
             history_start,
             buy_count,
@@ -341,13 +355,16 @@ class ProfitService:
         unrealized_item_ids = {item_id for item_id, _price in unrealized.items}
         market_prices, item_names = await asyncio.gather(
             # Priced for the picks, and for what the held stock would fetch
-            # against the rest of the market right now.
+            # against the rest of the market right now. An excluded item is
+            # in no table that carries a price, so none is fetched for it.
             self._api.fetch_market_prices(
                 set(realized.items) | unrealized_item_ids,
                 force=force,
             ),
             self._resolve_item_names(
-                set(realized.items) | unrealized_item_ids,
+                # An excluded item still needs its name, or the member cannot
+                # tell what they are restoring.
+                set(realized.items) | unrealized_item_ids | set(excluded_items),
                 loaded_at,
             ),
         )
@@ -364,18 +381,21 @@ class ProfitService:
             unrealized=unrealized,
             item_names=item_names,
             market_prices=market_prices,
+            excluded_items=excluded_items,
             trailing_days=trailing_days,
             history_start=history_start,
             key_generation=snapshot.origin,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
-            "unrealized_items=%s market_prices=%s history_start=%s",
+            "unrealized_items=%s market_prices=%s hidden_items=%s "
+            "history_start=%s",
             discord_user_id,
             days,
             len(realized.items),
             len(unrealized.items),
             len(market_prices),
+            len(excluded_items),
             history_start is not None,
         )
         return report
@@ -590,9 +610,10 @@ class ProfitService:
         sells = self._store.get_transactions(
             discord_user_id, "history_sells", **bound
         )
-        # No flip threshold here: it belongs to the window a member asked
-        # for, not to their whole history, and is applied when the rollups
-        # are read back.
+        # Every item is matched here, hidden ones included: what a member
+        # leaves out of their flipped profit is a choice about the report,
+        # not about their history, so it is applied when the rollups are read
+        # back and costs nothing to change back.
         item_days, carried = self._match_in_segments(
             discord_user_id,
             buys,
@@ -709,6 +730,7 @@ class ProfitService:
     ) -> tuple[
         RealizedProfit,
         dict[str, int],
+        frozenset[int],
         list[Transaction],
         datetime | None,
         int,
@@ -723,37 +745,37 @@ class ProfitService:
         )
         opening_day = cutoff.date().isoformat()
         open_lots = self._store.get_open_lots(discord_user_id)
+        excluded_items = self._store.get_excluded_profit_items(discord_user_id)
         realized = aggregate_rollups(
             [row for row in rollups if row[1] >= opening_day],
             open_lots,
-            minimum_flip_quantity=MIN_FLIP_QUANTITY,
+            excluded_items=excluded_items,
         )
         # The trailing average reads its own series, summed in one pass over
-        # the whole stretch it covers. The five-unit flip rule is a question
-        # about the stretch it is applied to, so applying it to the window
-        # and to the dates behind it separately would count an item that
-        # cleared five units across the two on one side of the window's first
-        # date and not on the other, and the average would step at that date
-        # for no reason a reader could see.
+        # the whole stretch it covers, leaving out the same items the window
+        # does. Every table and every chart on the page then describes the
+        # same set of trades, so hiding an item moves all of them together.
         trailing_days = {
             sold_day: totals.profit
             for sold_day, totals in aggregate_rollups(
                 rollups,
                 open_lots,
-                minimum_flip_quantity=MIN_FLIP_QUANTITY,
+                excluded_items=excluded_items,
             ).days.items()
         }
         LOGGER.debug(
             "Read windowed profit report; user_id=%s rollups=%s "
-            "window_days=%s trailing_days=%s",
+            "window_days=%s trailing_days=%s hidden_items=%s",
             discord_user_id,
             len(rollups),
             len(realized.days),
             len(trailing_days),
+            len(excluded_items),
         )
         return (
             realized,
             trailing_days,
+            excluded_items,
             # What is listed for sale now, which is a reading of the present
             # rather than of the window: a member's held stock is theirs
             # today whichever dates the report covers.
@@ -1185,6 +1207,22 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             ),
         },
         "items": items,
+        # The items left out of every figure above, named so the page can
+        # list them for restoring. An item hidden while it had no trades in
+        # this window is here too, which is what lets it be put back.
+        "excluded_items": [
+            {"item_id": item_id, "name": name}
+            for item_id, name in sorted(
+                (
+                    (
+                        item_id,
+                        report.item_names.get(item_id, f"Item {item_id}"),
+                    )
+                    for item_id in report.excluded_items
+                ),
+                key=lambda entry: (entry[1].casefold(), entry[0]),
+            )
+        ],
         "picks": picks,
         "days_table": day_rows,
         # The series the trailing seven-day average is drawn from: every UTC

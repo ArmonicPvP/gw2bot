@@ -145,13 +145,16 @@ class TestProfitCalculation:
 
     @pytest.mark.parametrize(
         ("buy_quantity", "sell_quantity"),
-        [(250, 4), (4, 250)],
+        [(250, 4), (4, 250), (1, 1)],
     )
-    def test_excludes_items_when_either_side_matches_fewer_than_five_units(
+    def test_reports_a_flip_however_few_units_it_matched(
         self,
         buy_quantity: int,
         sell_quantity: int,
     ) -> None:
+        # There is no unit threshold any more. A member who wants an item
+        # left out says so with an exclusion instead, which is their choice
+        # rather than a rule the report applies on their behalf.
         result = calculate_realized_profit(
             [transaction("buy", quantity=buy_quantity)],
             [
@@ -161,17 +164,16 @@ class TestProfitCalculation:
                     occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
                 )
             ],
-            minimum_flip_quantity=5,
         )
 
-        assert result.items == {}
-        assert result.days == {}
-        assert result.total_matched_quantity == 0
-        # What is still held is reported even when the item is not a flip:
-        # those units are unmatched purchases whatever the threshold says,
-        # and a later pass has to carry them forward to stay correct.
+        matched = min(buy_quantity, sell_quantity)
+        assert result.items[1].matched_quantity == matched
+        assert result.total_matched_quantity == matched
+        assert result.days["2026-08-02"].matched_quantity == matched
+        # What is still held is reported alongside it, so a later pass can
+        # carry those lots forward.
         held = sum(lot.remaining for lot in result.unmatched_buys.get(1, ()))
-        assert held == max(0, buy_quantity - min(buy_quantity, sell_quantity))
+        assert held == buy_quantity - matched
 
     def test_a_second_pass_resumes_from_the_lots_the_first_left(self) -> None:
         buys = [transaction("buy", quantity=10, price=100)]
@@ -214,7 +216,6 @@ class TestProfitCalculation:
                 )
             ],
             [transaction("sell", quantity=5)],
-            minimum_flip_quantity=5,
         )
 
         assert result.items == {}
@@ -227,7 +228,6 @@ class TestProfitCalculation:
         result = calculate_realized_profit(
             [transaction("buy", quantity=5, occurred_at=occurred_at)],
             [transaction("sell", quantity=5, occurred_at=occurred_at)],
-            minimum_flip_quantity=5,
         )
 
         assert result.items == {}
@@ -306,6 +306,36 @@ class TestProfitCalculation:
         assert sum(
             row["profit_share_percent"] for row in items.values()
         ) == pytest.approx(100)
+
+    def test_names_every_hidden_item_including_the_untraded_ones(
+        self,
+    ) -> None:
+        # An item hidden while it traded, then left alone for a window it has
+        # no rows in, is in no table on the page. The payload still names it,
+        # which is the only way the member can find it to restore it.
+        report = ProfitReport(
+            days=30,
+            range_key="30d",
+            rolling_days=None,
+            window_start=datetime(2026, 8, 1, tzinfo=UTC),
+            window_end=datetime(2026, 8, 31, tzinfo=UTC),
+            buy_transaction_count=0,
+            sell_transaction_count=0,
+            realized=RealizedProfit({}, {}, {}, 0, 0, 0, 0),
+            unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
+            item_names={9: "Bolt of Damask"},
+            excluded_items=frozenset({9, 11}),
+        )
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+
+        # Sorted by name, and an item whose name never arrived falls back to
+        # its id rather than dropping out of the list it has to be in.
+        assert payload["excluded_items"] == [
+            {"item_id": 9, "name": "Bolt of Damask"},
+            {"item_id": 11, "name": "Item 11"},
+        ]
+        assert payload["items"] == []
 
     def test_preserves_sale_revenue_remainder_across_fifo_lots(self) -> None:
         buys = [
@@ -716,23 +746,47 @@ class TestRollups:
         # Hold time is the units-weighted mean across the window.
         assert realized.items[1].hold_seconds == (432_000 + 864_000) / 10
 
-    def test_the_flip_threshold_applies_to_the_window_not_the_history(
-        self,
-    ) -> None:
-        # Four units of item 2 in this window is not a flip, however many
-        # were traded before it.
+    def test_an_excluded_item_leaves_every_total_it_was_in(self) -> None:
+        # Item 2 is one the member asked not to count as flipped profit,
+        # however much of it they traded.
+        rollups = [
+            (1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 0.0)),
+            (2, "2026-08-01", ItemDayProfit(400, 4_000, 8_000, 4_000, 0.0)),
+        ]
+
+        realized = aggregate_rollups(
+            rollups, {}, excluded_items=frozenset({2})
+        )
+
+        assert set(realized.items) == {1}
+        assert realized.total_profit == 350
+        assert realized.total_matched_quantity == 5
+        # The excluded item leaves the day totals as well, so the tables and
+        # the footer keep describing the same trades.
+        assert realized.days["2026-08-01"].profit == 350
+
+    def test_a_small_flip_is_kept_unless_the_member_excluded_it(self) -> None:
         rollups = [
             (1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 0.0)),
             (2, "2026-08-01", ItemDayProfit(4, 40, 80, 40, 0.0)),
         ]
 
-        realized = aggregate_rollups(rollups, {}, minimum_flip_quantity=5)
+        realized = aggregate_rollups(rollups, {})
+
+        assert set(realized.items) == {1, 2}
+        assert realized.days["2026-08-01"].profit == 390
+
+    def test_excluding_an_item_that_traded_nothing_changes_nothing(
+        self,
+    ) -> None:
+        rollups = [(1, "2026-08-01", ItemDayProfit(5, 500, 850, 350, 0.0))]
+
+        realized = aggregate_rollups(
+            rollups, {}, excluded_items=frozenset({7})
+        )
 
         assert set(realized.items) == {1}
         assert realized.total_profit == 350
-        # The excluded item leaves the day totals as well, so the tables and
-        # the footer keep describing the same trades.
-        assert realized.days["2026-08-01"].profit == 350
 
     def test_rollups_reproduce_a_direct_match_of_the_same_trades(self) -> None:
         buys = [
@@ -769,10 +823,6 @@ class TestRollups:
         assert realized.total_profit == 0
         assert realized.items == {}
         assert realized.days == {}
-
-    def test_a_zero_flip_threshold_is_refused(self) -> None:
-        with pytest.raises(ValueError):
-            aggregate_rollups([], {}, minimum_flip_quantity=0)
 
 
 class TestLotCheckpointHelpers:
@@ -1515,6 +1565,43 @@ class TestProfitStore:
         assert store.get_excluded_order_items(101) == frozenset({24_292})
         assert store.get_excluded_order_items(202) == frozenset({8_871})
 
+    def test_excluded_profit_items_stay_with_the_member_who_set_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+
+        assert store.get_excluded_profit_items(101) == frozenset()
+        assert store.set_item_exclusion(101, 19_721, True)
+        # Excluding an already excluded item changes nothing and does not fail.
+        assert not store.set_item_exclusion(101, 19_721, True)
+        assert store.set_item_exclusion(101, 24_292, True)
+        assert store.set_item_exclusion(202, 8_871, True)
+
+        assert store.get_excluded_profit_items(101) == frozenset(
+            {19_721, 24_292}
+        )
+        assert store.get_excluded_profit_items(202) == frozenset({8_871})
+
+        assert store.set_item_exclusion(101, 19_721, False)
+        assert not store.set_item_exclusion(101, 19_721, False)
+
+        assert store.get_excluded_profit_items(101) == frozenset({24_292})
+        assert store.get_excluded_profit_items(202) == frozenset({8_871})
+
+    def test_the_two_hidden_sets_are_kept_apart(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # Hiding an item from Open Orders is not a statement about the
+        # realized tables, so neither set reads the other's rows.
+        store, _, _ = profit_store
+        store.set_order_exclusion(101, 19_721, True)
+        store.set_item_exclusion(101, 24_292, True)
+
+        assert store.get_excluded_order_items(101) == frozenset({19_721})
+        assert store.get_excluded_profit_items(101) == frozenset({24_292})
+
     def test_refuses_an_exclusion_without_a_usable_item(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -1523,6 +1610,8 @@ class TestProfitStore:
 
         with pytest.raises(ValueError):
             store.set_order_exclusion(101, 0, True)
+        with pytest.raises(ValueError):
+            store.set_item_exclusion(101, 0, True)
 
     def test_replacing_a_key_keeps_the_window_and_exclusions(
         self,
@@ -1532,11 +1621,13 @@ class TestProfitStore:
         store.set_api_key(101, "first-member-secret")
         store.set_report_window(101, ReportWindow(days=60))
         store.set_order_exclusion(101, 19_721, True)
+        store.set_item_exclusion(101, 24_292, True)
 
         store.set_api_key(101, "replacement-member-secret")
 
         assert store.get_report_window(101) == ReportWindow(days=60)
         assert store.get_excluded_order_items(101) == frozenset({19_721})
+        assert store.get_excluded_profit_items(101) == frozenset({24_292})
 
     def test_deleting_a_key_takes_the_window_and_exclusions_with_it(
         self,
@@ -1546,16 +1637,20 @@ class TestProfitStore:
         store.set_api_key(101, "member-secret")
         store.set_report_window(101, ReportWindow(days=60))
         store.set_order_exclusion(101, 19_721, True)
+        store.set_item_exclusion(101, 24_292, True)
         store.set_api_key(202, "other-member-secret")
         store.set_report_window(202, ReportWindow(days=7))
         store.set_order_exclusion(202, 8_871, True)
+        store.set_item_exclusion(202, 8_872, True)
 
         assert store.delete_api_key(101)
 
         assert store.get_report_window(101) is None
         assert store.get_excluded_order_items(101) == frozenset()
+        assert store.get_excluded_profit_items(101) == frozenset()
         assert store.get_report_window(202) == ReportWindow(days=7)
         assert store.get_excluded_order_items(202) == frozenset({8_871})
+        assert store.get_excluded_profit_items(202) == frozenset({8_872})
 
 
 class TestProfitService:
@@ -2562,16 +2657,21 @@ class TestProfitService:
         assert "trailing_days=2" in caplog.text
         assert secret not in caplog.text
 
-    async def test_the_average_reads_one_flip_rule_across_its_whole_stretch(
+    async def test_a_hidden_item_leaves_the_window_and_the_average_alike(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, _ = profit_store
         store.set_api_key(101, "member-secret")
+        # Item 1 is hidden, so nothing it traded is counted - on the dates
+        # inside the window or on the ones behind it the average reads.
+        # Counting it on one and not the other is what would put a step in
+        # the line at the window's first date.
+        store.set_item_exclusion(101, 1, True)
         now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
         buys = [
             transaction(
-                "buy-straddler",
+                "buy-hidden",
                 item_id=1,
                 price=100,
                 quantity=5,
@@ -2586,26 +2686,22 @@ class TestProfitService:
             ),
         ]
         sells = [
-            # One unit behind the window and four inside it: five across the
-            # stretch the average covers, and four inside the window, so the
-            # flip rule keeps this item on one reading and drops it on the
-            # other.
+            # One date behind the window the average still reads, and one
+            # inside it that item 2 sells on too.
             transaction(
-                "sell-straddler-behind",
+                "sell-hidden-behind",
                 item_id=1,
                 price=200,
                 quantity=1,
                 occurred_at=datetime(2026, 8, 12, tzinfo=UTC),
             ),
             transaction(
-                "sell-straddler-inside",
+                "sell-hidden-inside",
                 item_id=1,
                 price=200,
                 quantity=4,
                 occurred_at=datetime(2026, 8, 18, tzinfo=UTC),
             ),
-            # Enough of its own to be kept either way, so neither the tables
-            # nor the charts are empty.
             transaction(
                 "sell-kept",
                 item_id=2,
@@ -2635,7 +2731,7 @@ class TestProfitService:
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(side_effect=fetched),
             fetch_item_names=AsyncMock(
-                return_value={1: "Straddler", 2: "Kept Item"}
+                return_value={1: "Hidden Item", 2: "Kept Item"}
             ),
             fetch_market_prices=AsyncMock(
                 return_value={
@@ -2647,17 +2743,25 @@ class TestProfitService:
 
         report = await service.load_report(101, ReportWindow(days=7), now=now)
 
-        # The window's own tables drop the straddling item: four units is
-        # under the flip rule's five.
         assert list(report.realized.items) == [2]
-        # The average reads both of its dates under one rule instead, so the
-        # four units inside the window are counted wherever its one unit
-        # behind the window was. Counting one and not the other is what put
-        # a step in the line at the window's first date.
-        behind = report.trailing_days["2026-08-12"]
-        inside = report.trailing_days["2026-08-18"]
-        assert behind > 0
-        assert inside - report.realized.days["2026-08-18"].profit == behind * 4
+        assert report.excluded_items == frozenset({1})
+        # A hidden item still needs its name, or the member cannot tell what
+        # they are restoring.
+        assert report.item_names[1] == "Hidden Item"
+        # The date only the hidden item sold on has nothing left on it, and
+        # the shared date carries item 2 alone.
+        assert "2026-08-12" not in report.trailing_days
+        assert (
+            report.trailing_days["2026-08-18"]
+            == report.realized.days["2026-08-18"].profit
+        )
+        # Your Picks revisits the realized items, so it drops the hidden one
+        # with them.
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert [pick["item_id"] for pick in payload["picks"]] == [2]
+        assert payload["excluded_items"] == [
+            {"item_id": 1, "name": "Hidden Item"}
+        ]
 
     async def test_report_window_is_remembered_once_a_member_picks_one(
         self,
@@ -2742,6 +2846,11 @@ class TestProfitService:
         assert store.get_excluded_order_items(101) == frozenset({19_721})
         assert await service.set_order_exclusion(101, 19_721, False)
         assert store.get_excluded_order_items(101) == frozenset()
+
+        assert await service.set_item_exclusion(101, 24_292, True)
+        assert store.get_excluded_profit_items(101) == frozenset({24_292})
+        assert await service.set_item_exclusion(101, 24_292, False)
+        assert store.get_excluded_profit_items(101) == frozenset()
 
 
 class TestRollupStore:

@@ -1408,9 +1408,10 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   24-hour, 7-day, 30-day and custom windows the other dashboards do; this
   argument is the way to name a length none of those buttons covers.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
-  data, remembered report window, and hidden Open Orders items. It cannot
-  affect any other member's key, cache, or choices. Replacing a key with
-  `/profit setkey` keeps the window and the hidden items.
+  data, remembered report window, and both lists of hidden items — the Open
+  Orders one and the realized-profit one. It cannot affect any other member's
+  key, cache, or choices. Replacing a key with `/profit setkey` keeps the
+  window and the hidden items.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
@@ -1434,14 +1435,34 @@ rather than over the chosen window, so a sale of stock bought before the window
 began is costed from the purchase that actually paid for it. It used to be
 dropped for having no match inside the window, which understated short windows
 — by around 13% on a week for a busy trader, and by little or nothing once the
-window covers most of the held history. An item counts as a flip only after at
-least five units have been matched inside the window. Click any column heading in the
-detail tables to sort it; click the same heading again to reverse the
-order. The totals remain
+window covers most of the held history. Every item with a matched sale in the
+window is reported, however few units it cleared; an item a member does not
+want counted is hidden by hand, as described below, rather than dropped by a
+unit threshold. Click any column heading in the detail tables to sort it; click
+the same heading again to reverse the order. The totals remain
 pinned below the sortable rows. Realized and projected ROI are profit divided
 by their corresponding matched cost. Each realized item also shows its
 unit-weighted average time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
+
+Each **Realized Profit by Item** row ends with a crossed-out eye button that
+leaves that item out of the member's flipped profit. Hiding one is not a change
+to the item table alone: the item leaves the summary, all three daily charts,
+the **Realized Profit by Day** table and **Your Picks** with it, so every figure
+on the page keeps describing the same trades. Use it for stock that is not a
+flip — a sale out of long-held storage, or an item bought to use rather than to
+resell — whose result would otherwise read as trading profit. The matching
+itself is untouched, so restoring an item brings its whole history back rather
+than re-reading the Trading Post.
+
+Hidden items are remembered against the member's Discord account, so they
+survive a reload, a new sign-in, and a different browser, and hiding an item
+affects only that member's own dashboard. The three dots at the top right of
+the section open a **Hidden items** window listing them in a searchable table,
+each with a **Restore** button; an item with no trades in the window on screen
+is listed there too, so it can always be put back. **Open Orders** keeps its
+own separate list: hiding an item from one table says nothing about the other.
+
 The **Your Picks** table revisits items flipped in the selected window using
 their current highest buy order and lowest sell listing. Its columns sort like
 those of the other detail tables, and it shows the ten rows at the top of
@@ -1472,13 +1493,16 @@ worth reading every visit. Hidden items are remembered against the member's
 Discord account, so they survive a reload, a new sign-in, and a different
 browser, and hiding an item affects only that member's own dashboard.
 
-The three dots at the top right of the section open a **Hidden items** window
-listing them in a searchable table, each with a **Restore** button that puts the
-item back. A member may accumulate hundreds of them, so the list lives behind
-that button rather than above the table, and the search box filters it by name.
-The window closes with its × button, the Escape key, or a click outside it. An
+The three dots at the top right of the section open this table's own **Hidden
+items** window, listing them in a searchable table, each with a **Restore**
+button that puts the item back. A member may accumulate hundreds of them, so the
+list lives behind that button rather than above the table, and the search box
+filters it by name. The window closes with its × button, the Escape key, or a
+click outside it. An
 item hidden while it had an order keeps its entry there after the order fills or
-is cancelled, so it can always be restored.
+is cancelled, so it can always be restored. Hiding an item here leaves the
+realized tables alone; the eye in **Realized Profit by Item** is what hides it
+from those.
 
 The **Unclaimed Trading Post** section shows the coins waiting for pickup and
 then one row per item waiting with it, with the totals below them. An item
@@ -1584,11 +1608,10 @@ carries a series of its own, covering the six UTC dates before the window as
 well as the window itself, so every date drawn has a whole week behind it
 rather than the line starting six dates in and a seven-day window showing a
 single dot. That series is summed in one pass across the whole stretch it
-covers, so every date in it passes the same five-unit flip rule; the daily
-table is summed over the window alone, so an item that only clears five units
-once the dates behind the window are counted lifts the average a little above
-the bars. The six dates behind the window are drawn nowhere else — no bar, no
-cumulative total, and no row in the daily table. Because the average is a
+covers and leaves out the same hidden items the window does, so hiding an item
+moves the bars, the two averages and the cumulative line together. The six
+dates behind the window are drawn nowhere else — no bar, no cumulative total,
+and no row in the daily table. Because the average is a
 reading of the week behind each of its dates rather than of the window, a
 quiet window that follows a profitable one still draws it, with the other two
 charts reporting no realized profit.

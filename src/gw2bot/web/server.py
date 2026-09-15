@@ -227,6 +227,10 @@ class WebServer:
                     "/api/profit/exclusions",
                     self._profit_exclusion,
                 ),
+                web.post(
+                    "/api/profit/item-exclusions",
+                    self._profit_item_exclusion,
+                ),
             ]
         )
 
@@ -947,12 +951,32 @@ class WebServer:
         self,
         request: web.Request,
     ) -> web.StreamResponse:
+        return await self._profit_exclusion_change(request, "order")
+
+    async def _profit_item_exclusion(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        return await self._profit_exclusion_change(request, "item")
+
+    async def _profit_exclusion_change(
+        self,
+        request: web.Request,
+        scope: str,
+    ) -> web.StreamResponse:
+        """Hide or restore one item in the open orders or the realized table.
+
+        Both tables are hidden from the same way and remembered against the
+        same account, so they share this handler and differ only in which
+        stored set the change lands in.
+        """
         session = request[SESSION_KEY]
         try:
             body = await request.json()
         except ValueError:
             LOGGER.debug(
-                "Rejected profit order exclusion; user_id=%s reason=malformed",
+                "Rejected profit %s exclusion; user_id=%s reason=malformed",
+                scope,
                 session.user_id,
             )
             return self._json({"error": "invalid request"}, status=400)
@@ -965,33 +989,38 @@ class WebServer:
             or not isinstance(excluded, bool)
         ):
             LOGGER.debug(
-                "Rejected profit order exclusion; user_id=%s reason=fields",
+                "Rejected profit %s exclusion; user_id=%s reason=fields",
+                scope,
                 session.user_id,
             )
             return self._json({"error": "invalid request"}, status=400)
         service = self._bot.profit_service
         if service is None:
             LOGGER.error(
-                "Could not store profit order exclusion; service=unavailable"
+                "Could not store profit %s exclusion; service=unavailable",
+                scope,
             )
             return self._json({"error": "unavailable"}, status=503)
+        store_change = (
+            service.set_item_exclusion
+            if scope == "item"
+            else service.set_order_exclusion
+        )
         try:
-            changed = await service.set_order_exclusion(
-                session.user_id,
-                item_id,
-                excluded,
-            )
+            changed = await store_change(session.user_id, item_id, excluded)
         except (SQLAlchemyError, ValueError) as exc:
             LOGGER.error(
-                "Could not store profit order exclusion; user_id=%s "
+                "Could not store profit %s exclusion; user_id=%s "
                 "error_type=%s",
+                scope,
                 session.user_id,
                 type(exc).__name__,
             )
             return self._json({"error": "exclusion unavailable"}, status=500)
         LOGGER.info(
-            "Stored profit order exclusion; user_id=%s item_id=%s "
+            "Stored profit %s exclusion; user_id=%s item_id=%s "
             "excluded=%s changed=%s",
+            scope,
             session.user_id,
             item_id,
             excluded,
