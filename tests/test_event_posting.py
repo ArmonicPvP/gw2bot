@@ -51,9 +51,11 @@ from gw2bot.events.posting import (
     prune_superseded_occurrences,
     rebalance_occurrence_roster,
     refresh_occurrence_message,
+    refresh_retired_posts,
     remove_signup,
     repost_occurrence,
     seat_signup,
+    split_event_history,
     sweep_stale_announcement,
 )
 from gw2bot.events.formatting import roster_update_messages
@@ -7662,6 +7664,177 @@ class TestRebalanceOccurrenceRoster:
         ]
 
 
+class TestRefreshRetiredPosts:
+    async def test_renders_every_kept_run_past_a_failed_roster_read(
+        self,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The rows are already retired when this runs, so a roster it cannot
+        # read must cost that post its final render and nothing else - not
+        # the posts after it, and not the reply the commander is waiting on.
+        bot = cast(Any, FakeBot(store, channel))
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        first = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(first.occurrence_id, 1234, 555, 777)
+        second = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        store.set_occurrence_message(second.occurrence_id, 1234, 556, 778)
+        kept = store.get_event_occurrences(event.event_id)
+        real_get_signups = store.get_signups
+
+        def refuse_first_roster(occurrence_id: int) -> Any:
+            if occurrence_id == first.occurrence_id:
+                raise SQLAlchemyError("the roster could not be read")
+            return real_get_signups(occurrence_id)
+
+        store.get_signups = refuse_first_roster  # type: ignore[method-assign]
+        try:
+            refreshed = await refresh_retired_posts(
+                bot,
+                event,
+                kept,
+                START + timedelta(days=2),
+            )
+        finally:
+            store.get_signups = real_get_signups  # type: ignore[method-assign]
+
+        assert refreshed == 1
+        channel.partial_message.edit.assert_awaited_once()
+
+    async def test_renders_every_kept_run_past_a_refused_edit(
+        self,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        bot = cast(Any, FakeBot(store, channel))
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        for index in range(2):
+            occurrence = store.create_occurrence(
+                event.event_id,
+                START + timedelta(days=index),
+            )
+            store.set_occurrence_message(
+                occurrence.occurrence_id,
+                1234,
+                555 + index,
+                777 + index,
+            )
+        kept = store.get_event_occurrences(event.event_id)
+        channel.partial_message.edit = AsyncMock(
+            side_effect=[forbidden_error(50013), None]
+        )
+
+        refreshed = await refresh_retired_posts(
+            bot,
+            event,
+            kept,
+            START + timedelta(days=2),
+        )
+
+        # The refusal is logged and the run after it is still rendered.
+        assert refreshed == 1
+        assert channel.partial_message.edit.await_count == 2
+
+
+class TestSplitEventHistory:
+    def test_keeps_the_finished_runs_and_removes_the_rest(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        upcoming = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        store.set_occurrence_message(upcoming.occurrence_id, 1234, 556, 778)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(
+            event,
+            occurrences,
+            START + timedelta(hours=3),
+        )
+
+        assert [occurrence.occurrence_id for occurrence in kept] == [
+            finished.occurrence_id
+        ]
+        assert [occurrence.occurrence_id for occurrence in removed] == [
+            upcoming.occurrence_id
+        ]
+
+    def test_keeps_a_run_retired_before_its_end_time(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A post someone deleted by hand retires its run as OVER while the
+        # clock still says it is running; the stored status decides.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+        )
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(event, occurrences, BEFORE_START)
+
+        assert [occurrence.occurrence_id for occurrence in kept] == [
+            occurrence.occurrence_id
+        ]
+        assert removed == []
+
+    def test_removes_a_finished_run_that_never_reached_a_message(
+        self,
+        store: EventStore,
+    ) -> None:
+        # There is no post to keep, and a pending row left behind would be
+        # posted by the next maintenance pass - a fresh message for an event
+        # that has just been deleted.
+        event = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+        unposted = store.create_occurrence(event.event_id, START)
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(
+            event,
+            occurrences,
+            START + timedelta(hours=3),
+        )
+
+        assert kept == []
+        assert [occurrence.occurrence_id for occurrence in removed] == [
+            unposted.occurrence_id
+        ]
+
+    def test_removes_an_ongoing_run(self, store: EventStore) -> None:
+        # A run in progress is still to be finished, so deleting the event
+        # calls it off rather than keeping it as history.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.ONGOING,
+        )
+        occurrences = store.get_event_occurrences(event.event_id)
+
+        kept, removed = split_event_history(
+            event,
+            occurrences,
+            START + timedelta(minutes=10),
+        )
+
+        assert kept == []
+        assert [occurrence.occurrence_id for occurrence in removed] == [
+            occurrence.occurrence_id
+        ]
+
+
 class TestDeleteEventPosts:
     async def test_deletes_posted_messages_and_skips_unposted(
         self,
@@ -8767,11 +8940,11 @@ class TestPostingLoggingSafety:
                 (),
             )
             await remove_signup(bot, event, occurrence, 11)
-            await delete_event_posts(
-                bot,
-                event,
-                store.get_event_occurrences(event.event_id),
-            )
+            occurrences = store.get_event_occurrences(event.event_id)
+            # The split decides what a deletion keeps and logs its counts, so
+            # it runs here too rather than only under the delete below.
+            split_event_history(event, occurrences, START + timedelta(days=1))
+            await delete_event_posts(bot, event, occurrences)
 
         assert title not in caplog.text
         assert description not in caplog.text

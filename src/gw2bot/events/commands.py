@@ -21,6 +21,7 @@ from gw2bot.events.models import (
 # retired occurrence is before its end time.
 from gw2bot.events.posting import (
     occurrence_finished as occurrence_retired,
+    split_event_history,
 )
 from gw2bot.events.reminders import (
     occurrence_finished,
@@ -45,6 +46,31 @@ LOGGER = logging.getLogger(__name__)
 
 EVENT_AUTOCOMPLETE_LIMIT = 25
 EVENT_CHOICE_NAME_LIMIT = 100
+
+
+def _kept_history_note(kept: int) -> str:
+    """What a delete confirmation promises about the runs it will not touch.
+
+    Deleting an event leaves the runs it has already put on standing, so the
+    confirmation has to say so before the commander decides - and say nothing
+    at all for an event that has none, where there is no history to reassure
+    anyone about. What it promises is what the deletion decides: the runs
+    stay, with their place on the calendar, and their posts are not touched.
+    Whether a post is still in the channel is not the deletion's to promise -
+    a run whose message turned out to be gone keeps its row and the id of a
+    message Discord no longer has.
+    """
+    if not kept:
+        return ""
+    if kept == 1:
+        return (
+            " Its one finished run is kept, with its place on the calendar, "
+            "and its post is left alone."
+        )
+    return (
+        f" Its {kept} finished runs are kept, with their places on the "
+        "calendar, and their posts are left alone."
+    )
 
 
 def _event_choice_name(event: Event) -> str:
@@ -527,8 +553,9 @@ class EventCommands(app_commands.Group):
         # Resolve the run first, whether or not the event repeats. Cancelling
         # is about a run still to come, and an event whose last run is behind
         # it has none - offering to delete a one-off event in that state would
-        # erase a completed run's roster and post through a command that only
-        # ever promised to call off the next one.
+        # retire the event, and drop the roles and automatic sign-ups it
+        # remembers, through a command that only ever promised to call off the
+        # next run.
         occurrence = self._next_occurrence(event)
         if occurrence is None:
             LOGGER.debug(
@@ -554,12 +581,18 @@ class EventCommands(app_commands.Group):
                 interaction.user.id,
                 event_id,
             )
+            kept, _ = split_event_history(
+                event,
+                self._bot.event_store.get_event_occurrences(event_id),
+                datetime.now(UTC),
+            )
             await interaction.response.send_message(
                 f"**{event.title}** (event **{event.event_id}**) does not "
-                "repeat, so cancelling it deletes the event. This removes its "
-                "message(s), any signup thread(s) the bot opened for them and "
-                "everyone's sign-ups, and cannot be undone. A forum post the "
-                "event was posted into is kept.",
+                "repeat, so cancelling it deletes the event. This removes "
+                "the run it is on — its message, any signup thread the "
+                "bot opened for it and everyone's sign-ups for it — and "
+                f"cannot be undone.{_kept_history_note(len(kept))} A forum "
+                "post the event was posted into is kept.",
                 view=EventDeleteConfirmView(
                     self._bot,
                     event,
@@ -635,10 +668,17 @@ class EventCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
+        kept, _ = split_event_history(
+            event,
+            self._bot.event_store.get_event_occurrences(event_id),
+            datetime.now(UTC),
+        )
         await interaction.response.send_message(
             f"Delete **{event.title}** (event **{event.event_id}**)? This "
-            "removes its message(s), any signup thread(s) the bot opened for "
-            "them and everyone's sign-ups, and cannot be undone. A forum post "
+            "removes every run that has not finished, the one in progress "
+            "included — their message(s), any signup thread(s) the bot "
+            "opened for them and everyone's sign-ups for them — and "
+            f"cannot be undone.{_kept_history_note(len(kept))} A forum post "
             "the event was posted into is kept.",
             view=EventDeleteConfirmView(self._bot, event),
             ephemeral=True,

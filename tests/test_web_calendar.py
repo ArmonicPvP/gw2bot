@@ -4,7 +4,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from gw2bot.events.models import EventCategory, EventRole, RepeatFrequency
+from gw2bot.events.models import (
+    EventCategory,
+    EventRole,
+    EventStatus,
+    RepeatFrequency,
+)
 from gw2bot.events.store import EventStore
 from gw2bot.web.calendar import (
     PROJECTED_STATUS,
@@ -192,6 +197,68 @@ class TestMaterializedEntries:
 
         assert len(entries) == 1
         assert entries[0].status == "over"
+
+
+    def test_a_run_retired_early_reads_as_over(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A run retires before its end time when its message turns out to be
+        # gone. Derived from the schedule alone it would advertise itself as
+        # open until that end - for good, once a deleted event's kept runs
+        # leave the maintenance pass.
+        event = create_event(store)
+        occurrence = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+        store.set_occurrence_status(occurrence.occurrence_id, EventStatus.OVER)
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 1, 30, 20, 30, tzinfo=UTC),
+        )
+
+        assert [entry.status for entry in entries] == [EventStatus.OVER.value]
+
+    def test_keeps_the_runs_of_a_deleted_event(
+        self,
+        store: EventStore,
+    ) -> None:
+        # `/event delete` keeps the runs an event has already put on, so the
+        # calendar goes on showing them on the days they were run - and
+        # projects nothing further for a series that has ended.
+        anchor = datetime(2027, 1, 6, 20, 0, tzinfo=UTC)
+        event = create_event(
+            store,
+            start_time=anchor,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(2,),
+        )
+        finished = store.create_occurrence(event.event_id, anchor)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        upcoming = store.create_occurrence(
+            event.event_id,
+            anchor + timedelta(days=7),
+        )
+
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+            anchor + timedelta(days=10),
+        )
+
+        assert [entry.occurrence_id for entry in entries] == [
+            finished.occurrence_id
+        ]
+        assert not entries[0].projected
 
 
 class TestProjectedEntries:
