@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from gw2bot.discord_utils import (
+from gw2bot.core.discord_utils import (
     GuildMembership,
     resolve_display_name,
     resolve_display_names,

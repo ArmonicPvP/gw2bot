@@ -36,7 +36,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
 )
 from gw2bot.events.store import EventStore
-from gw2bot.logging_setup import SecretRegistry, configure_logging
+from gw2bot.core.logging_setup import SecretRegistry, configure_logging
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
     PING_ROLE_OPTION_LIMIT,

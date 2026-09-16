@@ -11,8 +11,8 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import ConfigurationError, same_guild_id
-from gw2bot.gw2_api import Gw2ApiClient
-from gw2bot.discord_utils import (
+from gw2bot.gw2.api import Gw2ApiClient
+from gw2bot.core.discord_utils import (
     forum_tags_for_ids,
     log_discord_failure,
     safe_int,

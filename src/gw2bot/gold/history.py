@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
-from gw2bot.anchored_series import (
+from gw2bot.core.anchored_series import (
     derive_values,
     value_before,
     value_through,

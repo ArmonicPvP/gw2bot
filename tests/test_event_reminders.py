@@ -26,7 +26,7 @@ from gw2bot.events.reminders import (
 )
 from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.store import EventStore
-from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
+from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 
 from factories import forbidden_error
 from test_event_posting import (

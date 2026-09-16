@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
-from gw2bot.database import (
+from gw2bot.core.database import (
     ProfitApiKeyRecord,
     ProfitCacheSyncRecord,
     ProfitItemExclusionRecord,
@@ -24,7 +24,7 @@ from gw2bot.database import (
     create_database_engine,
     initialize_database,
 )
-from gw2bot.logging_setup import SecretRegistry
+from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.profit.models import (
     BuyLot,
     ItemDayProfit,

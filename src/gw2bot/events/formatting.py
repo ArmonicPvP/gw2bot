@@ -30,7 +30,7 @@ from gw2bot.events.models import (
     count_roster,
     is_roster_full,
 )
-from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
+from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 
 EVENT_DATETIME_FORMAT = "%m.%d.%Y %H:%M"
 EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"

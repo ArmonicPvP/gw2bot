@@ -12,7 +12,7 @@ import discord
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import GuildMembership
+from gw2bot.core.discord_utils import GuildMembership
 from gw2bot.events import posting
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
@@ -60,7 +60,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
-from gw2bot.logging_setup import SecretRegistry, configure_logging
+from gw2bot.core.logging_setup import SecretRegistry, configure_logging
 
 from factories import (
     FakeGuild,

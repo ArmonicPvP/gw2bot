@@ -12,12 +12,12 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from gw2bot import (
+from gw2bot import notifications
+from gw2bot.gw2 import (
     guild_log,
     guild_stash,
     guild_storage,
     member_count,
-    notifications,
 )
 from gw2bot.config import (
     NOTIFICATION_CHANNEL_SETTING,
@@ -25,7 +25,7 @@ from gw2bot.config import (
     Config,
     missing_configuration_message,
 )
-from gw2bot.discord_utils import send_interaction_notice, user_has_role
+from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.events import scheduler as event_scheduler
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.store import EventStore
@@ -35,8 +35,8 @@ from gw2bot.events.views import (
     EventSignUpButton,
 )
 from gw2bot.gold.commands import GoldCommands
-from gw2bot.guild_members import GuildMemberCache, TrialMemberReportEntry
-from gw2bot.gw2_api import Gw2ApiClient
+from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
+from gw2bot.gw2.api import Gw2ApiClient
 from gw2bot.poll_status import PollStatusTracker
 from gw2bot.profit.commands import ProfitCommands
 from gw2bot.profit.service import ProfitService
@@ -50,7 +50,7 @@ from gw2bot.raffle import (
     RaffleTotal,
 )
 from gw2bot.raffle import reports as raffle_reports
-from gw2bot.logging_setup import SecretRegistry
+from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.raffle.commands import RaffleCommands
 from gw2bot.roster.commands import RosterCommands
 from gw2bot.raffle.views import (

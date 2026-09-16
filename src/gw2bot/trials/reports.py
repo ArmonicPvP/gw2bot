@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Any, cast
 import aiohttp
 import discord
 
-from gw2bot.discord_utils import log_discord_failure
-from gw2bot.guild_members import (
+from gw2bot.core.discord_utils import log_discord_failure
+from gw2bot.gw2.guild_members import (
     SUNBORNE_DISCORD_STATUS,
     TRIAL_WARNING_MARK_HEADER,
     TrialMemberReportEntry,

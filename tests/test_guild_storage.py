@@ -7,7 +7,7 @@ import discord
 import pytest
 
 from gw2bot.bot import Gw2Bot
-from gw2bot.guild_storage import handle_storage
+from gw2bot.gw2.guild_storage import handle_storage
 
 
 class TestFeastNotification:

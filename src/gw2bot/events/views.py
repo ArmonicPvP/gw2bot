@@ -14,7 +14,7 @@ import discord
 from discord.utils import MISSING
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import (
+from gw2bot.core.discord_utils import (
     GuildMembership,
     resolve_display_names,
     resolve_guild_memberships,

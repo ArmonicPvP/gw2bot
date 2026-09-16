@@ -15,7 +15,7 @@ from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config
-from gw2bot.dashboard_ranges import (
+from gw2bot.core.dashboard_ranges import (
     CUSTOM_RANGE,
     DEFAULT_RANGE,
     FOOD_DASHBOARD,
@@ -24,8 +24,8 @@ from gw2bot.dashboard_ranges import (
     StoredRange,
     is_servable,
 )
-from gw2bot.discord_utils import resolve_display_name, user_has_role
-from gw2bot.feast_stock import (
+from gw2bot.core.discord_utils import resolve_display_name, user_has_role
+from gw2bot.gw2.feast_stock import (
     FEAST_USAGE_RANGES,
     TRACKED_FEASTS,
     Feast,

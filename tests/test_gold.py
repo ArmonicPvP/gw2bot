@@ -31,7 +31,7 @@ from gw2bot.gold import (
 from gw2bot.gold.commands import GoldCommands
 from gw2bot.gold.import_log import format_import_result, import_gold_history
 from gw2bot.gold.models import GoldImportResult
-from gw2bot.guild_stash import stash_coin_balance
+from gw2bot.gw2.guild_stash import stash_coin_balance
 from gw2bot.raffle import COPPER_PER_GOLD, RaffleStore
 from gw2bot.raffle.events import parse_gold_withdrawal, parse_stash_coin_movement
 from gw2bot.raffle.models import GoldWithdrawal

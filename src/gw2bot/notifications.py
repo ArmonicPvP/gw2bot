@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, Any
 import discord
 
 from gw2bot.config import NOTIFICATION_CHANNEL_SETTING
-from gw2bot.discord_utils import discord_failure_reason, log_discord_failure
-from gw2bot.feast_stock import FeastAlert
-from gw2bot.guild_members import (
+from gw2bot.core.discord_utils import discord_failure_reason, log_discord_failure
+from gw2bot.gw2.feast_stock import FeastAlert
+from gw2bot.gw2.guild_members import (
     TRIAL_WARNING_MARK_HEADER,
     format_overdue_trial_report,
 )
-from gw2bot.member_count import format_guild_member_count_topic
+from gw2bot.gw2.member_count import format_guild_member_count_topic
 from gw2bot.raffle.formatting import (
     RAFFLE_TICKETS_PAGE_SIZE,
     format_addticket_audit,

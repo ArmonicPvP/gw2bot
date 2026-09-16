@@ -19,7 +19,7 @@ from factories import (
 )
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
-from gw2bot.logging_setup import SecretRegistry
+from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.main import main as run_main
 from gw2bot.raffle import TrialForumPost
 from gw2bot.settings.definitions import definition_for

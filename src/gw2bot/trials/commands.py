@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from gw2bot.discord_utils import user_has_role
+from gw2bot.core.discord_utils import user_has_role
 from gw2bot.trials.reports import format_track_audit
 
 if TYPE_CHECKING:

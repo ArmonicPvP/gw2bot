@@ -50,7 +50,7 @@ from gw2bot.raffle.views import (
     RaffleTicketsListButton,
     RaffleTicketsListView,
 )
-from gw2bot.discord_utils import user_has_role
+from gw2bot.core.discord_utils import user_has_role
 
 from factories import (
     configured_bot,

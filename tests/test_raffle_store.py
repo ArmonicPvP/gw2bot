@@ -17,7 +17,7 @@ from sqlalchemy import (
     select,
 )
 
-from gw2bot.dashboard_ranges import StoredRange
+from gw2bot.core.dashboard_ranges import StoredRange
 from gw2bot.settings.crypto import SettingsCipher
 from gw2bot.settings.store import SettingsStore
 from gw2bot.raffle import (

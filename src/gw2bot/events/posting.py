@@ -13,7 +13,7 @@ from weakref import WeakKeyDictionary
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import (
+from gw2bot.core.discord_utils import (
     GuildMembership,
     discord_failure_reason,
     log_discord_failure,

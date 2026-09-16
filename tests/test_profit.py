@@ -14,8 +14,8 @@ from cryptography.fernet import Fernet
 from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine
 
 from factories import default_config
-from gw2bot.database import create_database_engine
-from gw2bot.logging_setup import SecretRegistry
+from gw2bot.core.database import create_database_engine
+from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.profit.api import (
     DELIVERY_PATH,
     TRANSACTION_PATHS,

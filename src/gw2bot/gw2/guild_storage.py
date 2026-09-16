@@ -9,7 +9,7 @@ import aiohttp
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.feast_stock import (
+from gw2bot.gw2.feast_stock import (
     changed_feast_counts,
     get_due_low_stock_alerts,
     tracked_feast_counts,

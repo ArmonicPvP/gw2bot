@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import discord
 
-from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
+from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 from gw2bot.raffle.models import (
     RAFFLE_REWARD_TIERS,
     RaffleAudit,

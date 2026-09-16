@@ -18,7 +18,7 @@ from factories import (
     not_found_error,
     unconfigured_bot,
 )
-from gw2bot.guild_members import TrialMemberReportEntry
+from gw2bot.gw2.guild_members import TrialMemberReportEntry
 from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleStore, TrialForumPost
 from gw2bot.config import (

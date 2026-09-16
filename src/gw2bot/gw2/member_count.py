@@ -9,13 +9,13 @@ import aiohttp
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import (
+from gw2bot.core.discord_utils import (
     TopicEditableChannel,
     discord_failure_reason,
     discord_failure_signature,
     log_discord_failure,
 )
-from gw2bot.guild_members import INVITED_RANK
+from gw2bot.gw2.guild_members import INVITED_RANK
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot

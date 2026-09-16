@@ -10,8 +10,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.config import same_guild_id
-from gw2bot.dashboard_ranges import StoredRange
-from gw2bot.database import (
+from gw2bot.core.dashboard_ranges import StoredRange
+from gw2bot.core.database import (
     PENDING_LEGACY_TOTALS_KEY,
     DashboardRangeRecord,
     FeastAlertRecord,
@@ -37,7 +37,7 @@ from gw2bot.database import (
     create_database_engine,
     initialize_database,
 )
-from gw2bot.feast_stock import (
+from gw2bot.gw2.feast_stock import (
     TRACKED_FEASTS,
     FeastStockSample,
     FeastStockSeries,

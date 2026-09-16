@@ -10,12 +10,12 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import (
+from gw2bot.core.discord_utils import (
     log_discord_failure,
     send_interaction_notice,
     user_has_role,
 )
-from gw2bot.guild_members import (
+from gw2bot.gw2.guild_members import (
     TrialMemberReportEntry,
     format_pending_invite_report,
     get_pending_invite_members,

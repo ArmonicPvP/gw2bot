@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from gw2bot.guild_members import (
+from gw2bot.gw2.guild_members import (
     DISCORD_MESSAGE_LIMIT,
     TRIAL_WARNING_MARK_HEADER,
     GuildMemberCache,
@@ -116,7 +116,7 @@ class TestGuildMemberCache:
         cache = GuildMemberCache(FakeGuildApi(), "guild-id", ttl_seconds=60)
         await cache.resolve("Member One.1234")
 
-        with caplog.at_level(logging.DEBUG, logger="gw2bot.guild_members"):
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.gw2.guild_members"):
             assert await cache.search(secret) == []
 
         assert secret not in caplog.text
@@ -191,7 +191,7 @@ class TestGuildMemberCache:
         await cache.resolve("Member One.1234")
         now[0] = 161.0
 
-        with caplog.at_level(logging.DEBUG, logger="gw2bot.guild_members"):
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.gw2.guild_members"):
             assert await cache.search("member") == [
                 "Member One.1234",
                 "Another Member.5678",

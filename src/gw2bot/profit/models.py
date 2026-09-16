@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from gw2bot.dashboard_ranges import CUSTOM_RANGE
+from gw2bot.core.dashboard_ranges import CUSTOM_RANGE
 
 LOGGER = logging.getLogger(__name__)
 
