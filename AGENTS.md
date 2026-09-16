@@ -26,6 +26,7 @@ If a user's instruction conflicts with a preference or other rules or informatio
 - Never store sensitive credentials, passwords, or secrets in CLAUDE.md or AGENTS.md.
 - **NEVER** modify CLAUDE.md or AGENTS.md to add or remove a constraint. Constraints should only be modified directly by the user. You may only copy constraints between CLAUDE.md and AGENTS.md.
 - CLAUDE.md and AGENTS.md must be mirrors of each other. Changes to one must result in changes to the other.
+- Never import anything under `gw2bot` outside `core/` from a module in `src/gw2bot/core/`, in any import spelling.
 
 ## Reference files
 
