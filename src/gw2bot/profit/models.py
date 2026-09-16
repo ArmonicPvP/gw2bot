@@ -10,8 +10,6 @@ from gw2bot.dashboard_ranges import CUSTOM_RANGE
 
 LOGGER = logging.getLogger(__name__)
 
-MIN_FLIP_QUANTITY = 5
-
 # How many whole UTC dates the dashboard's trailing average covers. The dates
 # before a window are read with it too, so the average has a reading on the
 # window's own first date rather than starting six days into it.
@@ -318,13 +316,18 @@ class ProfitReport:
     unrealized: UnrealizedProfit
     item_names: dict[int, str]
     market_prices: dict[int, MarketPrice] = field(default_factory=dict)
+    # The items this member asked not to count as flipped profit. They are
+    # already out of ``realized`` and of every total drawn from it; the set is
+    # carried so the page can list them for restoring, including the ones
+    # that traded nothing inside this window.
+    excluded_items: frozenset[int] = frozenset()
     # Realized profit per UTC date across the whole stretch the trailing
     # average covers - the window and the six dates behind it - keyed by
     # date. Only that average reads it: without the dates behind the window
     # its first six have no complete week behind them and go undrawn, which
     # leaves a seven-day window showing a single dot. It is summed in one
     # pass over that stretch rather than beside ``realized``, so every date
-    # it reads passes the same flip rule; a date without a matched sale is
+    # it reads leaves out the same items; a date without a matched sale is
     # left out and read as zero, the way the window's own dates are.
     trailing_days: dict[str, int] = field(default_factory=dict)
     # The oldest purchase or sale held for this member, which is how far back
@@ -463,7 +466,6 @@ def calculate_realized_profit(
     buys: list[Transaction],
     sells: list[Transaction],
     *,
-    minimum_flip_quantity: int = 1,
     with_item_days: bool = False,
     opening_lots: dict[int, tuple[BuyLot, ...]] | None = None,
 ) -> RealizedProfit:
@@ -477,8 +479,6 @@ def calculate_realized_profit(
     stock a member was already holding, without re-reading the years of
     history that established it.
     """
-    if minimum_flip_quantity <= 0:
-        raise ValueError("minimum_flip_quantity must be positive")
     events_by_item: dict[int, list[_Event]] = defaultdict(list)
     carried = {} if opening_lots is None else opening_lots
     for item_id in carried:
@@ -512,7 +512,7 @@ def calculate_realized_profit(
     total_net_revenue = 0
     total_profit = 0
     total_matched_quantity = 0
-    excluded_items = 0
+    unmatched_items = 0
 
     for item_id, events in events_by_item.items():
         events.sort(
@@ -593,11 +593,11 @@ def calculate_realized_profit(
             for lot in buy_lots
             if lot.remaining > 0
         )
-        # A flip needs at least five units bought and subsequently sold. FIFO
-        # matching supplies both sides of that condition and necessarily
-        # rejects sales which happened before the first available purchase.
-        if item.matched_quantity < minimum_flip_quantity:
-            excluded_items += 1
+        # An item nothing was sold out of has no realized result to report.
+        # FIFO matching is what decides that, and it necessarily rejects
+        # sales which happened before the first available purchase.
+        if item.matched_quantity == 0:
+            unmatched_items += 1
             # The item is not reported, but what is still held is not lost:
             # an incremental pass has to carry those lots on to the next one.
             if remaining_lots:
@@ -651,13 +651,13 @@ def calculate_realized_profit(
     )
     LOGGER.debug(
         "Calculated realized Trading Post profit; buys=%s sells=%s "
-        "items=%s days=%s matched=%s excluded_items=%s",
+        "items=%s days=%s matched=%s unmatched_items=%s",
         len(buys),
         len(sells),
         len(result.items),
         len(result.days),
         result.total_matched_quantity,
-        excluded_items,
+        unmatched_items,
     )
     return result
 
@@ -810,18 +810,17 @@ def aggregate_rollups(
     rollups: list[tuple[int, str, ItemDayProfit]],
     open_lots: dict[int, tuple[BuyLot, ...]],
     *,
-    minimum_flip_quantity: int = 1,
+    excluded_items: frozenset[int] = frozenset(),
 ) -> RealizedProfit:
     """Sum stored rollup rows into the report for one window.
 
     The rows are already matched, so this is addition rather than matching:
     across days for the item table, across items for the day table, and
-    across both for the summary. The flip threshold is applied here rather
-    than when the rows were built, because five units is a question about the
-    window a member asked for and not about their whole history.
+    across both for the summary. ``excluded_items`` are the items the member
+    asked not to count as flipped profit. They are dropped here rather than
+    when the rows were built, because the choice is the member's and can be
+    changed back without rematching a single trade.
     """
-    if minimum_flip_quantity <= 0:
-        raise ValueError("minimum_flip_quantity must be positive")
     per_item: dict[int, _Totals] = defaultdict(_Totals)
     for item_id, _sold_day, totals in rollups:
         item = per_item[item_id]
@@ -831,11 +830,7 @@ def aggregate_rollups(
         item.profit += totals.profit
         item.hold_seconds += totals.hold_seconds
 
-    kept = {
-        item_id
-        for item_id, totals in per_item.items()
-        if totals.matched_quantity >= minimum_flip_quantity
-    }
+    kept = set(per_item) - excluded_items
     day_totals: dict[str, _Totals] = defaultdict(_Totals)
     for item_id, sold_day, totals in rollups:
         if item_id not in kept:

@@ -194,6 +194,7 @@ class FakeBot:
                 )
             ),
             set_order_exclusion=AsyncMock(return_value=True),
+            set_item_exclusion=AsyncMock(return_value=True),
         )
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
@@ -1449,122 +1450,6 @@ class TestProfitPage:
         assert response.status == 400
         bot.profit_service.load_report.assert_not_awaited()
 
-    async def test_exclusion_is_stored_for_the_signed_in_member_only(
-        self,
-        client: TestClient,
-        bot: FakeBot,
-        guild: FakeGuild,
-    ) -> None:
-        other_user_id = 202
-        guild.members[other_user_id] = member("Other Kitty")
-
-        response = await client.post(
-            "/api/profit/exclusions",
-            json={"item_id": 4, "excluded": True},
-            headers=self._headers(other_user_id),
-        )
-
-        assert response.status == 200
-        assert await response.json() == {
-            "item_id": 4,
-            "excluded": True,
-            "changed": True,
-        }
-        bot.profit_service.set_order_exclusion.assert_awaited_once_with(
-            other_user_id,
-            4,
-            True,
-        )
-
-    async def test_exclusion_needs_a_session(
-        self,
-        client: TestClient,
-        bot: FakeBot,
-    ) -> None:
-        response = await client.post(
-            "/api/profit/exclusions",
-            json={"item_id": 4, "excluded": True},
-        )
-
-        assert response.status == 401
-        bot.profit_service.set_order_exclusion.assert_not_awaited()
-
-    @pytest.mark.parametrize(
-        "body",
-        [
-            {"item_id": 4},
-            {"excluded": True},
-            {"item_id": 0, "excluded": True},
-            {"item_id": -3, "excluded": True},
-            {"item_id": "4", "excluded": True},
-            {"item_id": True, "excluded": True},
-            {"item_id": 4, "excluded": "yes"},
-            [],
-        ],
-        ids=(
-            "no-excluded",
-            "no-item",
-            "zero-item",
-            "negative-item",
-            "string-item",
-            "boolean-item",
-            "string-excluded",
-            "not-an-object",
-        ),
-    )
-    async def test_exclusion_rejects_an_unusable_body_without_storing(
-        self,
-        client: TestClient,
-        bot: FakeBot,
-        body: object,
-    ) -> None:
-        response = await client.post(
-            "/api/profit/exclusions",
-            json=body,
-            headers=self._headers(),
-        )
-
-        assert response.status == 400
-        assert await response.json() == {"error": "invalid request"}
-        bot.profit_service.set_order_exclusion.assert_not_awaited()
-
-    async def test_exclusion_rejects_a_body_that_is_not_json(
-        self,
-        client: TestClient,
-        bot: FakeBot,
-    ) -> None:
-        response = await client.post(
-            "/api/profit/exclusions",
-            data="item_id=4",
-            headers=self._headers(),
-        )
-
-        assert response.status == 400
-        bot.profit_service.set_order_exclusion.assert_not_awaited()
-
-    async def test_exclusion_failure_reports_without_its_error_text(
-        self,
-        client: TestClient,
-        bot: FakeBot,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        secret = "exclusion-failure-secret"
-        bot.profit_service.set_order_exclusion.side_effect = SQLAlchemyError(
-            secret
-        )
-
-        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
-            response = await client.post(
-                "/api/profit/exclusions",
-                json={"item_id": 4, "excluded": False},
-                headers=self._headers(),
-            )
-        body = await response.text()
-
-        assert response.status == 500
-        assert secret not in caplog.text
-        assert secret not in body
-
     @pytest.mark.parametrize("days", ["0", "3651", "abc", "1.5"])
     async def test_api_rejects_invalid_days_without_loading_data(
         self,
@@ -1614,6 +1499,166 @@ class TestProfitPage:
         body = await response.text()
 
         assert response.status == 502
+        assert secret not in caplog.text
+        assert secret not in body
+
+
+@pytest.mark.parametrize(
+    ("path", "stored"),
+    [
+        ("/api/profit/exclusions", "set_order_exclusion"),
+        ("/api/profit/item-exclusions", "set_item_exclusion"),
+    ],
+    ids=("open-orders", "realized-items"),
+)
+class TestProfitExclusionRoutes:
+    """Hiding a row, in either of the two tables that offer it.
+
+    Open Orders and Realized Profit by Item share one handler and differ only
+    in the stored set a change lands in, so every case below is run against
+    both routes rather than written twice.
+    """
+
+    @staticmethod
+    def _headers(user_id: int = SESSION_USER_ID) -> dict[str, str]:
+        return TestProfitPage._headers(user_id)
+
+    @staticmethod
+    def _other(bot: FakeBot, stored: str) -> AsyncMock:
+        """The stored set this route must leave alone."""
+        return getattr(
+            bot.profit_service,
+            "set_order_exclusion"
+            if stored == "set_item_exclusion"
+            else "set_item_exclusion",
+        )
+
+    async def test_exclusion_is_stored_for_the_signed_in_member_only(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        guild: FakeGuild,
+        path: str,
+        stored: str,
+    ) -> None:
+        other_user_id = 202
+        guild.members[other_user_id] = member("Other Kitty")
+
+        response = await client.post(
+            path,
+            json={"item_id": 4, "excluded": True},
+            headers=self._headers(other_user_id),
+        )
+
+        assert response.status == 200
+        assert await response.json() == {
+            "item_id": 4,
+            "excluded": True,
+            "changed": True,
+        }
+        getattr(bot.profit_service, stored).assert_awaited_once_with(
+            other_user_id,
+            4,
+            True,
+        )
+        # The two tables are hidden from independently, so a change to one
+        # never reaches the other's stored set.
+        assert not self._other(bot, stored).await_count
+
+    async def test_exclusion_needs_a_session(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        path: str,
+        stored: str,
+    ) -> None:
+        response = await client.post(
+            path,
+            json={"item_id": 4, "excluded": True},
+        )
+
+        assert response.status == 401
+        getattr(bot.profit_service, stored).assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"item_id": 4},
+            {"excluded": True},
+            {"item_id": 0, "excluded": True},
+            {"item_id": -3, "excluded": True},
+            {"item_id": "4", "excluded": True},
+            {"item_id": True, "excluded": True},
+            {"item_id": 4, "excluded": "yes"},
+            [],
+        ],
+        ids=(
+            "no-excluded",
+            "no-item",
+            "zero-item",
+            "negative-item",
+            "string-item",
+            "boolean-item",
+            "string-excluded",
+            "not-an-object",
+        ),
+    )
+    async def test_exclusion_rejects_an_unusable_body_without_storing(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        body: object,
+        path: str,
+        stored: str,
+    ) -> None:
+        response = await client.post(
+            path,
+            json=body,
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid request"}
+        getattr(bot.profit_service, stored).assert_not_awaited()
+
+    async def test_exclusion_rejects_a_body_that_is_not_json(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        path: str,
+        stored: str,
+    ) -> None:
+        response = await client.post(
+            path,
+            data="item_id=4",
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        getattr(bot.profit_service, stored).assert_not_awaited()
+
+    async def test_exclusion_failure_reports_without_its_error_text(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+        path: str,
+        stored: str,
+    ) -> None:
+        secret = "exclusion-failure-secret"
+        getattr(bot.profit_service, stored).side_effect = SQLAlchemyError(
+            secret
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.post(
+                path,
+                json={"item_id": 4, "excluded": False},
+                headers=self._headers(),
+            )
+        body = await response.text()
+
+        assert response.status == 500
         assert secret not in caplog.text
         assert secret not in body
 

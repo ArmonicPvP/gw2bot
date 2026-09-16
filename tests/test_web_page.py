@@ -77,7 +77,9 @@ class TestProfitPage:
         assert 'coins.textContent = "Unavailable";' in PROFIT_PAGE
         assert "help.hidden = false;" in PROFIT_PAGE
         assert 'fetchSection("delivery", "/api/profit/delivery"' in PROFIT_PAGE
-        assert 'fetchSection("report", "/api/profit"' in PROFIT_PAGE
+        assert 'fetchSection("report", reportUrl(forced), renderReport)' in (
+            PROFIT_PAGE
+        )
 
     def test_delivery_lists_each_waiting_item_instead_of_one_count(
         self,
@@ -174,55 +176,96 @@ class TestProfitPage:
         assert "percent(cost ? profit / cost * 100 : null)" in PROFIT_PAGE
 
     def test_open_orders_hiding_is_saved_and_restorable(self) -> None:
-        assert 'fetch("/api/profit/exclusions", {' in PROFIT_PAGE
+        assert 'path: "/api/profit/exclusions",' in PROFIT_PAGE
         assert 'method: "POST",' in PROFIT_PAGE
         assert (
-            "JSON.stringify({ item_id: itemId, excluded: excluded })"
+            "JSON.stringify({ item_id: item.item_id, excluded: excluded })"
             in PROFIT_PAGE
         )
-        assert "function renderHiddenOrders()" in PROFIT_PAGE
-        assert "function restoreButton(order)" in PROFIT_PAGE
+        assert "function renderHidden(group)" in PROFIT_PAGE
+        assert "function restoreButton(name, restore)" in PROFIT_PAGE
         assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
+        # Open Orders is summed in the browser, so it redraws from the rows
+        # already on screen rather than asking for them again.
+        assert "function applyOrderExclusion(item, excluded)" in PROFIT_PAGE
 
-    def test_hidden_items_live_behind_the_open_orders_menu(self) -> None:
+    def test_realized_items_hiding_is_saved_and_redraws_the_report(
+        self,
+    ) -> None:
+        assert 'path: "/api/profit/item-exclusions",' in PROFIT_PAGE
+        assert 'subject: "your realized profit"' in PROFIT_PAGE
+        assert "excludedItems = data.excluded_items;" in PROFIT_PAGE
+        assert 'setExclusion("items", item, true, button)' in PROFIT_PAGE
+        # The summary, the charts, the day table and Your Picks all move with
+        # it, and every one of them is summed by the server.
+        assert "function applyItemExclusion(item, excluded)" in PROFIT_PAGE
+        assert "function reloadReport()" in PROFIT_PAGE
+        assert 'fetchSection("report", reportUrl(false), renderReport)' in (
+            PROFIT_PAGE
+        )
+        # The two tables hide independently, each into its own stored set.
+        assert 'if (group === "items") { return excludedItems.slice(); }' in (
+            PROFIT_PAGE
+        )
+
+    def test_hidden_items_live_behind_each_section_menu(self) -> None:
         assert 'id="orders-menu" class="icon-button"' in PROFIT_PAGE
+        assert 'id="items-menu" class="icon-button"' in PROFIT_PAGE
         assert 'aria-haspopup="dialog"' in PROFIT_PAGE
-        # Three dots, drawn rather than typed so they line up at any size.
-        assert PROFIT_PAGE.count('<circle cx="12" cy="5" r="2">') == 1
-        assert PROFIT_PAGE.count('<circle cx="12" cy="12" r="2">') == 1
-        assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 1
-        assert '<dialog id="hidden-dialog"' in PROFIT_PAGE
-        assert '<h2 id="hidden-title">Hidden items</h2>' in PROFIT_PAGE
-        # The count line is outside any card, so it carries its own inset.
-        assert "#hidden-count { padding: 0 1rem 0.6rem; }" in PROFIT_PAGE
+        # Three dots, drawn rather than typed so they line up at any size,
+        # once for each of the two sections that can hide a row.
+        assert PROFIT_PAGE.count('<circle cx="12" cy="5" r="2">') == 2
+        assert PROFIT_PAGE.count('<circle cx="12" cy="12" r="2">') == 2
+        assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 2
+        for group in ("orders", "items"):
+            assert f'<dialog id="{group}-hidden-dialog"' in PROFIT_PAGE
+            assert (
+                f'<h2 id="{group}-hidden-title">Hidden items</h2>'
+                in PROFIT_PAGE
+            )
+        # The window is stamped twice, so it is styled by class rather than id.
+        assert ".hidden-count { padding: 0 1rem 0.6rem; }" in PROFIT_PAGE
         assert "dialog.showModal();" in PROFIT_PAGE
-        assert "function openHiddenItems()" in PROFIT_PAGE
-        assert 'document.getElementById("hidden-dialog").close();' in (
+        assert "function openHidden(group)" in PROFIT_PAGE
+        assert 'document.getElementById(group + "-hidden-dialog").close();' in (
             PROFIT_PAGE
         )
         # The old always-on chip list is gone, not merely hidden.
         assert "Excluded items" not in PROFIT_PAGE
         assert 'id="orders-excluded-list"' not in PROFIT_PAGE
 
-    def test_hidden_items_are_searchable_in_a_table(self) -> None:
-        assert 'id="hidden-search" type="search"' in PROFIT_PAGE
-        assert '<table id="hidden-table">' in PROFIT_PAGE
-        assert 'id="hidden-body"' in PROFIT_PAGE
-        assert "order.name.toLowerCase().indexOf(search) !== -1" in PROFIT_PAGE
-        assert '"No hidden items match that search."' in PROFIT_PAGE
-        assert '"You have not hidden any items yet."' in PROFIT_PAGE
-        assert 'addEventListener(\n    "input", renderHiddenOrders)' in (
+    def test_restoring_answers_at_once_in_both_hidden_windows(self) -> None:
+        # One Restore button, one handler, one immediate redraw, whichever
+        # window the member opened. The items list is corrected by the
+        # reloaded report when it lands, so a failed reload cannot leave a
+        # restored row sitting in the window.
+        assert PROFIT_PAGE.count("setExclusion(group, item, false, button)") == 1
+        assert 'restoreButton(item.name, function (button) {' in PROFIT_PAGE
+        assert 'renderHidden("items");\n    // The tables and totals' in (
             PROFIT_PAGE
         )
+        assert "excludedItems = data.excluded_items;" in PROFIT_PAGE
+        assert "renderOrders();" in PROFIT_PAGE
+
+    def test_hidden_items_are_searchable_in_a_table(self) -> None:
+        for group in ("orders", "items"):
+            assert f'id="{group}-hidden-search" type="search"' in PROFIT_PAGE
+            assert f'<table id="{group}-hidden-table"' in PROFIT_PAGE
+            assert f'id="{group}-hidden-body"' in PROFIT_PAGE
+        assert "item.name.toLowerCase().indexOf(search) !== -1" in PROFIT_PAGE
+        assert '"No hidden items match that search."' in PROFIT_PAGE
+        assert '"You have not hidden any items yet."' in PROFIT_PAGE
+        assert '"input", function () { renderHidden(group); }' in PROFIT_PAGE
 
     def test_hiding_a_row_uses_an_icon_rather_than_a_word(self) -> None:
-        assert '<th class="actions">Hide</th>' in PROFIT_PAGE
+        # Both Open Orders and Realized Profit by Item carry the column.
+        assert PROFIT_PAGE.count('<th class="actions">Hide</th>') == 2
         # The heading and the icon under it share an alignment.
         assert "th.actions, td.actions { text-align: center; }" in PROFIT_PAGE
         assert "<th>Exclude</th>" not in PROFIT_PAGE
-        assert "function hideButton(order)" in PROFIT_PAGE
-        assert 'button.title = "Hide " + order.name;' in PROFIT_PAGE
-        assert 'button.setAttribute("aria-label", "Hide " + order.name);' in (
+        assert "function hideButton(name, hide)" in PROFIT_PAGE
+        assert 'button.title = "Hide " + name;' in PROFIT_PAGE
+        assert 'button.setAttribute("aria-label", "Hide " + name);' in (
             PROFIT_PAGE
         )
         # An eye with a line struck through it, so the row keeps its width.

@@ -16,6 +16,43 @@ PAGE_SIZE_DEFAULT = 10
 PAGE_SIZE_LIMIT = 90
 
 
+def _hidden_items_dialog(group: str, subject: str) -> str:
+    """Return the Hidden items window for one table.
+
+    Open Orders and Realized Profit by Item are each hidden from on their
+    own, and each keeps its own list of what it is hiding, so the window is
+    written once here and stamped per table. ``subject`` names the table in
+    the prose inside it.
+    """
+    return f"""  <dialog id="{group}-hidden-dialog" class="hidden-dialog"
+    aria-labelledby="{group}-hidden-title">
+    <div class="modal-head">
+      <h2 id="{group}-hidden-title">Hidden items</h2>
+      <button id="{group}-hidden-close" class="icon-button" type="button"
+        aria-label="Close hidden {subject} items">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <p class="note hidden-count" id="{group}-hidden-count"></p>
+    <label class="modal-search" for="{group}-hidden-search">
+      <span class="visually-hidden">Search hidden {subject} items</span>
+      <input id="{group}-hidden-search" type="search"
+        placeholder="Search hidden items" autocomplete="off">
+    </label>
+    <div class="modal-scroll"><table id="{group}-hidden-table"
+      class="hidden-table">
+      <thead><tr><th>Item</th><th>Restore</th></tr></thead>
+      <tbody id="{group}-hidden-body"></tbody>
+    </table></div>
+  </dialog>
+"""
+
+
 def _pagination_nav(group: str, position: str, label: str) -> str:
     """Return one pagination bar for ``group``, above or below its table.
 
@@ -230,7 +267,7 @@ main { width: 100%; margin: 0; padding: 1rem; }
 /* The heading and the icon under it are centred together, or the icon reads
    as sitting off to one side of a right-aligned label. */
 th.actions, td.actions { text-align: center; }
-#hidden-dialog {
+.hidden-dialog {
   /* The shared reset zeroes every margin, which takes the centring a modal
      dialog normally gets from the user agent's `margin: auto` with it. */
   margin: auto;
@@ -243,8 +280,8 @@ th.actions, td.actions { text-align: center; }
   border-radius: 10px;
   overflow: hidden;
 }
-#hidden-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
-#hidden-dialog[open] { display: flex; flex-direction: column; }
+.hidden-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.hidden-dialog[open] { display: flex; flex-direction: column; }
 .modal-head {
   display: flex;
   align-items: center;
@@ -252,17 +289,17 @@ th.actions, td.actions { text-align: center; }
   padding: 0.85rem 0.7rem 0.25rem 1rem;
 }
 .modal-head h2 { flex: 1; font-size: 1rem; }
-#hidden-count { padding: 0 1rem 0.6rem; }
+.hidden-count { padding: 0 1rem 0.6rem; }
 .modal-search { display: block; padding: 0 1rem 0.85rem; }
 .modal-search input { width: 100%; }
 .modal-scroll { overflow: auto; border-top: 1px solid var(--border); }
-#hidden-table th {
+.hidden-table th {
   position: sticky;
   top: 0;
   z-index: 1;
   border-top: 0;
 }
-#hidden-table th:last-child, #hidden-table td:last-child {
+.hidden-table th:last-child, .hidden-table td:last-child {
   width: 1%;
   text-align: right;
 }
@@ -460,8 +497,19 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
     <section class="card loading" data-source="report">
-      <h2>Realized Profit by Item</h2>
-      <p class="note">Avg Hold is the mean time those units were held, weighted by units. Profit Share is signed item profit divided by total realized profit.</p>
+      <div class="card-heading">
+        <h2>Realized Profit by Item</h2>
+        <button id="items-menu" class="icon-button" type="button"
+          aria-haspopup="dialog" title="Hidden items">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+            aria-hidden="true">
+            <circle cx="12" cy="5" r="2"></circle>
+            <circle cx="12" cy="12" r="2"></circle>
+            <circle cx="12" cy="19" r="2"></circle>
+          </svg>
+        </button>
+      </div>
+      <p class="note">Avg Hold is the mean time those units were held, weighted by units. Profit Share is signed item profit divided by total realized profit. The crossed-out eye on a row leaves that item out of every figure on this page; the three dots above put a hidden item back.</p>
 __ITEMS_PAGES_TOP__
       <div class="table-scroll"><table id="items-table" data-sort-table="items">
         <thead><tr>
@@ -474,6 +522,7 @@ __ITEMS_PAGES_TOP__
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="6" data-sort-kind="number" data-sort-key="profit-per-unit" data-sort-default="descending">Profit / Unit</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="7" data-sort-kind="number" data-sort-key="avg-hold" data-sort-default="ascending">Avg Hold</button></th>
           <th aria-sort="none"><button class="sort-button" type="button" data-sort-index="8" data-sort-kind="number" data-sort-key="profit-share" data-sort-default="descending">Profit Share</button></th>
+          <th class="actions">Hide</th>
         </tr></thead>
         <tbody id="items-body"></tbody>
         <tfoot id="items-foot"></tfoot>
@@ -582,30 +631,8 @@ __DAYS_PAGES_BOTTOM__
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
   </div>
-  <dialog id="hidden-dialog" aria-labelledby="hidden-title">
-    <div class="modal-head">
-      <h2 id="hidden-title">Hidden items</h2>
-      <button id="hidden-close" class="icon-button" type="button"
-        aria-label="Close hidden items">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
-          stroke="currentColor" stroke-width="2" stroke-linecap="round"
-          aria-hidden="true">
-          <line x1="6" y1="6" x2="18" y2="18"></line>
-          <line x1="18" y1="6" x2="6" y2="18"></line>
-        </svg>
-      </button>
-    </div>
-    <p class="note" id="hidden-count"></p>
-    <label class="modal-search" for="hidden-search">
-      <span class="visually-hidden">Search hidden items</span>
-      <input id="hidden-search" type="search" placeholder="Search hidden items"
-        autocomplete="off">
-    </label>
-    <div class="modal-scroll"><table id="hidden-table">
-      <thead><tr><th>Item</th><th>Restore</th></tr></thead>
-      <tbody id="hidden-body"></tbody>
-    </table></div>
-  </dialog>
+__ORDERS_HIDDEN_DIALOG__
+__ITEMS_HIDDEN_DIALOG__
 </main>
 <script>
 (function () {
@@ -1724,6 +1751,7 @@ __DAYS_PAGES_BOTTOM__
   function renderItems(data) {
     var body = document.getElementById("items-body");
     body.replaceChildren();
+    excludedItems = data.excluded_items;
     data.items.forEach(function (item, index) {
       var row = sortableRow(index);
       cell(row, item.name, "name", item.name);
@@ -1735,19 +1763,27 @@ __DAYS_PAGES_BOTTOM__
       profitCell(row, Math.round(item.profit / item.units));
       cell(row, duration(item.hold_seconds), "", item.hold_seconds);
       percentCell(row, item.profit_share_percent, item.profit);
+      cell(row, "", "actions").appendChild(
+        hideButton(item.name, function (button) {
+          setExclusion("items", item, true, button);
+        }));
       body.appendChild(row);
     });
     if (!data.items.length) {
-      emptyRow(body, 9, "No matched flips were found in this window.");
+      emptyRow(body, 10, excludedItems.length
+        ? "No matched flips were found in this window outside the items "
+          + "you have hidden."
+        : "No matched flips were found in this window.");
     }
     totalRow(document.getElementById("items-foot"), [
       "Total", data.summary.matched_units, coin(data.summary.cost),
       coin(data.summary.net_revenue), data.summary.profit,
       percent(data.summary.roi_percent),
       average(data.summary.profit, data.summary.matched_units), "\u2014",
-      data.summary.profit === 0 ? "\u2014" : "100.0%"
+      data.summary.profit === 0 ? "\u2014" : "100.0%", ""
     ], 4);
     applySort("items-table");
+    renderHidden("items");
   }
 
   var picksData = [];
@@ -1841,15 +1877,36 @@ __DAYS_PAGES_BOTTOM__
 
   var ordersRows = [];
   var ordersAvailable = true;
+  // The items left out of the realized report, as the server named them.
+  // They are not in any of its tables, so this is the only place their names
+  // arrive from - including for an item that traded nothing in this window.
+  var excludedItems = [];
 
   // "Hidden" is what the dashboard calls these items; the stored rows and the
-  // API keep calling them exclusions, so both words appear here.
-  function hideButton(order) {
+  // API keep calling them exclusions, so both words appear here. Open Orders
+  // and Realized Profit by Item hide independently: what belongs out of one
+  // table is not what belongs out of the other, so each keeps its own stored
+  // set, its own eye buttons and its own Hidden items window, and everything
+  // below takes the group it is working on.
+  var EXCLUSION_GROUPS = {
+    orders: {
+      path: "/api/profit/exclusions",
+      subject: "your open orders",
+      applied: applyOrderExclusion
+    },
+    items: {
+      path: "/api/profit/item-exclusions",
+      subject: "your realized profit",
+      applied: applyItemExclusion
+    }
+  };
+
+  function hideButton(name, hide) {
     var button = document.createElement("button");
     button.type = "button";
     button.className = "row-action";
-    button.title = "Hide " + order.name;
-    button.setAttribute("aria-label", "Hide " + order.name);
+    button.title = "Hide " + name;
+    button.setAttribute("aria-label", "Hide " + name);
     var icon = svgNode("svg", {
       viewBox: "0 0 24 24",
       width: 16,
@@ -1870,30 +1927,27 @@ __DAYS_PAGES_BOTTOM__
     }));
     icon.appendChild(svgNode("line", {x1: 2, y1: 2, x2: 22, y2: 22}));
     button.appendChild(icon);
-    button.addEventListener("click", function () {
-      setOrderExclusion(order.item_id, true, button);
-    });
+    button.addEventListener("click", function () { hide(button); });
     return button;
   }
 
-  function restoreButton(order) {
+  function restoreButton(name, restore) {
     var button = document.createElement("button");
     button.type = "button";
     button.className = "row-action";
     button.textContent = "Restore";
-    button.setAttribute("aria-label", "Restore " + order.name);
-    button.addEventListener("click", function () {
-      setOrderExclusion(order.item_id, false, button);
-    });
+    button.setAttribute("aria-label", "Restore " + name);
+    button.addEventListener("click", function () { restore(button); });
     return button;
   }
 
-  function setOrderExclusion(itemId, excluded, button) {
+  function setExclusion(group, item, excluded, button) {
+    var config = EXCLUSION_GROUPS[group];
     button.disabled = true;
-    fetch("/api/profit/exclusions", {
+    fetch(config.path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ item_id: itemId, excluded: excluded })
+      body: JSON.stringify({ item_id: item.item_id, excluded: excluded })
     }).then(function (response) {
       if (response.status === 401) {
         location.href = "/login?next=" + encodeURIComponent(
@@ -1904,41 +1958,71 @@ __DAYS_PAGES_BOTTOM__
       return true;
     }).then(function (stored) {
       if (!stored) { return; }
-      ordersRows.forEach(function (row) {
-        if (row.item_id === itemId) { row.excluded = excluded; }
-      });
-      if (!excluded) {
-        // A restored item with no live order has nothing left to show.
-        ordersRows = ordersRows.filter(function (row) {
-          return row.has_order || row.item_id !== itemId;
-        });
-      }
       status.className = "";
-      status.textContent = excluded
-        ? "Hid that item from your open orders."
-        : "Restored that item to your open orders.";
-      renderOrders();
-      trace(excluded ? "order-hidden" : "order-restored", 1);
+      status.textContent = (excluded
+        ? "Hid that item from "
+        : "Restored that item to ") + config.subject + ".";
+      config.applied(item, excluded);
+      trace(group + (excluded ? "-hidden" : "-restored"), 1);
     }).catch(function () {
       button.disabled = false;
       status.className = "error";
       status.textContent =
         "That change could not be saved. Try again in a moment.";
-      trace("hidden-item-failure", 0);
+      trace(group + "-hidden-failure", 0);
     });
   }
 
-  function openHiddenItems() {
-    var dialog = document.getElementById("hidden-dialog");
-    var search = document.getElementById("hidden-search");
-    search.value = "";
-    renderHiddenOrders();
-    dialog.showModal();
-    search.focus();
-    trace("hidden-items-open", hiddenOrders().length);
+  function applyOrderExclusion(item, excluded) {
+    // Open Orders is summed in the browser from rows already on screen, so
+    // the change is drawn from what is held here rather than re-fetched.
+    ordersRows.forEach(function (row) {
+      if (row.item_id === item.item_id) { row.excluded = excluded; }
+    });
+    if (!excluded) {
+      // A restored item with no live order has nothing left to show.
+      ordersRows = ordersRows.filter(function (row) {
+        return row.has_order || row.item_id !== item.item_id;
+      });
+    }
+    renderOrders();
   }
 
-  function hiddenOrders() {
+  function applyItemExclusion(item, excluded) {
+    // The Hidden items window answers at once, the way the Open Orders one
+    // does: the member is looking at the list they just changed, and the
+    // change is already stored. Waiting on the reload below would leave the
+    // row they clicked sitting there, and leave it there for good if that
+    // reload failed.
+    excludedItems = excludedItems.filter(function (row) {
+      return row.item_id !== item.item_id;
+    });
+    if (excluded) {
+      excludedItems = excludedItems.concat([
+        { item_id: item.item_id, name: item.name }
+      ]);
+    }
+    renderHidden("items");
+    // The tables and totals are a different matter. Hiding an item moves the
+    // summary, all three charts, the day table and Your Picks as well, and
+    // every one of those is summed by the server, so the report is asked for
+    // again rather than re-derived here as a second implementation of the
+    // same arithmetic. Its answer replaces the list above when it lands.
+    reloadReport();
+  }
+
+  function openHidden(group) {
+    var dialog = document.getElementById(group + "-hidden-dialog");
+    var search = document.getElementById(group + "-hidden-search");
+    search.value = "";
+    renderHidden(group);
+    dialog.showModal();
+    search.focus();
+    trace(group + "-hidden-open", hiddenItems(group).length);
+  }
+
+  function hiddenItems(group) {
+    if (group === "items") { return excludedItems.slice(); }
     // One entry per item, however many order rows that item has.
     var seen = Object.create(null);
     var hidden = [];
@@ -1947,28 +2031,32 @@ __DAYS_PAGES_BOTTOM__
       seen[row.item_id] = true;
       hidden.push(row);
     });
-    return hidden.sort(function (left, right) {
+    return hidden;
+  }
+
+  function renderHidden(group) {
+    var body = document.getElementById(group + "-hidden-body");
+    var count = document.getElementById(group + "-hidden-count");
+    var search = document.getElementById(group + "-hidden-search").value
+      .trim().toLowerCase();
+    var subject = EXCLUSION_GROUPS[group].subject;
+    var hidden = hiddenItems(group).sort(function (left, right) {
       return left.name.localeCompare(
         right.name, undefined, { sensitivity: "base", numeric: true });
     });
-  }
-
-  function renderHiddenOrders() {
-    var body = document.getElementById("hidden-body");
-    var count = document.getElementById("hidden-count");
-    var search = document.getElementById("hidden-search").value
-      .trim().toLowerCase();
-    var hidden = hiddenOrders();
     var shown = search
-      ? hidden.filter(function (order) {
-        return order.name.toLowerCase().indexOf(search) !== -1;
+      ? hidden.filter(function (item) {
+        return item.name.toLowerCase().indexOf(search) !== -1;
       })
       : hidden;
     body.replaceChildren();
-    shown.forEach(function (order) {
+    shown.forEach(function (item) {
       var row = document.createElement("tr");
-      cell(row, order.name, "name");
-      cell(row, "", "actions").appendChild(restoreButton(order));
+      cell(row, item.name, "name");
+      cell(row, "", "actions").appendChild(
+        restoreButton(item.name, function (button) {
+          setExclusion(group, item, false, button);
+        }));
       body.appendChild(row);
     });
     if (!shown.length) {
@@ -1976,13 +2064,13 @@ __DAYS_PAGES_BOTTOM__
         ? "No hidden items match that search."
         : "You have not hidden any items yet.");
     }
-    count.textContent = hidden.length === 1
-      ? "1 item is hidden from your open orders."
-      : hidden.length + " items are hidden from your open orders.";
-    document.getElementById("orders-menu").title = hidden.length
+    count.textContent = (hidden.length === 1
+      ? "1 item is hidden from "
+      : hidden.length + " items are hidden from ") + subject + ".";
+    document.getElementById(group + "-menu").title = hidden.length
       ? "Hidden items (" + hidden.length + ")"
       : "Hidden items";
-    trace("open-orders-hidden", shown.length);
+    trace(group + "-hidden-shown", shown.length);
   }
 
   function renderOrders() {
@@ -2012,7 +2100,10 @@ __DAYS_PAGES_BOTTOM__
       optionalProfitCell(row, order.profit);
       optionalProfitCell(row, order.total_profit);
       percentCell(row, order.roi_percent);
-      cell(row, "", "actions").appendChild(hideButton(order));
+      cell(row, "", "actions").appendChild(
+        hideButton(order.name, function (button) {
+          setExclusion("orders", order, true, button);
+        }));
       body.appendChild(row);
       if (order.total_profit === null) {
         unpriced += 1;
@@ -2033,7 +2124,7 @@ __DAYS_PAGES_BOTTOM__
       profit, percent(cost ? profit / cost * 100 : null), ""
     ], 7);
     applySort("orders-table");
-    renderHiddenOrders();
+    renderHidden("orders");
     trace("open-orders", kept.length);
   }
 
@@ -2284,14 +2375,26 @@ __DAYS_PAGES_BOTTOM__
     }
   }
 
+  // The report request for the window on screen. Asking without a window lets
+  // the server answer with the one this member last chose; the page only
+  // names a window when they just picked one, or when the link they followed
+  // named one. windowQuery opens with a "?" and is empty when the page is
+  // asking for the remembered window, so the mark comes off and the rest
+  // joins the other query values here.
+  function reportUrl(forced) {
+    var query = [windowQuery().slice(1), forced ? "refresh=1" : ""]
+      .filter(Boolean).join("&");
+    return "/api/profit" + (query ? "?" + query : "");
+  }
+
+  // Re-draw the report sections alone, on the cached path: hiding or
+  // restoring an item is a change to what the server sums, not a reason to
+  // re-read the Trading Post or to disturb the other two sections.
+  function reloadReport() {
+    return fetchSection("report", reportUrl(false), renderReport);
+  }
+
   function load(forced) {
-    // Asking without a window lets the server answer with the one this member
-    // last chose; the page only names a window when they just picked one, or
-    // when the link they followed named one.
-    // windowQuery opens with a "?" and is empty when the page is asking for
-    // the remembered window, so the mark comes off and the rest joins the
-    // other query values below.
-    var chosen = windowQuery().slice(1);
     status.className = "";
     status.textContent = "Loading\u2026";
     reports.hidden = false;
@@ -2303,10 +2406,8 @@ __DAYS_PAGES_BOTTOM__
     // the address bar carries one after every render, so treating that as a
     // forced refresh would make each ordinary reload bypass every cache.
     var refresh = forced ? "refresh=1" : "";
-    var reportQuery = [chosen, refresh].filter(Boolean).join("&");
     Promise.all([
-      fetchSection("report", "/api/profit"
-        + (reportQuery ? "?" + reportQuery : ""), renderReport),
+      fetchSection("report", reportUrl(forced), renderReport),
       fetchSection("orders", "/api/profit/orders"
         + (refresh ? "?" + refresh : ""), renderOrdersSection),
       fetchSection("delivery", "/api/profit/delivery"
@@ -2383,23 +2484,25 @@ __DAYS_PAGES_BOTTOM__
 """
     + _RANGE_PICKER_LISTENERS_JS
     + """
-  document.getElementById("orders-menu").addEventListener(
-    "click", openHiddenItems);
-  document.getElementById("hidden-close").addEventListener(
-    "click", function () {
-      document.getElementById("hidden-dialog").close();
-    });
-  document.getElementById("hidden-search").addEventListener(
-    "input", renderHiddenOrders);
-  document.getElementById("hidden-dialog").addEventListener(
-    "click", function (event) {
-      // A modal dialog's backdrop is part of the dialog element, so a click
-      // landing on it and not on the panel inside means "outside".
-      if (event.target === this) {
-        this.close();
-        trace("hidden-items-dismiss", 0);
-      }
-    });
+  Object.keys(EXCLUSION_GROUPS).forEach(function (group) {
+    document.getElementById(group + "-menu").addEventListener(
+      "click", function () { openHidden(group); });
+    document.getElementById(group + "-hidden-close").addEventListener(
+      "click", function () {
+        document.getElementById(group + "-hidden-dialog").close();
+      });
+    document.getElementById(group + "-hidden-search").addEventListener(
+      "input", function () { renderHidden(group); });
+    document.getElementById(group + "-hidden-dialog").addEventListener(
+      "click", function (event) {
+        // A modal dialog's backdrop is part of the dialog element, so a click
+        // landing on it and not on the panel inside means "outside".
+        if (event.target === this) {
+          this.close();
+          trace(group + "-hidden-dismiss", 0);
+        }
+      });
+  });
   initializePagers();
   initializeSorters();
   readInitialRange();
@@ -2441,5 +2544,13 @@ PROFIT_PAGE = (
     .replace(
         "__DAYS_PAGES_BOTTOM__",
         _pagination_nav("days", "bottom", "Daily profit pages and page size"),
+    )
+    .replace(
+        "__ORDERS_HIDDEN_DIALOG__",
+        _hidden_items_dialog("orders", "open order"),
+    )
+    .replace(
+        "__ITEMS_HIDDEN_DIALOG__",
+        _hidden_items_dialog("items", "realized profit"),
     )
 )

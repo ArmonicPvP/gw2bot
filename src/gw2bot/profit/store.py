@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from gw2bot.database import (
     ProfitApiKeyRecord,
     ProfitCacheSyncRecord,
+    ProfitItemExclusionRecord,
     ProfitItemRecord,
     ProfitLotCheckpointIndexRecord,
     ProfitLotCheckpointRecord,
@@ -352,6 +353,65 @@ class ProfitStore:
                     session.delete(record)
         LOGGER.debug(
             "Stored profit order exclusion; user_id=%s item_id=%s "
+            "excluded=%s changed=%s",
+            discord_user_id,
+            item_id,
+            excluded,
+            changed,
+        )
+        return changed
+
+    def get_excluded_profit_items(self, discord_user_id: int) -> frozenset[int]:
+        """The items this member left out of their realized profit."""
+        with self._sessions() as session:
+            item_ids = frozenset(
+                session.scalars(
+                    select(ProfitItemExclusionRecord.item_id).where(
+                        ProfitItemExclusionRecord.discord_user_id
+                        == discord_user_id
+                    )
+                )
+            )
+        LOGGER.debug(
+            "Read profit item exclusions; user_id=%s items=%s",
+            discord_user_id,
+            len(item_ids),
+        )
+        return item_ids
+
+    def set_item_exclusion(
+        self,
+        discord_user_id: int,
+        item_id: int,
+        excluded: bool,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Exclude or restore one item; return whether the row changed."""
+        if item_id <= 0:
+            raise ValueError("Profit item exclusions need a positive item id")
+        created_at = (datetime.now(UTC) if now is None else now).isoformat()
+        with self._sessions.begin() as session:
+            record = session.get(
+                ProfitItemExclusionRecord,
+                (discord_user_id, item_id),
+            )
+            if excluded:
+                changed = record is None
+                if record is None:
+                    session.add(
+                        ProfitItemExclusionRecord(
+                            discord_user_id=discord_user_id,
+                            item_id=item_id,
+                            created_at=created_at,
+                        )
+                    )
+            else:
+                changed = record is not None
+                if record is not None:
+                    session.delete(record)
+        LOGGER.debug(
+            "Stored profit item exclusion; user_id=%s item_id=%s "
             "excluded=%s changed=%s",
             discord_user_id,
             item_id,
@@ -1512,6 +1572,11 @@ def _clear_member_preferences(session: Session, discord_user_id: int) -> None:
     session.execute(
         delete(ProfitOrderExclusionRecord).where(
             ProfitOrderExclusionRecord.discord_user_id == discord_user_id
+        )
+    )
+    session.execute(
+        delete(ProfitItemExclusionRecord).where(
+            ProfitItemExclusionRecord.discord_user_id == discord_user_id
         )
     )
 

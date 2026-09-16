@@ -289,6 +289,21 @@ class ProfitOrderExclusionRecord(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class ProfitItemExclusionRecord(Base):
+    """One item a member left out of their realized profit.
+
+    Kept apart from the Open Orders exclusions: an item not worth reading in
+    the orders table is not necessarily one a member wants dropped from their
+    flipped profit, and the two tables are hidden from independently.
+    """
+
+    __tablename__ = "gw2_profit_item_exclusions"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class RaffleTotalRecord(Base):
     __tablename__ = "raffle_totals"
 
