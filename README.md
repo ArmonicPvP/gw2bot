@@ -1318,12 +1318,7 @@ does not prevent later previews from being sent.
 
 Docker Compose stores the database in the persistent `bot-data` volume, along
 with `settings.key` unless you set `SETTINGS_ENCRYPTION_KEY` yourself. Back
-both up together: the key is what makes the encrypted settings readable. To
-view the current totals:
-
-```powershell
-docker compose exec bot python -m gw2bot.raffle_totals
-```
+both up together: the key is what makes the encrypted settings readable.
 
 For Unraid, map persistent app data to `/app/data`:
 
