@@ -37,6 +37,12 @@ from gw2bot.events.models import (
 )
 from gw2bot.events.store import EventStore
 from gw2bot.core.logging_setup import SecretRegistry, configure_logging
+from gw2bot.events.views.roster import _departed_summary
+from gw2bot.events.views.shared import _ping_role_options
+from gw2bot.events.views.signup import (
+    _describe_signup_settings,
+    _signup_summary,
+)
 from gw2bot.events.views import (
     EVENT_CHANNEL_TYPES,
     PING_ROLE_OPTION_LIMIT,
@@ -81,10 +87,6 @@ from gw2bot.events.views import (
     SignupFlow,
     SignupSettingsView,
     UpdateRememberedRolesView,
-    _departed_summary,
-    _describe_signup_settings,
-    _ping_role_options,
-    _signup_summary,
     build_event_preview,
     build_signup_view,
     draft_from_event,
@@ -9679,7 +9681,7 @@ class TestAddSignups:
             return calls["count"] > 3
 
         monkeypatch.setattr(
-            "gw2bot.events.views.occurrence_has_ended",
+            "gw2bot.events.views.roster.occurrence_has_ended",
             fake_ended,
         )
 
