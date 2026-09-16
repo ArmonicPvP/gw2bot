@@ -1970,17 +1970,19 @@ the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets before merging
 
 ## Extending Notifications
 
-Add GW2 API methods in `src/gw2bot/gw2_api.py` and notification decisions in
-the matching feature module: `src/gw2bot/guild_log.py` for guild-log events,
-`src/gw2bot/guild_storage.py` and `src/gw2bot/feast_stock.py` for feast stock
-alerts and history, `src/gw2bot/raffle/` for raffle reports and commands,
-`src/gw2bot/trials/` for Trial member tracking, `src/gw2bot/events/` for guild
-events, `src/gw2bot/web/` for the calendar and feast usage site, and
-`src/gw2bot/notifications.py` for delivery to the notification channel.
-`src/gw2bot/database.py` owns the SQLite schema and its migrations,
-`src/gw2bot/bot.py` wires the pollers and commands together, and
-`src/gw2bot/main.py` is the entrypoint that loads configuration and installs
-the redacting log formatter. `src/gw2bot/settings/` owns `/settings`: the
+Add GW2 API methods in `src/gw2bot/gw2/api.py` and notification decisions in
+the matching feature module: `src/gw2bot/gw2/guild_log.py` for guild-log
+events, `src/gw2bot/gw2/guild_storage.py` and `src/gw2bot/gw2/feast_stock.py`
+for feast stock alerts and history, `src/gw2bot/raffle/` for raffle reports and
+commands, `src/gw2bot/trials/` for Trial member tracking, `src/gw2bot/events/`
+for guild events, `src/gw2bot/web/` for the calendar and feast usage site, and
+`src/gw2bot/notifications/` for delivery to the notification channel and the
+`diag` previews. `src/gw2bot/core/` holds what every feature shares and nothing
+feature-specific: `database.py` owns the SQLite schema and its migrations,
+`logging_setup.py` the redacting formatter, and `discord_utils.py` the role
+checks and failure logging. `src/gw2bot/bot.py` wires the pollers and commands
+together, and `src/gw2bot/main.py` is the entrypoint that loads configuration
+and installs the redacting log formatter. `src/gw2bot/settings/` owns `/settings`: the
 definitions every subcommand is generated from, the store behind them, the
 encryption for the credential-bearing ones, and the one-time import from the
 environment. Secrets are read only from `/settings` and the bootstrap

@@ -103,15 +103,17 @@ Trial members, manages guild events with sign-up rosters, and optionally serves
 a web calendar and feast usage dashboard.
 
 Source lives under `src/gw2bot`, and `tests/` mirrors it by feature rather than
-file. Most modules have a matching `tests/test_<module>.py`, closely related
+file. Most features have a matching `tests/test_<feature>.py`, closely related
 ones share a single module (all of `trials/` is covered by
-`tests/test_trials.py`), and support code such as `database.py`, the `models.py`
-files, and the `views.py` modules is exercised through the modules that drive
-it. Put a new test in the module that already covers its feature instead of
-adding a path per source file. `tests/factories.py` holds the shared builders
-for fake guild-log events, Discord errors, raffle totals, settings stores and
-/settings interactions, and the fake bots that answer the
-optional-configuration guards.
+`tests/test_trials.py`, and all of `events/views/` by
+`tests/test_event_commands.py`), and support code such as `core/database.py`,
+the `models.py` files, and the `views/` modules is exercised through the
+modules that drive it. Put a new test in the module that already covers its
+feature instead of adding a path per source file. `tests/factories.py` holds
+the shared builders for fake guild-log events, Discord errors, raffle totals,
+settings stores and /settings interactions, and the fake bots that answer the
+optional-configuration guards. `tests/test_layout.py` asserts the one import
+rule the layout depends on: nothing in `core/` may import a feature package.
 
 Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 `pyrightconfig.json` already put `src` on the path for tests and type checking.
@@ -120,23 +122,19 @@ Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 | --- | --- |
 | `main.py` | Entrypoint: bootstraps the environment, opens the settings store, composes `Config`, installs the redacting log formatter, starts the bot. |
 | `config.py` | `BootstrapConfig` and `bootstrap_from_env` for the environment-only variables, plus `Config` and the defaults every setting falls back to. |
-| `logging_setup.py` | `configure_logging` and `RedactingFormatter`, re-exported from `main`. |
 | `bot.py` | The `discord.py` client: wires pollers, background tasks, and command groups. |
-| `database.py` | SQLite engine, schema, and in-place migrations (Alembic operations). |
-| `gw2_api.py` | GW2 API client. Endpoint notes are in `docs/gw2-api.md`. |
-| `guild_log.py`, `guild_storage.py`, `guild_stash.py`, `feast_stock.py`, `guild_members.py`, `member_count.py` | GW2 polling and the decisions each poll feeds. |
-| `pending_invites.py` | The accounts invited in-game that have not accepted: the report behind `/pending` and the roster page's section. |
-| `anchored_series.py` | Deriving a running total from an observed value and the changes around it, shared by the roster and gold histories. |
-| `dashboard_ranges.py` | The window a dashboard draws and the one a member last picked: the custom range's name, the default, and the remembered choice every page but `/profit` stores. |
-| `notifications.py`, `poll_status.py` | Delivery to the notification channel, plus the `diag` previews. |
+| `core/` | The shared layer with no feature knowledge, which nothing in it may import back: `database.py` (SQLite engine, schema, and in-place migrations), `logging_setup.py` (`configure_logging` and `RedactingFormatter`, re-exported from `main`), `discord_utils.py` (role checks, ephemeral notices, Discord failure logging), `anchored_series.py` (a running total derived from an observed value and the changes around it, shared by the roster and gold histories), and `dashboard_ranges.py` (the window a dashboard draws and the one a member last picked). |
+| `gw2/` | The GW2 API client (`api.py`, with endpoint notes in `docs/gw2-api.md`) and the pollers that turn its responses into decisions: `guild_log.py`, `guild_storage.py`, `guild_stash.py`, `feast_stock.py`, `guild_members.py`, `member_count.py`. |
+| `notifications/` | `delivery.py` for the notification channel, `diagnostics.py` for the `diag` previews, and `poll_status.py` for poll failure and recovery reporting. |
+| `invites/` | The accounts invited in-game that have not accepted: the report behind `/pending` and the roster page's section. |
 | `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
 | `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import` from the log channel. |
 | `gold/` | Guild bank gold history: the series the gold page draws, and the one-time `/gold import` from the guild log. |
+| `profit/` | Trading Post profit reports: the member's API key, the price and delivery reads behind it, and `/profit`. |
 | `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
-| `events/` | Guild events: models, store, posting, scheduler, reminders, views, `/event` commands. |
-| `web/` | Optional aiohttp site: Discord OAuth, calendar, feast usage and guild roster pages. |
+| `events/` | Guild events: models, store, scheduler, reminders, `/event` commands, plus `posting/` (what an event does to Discord: `state`, `channels`, `pings`, `roster`, `messages`, `occurrences`) and `views/` (the UI, one module per flow: `shared`, `preview`, `create`, `field_edit`, `roster`, `lifecycle`, `signup`). |
+| `web/` | Optional aiohttp site: Discord OAuth and the server, with one module per served document under `pages/`. |
 | `settings/` | `/settings`: the definitions every subcommand is generated from, the store behind them, encryption for the credential-bearing ones, composition onto `Config`, and the one-time import from the environment. |
-| `discord_utils.py` | Shared role checks, ephemeral interaction notices, and Discord failure logging helpers. |
 
 Feature behaviour, every environment variable, and every `/settings`
 subcommand with its default are documented in `README.md`. It is the reference
