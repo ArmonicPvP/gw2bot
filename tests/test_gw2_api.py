@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from gw2bot.gw2_api import Gw2ApiClient
+from gw2bot.gw2.api import Gw2ApiClient
 
 
 class FakeResponse:
@@ -74,7 +74,7 @@ class TestGw2ApiClient:
         session = FakeSession([])
         client = Gw2ApiClient(session, "https://example.test", api_key)  # type: ignore[arg-type]
 
-        with caplog.at_level(logging.DEBUG, logger="gw2bot.gw2_api"):
+        with caplog.at_level(logging.DEBUG, logger="gw2bot.gw2.api"):
             await client.get_guild_log(guild_id, since=42)
 
         assert f"/v2/guild/{guild_id}/log" in caplog.text

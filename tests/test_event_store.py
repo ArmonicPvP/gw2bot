@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 
-from gw2bot.database import create_database_engine, initialize_database
+from gw2bot.core.database import create_database_engine, initialize_database
 from gw2bot.events.models import (
     AutoSignupChoice,
     EventCategory,

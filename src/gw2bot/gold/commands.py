@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import send_interaction_notice, user_has_role
+from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.gold.import_log import format_import_result, import_gold_history
 
 if TYPE_CHECKING:

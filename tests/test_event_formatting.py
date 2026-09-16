@@ -26,7 +26,7 @@ from gw2bot.events.formatting import (
     roster_update_messages,
     signup_edit_limit_message,
 )
-from gw2bot.guild_members import DISCORD_MESSAGE_LIMIT
+from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
     CATEGORY_EMOJI,

@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import user_has_role
+from gw2bot.core.discord_utils import user_has_role
 from gw2bot.events.formatting import format_event_datetime
 from gw2bot.events.models import (
     Event,

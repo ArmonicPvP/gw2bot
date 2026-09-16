@@ -12,8 +12,9 @@ import discord
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import GuildMembership
+from gw2bot.core.discord_utils import GuildMembership
 from gw2bot.events import posting
+from gw2bot.events.posting import roster as posting_roster
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
     AutoSignupChoice,
@@ -60,7 +61,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.events.formatting import roster_update_messages
 from gw2bot.events.store import EventStore
-from gw2bot.logging_setup import SecretRegistry, configure_logging
+from gw2bot.core.logging_setup import SecretRegistry, configure_logging
 
 from factories import (
     FakeGuild,
@@ -2808,7 +2809,7 @@ class TestPruneDepartedSignups:
                 )
             return result
 
-        monkeypatch.setattr(posting, "remove_signup", remove_then_end)
+        monkeypatch.setattr(posting_roster, "remove_signup", remove_then_end)
 
         removed, _ = await prune_departed_signups(
             bot,
@@ -2853,7 +2854,7 @@ class TestPruneDepartedSignups:
                 store.delete_event(event.event_id)
             return result
 
-        monkeypatch.setattr(posting, "remove_signup", remove_then_delete)
+        monkeypatch.setattr(posting_roster, "remove_signup", remove_then_delete)
 
         removed, _ = await prune_departed_signups(
             bot,
@@ -5630,7 +5631,7 @@ class TestCheckRosterMembership:
         async def refuse(*args: Any, **kwargs: Any) -> Any:
             raise forbidden_error(50001)
 
-        monkeypatch.setattr(posting, "resolve_guild_memberships", refuse)
+        monkeypatch.setattr(posting_roster, "resolve_guild_memberships", refuse)
 
         signup = await complete_signup(
             bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()

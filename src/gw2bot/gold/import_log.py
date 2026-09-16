@@ -5,7 +5,7 @@ import time
 from typing import TYPE_CHECKING
 
 from gw2bot.gold.models import DEPOSIT, WITHDRAW, GoldImportResult, GoldLedgerEntry
-from gw2bot.guild_stash import stash_coin_balance
+from gw2bot.gw2.guild_stash import stash_coin_balance
 from gw2bot.raffle.events import parse_stash_coin_movement
 from gw2bot.raffle.models import format_gold
 

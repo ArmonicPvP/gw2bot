@@ -5,7 +5,7 @@ from collections.abc import Mapping
 
 from sqlalchemy.orm import sessionmaker
 
-from gw2bot.database import (
+from gw2bot.core.database import (
     BotSettingRecord,
     SettingRecord,
     create_database_engine,

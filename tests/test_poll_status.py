@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import aiohttp
 import pytest
 
-from gw2bot.poll_status import PollStatusTracker, format_poll_error
+from gw2bot.notifications.poll_status import PollStatusTracker, format_poll_error
 
 
 class TestFormatPollError:
@@ -40,7 +40,7 @@ class TestPollStatusTracker:
             message="Bad Gateway",
         )
 
-        with caplog.at_level(logging.WARNING, logger="gw2bot.poll_status"):
+        with caplog.at_level(logging.WARNING, logger="gw2bot.notifications.poll_status"):
             tracker.record_error("Guild Log", error)
 
         assert tracker.last_errors == {"Guild Log": "HTTP 502: Bad Gateway"}
@@ -53,7 +53,7 @@ class TestPollStatusTracker:
         api_key = "secret-api-key"
         tracker = PollStatusTracker((api_key, "secret-discord-token"))
 
-        with caplog.at_level(logging.WARNING, logger="gw2bot.poll_status"):
+        with caplog.at_level(logging.WARNING, logger="gw2bot.notifications.poll_status"):
             tracker.record_error(
                 "Guild Log",
                 TimeoutError(f"Request failed with Bearer {api_key}"),
@@ -71,7 +71,7 @@ class TestPollStatusTracker:
         secret = "raffle-report-secret"
         tracker = PollStatusTracker((secret, "discord-secret"))
 
-        with caplog.at_level(logging.WARNING, logger="gw2bot.poll_status"):
+        with caplog.at_level(logging.WARNING, logger="gw2bot.notifications.poll_status"):
             tracker.record_error(
                 "Raffle Contributions",
                 aiohttp.ClientError(f"request failed with access_token={secret}"),
@@ -96,7 +96,7 @@ class TestPollStatusTracker:
         tracker = PollStatusTracker()
         error = TimeoutError("API unavailable")
 
-        with caplog.at_level(logging.WARNING, logger="gw2bot.poll_status"):
+        with caplog.at_level(logging.WARNING, logger="gw2bot.notifications.poll_status"):
             tracker.record_error("Guild Storage", error)
 
         assert "Guild Storage polling failed: API unavailable" in caplog.text
@@ -109,7 +109,7 @@ class TestPollStatusTracker:
         tracker = PollStatusTracker()
         tracker.record_error("Guild Storage", TimeoutError("API unavailable"))
 
-        with caplog.at_level(logging.INFO, logger="gw2bot.poll_status"):
+        with caplog.at_level(logging.INFO, logger="gw2bot.notifications.poll_status"):
             tracker.record_success("Guild Storage")
 
         assert "Guild Storage polling recovered." in caplog.text
@@ -121,7 +121,7 @@ class TestPollStatusTracker:
     ) -> None:
         tracker = PollStatusTracker()
 
-        with caplog.at_level(logging.INFO, logger="gw2bot.poll_status"):
+        with caplog.at_level(logging.INFO, logger="gw2bot.notifications.poll_status"):
             tracker.record_success("Guild Log")
 
         assert "recovered" not in caplog.text

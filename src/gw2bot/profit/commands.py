@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import send_interaction_notice
+from gw2bot.core.discord_utils import send_interaction_notice
 from gw2bot.profit.api import DELIVERY_PATH, ProfitApiError
 from gw2bot.profit.store import MAX_REPORT_DAYS, MIN_REPORT_DAYS
 

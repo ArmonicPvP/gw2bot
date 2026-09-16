@@ -2,7 +2,7 @@ import logging
 import sys
 from unittest.mock import MagicMock, patch
 
-from gw2bot.logging_setup import (
+from gw2bot.core.logging_setup import (
     RedactingFormatter,
     configure_logging,
     redact_log_text,
@@ -10,7 +10,7 @@ from gw2bot.logging_setup import (
 
 
 class TestConfigureLogging:
-    @patch("gw2bot.logging_setup.logging.basicConfig")
+    @patch("gw2bot.core.logging_setup.logging.basicConfig")
     def test_configures_application_debug_logging_only(
         self,
         basic_config: MagicMock,

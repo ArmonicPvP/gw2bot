@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import user_has_role
+from gw2bot.core.discord_utils import user_has_role
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
     RAFFLE_TICKETS_PAGE_SIZE,

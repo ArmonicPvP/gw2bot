@@ -17,7 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from factories import config_from_env, forbidden_error, not_found_error
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
-from gw2bot.dashboard_ranges import StoredRange
+from gw2bot.core.dashboard_ranges import StoredRange
 from gw2bot.events.models import EventCategory, RepeatFrequency
 from gw2bot.events.store import EventStore
 from gw2bot.raffle import RaffleStore
@@ -42,8 +42,8 @@ from gw2bot.profit import (
 )
 from gw2bot.profit.api import ProfitApiError
 from gw2bot.profit.service import MissingProfitApiKey, ResolvedWindow
-from gw2bot.guild_members import TrialMemberReportEntry
-from gw2bot.pending_invites import PendingInvites
+from gw2bot.gw2.guild_members import TrialMemberReportEntry
+from gw2bot.invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
 from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.web.server import WebServer

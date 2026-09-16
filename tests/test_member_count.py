@@ -8,7 +8,7 @@ import discord
 import pytest
 
 from gw2bot.bot import Gw2Bot
-from gw2bot.member_count import (
+from gw2bot.gw2.member_count import (
     GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS,
     count_active_guild_members,
     format_guild_member_count_topic,
@@ -312,7 +312,7 @@ class TestGuildMemberCountTopic:
         assert bot._last_topic_update_failure is None
         assert "Logging channel description update recovered" in caplog.text
 
-    @patch("gw2bot.member_count.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gw2bot.gw2.member_count.asyncio.sleep", new_callable=AsyncMock)
     async def test_poller_updates_topic_every_minute(self, sleep: AsyncMock) -> None:
         bot = SimpleNamespace(
             wait_until_ready=AsyncMock(),
@@ -332,7 +332,7 @@ class TestGuildMemberCountTopic:
         bot._poll_status.record_error.assert_not_called()
         sleep.assert_awaited_once_with(GUILD_MEMBER_COUNT_TOPIC_UPDATE_SECONDS)
 
-    @patch("gw2bot.member_count.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gw2bot.gw2.member_count.asyncio.sleep", new_callable=AsyncMock)
     async def test_poller_reports_member_count_api_failure(
         self,
         sleep: AsyncMock,

@@ -18,8 +18,8 @@ from factories import (
 )
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import DEFAULT_RAFFLE_OFFICER_ROLE_ID as OFFICER_ROLE_ID
-from gw2bot.guild_members import TrialMemberReportEntry
-from gw2bot.pending_invites import (
+from gw2bot.gw2.guild_members import TrialMemberReportEntry
+from gw2bot.invites import (
     build_pending_invite_entries,
     build_pending_invite_messages,
 )

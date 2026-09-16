@@ -1,4 +1,4 @@
-from gw2bot.feast_stock import (
+from gw2bot.gw2.feast_stock import (
     LOW_STOCK_REMINDER_SECONDS,
     FeastStockSample,
     FeastStockSeries,

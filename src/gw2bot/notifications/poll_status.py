@@ -4,7 +4,7 @@ import logging
 
 import aiohttp
 
-from gw2bot.logging_setup import Secrets, redact_log_text
+from gw2bot.core.logging_setup import Secrets, redact_log_text
 
 LOGGER = logging.getLogger(__name__)
 

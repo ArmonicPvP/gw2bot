@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 
-from gw2bot.discord_utils import log_discord_failure, safe_int
+from gw2bot.core.discord_utils import log_discord_failure, safe_int
 from gw2bot.roster.history import parse_membership_message
 from gw2bot.roster.models import (
     ImportedMembershipEvent,

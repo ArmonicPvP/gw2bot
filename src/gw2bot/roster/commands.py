@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.discord_utils import (
+from gw2bot.core.discord_utils import (
     log_discord_failure,
     send_interaction_notice,
     user_has_role,

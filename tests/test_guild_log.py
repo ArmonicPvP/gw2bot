@@ -95,7 +95,7 @@ class TestGuildLogRefresh:
             excluded_usernames=(),
         )
 
-    @patch("gw2bot.guild_log.asyncio.sleep", new_callable=AsyncMock)
+    @patch("gw2bot.gw2.guild_log.asyncio.sleep", new_callable=AsyncMock)
     async def test_guild_log_poller_sends_deposits_to_main_and_audit_channels(
         self,
         sleep: AsyncMock,

@@ -5,7 +5,7 @@ import os
 
 from gw2bot.bot import Gw2Bot as Gw2Bot
 from gw2bot.config import ConfigurationError, bootstrap_from_env
-from gw2bot.logging_setup import (
+from gw2bot.core.logging_setup import (
     SecretRegistry,
     configure_logging as configure_logging,
 )

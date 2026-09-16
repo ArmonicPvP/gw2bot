@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import sessionmaker
 
-from gw2bot.database import (
+from gw2bot.core.database import (
     EventAutoSignupRecord,
     EventOccurrenceRecord,
     EventRecord,

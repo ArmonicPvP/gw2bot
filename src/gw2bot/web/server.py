@@ -15,7 +15,7 @@ from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import Config
-from gw2bot.dashboard_ranges import (
+from gw2bot.core.dashboard_ranges import (
     CUSTOM_RANGE,
     DEFAULT_RANGE,
     FOOD_DASHBOARD,
@@ -24,8 +24,8 @@ from gw2bot.dashboard_ranges import (
     StoredRange,
     is_servable,
 )
-from gw2bot.discord_utils import resolve_display_name, user_has_role
-from gw2bot.feast_stock import (
+from gw2bot.core.discord_utils import resolve_display_name, user_has_role
+from gw2bot.gw2.feast_stock import (
     FEAST_USAGE_RANGES,
     TRACKED_FEASTS,
     Feast,
@@ -45,7 +45,7 @@ from gw2bot.profit.service import (
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
-from gw2bot.web.page import (
+from gw2bot.web.pages import (
     CALENDAR_PAGE,
     FOOD_PAGE,
     GOLD_OFFICER_ONLY_PAGE,
@@ -59,7 +59,7 @@ from gw2bot.web.page import (
     SIGNED_OUT_PAGE,
     sign_in_page,
 )
-from gw2bot.web.profit_page import PROFIT_PAGE
+from gw2bot.web.pages.profit import PROFIT_PAGE
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot

@@ -27,7 +27,7 @@ from gw2bot.config import (
     ConfigurationError,
     bootstrap_from_env,
 )
-from gw2bot.logging_setup import RedactingFormatter, SecretRegistry
+from gw2bot.core.logging_setup import RedactingFormatter, SecretRegistry
 from gw2bot.raffle import RaffleStore
 from gw2bot.settings.commands import (
     SettingsCommands,

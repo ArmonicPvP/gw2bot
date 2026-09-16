@@ -1,6 +1,6 @@
 import re
 
-from gw2bot.web.page import (
+from gw2bot.web.pages import (
     CALENDAR_PAGE,
     FOOD_PAGE,
     GOLD_PAGE,
@@ -8,7 +8,7 @@ from gw2bot.web.page import (
     sign_in_page,
 )
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
-from gw2bot.web.profit_page import (
+from gw2bot.web.pages.profit import (
     PAGE_SIZE_DEFAULT,
     PAGE_SIZE_LIMIT,
     PROFIT_PAGE,
