@@ -179,7 +179,7 @@ class TestProfitPage:
         assert 'path: "/api/profit/exclusions",' in PROFIT_PAGE
         assert 'method: "POST",' in PROFIT_PAGE
         assert (
-            "JSON.stringify({ item_id: itemId, excluded: excluded })"
+            "JSON.stringify({ item_id: item.item_id, excluded: excluded })"
             in PROFIT_PAGE
         )
         assert "function renderHidden(group)" in PROFIT_PAGE
@@ -187,7 +187,7 @@ class TestProfitPage:
         assert "return row.has_order && !row.excluded;" in PROFIT_PAGE
         # Open Orders is summed in the browser, so it redraws from the rows
         # already on screen rather than asking for them again.
-        assert "function applyOrderExclusion(itemId, excluded)" in PROFIT_PAGE
+        assert "function applyOrderExclusion(item, excluded)" in PROFIT_PAGE
 
     def test_realized_items_hiding_is_saved_and_redraws_the_report(
         self,
@@ -195,12 +195,10 @@ class TestProfitPage:
         assert 'path: "/api/profit/item-exclusions",' in PROFIT_PAGE
         assert 'subject: "your realized profit"' in PROFIT_PAGE
         assert "excludedItems = data.excluded_items;" in PROFIT_PAGE
-        assert 'setExclusion("items", item.item_id, true, button)' in (
-            PROFIT_PAGE
-        )
+        assert 'setExclusion("items", item, true, button)' in PROFIT_PAGE
         # The summary, the charts, the day table and Your Picks all move with
         # it, and every one of them is summed by the server.
-        assert "function applyItemExclusion()" in PROFIT_PAGE
+        assert "function applyItemExclusion(item, excluded)" in PROFIT_PAGE
         assert "function reloadReport()" in PROFIT_PAGE
         assert 'fetchSection("report", reportUrl(false), renderReport)' in (
             PROFIT_PAGE
@@ -235,6 +233,19 @@ class TestProfitPage:
         # The old always-on chip list is gone, not merely hidden.
         assert "Excluded items" not in PROFIT_PAGE
         assert 'id="orders-excluded-list"' not in PROFIT_PAGE
+
+    def test_restoring_answers_at_once_in_both_hidden_windows(self) -> None:
+        # One Restore button, one handler, one immediate redraw, whichever
+        # window the member opened. The items list is corrected by the
+        # reloaded report when it lands, so a failed reload cannot leave a
+        # restored row sitting in the window.
+        assert PROFIT_PAGE.count("setExclusion(group, item, false, button)") == 1
+        assert 'restoreButton(item.name, function (button) {' in PROFIT_PAGE
+        assert 'renderHidden("items");\n    // The tables and totals' in (
+            PROFIT_PAGE
+        )
+        assert "excludedItems = data.excluded_items;" in PROFIT_PAGE
+        assert "renderOrders();" in PROFIT_PAGE
 
     def test_hidden_items_are_searchable_in_a_table(self) -> None:
         for group in ("orders", "items"):

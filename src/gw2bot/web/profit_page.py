@@ -1765,7 +1765,7 @@ __ITEMS_HIDDEN_DIALOG__
       percentCell(row, item.profit_share_percent, item.profit);
       cell(row, "", "actions").appendChild(
         hideButton(item.name, function (button) {
-          setExclusion("items", item.item_id, true, button);
+          setExclusion("items", item, true, button);
         }));
       body.appendChild(row);
     });
@@ -1941,13 +1941,13 @@ __ITEMS_HIDDEN_DIALOG__
     return button;
   }
 
-  function setExclusion(group, itemId, excluded, button) {
+  function setExclusion(group, item, excluded, button) {
     var config = EXCLUSION_GROUPS[group];
     button.disabled = true;
     fetch(config.path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ item_id: itemId, excluded: excluded })
+      body: JSON.stringify({ item_id: item.item_id, excluded: excluded })
     }).then(function (response) {
       if (response.status === 401) {
         location.href = "/login?next=" + encodeURIComponent(
@@ -1962,7 +1962,7 @@ __ITEMS_HIDDEN_DIALOG__
       status.textContent = (excluded
         ? "Hid that item from "
         : "Restored that item to ") + config.subject + ".";
-      config.applied(itemId, excluded);
+      config.applied(item, excluded);
       trace(group + (excluded ? "-hidden" : "-restored"), 1);
     }).catch(function () {
       button.disabled = false;
@@ -1973,27 +1973,41 @@ __ITEMS_HIDDEN_DIALOG__
     });
   }
 
-  function applyOrderExclusion(itemId, excluded) {
+  function applyOrderExclusion(item, excluded) {
     // Open Orders is summed in the browser from rows already on screen, so
     // the change is drawn from what is held here rather than re-fetched.
     ordersRows.forEach(function (row) {
-      if (row.item_id === itemId) { row.excluded = excluded; }
+      if (row.item_id === item.item_id) { row.excluded = excluded; }
     });
     if (!excluded) {
       // A restored item with no live order has nothing left to show.
       ordersRows = ordersRows.filter(function (row) {
-        return row.has_order || row.item_id !== itemId;
+        return row.has_order || row.item_id !== item.item_id;
       });
     }
     renderOrders();
   }
 
-  function applyItemExclusion() {
-    // Hiding an item moves the summary, all three charts, the day table and
-    // Your Picks as well, and every one of those is summed by the server.
-    // Asking for the report again is what keeps them agreeing with each
-    // other; re-deriving them here would be a second implementation of the
-    // same arithmetic, drifting from the first.
+  function applyItemExclusion(item, excluded) {
+    // The Hidden items window answers at once, the way the Open Orders one
+    // does: the member is looking at the list they just changed, and the
+    // change is already stored. Waiting on the reload below would leave the
+    // row they clicked sitting there, and leave it there for good if that
+    // reload failed.
+    excludedItems = excludedItems.filter(function (row) {
+      return row.item_id !== item.item_id;
+    });
+    if (excluded) {
+      excludedItems = excludedItems.concat([
+        { item_id: item.item_id, name: item.name }
+      ]);
+    }
+    renderHidden("items");
+    // The tables and totals are a different matter. Hiding an item moves the
+    // summary, all three charts, the day table and Your Picks as well, and
+    // every one of those is summed by the server, so the report is asked for
+    // again rather than re-derived here as a second implementation of the
+    // same arithmetic. Its answer replaces the list above when it lands.
     reloadReport();
   }
 
@@ -2041,7 +2055,7 @@ __ITEMS_HIDDEN_DIALOG__
       cell(row, item.name, "name");
       cell(row, "", "actions").appendChild(
         restoreButton(item.name, function (button) {
-          setExclusion(group, item.item_id, false, button);
+          setExclusion(group, item, false, button);
         }));
       body.appendChild(row);
     });
@@ -2088,7 +2102,7 @@ __ITEMS_HIDDEN_DIALOG__
       percentCell(row, order.roi_percent);
       cell(row, "", "actions").appendChild(
         hideButton(order.name, function (button) {
-          setExclusion("orders", order.item_id, true, button);
+          setExclusion("orders", order, true, button);
         }));
       body.appendChild(row);
       if (order.total_profit === null) {

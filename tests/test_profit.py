@@ -2763,6 +2763,95 @@ class TestProfitService:
             {"item_id": 1, "name": "Hidden Item"}
         ]
 
+    async def test_restoring_a_hidden_item_brings_its_whole_history_back(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        """Hiding is a view over the stored rows, so restoring is complete.
+
+        Nothing is discarded when an item is hidden, so putting it back needs
+        no re-read of the Trading Post and no rematch: the same report comes
+        back, to the coin.
+        """
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                f"buy-{item_id}",
+                item_id=item_id,
+                price=100,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 16, tzinfo=UTC),
+            )
+            for item_id in (1, 2)
+        ]
+        sells = [
+            transaction(
+                f"sell-{item_id}",
+                item_id=item_id,
+                price=200,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 18, tzinfo=UTC),
+            )
+            for item_id in (1, 2)
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_names=AsyncMock(
+                return_value={1: "Hidden Item", 2: "Kept Item"}
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={
+                    1: MarketPrice(100, 200),
+                    2: MarketPrice(100, 200),
+                }
+            ),
+        )
+        window = ReportWindow(days=7)
+        before = await service.load_report(101, window, now=now)
+
+        assert await service.set_item_exclusion(101, 1, True)
+        hidden = await service.load_report(101, window, now=now)
+
+        assert set(hidden.realized.items) == {2}
+        assert hidden.excluded_items == frozenset({1})
+        assert hidden.realized.total_profit < before.realized.total_profit
+        # The hidden item is named in the report it is absent from, which is
+        # what the page lists for restoring.
+        assert hidden.item_names[1] == "Hidden Item"
+
+        # Restoring is the same call with the flag turned round, and a member
+        # who restores an item that was never hidden is told nothing changed
+        # rather than met with an error.
+        assert await service.set_item_exclusion(101, 1, False)
+        assert not await service.set_item_exclusion(101, 1, False)
+        restored = await service.load_report(101, window, now=now)
+
+        assert restored.excluded_items == frozenset()
+        assert restored.realized.items == before.realized.items
+        assert restored.realized.days == before.realized.days
+        assert restored.realized.total_profit == before.realized.total_profit
+        assert restored.trailing_days == before.trailing_days
+
     async def test_report_window_is_remembered_once_a_member_picks_one(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
