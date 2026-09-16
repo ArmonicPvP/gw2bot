@@ -45,7 +45,7 @@ from gw2bot.profit.service import (
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
-from gw2bot.web.page import (
+from gw2bot.web.pages import (
     CALENDAR_PAGE,
     FOOD_PAGE,
     GOLD_OFFICER_ONLY_PAGE,
@@ -59,7 +59,7 @@ from gw2bot.web.page import (
     SIGNED_OUT_PAGE,
     sign_in_page,
 )
-from gw2bot.web.profit_page import PROFIT_PAGE
+from gw2bot.web.pages.profit import PROFIT_PAGE
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot

@@ -1,14 +1,14 @@
 """Static browser dashboard for a member's Trading Post profit reports."""
 
 from gw2bot.profit.store import MAX_REPORT_DAYS
-from gw2bot.web.page import (
-    _CUSTOM_RANGE_PANEL,
-    _DASHBOARD_HEADER_STYLE,
-    _RANGE_PICKER_LISTENERS_JS,
-    _RANGE_PICKER_NAV,
-    _RANGE_PICKER_STYLE,
-    _SHARED_STYLE,
-    _range_picker_js,
+from gw2bot.web.pages.shared import (
+    CUSTOM_RANGE_PANEL,
+    DASHBOARD_HEADER_STYLE,
+    RANGE_PICKER_LISTENERS_JS,
+    RANGE_PICKER_NAV,
+    RANGE_PICKER_STYLE,
+    SHARED_STYLE,
+    range_picker_js,
 )
 
 # Rows per page a paginated table opens on, and the largest it will accept.
@@ -111,9 +111,9 @@ _PROFIT_PAGE_TEMPLATE = (
 <link rel="icon" href="data:,">
 <title>Trading Post Profit</title>
 <style>"""
-    + _SHARED_STYLE
-    + _DASHBOARD_HEADER_STYLE
-    + _RANGE_PICKER_STYLE
+    + SHARED_STYLE
+    + DASHBOARD_HEADER_STYLE
+    + RANGE_PICKER_STYLE
     + """
 body { display: flex; flex-direction: column; }
 /* The range buttons and the reload beside them travel together, so they move
@@ -420,7 +420,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
   <h1 id="brand">Trading Post Profit</h1>
   <div class="controls">
 """
-    + _RANGE_PICKER_NAV
+    + RANGE_PICKER_NAV
     + """
     <button class="primary" type="button" id="reload">Reload</button>
   </div>
@@ -440,7 +440,7 @@ tfoot td { font-weight: 700; background: var(--panel-2); }
     </button>
   </form>
 """
-    + _CUSTOM_RANGE_PANEL
+    + CUSTOM_RANGE_PANEL
     + """
 </header>
 <main>
@@ -2299,7 +2299,7 @@ __ITEMS_HIDDEN_DIALOG__
     load(false);
   }
 """
-    + _range_picker_js(
+    + range_picker_js(
         "profit", max_custom_days=MAX_REPORT_DAYS, utc_days=True
     )
     + """
@@ -2482,7 +2482,7 @@ __ITEMS_HIDDEN_DIALOG__
     load(true);
   });
 """
-    + _RANGE_PICKER_LISTENERS_JS
+    + RANGE_PICKER_LISTENERS_JS
     + """
   Object.keys(EXCLUSION_GROUPS).forEach(function (group) {
     document.getElementById(group + "-menu").addEventListener(
