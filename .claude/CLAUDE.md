@@ -28,97 +28,75 @@ If a user's instruction conflicts with a preference or other rules or informatio
 - CLAUDE.md and AGENTS.md must be mirrors of each other. Changes to one must result in changes to the other.
 - Never import anything under `gw2bot` outside `core/` from a module in `src/gw2bot/core/`, in any import spelling.
 
-## Credential-Safe Logging
+## Reference files
 
-- Never log credentials or secret-bearing objects. This includes API keys,
-  Discord tokens, authorization headers, request objects, response objects,
-  complete request URLs with query strings, and raw response bodies.
-- HTTP diagnostics may log only sanitized route paths without query strings,
-  status codes, result types, and result counts.
-- All console logging must retain the redacting formatter configured by
-  `gw2bot.main.configure_logging`. Do not add independent handlers that bypass
-  it.
-- Every new credential or token environment variable must be supplied to the
-  redacting formatter during startup.
-- Add regression tests whenever request, response, exception, or logging code
-  changes to prove secrets cannot appear in console output.
-- Never read, print, commit, or include the local `.env` file in diagnostics.
+Everything below the constraints lives in `docs/`, so a session only pays for
+what the work at hand needs. Read the file when its trigger applies; do not
+read them all up front.
 
-## Diagnostic Logging Coverage
+| File | Read it when |
+| --- | --- |
+| `docs/testing.md` | Finishing any Python change. Says what must pass and how annotations and suppressions are written. |
+| `docs/logging.md` | Touching anything that logs, makes a request, handles an exception, or holds a credential. |
+| `docs/concurrency.md` | Adding a lock, a guard against interleaving, or a defensive re-read - and before acting on a review finding that claims a race. |
+| `docs/core.md` | Adding to `src/gw2bot/core/`, moving something into it, or when `tests/test_layout.py` fails. |
+| `docs/settings.md` | Adding or changing a `/settings` subcommand, touching `Config`, or gating a feature on optional configuration. |
+| `docs/events.md` | Changing anything under `src/gw2bot/events/`, especially an import inside `views/` or `posting/`. |
+| `docs/web.md` | Changing a served page, the chrome they share, or how a document is assembled. |
+| `docs/gw2-api.md` | Calling a GW2 API endpoint, for its response shape and quirks. |
 
-- Add credential-safe debug logging for every meaningful action, decision,
-  skip, external delivery attempt, success, and failure.
-- Diagnostic logs must make it possible to trace a workflow end to end without
-  logging raw messages, event payloads, request or response bodies, or other
-  user-provided content. Prefer sanitized action names, counts, result flags,
-  character counts, and exception type names.
-- A failure in one diagnostic preview must be logged and must not prevent the
-  remaining previews from being attempted.
-
-## Concurrency And Rare Races
-
-- Write defensively against failures that actually happen: Discord errors,
-  missing permissions, rows that disappear, restarts mid-workflow, and stale
-  snapshots held while a confirmation sits open. Re-read state before mutating
-  it, and clean up after a write that fails part-way.
-- Do not chase sub-second interleavings - a race that needs two commanders, or
-  a commander and the maintenance pass, colliding inside the same few hundred
-  milliseconds. Re-reading before the mutation is the accepted mitigation for
-  these; a further guard is not worth its cost.
-- Reject review findings of that shape, including automated ones, rather than
-  acting on them. Say plainly that the interleaving is too rare to be worth
-  the change, and move on.
-- Weigh any such guard against the asynchronous design, which comes first:
-  holding locks across Discord I/O for whole workflows, serialising the event
-  loop, or taking broad mutation locks over central paths costs more than the
-  races it closes.
-- A race actually observed in production is a different matter. Fix that one
-  deliberately, with the evidence in hand.
-
-## Python Verification
-
-- Create and maintain tests with pytest, not unittest. Use pytest fixtures,
-  native `assert` statements, and `pytest.raises` instead of
-  `unittest.TestCase`; `unittest.mock` remains acceptable for mocking.
-- VS Code uses Pylance with `python.analysis.typeCheckingMode` set to
-  `standard`. The matching CLI configuration is `pyrightconfig.json`, which
-  targets the project's Python 3.13 CI and Docker runtime.
-- Before completing Python changes, run both `python -m pytest` and
-  `pyright`. Do not consider a change complete while either command reports
-  errors.
-- Keep annotations valid for both production code and tests. Prefer precise
-  protocols, casts, and typed fixtures over broad `Any` or new
-  `# type: ignore` comments.
-- When a suppression is unavoidable, scope it to the specific expression and
-  diagnostic rule, and include a short reason. Do not disable a Pyright rule
-  globally to hide a local typing problem.
-- Keep `.vscode/settings.json` and `pyrightconfig.json` aligned so local
-  Pylance diagnostics match CI and command-line verification.
+`README.md` documents feature behaviour, every environment variable, and every
+`/settings` subcommand with its default. It is the reference a server operator
+reads, so a change a member or operator would notice belongs there too.
 
 ## Repository Overview
 
 `gw2bot` is a Discord bot and poller for one Guild Wars 2 guild's server. It
-watches Guild Storage and the guild log through the GW2 API, posts notifications
-to a single configured channel, runs the guild's ticket raffle, reports overdue
-Trial members, manages guild events with sign-up rosters, and optionally serves
-a web calendar and feast usage dashboard.
-
-Source lives under `src/gw2bot`, and `tests/` mirrors it by feature rather than
-file. Most features have a matching `tests/test_<feature>.py`, closely related
-ones share a single module (all of `trials/` is covered by
-`tests/test_trials.py`, and all of `events/views/` by
-`tests/test_event_commands.py`), and support code such as `core/database.py`,
-the `models.py` files, and the `views/` modules is exercised through the
-modules that drive it. Put a new test in the module that already covers its
-feature instead of adding a path per source file. `tests/factories.py` holds
-the shared builders for fake guild-log events, Discord errors, raffle totals,
-settings stores and /settings interactions, and the fake bots that answer the
-optional-configuration guards. `tests/test_layout.py` asserts the one import
-rule the layout depends on: nothing in `core/` may import a feature package.
+watches Guild Storage and the guild log through the GW2 API, posts
+notifications to a single configured channel, runs the guild's ticket raffle,
+reports overdue Trial members, manages guild events with sign-up rosters, and
+optionally serves a web calendar and feast usage dashboard.
 
 Run the bot with `python -m gw2bot` and `PYTHONPATH=src`; `pytest.ini` and
 `pyrightconfig.json` already put `src` on the path for tests and type checking.
 
+Source lives under `src/gw2bot`:
+
+| Path | Responsibility |
+| --- | --- |
+| `main.py` | Entrypoint: bootstraps the environment, opens the settings store, composes `Config`, installs the redacting log formatter, starts the bot. |
+| `config.py` | `BootstrapConfig` and `bootstrap_from_env` for the environment-only variables, plus `Config` and every setting's default. |
+| `bot.py` | The `discord.py` client: wires pollers, background tasks, and command groups. |
+| `core/` | The shared layer with no feature knowledge: `database`, `logging_setup`, `discord_utils`, `anchored_series`, `dashboard_ranges`. Nothing in it may import anything else under `gw2bot` - see `docs/core.md`. |
+| `gw2/` | The GW2 API client (`api.py`) and the pollers that turn its responses into decisions: `guild_log`, `guild_storage`, `guild_stash`, `feast_stock`, `guild_members`, `member_count`. |
+| `notifications/` | `delivery.py` for the notification channel, `diagnostics.py` for the `diag` previews, `poll_status.py` for poll failure and recovery. |
+| `invites/` | The accounts invited in-game that have not accepted: the report behind `/pending` and the roster page's section. |
+| `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
+| `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import`. |
+| `gold/` | Guild bank gold history: the series the gold page draws, and the one-time `/gold import`. |
+| `profit/` | Trading Post profit reports: the member's API key, the price and delivery reads behind it, and `/profit`. |
+| `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
+| `events/` | Guild events: models, store, scheduler, reminders, `/event` commands, plus `posting/` and `views/` - see `docs/events.md`. |
+| `web/` | Optional aiohttp site: Discord OAuth, the server, and one module per served document under `pages/` - see `docs/web.md`. |
+| `settings/` | `/settings`: definitions, store, encryption, composition onto `Config` - see `docs/settings.md`. |
+
+### Tests
+
+`tests/` mirrors the source by feature rather than file. Most features have a
+matching `tests/test_<feature>.py`, closely related ones share a single module
+(all of `trials/` is covered by `tests/test_trials.py`, and all of
+`events/views/` by `tests/test_event_commands.py`), and support code such as
+`core/database.py`, the `models.py` files and the `views/` modules is exercised
+through the modules that drive it. Put a new test in the module that already
+covers its feature instead of adding a path per source file.
+
+`tests/factories.py` holds the shared builders for fake guild-log events,
+Discord errors, raffle totals, settings stores and /settings interactions, and
+the fake bots that answer the optional-configuration guards.
+
+`tests/test_layout.py` asserts the `core/` import boundary.
+`tests/test_agent_docs.py` asserts that this file and `AGENTS.md` stay
+identical and that every `docs/` file referenced above exists.
 | Path             | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `main.py`        | Entrypoint: bootstraps the environment, opens the settings store, composes `Config`, installs the redacting log formatter, starts the bot.                                                                                                                                                                                                                                                                                                                                                                                                                      |
