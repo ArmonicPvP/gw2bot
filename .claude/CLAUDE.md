@@ -150,13 +150,16 @@ vocabulary a dashboard range is written in.
 
 The dependency only ever points one way. Any package may import `core/`;
 nothing in `core/` may import anything else under `gw2bot` - not a feature
-package, not `gw2/`, not `bot.py`, not `config.py`. Relative imports within
-`core/` are fine, because they cannot reach past it.
+package, not `gw2/`, not `bot.py`, not `config.py`. A single-dot relative
+import stays inside `core/` and is fine; `from ..config import Config` is the
+same escape as the absolute spelling and is rejected the same way.
 
 `tests/test_layout.py` parses every module under `core/` and asserts this, so
-the boundary is a failing test rather than something review has to catch. The
-check reads imports anywhere in the file, so neither moving one inside a
-function nor hiding it in an `if TYPE_CHECKING:` block gets around it.
+the boundary is a failing test rather than something review has to catch. It
+judges an import by where it lands: relative spellings are resolved against
+the importing file's own package, and imports are read anywhere in the file,
+so none of a `..` prefix, a function body or an `if TYPE_CHECKING:` block
+gets around it.
 
 The rule is the whole point of the directory. Without it `core/` becomes the
 `utils/` folder that collects whatever had nowhere else to go, and the
