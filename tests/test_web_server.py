@@ -43,7 +43,7 @@ from gw2bot.profit import (
 from gw2bot.profit.api import ProfitApiError
 from gw2bot.profit.service import MissingProfitApiKey, ResolvedWindow
 from gw2bot.gw2.guild_members import TrialMemberReportEntry
-from gw2bot.pending_invites import PendingInvites
+from gw2bot.invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
 from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.web.server import WebServer

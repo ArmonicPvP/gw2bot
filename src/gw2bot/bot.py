@@ -37,7 +37,7 @@ from gw2bot.events.views import (
 from gw2bot.gold.commands import GoldCommands
 from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2.api import Gw2ApiClient
-from gw2bot.poll_status import PollStatusTracker
+from gw2bot.notifications.poll_status import PollStatusTracker
 from gw2bot.profit.commands import ProfitCommands
 from gw2bot.profit.service import ProfitService
 from gw2bot.profit.store import ProfitStore
@@ -59,7 +59,7 @@ from gw2bot.raffle.views import (
     RaffleLeaderboardButton,
     RaffleTicketsListButton,
 )
-from gw2bot.pending_invites import (
+from gw2bot.invites import (
     PendingInvites,
     build_pending_invite_entries,
     build_pending_invite_messages,
