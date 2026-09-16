@@ -3,6 +3,9 @@
 `core/` is the layer every feature is allowed to import. What keeps it from
 decaying into a junk drawer is that the dependency only ever points one way,
 so this asserts it rather than leaving it to review.
+
+"The `core/` Boundary" in CLAUDE.md and AGENTS.md says what belongs there and
+what to do instead when something in `core/` looks like it needs a feature.
 """
 
 from __future__ import annotations
@@ -46,7 +49,8 @@ class TestCoreIsSelfContained:
 
         assert offenders == {}, (
             "core/ holds the shared layer every feature imports, so it may not "
-            f"import a feature package back: {offenders}"
+            f"import anything else under gw2bot back: {offenders}. See "
+            '"The `core/` Boundary" in CLAUDE.md for what to do instead.'
         )
 
     def test_core_is_not_empty(self) -> None:

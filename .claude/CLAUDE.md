@@ -141,6 +141,44 @@ subcommand with its default are documented in `README.md`. It is the reference
 a server operator reads, so a change a member or operator would notice belongs
 there too.
 
+### The `core/` Boundary
+
+`core/` holds what every feature shares and nothing that knows about a
+feature: the SQLite engine and its migrations, the redacting log formatter,
+the Discord role and failure helpers, the anchored-series maths, and the
+vocabulary a dashboard range is written in.
+
+The dependency only ever points one way. Any package may import `core/`;
+nothing in `core/` may import anything else under `gw2bot` - not a feature
+package, not `gw2/`, not `bot.py`, not `config.py`. Relative imports within
+`core/` are fine, because they cannot reach past it.
+
+`tests/test_layout.py` parses every module under `core/` and asserts this, so
+the boundary is a failing test rather than something review has to catch. The
+check reads imports anywhere in the file, so neither moving one inside a
+function nor hiding it in an `if TYPE_CHECKING:` block gets around it.
+
+The rule is the whole point of the directory. Without it `core/` becomes the
+`utils/` folder that collects whatever had nowhere else to go, and the
+layering it is supposed to express stops meaning anything. "Several features
+use it" is not the test: something belongs in `core/` only if it is useful
+without knowing what a raffle, an event or a Trial member is.
+
+When something in `core/` looks like it needs a feature:
+
+- Used by one feature - it belongs in that feature's package, not here.
+- Used by several - take what it needs as an argument or a protocol instead
+  of importing the feature to go and get it.
+- Genuinely a new shared vocabulary - that is a new module in `core/`, not an
+  import out of an existing one.
+- Needed only for a type annotation - annotate against a protocol defined in
+  `core/`, or leave the annotation as a string.
+
+`gw2/` is *not* under this rule and no test asserts anything about it.
+`gw2/guild_log.py` imports `raffle` to parse gold deposits and render their
+embed, so the layer is deliberately not pure, and extending the assertion to
+`gw2/` would fail until that import is dealt with.
+
 ### Configuration
 
 Only the variables that decide how the container starts stay in the
