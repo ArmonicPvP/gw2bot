@@ -107,7 +107,7 @@ PROFIT_MARKUP = (
     <button class="primary" type="button" id="reload">Reload</button>
   </div>
   <span class="spacer"></span>
-  <a href="/">Calendar</a>
+  <a href="/calendar">Calendar</a>
   <span id="whoami"></span>
   <form method="post" action="/logout">
     <button type="submit" class="signout" aria-label="Sign out">

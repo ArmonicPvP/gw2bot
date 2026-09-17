@@ -316,12 +316,37 @@ def state_token(state_cookie: str) -> str:
     return json.loads(raw)["state"]
 
 
+class TestSiteRoot:
+    async def test_root_redirects_to_the_calendar(
+        self,
+        client: TestClient,
+    ) -> None:
+        # The site is served from a path of the main domain now, so the
+        # calendar has its own path and the root only points at it. The old
+        # bookmarks of the subdomain root land here.
+        response = await client.get("/", allow_redirects=False)
+
+        assert response.status == 302
+        assert response.headers["Location"] == "/calendar"
+
+    async def test_root_redirect_needs_no_session(
+        self,
+        client: TestClient,
+    ) -> None:
+        # The redirect holds nothing about a member, and sending an unsigned
+        # visitor to a sign-in page that then returns them to the redirect
+        # only adds a hop; /calendar asks for the sign-in itself.
+        response = await client.get("/", allow_redirects=False)
+
+        assert response.status == 302
+
+
 class TestAuthGate:
     async def test_unauthenticated_page_shows_sign_in(
         self,
         client: TestClient,
     ) -> None:
-        response = await client.get("/")
+        response = await client.get("/calendar")
 
         assert response.status == 401
         assert "Sign in with Discord" in await response.text()
@@ -343,7 +368,7 @@ class TestAuthGate:
         client: TestClient,
     ) -> None:
         response = await client.get(
-            "/",
+            "/calendar",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -377,7 +402,7 @@ class TestAuthGate:
     @pytest.mark.parametrize(
         ("method", "path", "params"),
         [
-            ("get", "/", {}),
+            ("get", "/calendar", {}),
             ("get", "/api/me", {}),
             (
                 "get",
@@ -417,7 +442,7 @@ class TestAuthGate:
         client: TestClient,
     ) -> None:
         assert "no-store" in (
-            await client.get("/")
+            await client.get("/calendar")
         ).headers["Cache-Control"]
         assert "no-store" in (
             await client.get("/login", allow_redirects=False)
@@ -433,7 +458,7 @@ class TestAuthGate:
         guild.members.clear()
 
         response = await client.get(
-            "/",
+            "/calendar",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -463,13 +488,13 @@ class TestAuthGate:
         guild: FakeGuild,
     ) -> None:
         headers = {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
-        assert (await client.get("/", headers=headers)).status == 200
+        assert (await client.get("/calendar", headers=headers)).status == 200
 
         # Membership was cached on the first request, so a departure that
         # Discord has not yet been re-polled for does not cost a lookup.
         guild.members.clear()
 
-        assert (await client.get("/", headers=headers)).status == 200
+        assert (await client.get("/calendar", headers=headers)).status == 200
         guild.fetch_member.assert_not_awaited()
 
     async def test_stale_membership_backs_off_while_discord_is_down(
@@ -484,7 +509,7 @@ class TestAuthGate:
         # Discord outage turns every single request into another one.
         monkeypatch.setattr(server_module, "MEMBERSHIP_CACHE_TTL_SECONDS", -1)
         headers = {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
-        assert (await client.get("/", headers=headers)).status == 200
+        assert (await client.get("/calendar", headers=headers)).status == 200
         assert guild.fetch_member.await_count == 0
 
         # Discord starts failing. The cached "yes" is already stale, so the
@@ -493,13 +518,13 @@ class TestAuthGate:
         guild.members.clear()
         guild.fetch_member.side_effect = forbidden_error(50001)
 
-        assert (await client.get("/", headers=headers)).status == 200
+        assert (await client.get("/calendar", headers=headers)).status == 200
         assert guild.fetch_member.await_count == 1
 
         # The failure re-armed the entry for the backoff window, so further
         # requests ride the stale answer instead of hammering Discord.
-        assert (await client.get("/", headers=headers)).status == 200
-        assert (await client.get("/", headers=headers)).status == 200
+        assert (await client.get("/calendar", headers=headers)).status == 200
+        assert (await client.get("/calendar", headers=headers)).status == 200
         assert guild.fetch_member.await_count == 1
 
     async def test_unreachable_discord_does_not_lock_out_members(
@@ -516,7 +541,7 @@ class TestAuthGate:
         test_client = TestClient(await quiet_test_server(server.app))
         try:
             response = await test_client.get(
-                "/",
+                "/calendar",
                 headers={
                     "Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"
                 },
@@ -984,7 +1009,10 @@ class TestProfitPage:
         )
 
         state_cookie = response.cookies[auth.STATE_COOKIE].value
-        assert auth.state_return_target(SESSION_SECRET, state_cookie) == "/"
+        assert (
+            auth.state_return_target(SESSION_SECRET, state_cookie)
+            == "/calendar"
+        )
 
     async def test_member_reaches_the_combined_profit_page(
         self,

@@ -122,13 +122,19 @@ class TestStateToken:
             "/profit#fragment",
             "/profit\r\nLocation: https://evil.example",
             "/profit?" + "x" * 1024,
+            # The site root only redirects to the calendar, so a sign-in that
+            # returned there would bounce the member through it.
+            "/",
         ],
     )
     def test_rejects_unsafe_return_targets(self, target: str) -> None:
-        assert sanitize_return_target(target) == "/"
+        assert sanitize_return_target(target) == "/calendar"
+
+    def test_accepts_the_calendar_page(self) -> None:
+        assert sanitize_return_target("/calendar") == "/calendar"
 
     def test_invalid_state_cookie_has_no_return_target(self) -> None:
-        assert state_return_target(SECRET, "garbage") == "/"
+        assert state_return_target(SECRET, "garbage") == "/calendar"
 
     def test_rejects_mismatched_state(self) -> None:
         _, cookie = sign_state(SECRET, NOW)

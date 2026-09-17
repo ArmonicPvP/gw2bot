@@ -107,9 +107,11 @@ PENDING_INVITE_CACHE_TTL_SECONDS = 300
 # shared cache, or by the browser's back/forward cache.
 NO_STORE = "no-store, private"
 
-# Paths reachable without a session; everything else is members-only.
+# Paths reachable without a session; everything else is members-only. The
+# site root is public because it holds nothing: it only redirects to
+# /calendar, which asks for the sign-in itself.
 PUBLIC_PATHS = frozenset(
-    {"/login", "/oauth/callback", "/logout", "/favicon.ico"}
+    {"/", "/login", "/oauth/callback", "/logout", "/favicon.ico"}
 )
 
 _Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -196,6 +198,7 @@ class WebServer:
         self.app.add_routes(
             [
                 web.get("/", self._index),
+                web.get("/calendar", self._calendar),
                 web.get("/login", self._login),
                 web.get("/oauth/callback", self._callback),
                 # POST, not GET: a GET sign-out is a CSRF any third-party page
@@ -370,6 +373,13 @@ class WebServer:
         )
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
+        # The calendar answers on /calendar, beside the other pages, so the
+        # site can live on a path of the main domain rather than a subdomain
+        # of its own. The root stays as this redirect for the bookmarks and
+        # links that still point at it.
+        return _redirect(auth.CALENDAR_PATH)
+
+    async def _calendar(self, request: web.Request) -> web.StreamResponse:
         return self._html(CALENDAR_PAGE)
 
     async def _login(self, request: web.Request) -> web.StreamResponse:

@@ -62,19 +62,19 @@ OFFICER_ONLY_PAGE = simple_page(
     "Officers only",
     "Officers only",
     "The feast usage dashboard is only available to raffle officers.",
-    '<a class="button" href="/">Back to the calendar</a>',
+    '<a class="button" href="/calendar">Back to the calendar</a>',
 )
 
 ROSTER_OFFICER_ONLY_PAGE = simple_page(
     "Officers only",
     "Officers only",
     "The guild roster history is only available to raffle officers.",
-    '<a class="button" href="/">Back to the calendar</a>',
+    '<a class="button" href="/calendar">Back to the calendar</a>',
 )
 
 GOLD_OFFICER_ONLY_PAGE = simple_page(
     "Officers only",
     "Officers only",
     "The guild bank gold history is only available to raffle officers.",
-    '<a class="button" href="/">Back to the calendar</a>',
+    '<a class="button" href="/calendar">Back to the calendar</a>',
 )
