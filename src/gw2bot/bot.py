@@ -1056,7 +1056,7 @@ class Gw2Bot(discord.Client):
                 )
             else:
                 try:
-                    await service.warm_item_names()
+                    await service.warm_item_facts()
                     await service.sync_all_members()
                 except asyncio.CancelledError:
                     raise

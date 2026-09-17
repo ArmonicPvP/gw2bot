@@ -11,8 +11,10 @@ import aiohttp
 
 from gw2bot.profit.models import (
     DeliveryItem,
+    ItemFacts,
     MarketPrice,
     Transaction,
+    item_category,
     parse_gw2_time,
 )
 from gw2bot.profit.prices import MarketPriceCache
@@ -280,12 +282,12 @@ class ProfitApiClient:
         LOGGER.debug("Fetched GW2 item id list; items=%s", len(item_ids))
         return item_ids
 
-    async def _fetch_item_name_chunk(
+    async def _fetch_item_facts_chunk(
         self,
         chunk: list[int],
         gate: asyncio.Semaphore,
-    ) -> dict[int, str]:
-        names: dict[int, str] = {}
+    ) -> dict[int, ItemFacts]:
+        facts: dict[int, ItemFacts] = {}
         try:
             async with gate:
                 payload, _ = await self._get(
@@ -304,30 +306,34 @@ class ProfitApiClient:
                     and not isinstance(item_id, bool)
                     and isinstance(name, str)
                 ):
-                    names[item_id] = name
+                    facts[item_id] = ItemFacts(name, item_category(item))
             LOGGER.debug(
-                "Fetched GW2 profit item names; requested=%s found=%s",
+                "Fetched GW2 profit item facts; requested=%s found=%s",
                 len(chunk),
-                len(names),
+                len(facts),
             )
         except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
-            # Names are presentation only. One failed chunk falls back to
-            # item ids and must not hide the otherwise complete report or
-            # prevent the other chunks from being attempted.
+            # Names and categories are presentation only. One failed chunk
+            # falls back to item ids and must not hide the otherwise complete
+            # report or prevent the other chunks from being attempted.
             LOGGER.warning(
-                "Could not fetch a profit item-name chunk; requested=%s "
+                "Could not fetch a profit item-facts chunk; requested=%s "
                 "error_type=%s",
                 len(chunk),
                 type(exc).__name__,
             )
-        return names
+        return facts
 
-    async def fetch_item_names(self, item_ids: set[int]) -> dict[int, str]:
-        """Name the requested items, reading the chunks together.
+    async def fetch_item_facts(
+        self, item_ids: set[int]
+    ) -> dict[int, ItemFacts]:
+        """Name and file the requested items, reading the chunks together.
 
         The whole catalogue is nearly four hundred chunks. Read one after
         another that is five minutes of the event loop; read eight at a time
-        it is well under one, and the ceiling keeps the burst polite.
+        it is well under one, and the ceiling keeps the burst polite. One read
+        answers both questions the dashboard asks about an item, so the
+        category costs no request of its own.
         """
         ordered_ids = sorted(item_ids)
         chunks = [
@@ -336,12 +342,12 @@ class ProfitApiClient:
         ]
         gate = asyncio.Semaphore(PAGE_CONCURRENCY)
         results = await asyncio.gather(
-            *(self._fetch_item_name_chunk(chunk, gate) for chunk in chunks)
+            *(self._fetch_item_facts_chunk(chunk, gate) for chunk in chunks)
         )
-        names: dict[int, str] = {}
+        facts: dict[int, ItemFacts] = {}
         for found in results:
-            names.update(found)
-        return names
+            facts.update(found)
+        return facts
 
     def forget_stale_prices(self) -> int:
         """Drop expired price readings the reads have not happened to touch."""

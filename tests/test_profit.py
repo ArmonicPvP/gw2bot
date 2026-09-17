@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,8 +27,11 @@ from gw2bot.profit.api import (
 from gw2bot.profit.commands import ProfitApiKeyModal, ProfitCommands
 from gw2bot.profit.prices import MarketPriceCache
 from gw2bot.profit.models import (
+    UNCATEGORIZED,
     BuyLot,
     ItemDayProfit,
+    ItemFacts,
+    item_category,
     aggregate_rollups,
     attribute_delivery_cost,
     month_boundaries,
@@ -87,6 +91,18 @@ def transaction(
             else occurred_at
         ),
     )
+
+
+def named(names: dict[int, str]) -> dict[int, ItemFacts]:
+    """Item facts for a test that cares only about what the items are called.
+
+    Every item lands in one category, so a test about names never has to
+    invent one and a test about categories always spells its own out.
+    """
+    return {
+        item_id: ItemFacts(name, "Crafting Material")
+        for item_id, name in names.items()
+    }
 
 
 @pytest.fixture
@@ -306,6 +322,49 @@ class TestProfitCalculation:
         assert sum(
             row["profit_share_percent"] for row in items.values()
         ) == pytest.approx(100)
+
+    def test_files_every_item_row_under_a_category(self) -> None:
+        # The item table's filter menu is built from these, so a row whose
+        # category never arrived still belongs somewhere rather than falling
+        # out of every filter.
+        buys = [
+            transaction("buy-1", item_id=1),
+            transaction("buy-2", item_id=2),
+        ]
+        sells = [
+            transaction(
+                "sell-1",
+                item_id=1,
+                price=200,
+                occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-2",
+                item_id=2,
+                price=200,
+                occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+            ),
+        ]
+        report = ProfitReport(
+            days=30,
+            range_key="30d",
+            rolling_days=None,
+            window_start=datetime(2026, 8, 1, tzinfo=UTC),
+            window_end=datetime(2026, 8, 31, tzinfo=UTC),
+            buy_transaction_count=2,
+            sell_transaction_count=2,
+            realized=calculate_realized_profit(buys, sells),
+            unrealized=UnrealizedProfit({}, 0, 0, 0, 0),
+            item_names={1: "Ring of Red", 2: "Nameless"},
+            item_categories={1: "Ring"},
+        )
+
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        categories = {
+            row["item_id"]: row["category"] for row in payload["items"]
+        }
+
+        assert categories == {1: "Ring", 2: UNCATEGORIZED}
 
     def test_names_every_hidden_item_including_the_untraded_ones(
         self,
@@ -556,6 +615,41 @@ class TestProfitCalculation:
         assert kept_name not in caplog.text
         assert skipped_name not in caplog.text
         assert undefined_name not in caplog.text
+
+
+class TestItemCategories:
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"type": "Trinket", "details": {"type": "Ring"}}, "Ring"),
+            ({"type": "Trinket", "details": {"type": "Amulet"}}, "Amulet"),
+            ({"type": "CraftingMaterial"}, "Crafting Material"),
+            (
+                {"type": "UpgradeComponent", "details": {"type": "Rune"}},
+                "Rune",
+            ),
+            # "Default" names nothing a reader could pick out of a menu, so
+            # the broader type stands in for it.
+            (
+                {"type": "UpgradeComponent", "details": {"type": "Default"}},
+                "Upgrade Component",
+            ),
+            ({"type": "Weapon", "details": {"type": "Greatsword"}},
+             "Greatsword"),
+            # Whatever the endpoint leaves out, every item still lands
+            # somewhere the filter can reach.
+            ({"type": "Armor", "details": "not-a-mapping"}, "Armor"),
+            ({"details": {"type": "Ring"}}, "Ring"),
+            ({}, UNCATEGORIZED),
+            ({"type": ""}, UNCATEGORIZED),
+        ],
+    )
+    def test_files_an_item_by_the_narrowest_type_that_says_something(
+        self,
+        payload: dict[str, object],
+        expected: str,
+    ) -> None:
+        assert item_category(payload) == expected
 
 
 class TestDeliveryCostAttribution:
@@ -1012,6 +1106,61 @@ class TestProfitPreferenceMigration:
         store.close()
 
 
+class TestItemCategoryMigration:
+    def test_a_database_without_the_category_column_re_reads_its_items(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A stored name with no category is a row the catalogue must refill.
+
+        The column was added beside ``name``, and the endpoint answers both in
+        one read, so opening the store adds the column and expires the rows
+        that predate it. The daily warm then re-reads them; until it does, the
+        item table's filter simply has fewer categories to offer.
+        """
+        database = tmp_path / "gw2bot.db"
+        engine = create_engine(f"sqlite:///{database}")
+        metadata = MetaData()
+        legacy = Table(
+            "gw2_profit_items",
+            metadata,
+            Column("item_id", Integer, primary_key=True),
+            Column("name", String, nullable=False),
+            Column("updated_at", String, nullable=False),
+        )
+        metadata.create_all(engine)
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        with engine.begin() as connection:
+            connection.execute(
+                legacy.insert().values(
+                    item_id=1,
+                    name="Mithril Ore",
+                    updated_at=now.isoformat(),
+                )
+            )
+        engine.dispose()
+
+        store = ProfitStore(
+            str(database), SettingsCipher(Fernet.generate_key())
+        )
+
+        # Fresh a moment ago by its own timestamp, and expired now, so the
+        # warm asks for it again rather than leaving it uncategorized.
+        assert store.get_item_facts({1}, ITEM_NAME_TTL_SECONDS, now=now) == {}
+        assert 1 not in store.get_known_item_ids(
+            ITEM_NAME_TTL_SECONDS, now=now
+        )
+
+        store.store_item_facts(
+            {1: ItemFacts("Mithril Ore", "Crafting Material")}, now=now
+        )
+
+        assert store.get_item_facts({1}, ITEM_NAME_TTL_SECONDS, now=now) == {
+            1: ItemFacts("Mithril Ore", "Crafting Material")
+        }
+        store.close()
+
+
 class TestReportWindow:
     """The stretch a report covers, however the member named it."""
 
@@ -1412,27 +1561,63 @@ class TestProfitStore:
             now=now + timedelta(seconds=300),
         )
 
-    def test_item_name_cache_excludes_expired_and_future_rows(
+    def test_item_fact_cache_excludes_expired_and_future_rows(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, _ = profit_store
         now = datetime(2026, 8, 21, tzinfo=UTC)
-        store.store_item_names(
-            {1: "Expired"},
+        store.store_item_facts(
+            {1: ItemFacts("Expired", "Ring")},
             now=now - timedelta(seconds=300),
         )
-        store.store_item_names(
-            {2: "Fresh"},
+        store.store_item_facts(
+            {2: ItemFacts("Fresh", "Amulet")},
             now=now - timedelta(seconds=299),
         )
-        store.store_item_names(
-            {3: "Future"},
+        store.store_item_facts(
+            {3: ItemFacts("Future", "Ring")},
             now=now + timedelta(seconds=1),
         )
 
-        assert store.get_item_names({1, 2, 3}, 300, now=now) == {
-            2: "Fresh"
+        assert store.get_item_facts({1, 2, 3}, 300, now=now) == {
+            2: ItemFacts("Fresh", "Amulet")
+        }
+
+    def test_item_categories_are_stored_beside_the_names(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+
+        store.store_item_facts({7: ItemFacts("Mithril Ore", "Ore")}, now=now)
+        # A later read of the same item replaces both halves together, so a
+        # category can never be left describing a previous game build's item.
+        store.store_item_facts(
+            {7: ItemFacts("Mithril Ore", "Crafting Material")}, now=now
+        )
+
+        assert store.get_item_facts({7}, 300, now=now) == {
+            7: ItemFacts("Mithril Ore", "Crafting Material")
+        }
+
+    def test_item_rows_written_before_categories_read_as_uncategorized(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # What the migration leaves behind until the daily warm re-reads the
+        # catalogue: a name, and a category column nothing has filled yet.
+        store, _, database_path = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.store_item_facts({5: ItemFacts("Legacy Item", "Ring")}, now=now)
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "UPDATE gw2_profit_items SET category = NULL WHERE item_id = 5"
+            )
+
+        assert store.get_item_facts({5}, 300, now=now) == {
+            5: ItemFacts("Legacy Item", UNCATEGORIZED)
         }
 
 
@@ -1711,7 +1896,9 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(12_345, (DeliveryItem(1, 7),))
             ),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(100, 200)}
             ),
@@ -1750,7 +1937,7 @@ class TestProfitService:
         # a slow history no longer holds up the sections that do not need it.
         assert api.fetch_transactions.await_count == 3
         api.fetch_delivery.assert_not_awaited()
-        api.fetch_item_names.assert_awaited_once_with({1})
+        api.fetch_item_facts.assert_awaited_once_with({1})
         assert api.fetch_market_prices.await_count == 2
 
     async def test_delivery_loads_without_touching_the_history(
@@ -1770,7 +1957,9 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(12_345, (DeliveryItem(1, 7),))
             ),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
@@ -1835,7 +2024,9 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(0, (DeliveryItem(1, 6),))
             ),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(150, 200)}
             ),
@@ -1900,7 +2091,9 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(0, (DeliveryItem(1, 100),))
             ),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(60, 80)}
             ),
@@ -1943,7 +2136,9 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(0, (DeliveryItem(1, 4),))
             ),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(150, 200)}
             ),
@@ -1985,7 +2180,7 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(0, (DeliveryItem(1, 4),))
             ),
-            fetch_item_names=AsyncMock(return_value={}),
+            fetch_item_facts=AsyncMock(return_value={}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
@@ -2026,7 +2221,9 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 return_value=(0, (DeliveryItem(1, 9),))
             ),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(150, 200)}
             ),
@@ -2069,7 +2266,7 @@ class TestProfitService:
                     "GW2 API request returned HTTP 403"
                 )
             ),
-            fetch_item_names=AsyncMock(),
+            fetch_item_facts=AsyncMock(),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
@@ -2100,7 +2297,7 @@ class TestProfitService:
             fetch_delivery=AsyncMock(
                 side_effect=ProfitApiError("GW2 API request returned HTTP 500")
             ),
-            fetch_item_names=AsyncMock(),
+            fetch_item_facts=AsyncMock(),
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
@@ -2162,7 +2359,9 @@ class TestProfitService:
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
@@ -2234,8 +2433,8 @@ class TestProfitService:
         store.store_transactions(101, "current_sells", [], now=now)
         for transaction_kind in TRANSACTION_PATHS:
             store.touch_cache(101, transaction_kind, now=now)
-        store.store_item_names(
-            {1: "Old Name"},
+        store.store_item_facts(
+            named({1: "Old Name"}),
             now=now - timedelta(seconds=ITEM_NAME_TTL_SECONDS + 1),
         )
         service = ProfitService(
@@ -2246,7 +2445,9 @@ class TestProfitService:
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(return_value={1: "New Name"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "New Name"})
+            ),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
@@ -2255,9 +2456,63 @@ class TestProfitService:
 
         assert report.item_names == {1: "New Name"}
         api.fetch_transactions.assert_not_awaited()
-        api.fetch_item_names.assert_awaited_once_with({1})
-        assert store.get_item_names({1}, 300, now=now) == {1: "New Name"}
+        api.fetch_item_facts.assert_awaited_once_with({1})
+        assert store.get_item_facts({1}, 300, now=now) == named(
+            {1: "New Name"}
+        )
 
+    async def test_a_report_carries_the_category_of_every_item_it_names(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # One read of the item endpoint answers both questions the dashboard
+        # asks, so a report that can name an item can also file it.
+        store, _, _ = profit_store
+        now = datetime(2026, 8, 21, tzinfo=UTC)
+        store.set_api_key(101, "member-secret")
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", item_id=1, quantity=5)],
+            now=now,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [
+                transaction(
+                    "sell",
+                    item_id=1,
+                    price=200,
+                    quantity=5,
+                    occurred_at=datetime(2026, 8, 2, tzinfo=UTC),
+                )
+            ],
+            now=now,
+        )
+        store.store_transactions(101, "current_sells", [], now=now)
+        for transaction_kind in TRANSACTION_PATHS:
+            store.touch_cache(101, transaction_kind, now=now)
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(),
+            fetch_delivery=AsyncMock(return_value=(0, ())),
+            fetch_item_facts=AsyncMock(
+                return_value={1: ItemFacts("Ring of Red", "Ring")}
+            ),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+
+        report = await service.load_report(101, ReportWindow(days=30), now=now)
+
+        assert report.item_names == {1: "Ring of Red"}
+        assert report.item_categories == {1: "Ring"}
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert [row["category"] for row in payload["items"]] == ["Ring"]
 
     async def test_excluded_items_leave_the_open_order_table(
         self,
@@ -2289,8 +2544,8 @@ class TestProfitService:
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(
-                return_value={1: "Kept", 2: "Hidden", 3: "Gone"}
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Kept", 2: "Hidden", 3: "Gone"})
             ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(100, 200)}
@@ -2346,7 +2601,9 @@ class TestProfitService:
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(90, 101)}
             ),
@@ -2388,7 +2645,7 @@ class TestProfitService:
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(return_value={}),
+            fetch_item_facts=AsyncMock(return_value={}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
@@ -2436,7 +2693,7 @@ class TestProfitService:
         api = SimpleNamespace(
             fetch_transactions=AsyncMock(side_effect=fetched),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(return_value={}),
+            fetch_item_facts=AsyncMock(return_value={}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         service._api = api  # type: ignore[assignment]
@@ -2473,7 +2730,7 @@ class TestProfitService:
                 )
             ),
             fetch_delivery=AsyncMock(return_value=(0, ())),
-            fetch_item_names=AsyncMock(return_value={}),
+            fetch_item_facts=AsyncMock(return_value={}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
@@ -2530,7 +2787,9 @@ class TestProfitService:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(100, 200)}
             ),
@@ -2615,7 +2874,9 @@ class TestProfitService:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(
                 return_value={1: MarketPrice(100, 200)}
             ),
@@ -2730,8 +2991,8 @@ class TestProfitService:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_item_names=AsyncMock(
-                return_value={1: "Hidden Item", 2: "Kept Item"}
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Hidden Item", 2: "Kept Item"})
             ),
             fetch_market_prices=AsyncMock(
                 return_value={
@@ -2816,8 +3077,8 @@ class TestProfitService:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(side_effect=fetched),
-            fetch_item_names=AsyncMock(
-                return_value={1: "Hidden Item", 2: "Kept Item"}
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Hidden Item", 2: "Kept Item"})
             ),
             fetch_market_prices=AsyncMock(
                 return_value={
@@ -2973,7 +3234,9 @@ class TestRollupStore:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
-            fetch_item_names=AsyncMock(return_value={1: "Test Item"}),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
@@ -3142,7 +3405,7 @@ class TestRollupRewind:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
-            fetch_item_names=AsyncMock(return_value={}),
+            fetch_item_facts=AsyncMock(return_value={}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
         return service
@@ -3415,7 +3678,7 @@ class TestRollupRefreshIsNotARewind:
         )
         service._api = SimpleNamespace(  # type: ignore[assignment]
             fetch_transactions=AsyncMock(),
-            fetch_item_names=AsyncMock(return_value={}),
+            fetch_item_facts=AsyncMock(return_value={}),
             fetch_market_prices=AsyncMock(return_value={}),
         )
 
@@ -3652,7 +3915,7 @@ class TestProfitBackgroundSync:
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, _ = profit_store
-        store.store_item_names({1: "Known Item"})
+        store.store_item_facts(named({1: "Known Item"}))
         service = ProfitService(
             store,
             cast(aiohttp.ClientSession, None),
@@ -3660,27 +3923,29 @@ class TestProfitBackgroundSync:
         )
         api = SimpleNamespace(
             fetch_all_item_ids=AsyncMock(return_value=[1, 2, 3]),
-            fetch_item_names=AsyncMock(
-                return_value={2: "New Item", 3: "Other Item"}
+            fetch_item_facts=AsyncMock(
+                return_value=named({2: "New Item", 3: "Other Item"})
             ),
         )
         service._api = api  # type: ignore[assignment]
 
-        assert await service.warm_item_names() == 2
+        assert await service.warm_item_facts() == 2
 
-        api.fetch_item_names.assert_awaited_once_with({2, 3})
-        assert store.get_item_names({1, 2, 3}, ITEM_NAME_TTL_SECONDS) == {
-            1: "Known Item",
-            2: "New Item",
-            3: "Other Item",
-        }
+        api.fetch_item_facts.assert_awaited_once_with({2, 3})
+        assert store.get_item_facts(
+            {1, 2, 3}, ITEM_NAME_TTL_SECONDS
+        ) == named(
+            {1: "Known Item", 2: "New Item", 3: "Other Item"}
+        )
 
     async def test_a_warm_cache_asks_for_nothing(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
         store, _, _ = profit_store
-        store.store_item_names({1: "Known Item", 2: "Other Item"})
+        store.store_item_facts(
+            named({1: "Known Item", 2: "Other Item"})
+        )
         service = ProfitService(
             store,
             cast(aiohttp.ClientSession, None),
@@ -3688,12 +3953,12 @@ class TestProfitBackgroundSync:
         )
         api = SimpleNamespace(
             fetch_all_item_ids=AsyncMock(return_value=[1, 2]),
-            fetch_item_names=AsyncMock(),
+            fetch_item_facts=AsyncMock(),
         )
         service._api = api  # type: ignore[assignment]
 
-        assert await service.warm_item_names() == 0
-        api.fetch_item_names.assert_not_awaited()
+        assert await service.warm_item_facts() == 0
+        api.fetch_item_facts.assert_not_awaited()
 
     async def test_a_failed_catalogue_read_never_raises(
         self,
@@ -3710,11 +3975,11 @@ class TestProfitBackgroundSync:
             fetch_all_item_ids=AsyncMock(
                 side_effect=ProfitApiError("GW2 API request returned HTTP 503")
             ),
-            fetch_item_names=AsyncMock(),
+            fetch_item_facts=AsyncMock(),
         )
 
         with caplog.at_level(logging.WARNING, logger="gw2bot"):
-            assert await service.warm_item_names() == 0
+            assert await service.warm_item_facts() == 0
 
         assert "Could not list GW2 items" in caplog.text
 
@@ -3781,6 +4046,49 @@ class TestProfitApiLogging:
         assert payload_secret not in caplog.text
         request = http.get.call_args
         assert request.args[0] == "https://api.example/v2/commerce/prices"
+        assert request.kwargs["params"] == {"ids": "1,2"}
+
+    async def test_reads_a_name_and_a_category_from_one_item_request(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        payload_secret = "item-payload-secret"
+        http = SimpleNamespace(
+            get=MagicMock(
+                return_value=_FakeResponse(
+                    200,
+                    [
+                        {
+                            "id": 1,
+                            "name": "Ring of Red",
+                            "note": payload_secret,
+                            "type": "Trinket",
+                            "details": {"type": "Ring"},
+                        },
+                        {
+                            "id": 2,
+                            "name": "Mithril Ore",
+                            "type": "CraftingMaterial",
+                        },
+                    ],
+                )
+            )
+        )
+        client = ProfitApiClient(
+            cast(aiohttp.ClientSession, http),
+            "https://api.example",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            facts = await client.fetch_item_facts({2, 1})
+
+        assert facts == {
+            1: ItemFacts("Ring of Red", "Ring"),
+            2: ItemFacts("Mithril Ore", "Crafting Material"),
+        }
+        assert payload_secret not in caplog.text
+        request = http.get.call_args
+        assert request.args[0] == "https://api.example/v2/items"
         assert request.kwargs["params"] == {"ids": "1,2"}
 
     @pytest.mark.parametrize(

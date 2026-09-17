@@ -91,6 +91,34 @@ main { width: 100%; margin: 0; padding: 1rem; }
 .page-current input { width: 3.6rem; text-align: center; }
 .page-size { display: flex; align-items: center; gap: 0.4rem; }
 .page-size input { width: 4rem; }
+/* Narrowing the item table: a word to match and a category to pick, on the
+   row between the table's prose and its first pagination bar. */
+.table-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0 1rem 0.2rem;
+}
+.filter-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+/* The bare `input` width above is meant for the paginator's number boxes. */
+.table-filters input[type="search"] { width: min(16rem, 60vw); }
+.table-filters select {
+  max-width: min(14rem, 60vw);
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+.filter-count { color: var(--muted); font-size: 0.82rem; }
+.filter-empty { padding-top: 0.4rem; }
 .card-heading { display: flex; align-items: center; gap: 0.75rem; padding-right: 1rem; }
 .card-heading h2 { flex: 1; }
 .card h3.subheading { font-size: 0.92rem; padding: 0.85rem 1rem 0.15rem; }
@@ -160,6 +188,14 @@ main { width: 100%; margin: 0; padding: 1rem; }
 }
 .row-action:hover { color: var(--text); }
 .row-action svg { pointer-events: none; }
+/* The row actions are otherwise icons, and an icon button is drawn with no
+   line box at all so the glyph decides its height. A word needs one back, or
+   the button closes to a sliver and the text spills past its edges. */
+.text-action {
+  padding: 0.35rem 0.7rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 /* The heading and the icon under it are centred together, or the icon reads
    as sitting off to one side of a right-aligned label. */
 th.actions, td.actions { text-align: center; }
@@ -168,7 +204,12 @@ th.actions, td.actions { text-align: center; }
      dialog normally gets from the user agent's `margin: auto` with it. */
   margin: auto;
   width: min(30rem, calc(100vw - 2rem));
-  max-height: min(32rem, calc(100vh - 4rem));
+  /* A list of hidden items is a list to scan, so the window takes the height
+     it can get rather than the height its rows happen to need: a short list
+     is not worth a taller window, but a long one was being read four rows at
+     a time through a panel a third of the screen. */
+  height: calc(100vh - 4rem);
+  max-height: calc(100vh - 4rem);
   padding: 0;
   background: var(--panel);
   color: var(--text);
@@ -188,7 +229,14 @@ th.actions, td.actions { text-align: center; }
 .hidden-count { padding: 0 1rem 0.6rem; }
 .modal-search { display: block; padding: 0 1rem 0.85rem; }
 .modal-search input { width: 100%; }
-.modal-scroll { overflow: auto; border-top: 1px solid var(--border); }
+/* The head, the count and the search box are as tall as they are; the table
+   takes everything the window has left, so the rows are what grows. */
+.modal-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
 .hidden-table th {
   position: sticky;
   top: 0;

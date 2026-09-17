@@ -26,8 +26,10 @@ from gw2bot.core.database import (
 )
 from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.profit.models import (
+    UNCATEGORIZED,
     BuyLot,
     ItemDayProfit,
+    ItemFacts,
     ReportWindow,
     Transaction,
     parse_gw2_time,
@@ -779,7 +781,7 @@ class ProfitStore:
         *,
         now: datetime | None = None,
     ) -> set[int]:
-        """Item ids whose names are stored and still fresh."""
+        """Item ids whose name and category are stored and still fresh."""
         checked_at = datetime.now(UTC) if now is None else now
         with self._sessions() as session:
             records = list(
@@ -801,7 +803,7 @@ class ProfitStore:
             if 0 <= age < ttl_seconds:
                 known.add(item_id)
         LOGGER.debug(
-            "Read known profit item names; stored=%s fresh=%s",
+            "Read known profit item facts; stored=%s fresh=%s",
             len(records),
             len(known),
         )
@@ -1321,16 +1323,16 @@ class ProfitStore:
             )
         return int(total or 0)
 
-    def get_item_names(
+    def get_item_facts(
         self,
         item_ids: set[int],
         ttl_seconds: int,
         *,
         now: datetime | None = None,
-    ) -> dict[int, str]:
+    ) -> dict[int, ItemFacts]:
         if not item_ids:
             LOGGER.debug(
-                "Read profit item names; requested=0 found=0 expired=0 "
+                "Read profit item facts; requested=0 found=0 expired=0 "
                 "invalid_timestamps=0"
             )
             return {}
@@ -1343,7 +1345,7 @@ class ProfitStore:
                 )
             )
         checked_at = datetime.now(UTC) if now is None else now
-        names: dict[int, str] = {}
+        facts: dict[int, ItemFacts] = {}
         expired = 0
         invalid_timestamps = 0
         for record in records:
@@ -1355,47 +1357,51 @@ class ProfitStore:
                 invalid_timestamps += 1
                 continue
             if 0 <= age < ttl_seconds:
-                names[record.item_id] = record.name
+                facts[record.item_id] = ItemFacts(
+                    record.name, record.category or UNCATEGORIZED
+                )
             else:
                 expired += 1
         LOGGER.debug(
-            "Read profit item names; requested=%s found=%s expired=%s "
+            "Read profit item facts; requested=%s found=%s expired=%s "
             "invalid_timestamps=%s",
             len(item_ids),
-            len(names),
+            len(facts),
             expired,
             invalid_timestamps,
         )
-        return names
+        return facts
 
-    def store_item_names(
+    def store_item_facts(
         self,
-        names: dict[int, str],
+        facts: dict[int, ItemFacts],
         *,
         now: datetime | None = None,
     ) -> None:
         updated_at = (datetime.now(UTC) if now is None else now).isoformat()
         with self._sessions.begin() as session:
-            if names:
+            if facts:
                 statement = sqlite_insert(ProfitItemRecord)
                 session.execute(
                     statement.on_conflict_do_update(
                         index_elements=("item_id",),
                         set_={
                             "name": statement.excluded.name,
+                            "category": statement.excluded.category,
                             "updated_at": statement.excluded.updated_at,
                         },
                     ),
                     [
                         {
                             "item_id": item_id,
-                            "name": name,
+                            "name": item.name,
+                            "category": item.category,
                             "updated_at": updated_at,
                         }
-                        for item_id, name in names.items()
+                        for item_id, item in facts.items()
                     ],
                 )
-        LOGGER.debug("Stored profit item names; records=%s", len(names))
+        LOGGER.debug("Stored profit item facts; records=%s", len(facts))
 
 
 def _require_kind(transaction_kind: str) -> None:

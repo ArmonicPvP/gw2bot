@@ -200,8 +200,11 @@ class TestProfitPage:
         # it, and every one of them is summed by the server.
         assert "function applyItemExclusion(item, excluded)" in PROFIT_PAGE
         assert "function reloadReport()" in PROFIT_PAGE
-        assert 'fetchSection("report", reportUrl(false), renderReport)' in (
-            PROFIT_PAGE
+        # Quiet, so the cards keep their numbers instead of collapsing to
+        # spinners and carrying the row the member just clicked off screen.
+        assert (
+            'fetchSection("report", reportUrl(false), renderReport, true)'
+            in PROFIT_PAGE
         )
         # The two tables hide independently, each into its own stored set.
         assert 'if (group === "items") { return excludedItems.slice(); }' in (
@@ -246,6 +249,68 @@ class TestProfitPage:
         )
         assert "excludedItems = data.excluded_items;" in PROFIT_PAGE
         assert "renderOrders();" in PROFIT_PAGE
+
+    def test_realized_items_can_be_searched_and_filtered_by_category(
+        self,
+    ) -> None:
+        assert 'id="items-search" type="search"' in PROFIT_PAGE
+        assert '<select id="items-category">' in PROFIT_PAGE
+        assert '<option value="">All categories</option>' in PROFIT_PAGE
+        assert 'id="items-filter-clear"' in PROFIT_PAGE
+        assert "function refreshItemCategories()" in PROFIT_PAGE
+        assert "function filteredItems()" in PROFIT_PAGE
+        assert "function applyItemsFilter()" in PROFIT_PAGE
+        assert "initializeItemsFilter();" in PROFIT_PAGE
+        # Both halves narrow the same table, so either alone is a filter.
+        assert (
+            'return itemsFilter.search !== "" || itemsFilter.category !== "";'
+            in PROFIT_PAGE
+        )
+        assert (
+            "item.name.toLowerCase().indexOf(itemsFilter.search) !== -1"
+            in PROFIT_PAGE
+        )
+        assert (
+            "if (itemsFilter.category && item.category !== "
+            "itemsFilter.category) {" in PROFIT_PAGE
+        )
+        # The category comes from the server with the row rather than being
+        # guessed from its name.
+        assert "seen[item.category] = true;" in PROFIT_PAGE
+
+    def test_a_filtered_item_table_pages_and_totals_the_rows_it_kept(
+        self,
+    ) -> None:
+        # A ruled-out row is on no page, so it neither shows nor counts
+        # towards how many pages the table has.
+        assert 'return row.dataset.filtered !== "1";' in PROFIT_PAGE
+        assert (
+            'if (row.dataset.filtered === "1") { row.hidden = true; }'
+            in PROFIT_PAGE
+        )
+        assert "pagers.items.page = 1;" in PROFIT_PAGE
+        # The footer is the window's own total until a filter narrows it, and
+        # is added up from the kept rows once one does.
+        assert "function renderItemsTotal(kept)" in PROFIT_PAGE
+        assert '"Filtered total", units, coin(cost)' in PROFIT_PAGE
+        assert (
+            "percent(summary.profit ? profit / summary.profit * 100 : null)"
+            in PROFIT_PAGE
+        )
+        assert 'id="items-filter-empty" hidden' in PROFIT_PAGE
+
+    def test_the_restore_button_is_a_word_rather_than_an_icon(self) -> None:
+        # The icon styling leaves a button no line box, which closed the
+        # Restore button to a sliver and spilled its text past the edges.
+        assert 'button.className = "row-action text-action";' in PROFIT_PAGE
+        assert ".text-action {" in PROFIT_PAGE
+        assert "  line-height: 1.2;" in PROFIT_PAGE
+
+    def test_the_hidden_items_window_fills_the_height_it_can(self) -> None:
+        assert "  height: calc(100vh - 4rem);" in PROFIT_PAGE
+        assert "  max-height: calc(100vh - 4rem);" in PROFIT_PAGE
+        # The rows are what grows inside it.
+        assert ".modal-scroll {\n  flex: 1;\n  min-height: 0;" in PROFIT_PAGE
 
     def test_hidden_items_are_searchable_in_a_table(self) -> None:
         for group in ("orders", "items"):
@@ -334,7 +399,10 @@ class TestProfitPage:
         assert PROFIT_PAGE.count('data-source="delivery"') == 1
         assert '<section class="card loading"' in PROFIT_PAGE
         assert "function markSection(source, state, message)" in PROFIT_PAGE
-        assert "function fetchSection(source, url, render)" in PROFIT_PAGE
+        assert "function fetchSection(source, url, render, quiet)" in (
+            PROFIT_PAGE
+        )
+        assert 'if (!quiet) { markSection(source, "loading"); }' in PROFIT_PAGE
         # All three requests go out together rather than one after another.
         assert "Promise.all([" in PROFIT_PAGE
         assert 'fetchSection("orders", "/api/profit/orders"' in PROFIT_PAGE

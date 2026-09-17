@@ -1440,6 +1440,22 @@ by their corresponding matched cost. Each realized item also shows its
 unit-weighted average time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
 
+**Realized Profit by Item** carries a search box and a category menu above its
+rows. Typing narrows the table to the items whose names contain what was typed,
+and the menu narrows it to one kind of item — Ring, Amulet, Crafting Material,
+or whatever kinds the window happens to hold; the menu lists only the
+categories the window actually contains, and the two narrow together. The
+categories are the Guild Wars 2 item endpoint's own, taking the narrower of the
+two names it gives — Ring rather than Trinket, Greatsword rather than Weapon —
+and an item the endpoint says nothing useful about is listed as Uncategorized.
+A narrowed table repages from its first page over the rows that are left, and
+its footer becomes a **Filtered total** added up from those rows, with Profit
+Share still measured against the whole window's realized profit so it reads as
+the share those items account for. Clearing both leaves the table whole again,
+with the window's own totals back in the footer. Neither box changes what is
+stored or what any other section shows: they narrow the one table on screen,
+and hiding an item is what takes it out of the figures.
+
 Each **Realized Profit by Item** row ends with a crossed-out eye button that
 leaves that item out of the member's flipped profit. Hiding one is not a change
 to the item table alone: the item leaves the summary, all three daily charts,
@@ -1639,9 +1655,18 @@ the page down with it. **Unclaimed Trading Post** needs one request and is
 usually first; **Open Orders** needs one short collection; the realized report
 needs the whole trade history and is last.
 
+Hiding or restoring a realized item asks for the report again, because the
+summary, the charts, the daily table and **Your Picks** all move with it, and
+every one of them is summed on the server. That redraw is quiet: the sections
+keep the numbers already on screen until the new ones are ready to replace
+them, rather than collapsing to spinners and back, which used to shorten the
+page under the reader and carry the row they had just clicked well off screen.
+If the redraw fails, the page says so and leaves the last good figures up — the
+change itself is already saved.
+
 Everything the GW2 API is asked for goes out in parallel wherever one answer
 does not depend on another — the four transaction collections together, then
-prices and names together.
+prices and item facts together.
 
 #### What is stored, and for how long
 
@@ -1733,7 +1758,7 @@ The rest of the caching:
 | Data | Held for | Why |
 | --- | --- | --- |
 | Transactions | Forever | The only copy of history older than GW2 serves |
-| Item names | 30 days | Fixed for the life of a game build |
+| Item names and categories | 30 days | Fixed for the life of a game build |
 | Matched rollups | Until new trades land | Matching does not depend on the window |
 | Month-end lot snapshots | 24 months | Where a late arrival rematches from |
 | Transaction snapshots | 5 minutes | How often a refresh is worth making |
