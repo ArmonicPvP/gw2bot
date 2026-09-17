@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,63 @@ ROLLING_AVERAGE_DAYS = 7
 # dates each covers. They are the three buttons the feast usage, roster and
 # gold dashboards carry, so every page on the site reads the same way.
 PRESET_REPORT_RANGES: dict[str, int] = {"24h": 1, "7d": 7, "30d": 30}
+
+
+# The category names the item endpoint gives with no useful meaning of their
+# own. An upgrade component is a "Default" one when it is neither a rune nor a
+# sigil, which says nothing a reader could filter by, so those fall back to
+# the broader type the same item carries.
+GENERIC_ITEM_DETAIL_TYPES = frozenset({"Default", "Generic"})
+
+# What an item with no usable type at all is filed under, so every row on the
+# dashboard belongs to exactly one category.
+UNCATEGORIZED = "Uncategorized"
+
+
+def item_category(payload: dict[str, object]) -> str:
+    """Name the category one `/v2/items` entry belongs to.
+
+    The endpoint gives a broad `type` - Trinket, CraftingMaterial, Weapon -
+    and, for most of them, a `details.type` naming the kind within it: Ring
+    and Amulet under Trinket, Greatsword under Weapon. The narrower one is
+    what a reader filtering the item table is actually looking for, so it
+    wins wherever it says something, and the broad type is the fallback.
+    """
+    details = payload.get("details")
+    if isinstance(details, dict):
+        detail_type = details.get("type")
+        if (
+            isinstance(detail_type, str)
+            and detail_type
+            and detail_type not in GENERIC_ITEM_DETAIL_TYPES
+        ):
+            return spaced_category(detail_type)
+    broad_type = payload.get("type")
+    if isinstance(broad_type, str) and broad_type:
+        return spaced_category(broad_type)
+    return UNCATEGORIZED
+
+
+def spaced_category(name: str) -> str:
+    """Render an API category name the way the dashboard shows it.
+
+    The endpoint writes them as single words - "CraftingMaterial",
+    "UpgradeComponent" - and the dashboard lists them in a menu a member
+    reads, so the word boundaries the API dropped are put back.
+    """
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
+
+
+@dataclass(frozen=True, slots=True)
+class ItemFacts:
+    """What the public item endpoint tells the dashboard about one item.
+
+    Both halves come from the same read and are stored together, so an item
+    the dashboard can name is also one it can file under a category.
+    """
+
+    name: str
+    category: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +373,10 @@ class ProfitReport:
     realized: RealizedProfit
     unrealized: UnrealizedProfit
     item_names: dict[int, str]
+    # What each item is, as the public item endpoint files it - Ring, Amulet,
+    # Crafting Material. Only the item table's filter reads it, so an item the
+    # endpoint never answered for is simply absent rather than guessed at.
+    item_categories: dict[int, str] = field(default_factory=dict)
     market_prices: dict[int, MarketPrice] = field(default_factory=dict)
     # The items this member asked not to count as flipped profit. They are
     # already out of ``realized`` and of every total drawn from it; the set is

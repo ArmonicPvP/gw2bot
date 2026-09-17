@@ -16,6 +16,7 @@ from gw2bot.profit.api import (
 )
 from gw2bot.profit.models import (
     ROLLING_AVERAGE_DAYS,
+    UNCATEGORIZED,
     DeliveryItem,
     DeliveryReport,
     attribute_delivery_cost,
@@ -26,6 +27,7 @@ from gw2bot.profit.models import (
     Transaction,
     BuyLot,
     ItemDayProfit,
+    ItemFacts,
     RealizedProfit,
     aggregate_rollups,
     calculate_realized_profit,
@@ -353,7 +355,7 @@ class ProfitService:
             current_sells,
         )
         unrealized_item_ids = {item_id for item_id, _price in unrealized.items}
-        market_prices, item_names = await asyncio.gather(
+        market_prices, item_facts = await asyncio.gather(
             # Priced for the picks, and for what the held stock would fetch
             # against the rest of the market right now. An excluded item is
             # in no table that carries a price, so none is fetched for it.
@@ -361,13 +363,19 @@ class ProfitService:
                 set(realized.items) | unrealized_item_ids,
                 force=force,
             ),
-            self._resolve_item_names(
+            self._resolve_item_facts(
                 # An excluded item still needs its name, or the member cannot
                 # tell what they are restoring.
                 set(realized.items) | unrealized_item_ids | set(excluded_items),
                 loaded_at,
             ),
         )
+        item_names = {
+            item_id: item.name for item_id, item in item_facts.items()
+        }
+        item_categories = {
+            item_id: item.category for item_id, item in item_facts.items()
+        }
 
         report = ProfitReport(
             days=days,
@@ -380,6 +388,7 @@ class ProfitService:
             realized=realized,
             unrealized=unrealized,
             item_names=item_names,
+            item_categories=item_categories,
             market_prices=market_prices,
             excluded_items=excluded_items,
             trailing_days=trailing_days,
@@ -400,38 +409,49 @@ class ProfitService:
         )
         return report
 
+    async def _resolve_item_facts(
+        self,
+        item_ids: set[int],
+        now: datetime,
+    ) -> dict[int, ItemFacts]:
+        """Describe every item, asking GW2 only about ones not stored."""
+        if not item_ids:
+            return {}
+        item_facts = await asyncio.to_thread(
+            self._store.get_item_facts,
+            item_ids,
+            ITEM_NAME_TTL_SECONDS,
+            now=now,
+        )
+        missing_ids = item_ids - set(item_facts)
+        if missing_ids:
+            fetched_facts = await self._api.fetch_item_facts(missing_ids)
+            if fetched_facts:
+                await asyncio.to_thread(
+                    self._store.store_item_facts,
+                    fetched_facts,
+                    now=now,
+                )
+                item_facts.update(fetched_facts)
+        for item_id in item_ids:
+            item_facts.setdefault(
+                item_id, ItemFacts(f"Item {item_id}", UNCATEGORIZED)
+            )
+        LOGGER.debug(
+            "Resolved profit item facts; requested=%s fetched=%s",
+            len(item_ids),
+            len(missing_ids),
+        )
+        return item_facts
+
     async def _resolve_item_names(
         self,
         item_ids: set[int],
         now: datetime,
     ) -> dict[int, str]:
-        """Name every item, asking GW2 only about ones not already stored."""
-        if not item_ids:
-            return {}
-        item_names = await asyncio.to_thread(
-            self._store.get_item_names,
-            item_ids,
-            ITEM_NAME_TTL_SECONDS,
-            now=now,
-        )
-        missing_ids = item_ids - set(item_names)
-        if missing_ids:
-            fetched_names = await self._api.fetch_item_names(missing_ids)
-            if fetched_names:
-                await asyncio.to_thread(
-                    self._store.store_item_names,
-                    fetched_names,
-                    now=now,
-                )
-                item_names.update(fetched_names)
-        for item_id in item_ids:
-            item_names.setdefault(item_id, f"Item {item_id}")
-        LOGGER.debug(
-            "Resolved profit item names; requested=%s fetched=%s",
-            len(item_ids),
-            len(missing_ids),
-        )
-        return item_names
+        """Name every item, for the sections that show no category."""
+        facts = await self._resolve_item_facts(item_ids, now)
+        return {item_id: item.name for item_id, item in facts.items()}
 
     async def _delivery_box(
         self,
@@ -790,14 +810,14 @@ class ProfitService:
         )
 
 
-    async def warm_item_names(self) -> int:
-        """Store the name of every item the game has, ahead of any report.
+    async def warm_item_facts(self) -> int:
+        """Store the facts about every item the game has, before any report.
 
-        Names are the one lookup a report cannot avoid and cannot guess, and
-        they never change within a game build. Reading the whole catalogue in
-        the background once a day means no member ever waits on /v2/items;
-        only ids that are missing or a month stale are asked for, so the run
-        after the first costs almost nothing.
+        A name and a category are the one lookup a report cannot avoid and
+        cannot guess, and neither changes within a game build. Reading the
+        whole catalogue in the background once a day means no member ever
+        waits on /v2/items; only ids that are missing or a month stale are
+        asked for, so the run after the first costs almost nothing.
         """
         try:
             item_ids = await self._api.fetch_all_item_ids()
@@ -816,23 +836,23 @@ class ProfitService:
         missing = set(item_ids) - known
         if not missing:
             LOGGER.debug(
-                "Item name cache already warm; items=%s", len(item_ids)
+                "Item fact cache already warm; items=%s", len(item_ids)
             )
             return 0
         LOGGER.info(
-            "Warming the profit item name cache; catalogue=%s missing=%s",
+            "Warming the profit item fact cache; catalogue=%s missing=%s",
             len(item_ids),
             len(missing),
         )
-        names = await self._api.fetch_item_names(missing)
-        if names:
-            await asyncio.to_thread(self._store.store_item_names, names)
+        facts = await self._api.fetch_item_facts(missing)
+        if facts:
+            await asyncio.to_thread(self._store.store_item_facts, facts)
         LOGGER.info(
-            "Warmed the profit item name cache; stored=%s missing=%s",
-            len(names),
+            "Warmed the profit item fact cache; stored=%s missing=%s",
+            len(facts),
             len(missing),
         )
-        return len(names)
+        return len(facts)
 
     async def sync_member(self, discord_user_id: int) -> bool:
         """Bring one member's stored collections up to date in the background.
@@ -1093,6 +1113,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
         {
             "item_id": item_id,
             "name": report.item_names[item_id],
+            # What the item table's category menu is built from. Every row
+            # carries one, so no row falls out of a filter by belonging to
+            # nothing.
+            "category": report.item_categories.get(item_id, UNCATEGORIZED),
             "units": totals.matched_quantity,
             "cost": totals.cost,
             "net_revenue": totals.net_revenue,

@@ -121,12 +121,16 @@ class ProfitTransactionRecord(Base):
 
 
 class ProfitItemRecord(Base):
-    """Shared item names fetched from the public Guild Wars 2 endpoint."""
+    """Shared item facts fetched from the public Guild Wars 2 endpoint."""
 
     __tablename__ = "gw2_profit_items"
 
     item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    # What the item is - Ring, Amulet, Crafting Material - which the profit
+    # dashboard filters its item table by. Nullable because a row written
+    # before the column existed has a name and nothing else.
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
@@ -873,6 +877,31 @@ def initialize_database(engine: Engine) -> set[str]:
             # rows stay marked un-backfilled and the next report walks the
             # whole history once to fill in what retention had dropped.
             added_columns.add("backfilled")
+
+        item_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                ProfitItemRecord.__tablename__
+            )
+        }
+        if "category" not in item_columns:
+            operations.add_column(
+                ProfitItemRecord.__tablename__,
+                Column("category", String, nullable=True),
+            )
+            # A row written before the column existed carries a name and no
+            # category, and the endpoint answers both in one read. Expiring
+            # those rows is what gets the categories filled: the daily warm
+            # treats a stale row as missing and re-reads it, so the catalogue
+            # comes back whole once instead of item by item as members load
+            # reports. Until it does, the item table's filter simply has
+            # fewer categories to offer.
+            connection.exec_driver_sql(
+                "UPDATE gw2_profit_items "
+                "SET updated_at = '1970-01-01T00:00:00+00:00' "
+                "WHERE category IS NULL"
+            )
+            added_columns.add("category")
 
         preference_columns = {
             column["name"]

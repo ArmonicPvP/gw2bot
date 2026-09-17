@@ -192,6 +192,25 @@ PROFIT_MARKUP = (
         </button>
       </div>
       <p class="note">Avg Hold is the mean time those units were held, weighted by units. Profit Share is signed item profit divided by total realized profit. The crossed-out eye on a row leaves that item out of every figure on this page; the three dots above put a hidden item back.</p>
+      <div class="table-filters" role="group"
+        aria-label="Narrow the realized profit by item table">
+        <label class="filter-field" for="items-search">
+          <span class="visually-hidden">Search items</span>
+          <input id="items-search" type="search" placeholder="Search items"
+            autocomplete="off">
+        </label>
+        <label class="filter-field" for="items-category">Category
+          <select id="items-category">
+            <option value="">All categories</option>
+          </select>
+        </label>
+        <button id="items-filter-clear" type="button" hidden>Clear</button>
+        <span class="filter-count" id="items-filter-count"
+          role="status" aria-live="polite"></span>
+      </div>
+      <p class="note filter-empty" id="items-filter-empty" hidden>No items in
+        this window match that search and category. The totals below cover
+        the items that match.</p>
 __ITEMS_PAGES_TOP__
       <div class="table-scroll"><table id="items-table" data-sort-table="items">
         <thead><tr>

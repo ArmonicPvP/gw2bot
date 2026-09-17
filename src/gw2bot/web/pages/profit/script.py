@@ -286,8 +286,16 @@ PROFIT_SCRIPT = (
 
   function paginate(key) {
     var pager = pagers[key];
-    var rows = Array.prototype.slice.call(
+    var all = Array.prototype.slice.call(
       document.querySelectorAll("#" + pager.body + " tr[data-sort-row]"));
+    // A row a filter has ruled out is not on any page, so it neither shows
+    // nor counts towards how many pages there are.
+    var rows = all.filter(function (row) {
+      return row.dataset.filtered !== "1";
+    });
+    all.forEach(function (row) {
+      if (row.dataset.filtered === "1") { row.hidden = true; }
+    });
     pager.pages = Math.max(1, Math.ceil(rows.length / pager.size));
     pager.page = Math.min(Math.max(1, pager.page), pager.pages);
     rows.forEach(function (row, index) {
@@ -1130,8 +1138,14 @@ PROFIT_SCRIPT = (
     var body = document.getElementById("items-body");
     body.replaceChildren();
     excludedItems = data.excluded_items;
+    itemsData = data.items;
+    itemsSummary = data.summary;
     data.items.forEach(function (item, index) {
       var row = sortableRow(index);
+      // What the filter matches on, kept on the row so it survives sorting:
+      // the row's place in the data changes every time a column is sorted,
+      // and its identity does not.
+      row.dataset.itemId = String(item.item_id);
       cell(row, item.name, "name", item.name);
       cell(row, item.units, "", item.units);
       cell(row, coin(item.cost), "", item.cost);
@@ -1153,15 +1167,164 @@ PROFIT_SCRIPT = (
           + "you have hidden."
         : "No matched flips were found in this window.");
     }
-    totalRow(document.getElementById("items-foot"), [
-      "Total", data.summary.matched_units, coin(data.summary.cost),
-      coin(data.summary.net_revenue), data.summary.profit,
-      percent(data.summary.roi_percent),
-      average(data.summary.profit, data.summary.matched_units), "\u2014",
-      data.summary.profit === 0 ? "\u2014" : "100.0%", ""
-    ], 4);
+    refreshItemCategories();
+    markItemsFilter();
     applySort("items-table");
     renderHidden("items");
+  }
+
+  // The rows of Realized Profit by Item as the server sent them, and the
+  // window totals it summed for them. Both are kept because the table can be
+  // narrowed here after it has been drawn, and a narrowed table's footer is
+  // added up from the rows that are left rather than from the window.
+  var itemsData = [];
+  var itemsSummary = null;
+  // What the reader has narrowed the table to: a word to find in the name,
+  // and one category to keep. Either alone is a filter, and neither is the
+  // table whole.
+  var itemsFilter = { search: "", category: "" };
+
+  function itemsFilterActive() {
+    return itemsFilter.search !== "" || itemsFilter.category !== "";
+  }
+
+  function filteredItems() {
+    if (!itemsFilterActive()) { return itemsData.slice(); }
+    return itemsData.filter(function (item) {
+      if (itemsFilter.category && item.category !== itemsFilter.category) {
+        return false;
+      }
+      return !itemsFilter.search
+        || item.name.toLowerCase().indexOf(itemsFilter.search) !== -1;
+    });
+  }
+
+  // The categories the menu offers are the ones the window actually holds,
+  // so it never lists a kind of item the table cannot show. A category the
+  // reader had picked that this window has none of is kept in the list and
+  // stays picked, rather than silently widening the table under them.
+  function refreshItemCategories() {
+    var menu = document.getElementById("items-category");
+    var seen = Object.create(null);
+    var categories = [];
+    itemsData.forEach(function (item) {
+      if (!item.category || seen[item.category]) { return; }
+      seen[item.category] = true;
+      categories.push(item.category);
+    });
+    if (itemsFilter.category && !seen[itemsFilter.category]) {
+      categories.push(itemsFilter.category);
+    }
+    categories.sort(function (left, right) {
+      return left.localeCompare(
+        right, undefined, { sensitivity: "base", numeric: true });
+    });
+    menu.replaceChildren();
+    var all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All categories";
+    menu.appendChild(all);
+    categories.forEach(function (category) {
+      var option = document.createElement("option");
+      option.value = category;
+      option.textContent = category;
+      menu.appendChild(option);
+    });
+    menu.value = itemsFilter.category;
+    trace("items-categories", categories.length);
+  }
+
+  // Mark the rows the filter keeps and re-add the footer from them. This does
+  // not move the table to a page; rendering and filtering each do that for
+  // themselves, so a redraw does not paginate twice.
+  function markItemsFilter() {
+    // The controls are wired up at start-up, before the first report has
+    // landed. There is nothing to narrow until it has.
+    if (itemsSummary === null) { return; }
+    var kept = filteredItems();
+    var keptIds = Object.create(null);
+    kept.forEach(function (item) { keptIds[item.item_id] = true; });
+    document.querySelectorAll("#items-body tr[data-sort-row]").forEach(
+      function (row) {
+        row.dataset.filtered = keptIds[row.dataset.itemId] ? "" : "1";
+      });
+    renderItemsTotal(kept);
+    var active = itemsFilterActive();
+    document.getElementById("items-filter-clear").hidden = !active;
+    document.getElementById("items-filter-empty").hidden =
+      !active || !itemsData.length || kept.length > 0;
+    document.getElementById("items-filter-count").textContent = active
+      ? "Showing " + kept.length + " of " + itemsData.length + " item"
+        + (itemsData.length === 1 ? "" : "s") + "."
+      : "";
+  }
+
+  function renderItemsTotal(kept) {
+    var foot = document.getElementById("items-foot");
+    var summary = itemsSummary;
+    if (!itemsFilterActive()) {
+      // The whole window, as the server added it up. Its figures are the ones
+      // every other section is drawn from, so the unnarrowed table shows them
+      // rather than a second reckoning of the same rows.
+      totalRow(foot, [
+        "Total", summary.matched_units, coin(summary.cost),
+        coin(summary.net_revenue), summary.profit,
+        percent(summary.roi_percent),
+        average(summary.profit, summary.matched_units), "\u2014",
+        summary.profit === 0 ? "\u2014" : "100.0%", ""
+      ], 4);
+      return;
+    }
+    var units = 0;
+    var cost = 0;
+    var revenue = 0;
+    var profit = 0;
+    kept.forEach(function (item) {
+      units += item.units;
+      cost += item.cost;
+      revenue += item.net_revenue;
+      profit += item.profit;
+    });
+    // Profit Share stays a share of the whole window's profit, which is what
+    // makes the narrowed footer say something the unnarrowed one does not:
+    // how much of everything realized came from these items.
+    totalRow(foot, [
+      "Filtered total", units, coin(cost), coin(revenue), profit,
+      percent(cost ? profit / cost * 100 : null),
+      average(profit, units), "\u2014",
+      percent(summary.profit ? profit / summary.profit * 100 : null), ""
+    ], 4);
+  }
+
+  function applyItemsFilter() {
+    markItemsFilter();
+    // A narrower table is a different run of pages, and the page the reader
+    // was on is a page of rows that may be gone.
+    pagers.items.page = 1;
+    paginate("items");
+    trace("items-filtered", filteredItems().length);
+  }
+
+  function initializeItemsFilter() {
+    var search = document.getElementById("items-search");
+    var category = document.getElementById("items-category");
+    var clear = document.getElementById("items-filter-clear");
+    search.addEventListener("input", function () {
+      itemsFilter.search = search.value.trim().toLowerCase();
+      applyItemsFilter();
+    });
+    category.addEventListener("change", function () {
+      itemsFilter.category = category.value;
+      applyItemsFilter();
+    });
+    clear.addEventListener("click", function () {
+      search.value = "";
+      category.value = "";
+      itemsFilter.search = "";
+      itemsFilter.category = "";
+      applyItemsFilter();
+      search.focus();
+    });
   }
 
   var picksData = [];
@@ -1312,7 +1475,9 @@ PROFIT_SCRIPT = (
   function restoreButton(name, restore) {
     var button = document.createElement("button");
     button.type = "button";
-    button.className = "row-action";
+    // Every other row action is an icon, and the icon styling gives a button
+    // no line box of its own. This one is a word, so it asks for one back.
+    button.className = "row-action text-action";
     button.textContent = "Restore";
     button.setAttribute("aria-label", "Restore " + name);
     button.addEventListener("click", function () { restore(button); });
@@ -1681,8 +1846,15 @@ PROFIT_SCRIPT = (
         "profit", max_custom_days=MAX_REPORT_DAYS, utc_days=True
     )
     + """
-  function fetchSection(source, url, render) {
-    markSection(source, "loading");
+  // ``quiet`` is for a redraw the page decided on rather than one the reader
+  // asked for. A loading section collapses to its heading and a spinner,
+  // which is right when there is nothing on screen yet and wrong when there
+  // is: every card shrinking and growing again moves the whole document
+  // under the reader, who was looking at one row in one table. A quiet fetch
+  // leaves the numbers on screen until the new ones are ready to replace
+  // them, so nothing moves and nothing is lost if the request fails.
+  function fetchSection(source, url, render, quiet) {
+    if (!quiet) { markSection(source, "loading"); }
     return fetch(url).then(function (response) {
       if (response.status === 401) {
         location.href = "/login?next=" + encodeURIComponent(
@@ -1703,6 +1875,17 @@ PROFIT_SCRIPT = (
       markSection(source, "ready");
       return true;
     }).catch(function () {
+      if (quiet) {
+        // The rows on screen are still the last good ones, and the change
+        // that prompted this is already stored, so the reader is told rather
+        // than shown an emptied page.
+        status.className = "error";
+        status.textContent =
+          "That change was saved, but the report could not be redrawn. "
+          + "Reload the page to catch up.";
+        trace("section-" + source + "-quiet-failure", 0);
+        return false;
+      }
       markSection(
         source, "failed",
         "This section could not be loaded. Try again in a moment.");
@@ -1767,9 +1950,12 @@ PROFIT_SCRIPT = (
 
   // Re-draw the report sections alone, on the cached path: hiding or
   // restoring an item is a change to what the server sums, not a reason to
-  // re-read the Trading Post or to disturb the other two sections.
+  // re-read the Trading Post or to disturb the other two sections. It is
+  // quiet for the same reason - the reader is looking at a row they just
+  // clicked, and collapsing every card to a spinner underneath them would
+  // carry that row off the screen.
   function reloadReport() {
-    return fetchSection("report", reportUrl(false), renderReport);
+    return fetchSection("report", reportUrl(false), renderReport, true);
   }
 
   function load(forced) {
@@ -1883,6 +2069,7 @@ PROFIT_SCRIPT = (
   });
   initializePagers();
   initializeSorters();
+  initializeItemsFilter();
   readInitialRange();
   syncRangeButtons();
   fetch("/api/me")

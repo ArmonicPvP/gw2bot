@@ -171,15 +171,25 @@ part of why the Load button is cheap to press.
 
 ### `/v2/items`
 
-Names the requested items, in chunks of 200 ids read eight at a time, and needs
-no API key. Names are stored and re-used for a month rather than for the five
-minutes a transaction snapshot lasts: an item's name is fixed for the life of a
+Names and describes the requested items, in chunks of 200 ids read eight at a
+time, and needs no API key. Each entry carries a broad `type` — `Trinket`,
+`CraftingMaterial`, `Weapon` — and most also carry a `details.type` naming the
+kind within it: `Ring` and `Amulet` under `Trinket`, `Greatsword` under
+`Weapon`, `Rune` and `Sigil` under `UpgradeComponent`. The profit dashboard's
+item filter files a row under the narrower of the two, spaced out for reading
+(`CraftingMaterial` becomes `Crafting Material`), because that is the name a
+member is looking for. `details.type` is sometimes `Default` or `Generic`,
+which names nothing; those fall back to the broad type, and an entry with
+neither is `Uncategorized`.
+
+Both are stored and re-used for a month rather than for the five minutes a
+transaction snapshot lasts: an item's name and type are fixed for the life of a
 game build, and re-reading a few thousand of them on every page load was one of
 the slower parts of a report. One failed chunk falls back to `Item <id>` for
 those ids and never fails the report.
 
 Called with no `ids`, it returns every item id in the game — about 74,000. The
-daily background pass reads that list and stores the names it does not already
+daily background pass reads that list and stores the facts it does not already
 hold, which takes around half a minute the first time and nothing afterwards.
 No member then waits on a name.
 
@@ -299,8 +309,8 @@ IDs resolved from `/v2/guild/upgrades`.
 
 `/v2/items` returns definitions for inventory items, including the crafted
 Ascended Feast items. The profit dashboard also resolves Trading Post item IDs
-here in chunks of 200 and caches their display names. Those item IDs are not the
-IDs returned by Guild Storage.
+here in chunks of 200 and caches their display names and categories. Those item
+IDs are not the IDs returned by Guild Storage.
 `/v2/itemstats` describes selectable equipment attribute combinations and is
 not relevant to feast storage counts.
 
