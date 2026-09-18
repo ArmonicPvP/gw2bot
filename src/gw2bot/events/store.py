@@ -14,6 +14,7 @@ from gw2bot.core.database import (
     EventReminderRecord,
     EventSignupPreferenceRecord,
     EventSignupRecord,
+    SettingRecord,
     create_database_engine,
     initialize_database,
 )
@@ -33,6 +34,12 @@ from gw2bot.events.models import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Marks the one-time pass that re-rendered the events already posted when the
+# calendar link joined their footer. Kept in the bot's own `metadata` table
+# beside the other watermarks, so an upgraded database refreshes its live posts
+# once instead of on every restart.
+POSTED_FOOTER_REFRESH_KEY = "event_footer_calendar_link_v1"
 
 
 def _serialize_time(value: datetime) -> str:
@@ -173,6 +180,7 @@ class EventStore:
         self._engine = create_database_engine(database_path)
         initialize_database(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
+        self._refresh_posted_footers_once()
         LOGGER.debug("Event store initialized")
 
     def close(self) -> None:
@@ -486,6 +494,72 @@ class EventStore:
             "needs_refresh=%s",
             occurrence_id,
             needs_refresh,
+        )
+
+    def mark_posted_occurrences_for_refresh(self) -> int:
+        """Flag every live posted occurrence for a re-render.
+
+        The maintenance pass only refreshes an occurrence whose status has
+        moved or which is already dirty, so a change to what the embed says -
+        rather than to the event behind it - has to be announced here. The
+        next pass then edits the messages, which keeps every Discord call in
+        the one place that owns them. Returns how many were flagged.
+        """
+        pending = (
+            EventOccurrenceRecord.status != EventStatus.OVER.value,
+            EventOccurrenceRecord.message_id.is_not(None),
+            EventOccurrenceRecord.needs_refresh.is_(False),
+        )
+        with self._sessions() as session:
+            marked = session.scalar(
+                select(func.count())
+                .select_from(EventOccurrenceRecord)
+                .where(*pending)
+            )
+            session.execute(
+                update(EventOccurrenceRecord)
+                .where(*pending)
+                .values(needs_refresh=True)
+            )
+            session.commit()
+        LOGGER.debug(
+            "Flagged posted occurrences for a refresh; occurrences=%s",
+            marked,
+        )
+        return marked or 0
+
+    def _refresh_posted_footers_once(self) -> None:
+        """Re-render the posts made before the footer named the calendar.
+
+        The flag is set before the marker row is written, so a crash between
+        the two re-runs a pass that only ever sets a flag already set. Without
+        the marker every restart would re-edit every live event message, and
+        with it the upgrade is the only time that happens.
+        """
+        with self._sessions() as session:
+            if (
+                session.get(SettingRecord, POSTED_FOOTER_REFRESH_KEY)
+                is not None
+            ):
+                return
+        marked = self.mark_posted_occurrences_for_refresh()
+        with self._sessions.begin() as session:
+            session.merge(
+                SettingRecord(
+                    key=POSTED_FOOTER_REFRESH_KEY,
+                    value="complete",
+                )
+            )
+        if not marked:
+            # The common case: a new database, or one whose live posts have
+            # all finished. Nothing was flagged, so nothing is worth saying
+            # above debug.
+            LOGGER.debug("No posted event needed a footer refresh")
+            return
+        LOGGER.info(
+            "Scheduled a footer refresh for the events already posted; "
+            "occurrences=%s",
+            marked,
         )
 
     def get_event(self, event_id: int) -> Event | None:

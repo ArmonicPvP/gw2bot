@@ -260,6 +260,9 @@ def make_destination_bot() -> Any:
         SimpleNamespace(
             event_timezone=ZoneInfo("UTC"),
             event_store=None,
+            # The preview's footer reads the calendar off the config, so even
+            # a bot that only answers destination questions carries one.
+            _config=default_config(),
             get_channel=channels.get,
             fetch_channel=AsyncMock(side_effect=not_found_error()),
         ),

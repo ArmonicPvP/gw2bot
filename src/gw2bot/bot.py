@@ -28,6 +28,7 @@ from gw2bot.config import (
 from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.events import scheduler as event_scheduler
 from gw2bot.events.commands import EventCommands
+from gw2bot.events.formatting import calendar_footer_link
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     EventSettingsButton,
@@ -408,6 +409,9 @@ class Gw2Bot(discord.Client):
         lists what was actually restarted rather than everything considered.
         """
         LOGGER.debug("Applying settings change; fields=%s", sorted(changed))
+        # Read before the swap below: the posted event messages carry this in
+        # their footer, so a change to it leaves every live post stale.
+        previous_calendar_footer = calendar_footer_link(self._config)
         self._config = compose_from_store(self._bootstrap, self._settings_store)
         # A credential set while the bot is running has to be redacted by the
         # handler that is already installed, so it is registered before
@@ -473,6 +477,16 @@ class Gw2Bot(discord.Client):
 
         if "discord_feast_notification_user_id" in changed:
             self._feast_notification_user = None
+
+        # A footer naming a calendar that is no longer served - or not naming
+        # one that now is - is only corrected when the message is re-rendered,
+        # and the maintenance pass will not do that on its own for an event
+        # whose status has not moved. Flagging the occurrences puts every live
+        # post right within a pass.
+        if calendar_footer_link(self._config) != previous_calendar_footer:
+            marked = self._event_store.mark_posted_occurrences_for_refresh()
+            if marked:
+                restarted.append(f"the footer of {marked} posted event(s)")
 
         if "event_timezone" in changed:
             self._event_timezone = ZoneInfo(self._config.event_timezone)

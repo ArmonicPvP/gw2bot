@@ -17,6 +17,7 @@ import discord
 from discord.utils import MISSING
 
 from gw2bot.events.formatting import (
+    calendar_footer_link,
     confirm_embed,
     describe_repeat,
     details_confirm_embed,
@@ -62,6 +63,7 @@ def build_details_preview(
         draft.channel_id,
         draft.leader_discord_id,
         PREVIEW_EVENT_ID_TEXT,
+        calendar_url=calendar_footer_link(bot._config),
     )
     confirmation = details_confirm_embed()
     _append_ping_note(confirmation, draft)
@@ -111,6 +113,7 @@ def build_event_preview(
             signups,
             _preview_status(edited, signups, draft.roster_only),
             event_id_text=str(editing_event_id),
+            calendar_url=calendar_footer_link(bot._config),
         )
         if draft.roster_only:
             # The event is running: its details are frozen, so the preview is a
@@ -127,6 +130,7 @@ def build_event_preview(
             [],
             EventStatus.OPEN,
             event_id_text=PREVIEW_EVENT_ID_TEXT,
+            calendar_url=calendar_footer_link(bot._config),
         )
         confirmation = confirm_embed()
         view = EventConfirmView(bot, draft)

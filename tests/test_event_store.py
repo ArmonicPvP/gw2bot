@@ -14,7 +14,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
     RosterAssignment,
 )
-from gw2bot.events.store import EventStore
+from gw2bot.events.store import POSTED_FOOTER_REFRESH_KEY, EventStore
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 
@@ -744,6 +744,89 @@ class TestEventStoreOccurrences:
         assert store.get_handled_reminder_offsets(upcoming.occurrence_id) == (
             set()
         )
+
+    def test_marking_posted_occurrences_skips_what_no_pass_refreshes(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A change to what the embed renders - the footer naming the calendar
+        # - reaches a posted message through the refresh flag, because the
+        # maintenance pass skips an occurrence whose status has not moved.
+        event = create_event(store, repeat_frequency=RepeatFrequency.WEEKLY)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 556, 778)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        unposted = store.create_occurrence(event.event_id, START)
+
+        marked = store.mark_posted_occurrences_for_refresh()
+
+        # Only the live post is flagged: a finished run is never refreshed
+        # again, and one still to be posted renders its footer when it is.
+        assert marked == 1
+        flagged = store.get_occurrence(posted.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+        for untouched_id in (finished.occurrence_id, unposted.occurrence_id):
+            untouched = store.get_occurrence(untouched_id)
+            assert untouched is not None
+            assert not untouched.needs_refresh
+
+    def test_reopening_the_store_does_not_reflag_posted_occurrences(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The upgrade refreshes the events already posted once. Doing it on
+        # every restart would re-edit every live message each time the bot
+        # came up, so the pass leaves a marker behind.
+        db_path = str(tmp_path / "gw2bot.db")
+        store = EventStore(db_path)
+        try:
+            event = create_event(store)
+            posted = store.create_occurrence(event.event_id, START)
+            store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+            store.set_occurrence_needs_refresh(posted.occurrence_id, False)
+        finally:
+            store.close()
+
+        reopened = EventStore(db_path)
+        try:
+            unflagged = reopened.get_occurrence(posted.occurrence_id)
+            assert unflagged is not None
+            assert not unflagged.needs_refresh
+        finally:
+            reopened.close()
+
+    def test_a_database_without_the_marker_refreshes_its_posts_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = str(tmp_path / "gw2bot.db")
+        store = EventStore(db_path)
+        try:
+            event = create_event(store)
+            posted = store.create_occurrence(event.event_id, START)
+            store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+        finally:
+            store.close()
+
+        # An upgraded database is one whose posts predate the marker.
+        engine = create_database_engine(db_path)
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM metadata WHERE key = :key"),
+                {"key": POSTED_FOOTER_REFRESH_KEY},
+            )
+        engine.dispose()
+
+        upgraded = EventStore(db_path)
+        try:
+            flagged = upgraded.get_occurrence(posted.occurrence_id)
+            assert flagged is not None
+            assert flagged.needs_refresh
+        finally:
+            upgraded.close()
 
     def test_retire_event_ends_the_runs_it_keeps(
         self,
