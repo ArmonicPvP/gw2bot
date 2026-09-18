@@ -69,6 +69,7 @@ from factories import (
     forbidden_error,
     not_found_error,
     unknown_guild_error,
+    web_enabled_config,
 )
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
@@ -552,6 +553,23 @@ class TestSolveRoster:
 
 
 class TestPostOccurrence:
+    async def test_footer_names_the_calendar_when_it_is_served(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The post is where a member meets the event, so it is also where the
+        # rest of the schedule is advertised.
+        bot._config = web_enabled_config()
+
+        event, _ = await post_new_event(bot, store)
+
+        embed = channel.sent[0]["embed"]
+        assert embed.footer.text == (
+            f"gw2bot.example.com/calendar | eventID: {event.event_id}"
+        )
+
     async def test_posts_message_with_thread_and_stores_ids(
         self,
         bot: Any,

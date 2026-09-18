@@ -167,6 +167,21 @@ def default_config(**overrides: Any) -> Config:
     return Config(**overrides)
 
 
+def web_enabled_config(**overrides: Any) -> Config:
+    """Config whose web site is both switched on and fully configured.
+
+    A page is only linked to - from `/profit`, or from the footer of an event
+    post - when the calendar is actually being served, which takes all four of
+    its settings rather than the base URL alone.
+    """
+    overrides.setdefault("web_enabled", True)
+    overrides.setdefault("web_base_url", "https://gw2bot.example.com")
+    overrides.setdefault("discord_oauth_client_id", "oauth-client")
+    overrides.setdefault("discord_oauth_client_secret", "oauth-secret")
+    overrides.setdefault("web_session_secret", "s" * 32)
+    return default_config(**overrides)
+
+
 class FakeGuild:
     """Answers member lookups the way Discord does for a bot without the intent.
 

@@ -7,15 +7,18 @@ import pytest
 
 from gw2bot.events.formatting import (
     DRAFT_PENDING_TEXT,
+    EMBED_FOOTER_LIMIT,
     EMBED_TOTAL_LIMIT,
     ROSTER_UPDATE_HEADER,
     WAITLIST_EMOJI,
+    calendar_footer_link,
     compute_status,
     confirm_embed,
     describe_repeat,
     details_confirm_embed,
     details_preview_embed,
     event_embed,
+    event_footer_text,
     event_thread_name,
     format_duration,
     format_role_groups,
@@ -43,6 +46,8 @@ from gw2bot.events.models import (
     RoleChange,
     RosterUpdate,
 )
+
+from factories import default_config, web_enabled_config
 
 NEW_YORK = ZoneInfo("America/New_York")
 UTC_ZONE = ZoneInfo("UTC")
@@ -739,6 +744,30 @@ class TestEventEmbed:
         assert color_of(EventStatus.ONGOING) == 0xF1C40F
         assert color_of(EventStatus.OVER) == 0x31373D
 
+    def test_footer_names_the_calendar_when_it_is_served(self) -> None:
+        embed = event_embed(
+            make_event(),
+            [],
+            EventStatus.OPEN,
+            calendar_url=calendar_footer_link(web_enabled_config()),
+        )
+
+        assert embed.footer.text == (
+            "gw2bot.example.com/calendar | eventID: 7"
+        )
+
+    def test_footer_is_the_event_id_alone_without_a_calendar(self) -> None:
+        # Nothing is served, so nothing is advertised: the footer says only
+        # what it always said.
+        embed = event_embed(
+            make_event(),
+            [],
+            EventStatus.OPEN,
+            calendar_url=calendar_footer_link(default_config()),
+        )
+
+        assert embed.footer.text == "eventID: 7"
+
     def test_preview_footer_uses_placeholder_id(self) -> None:
         embed = event_embed(
             make_event(),
@@ -861,6 +890,83 @@ class TestDetailsPreviewEmbed:
         )
 
         assert embed.footer.text == "eventID: —"
+
+    def test_footer_names_the_calendar_when_it_is_served(self) -> None:
+        # The step-one preview carries the same footer as the posted event, so
+        # a commander sees what members will read.
+        embed = details_preview_embed(
+            EventCategory.FRACTAL,
+            "Kitty Cleanup",
+            "Bring food.",
+            1234,
+            42,
+            "—",
+            calendar_url=calendar_footer_link(web_enabled_config()),
+        )
+
+        assert embed.footer.text == (
+            "gw2bot.example.com/calendar | eventID: —"
+        )
+
+
+class TestCalendarFooterLink:
+    def test_drops_the_scheme_and_any_trailing_slash(self) -> None:
+        # Discord does not linkify an embed footer, so what goes in it is the
+        # address a member types rather than a URL.
+        link = calendar_footer_link(
+            web_enabled_config(web_base_url="https://gw2bot.com/")
+        )
+
+        assert link == "gw2bot.com/calendar"
+
+    def test_keeps_a_plain_http_host(self) -> None:
+        link = calendar_footer_link(
+            web_enabled_config(web_base_url="http://192.168.1.5:2222")
+        )
+
+        assert link == "192.168.1.5:2222/calendar"
+
+    def test_is_absent_while_the_site_is_switched_off(self) -> None:
+        # WEB_ENABLED opens the port, so a base URL on its own serves nothing
+        # and must not be advertised.
+        link = calendar_footer_link(
+            web_enabled_config(web_enabled=False)
+        )
+
+        assert link is None
+
+    def test_is_absent_while_a_credential_is_missing(self) -> None:
+        link = calendar_footer_link(
+            web_enabled_config(web_session_secret=None)
+        )
+
+        assert link is None
+
+    def test_is_absent_without_a_base_url(self) -> None:
+        link = calendar_footer_link(web_enabled_config(web_base_url=None))
+
+        assert link is None
+
+
+class TestEventFooterText:
+    def test_keeps_the_event_id_when_the_calendar_will_not_fit(self) -> None:
+        # Nothing bounds the length of /settings web_base_url, and a footer
+        # over Discord's own 2,048-character limit is refused outright - which
+        # would fail every post and every refresh of the event. The eventID is
+        # what the commands read off the footer, so it is what survives.
+        absurd = "x" * EMBED_FOOTER_LIMIT
+
+        footer = event_footer_text("7", f"{absurd}/calendar")
+
+        assert footer == "eventID: 7"
+
+    def test_keeps_a_calendar_that_fits(self) -> None:
+        host = "x" * (EMBED_FOOTER_LIMIT - len("/calendar | eventID: 7"))
+
+        footer = event_footer_text("7", f"{host}/calendar")
+
+        assert len(footer) == EMBED_FOOTER_LIMIT
+        assert footer.endswith("/calendar | eventID: 7")
 
 
 class TestDetailsConfirmEmbed:

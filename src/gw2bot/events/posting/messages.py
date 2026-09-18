@@ -18,6 +18,7 @@ import discord
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.formatting import (
+    calendar_footer_link,
     event_embed,
     event_thread_name,
     message_link,
@@ -71,6 +72,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def occurrence_embed(
+    bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
     signups: list[EventSignup],
@@ -82,6 +84,10 @@ def occurrence_embed(
         signups,
         status,
         start_time=occurrence.start_time,
+        # Read per render rather than captured: /settings can turn the
+        # calendar on or off while events are posted, and the footer of every
+        # message refreshed after that has to say what is true then.
+        calendar_url=calendar_footer_link(bot._config),
     )
 
 
@@ -96,7 +102,7 @@ async def post_occurrence(
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     status = occurrence_status(event, occurrence, signups, now)
     channel = await resolve_channel(bot, event.channel_id)
-    embed = occurrence_embed(event, occurrence, signups, now)
+    embed = occurrence_embed(bot, event, occurrence, signups, now)
     view = build_signup_view(occurrence.occurrence_id)
     in_thread = is_thread_channel(channel)
     thread_id: int | None = None
@@ -279,7 +285,7 @@ async def refresh_occurrence_message(
                 occurrence_channel_id(event, occurrence),
             )
             await channel.get_partial_message(occurrence.message_id).edit(
-                embed=occurrence_embed(event, occurrence, signups, now),
+                embed=occurrence_embed(bot, event, occurrence, signups, now),
             )
         except discord.NotFound:
             # The message or its channel was permanently deleted. Retrying
@@ -666,7 +672,7 @@ async def refresh_retired_posts(
                 occurrence_channel_id(event, occurrence),
             )
             await channel.get_partial_message(occurrence.message_id).edit(
-                embed=occurrence_embed(event, occurrence, signups, now),
+                embed=occurrence_embed(bot, event, occurrence, signups, now),
             )
         except discord.HTTPException as exc:
             # NotFound included: a post somebody deleted by hand is nothing to

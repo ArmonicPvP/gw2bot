@@ -25,7 +25,7 @@ from gw2bot.core.discord_utils import (
     send_direct_message,
     user_has_role,
 )
-from gw2bot.events.formatting import event_embed
+from gw2bot.events.formatting import calendar_footer_link, event_embed
 from gw2bot.events.models import (
     Event,
     EventOccurrence,
@@ -249,6 +249,7 @@ async def _picked_roster_target(
 
 
 def _roster_preview_embed(
+    bot: Gw2Bot,
     draft: EventDraft,
     event_id: int,
     signups: list[EventSignup],
@@ -265,6 +266,7 @@ def _roster_preview_embed(
         signups,
         _preview_status(edited, signups, draft.roster_only),
         event_id_text=str(event_id),
+        calendar_url=calendar_footer_link(bot._config),
     )
 
 
@@ -406,7 +408,7 @@ async def open_roster_removal(
             view=None,
         )
         return
-    roster = _roster_preview_embed(draft, editing_event_id, signups)
+    roster = _roster_preview_embed(bot, draft, editing_event_id, signups)
     view = RemoveSignupsView(
         bot,
         draft,
@@ -1140,7 +1142,7 @@ async def open_roster_addition(
     view = AddSignupsView(bot, draft, occurrence)
     await interaction.response.edit_message(
         content=view.prompt(),
-        embeds=[_roster_preview_embed(draft, event.event_id, signups)],
+        embeds=[_roster_preview_embed(bot, draft, event.event_id, signups)],
         view=view,
     )
 

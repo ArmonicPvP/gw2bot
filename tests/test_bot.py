@@ -24,6 +24,7 @@ from gw2bot.main import main as run_main
 from gw2bot.raffle import TrialForumPost
 from gw2bot.settings.definitions import definition_for
 from gw2bot.web.server import WebServer
+from gw2bot.events.models import EventCategory, RepeatFrequency
 from gw2bot.events.views import (
     EventSettingsButton,
     EventSignOutButton,
@@ -1190,6 +1191,122 @@ class TestSettingsHotApply:
         await self._close(bot)
 
     @patch("gw2bot.bot.GuildMemberCache")
+    async def test_configuring_the_calendar_refreshes_posted_event_footers(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The footer of every posted event names the calendar, so switching it
+        # on leaves those messages stale. The maintenance pass will not
+        # re-render an event whose status has not moved, so the occurrences are
+        # flagged for it here.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path, WEB_ENABLED="true"))
+        event = bot.event_store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = bot.event_store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        bot.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            1234,
+            555,
+            777,
+        )
+        for name, value in (
+            ("web_base_url", "https://gw2bot.example.com"),
+            ("discord_oauth_client_id", "client-id"),
+            ("discord_oauth_client_secret", "client-secret"),
+            ("web_session_secret", "s" * 32),
+        ):
+            bot.settings_store.set_raw(definition_for(name), value)
+
+        with (
+            self._quiet_bot_patches(),
+            patch.object(
+                Gw2Bot,
+                "_reconcile_web_server",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            restarted = await bot.apply_settings_change(
+                {
+                    "web_base_url",
+                    "discord_oauth_client_id",
+                    "discord_oauth_client_secret",
+                    "web_session_secret",
+                }
+            )
+
+        flagged = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+        assert "the footer of 1 posted event(s)" in restarted
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_a_change_that_leaves_the_footer_alone_refreshes_nothing(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # Re-editing every live event message costs a Discord call each and
+        # changes nothing a member can see, so only a change to the address in
+        # the footer is allowed to ask for it.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        event = bot.event_store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = bot.event_store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        bot.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            1234,
+            555,
+            777,
+        )
+        bot.settings_store.set_raw(definition_for("timezone"), "Europe/Berlin")
+
+        with (
+            self._quiet_bot_patches(),
+            patch.object(
+                Gw2Bot,
+                "_reconcile_web_server",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            restarted = await bot.apply_settings_change({"event_timezone"})
+
+        untouched = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        assert untouched is not None
+        assert not untouched.needs_refresh
+        assert not any("footer" in entry for entry in restarted)
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
     async def test_an_unrelated_change_keeps_the_pending_invite_cache(
         self,
         member_cache: MagicMock,
@@ -1339,6 +1456,91 @@ class TestWebCalendarReconcile:
         bot._session = None
         with patch.object(discord.Client, "close", AsyncMock()):
             await bot.close()
+
+    async def test_starting_with_the_calendar_on_refreshes_posted_footers(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # WEB_ENABLED is an environment variable, so switching the calendar on
+        # is a restart rather than a settings change, and apply_settings_change
+        # never sees it. The events posted before it still carry a footer with
+        # no address in it, so startup is what has to notice.
+        off = await self._bot(self._config(tmp_path, WEB_ENABLED="false"))
+        event = off.event_store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = off.event_store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        off.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            1234,
+            555,
+            777,
+        )
+        assert not off.event_store.get_posted_unfinished_occurrences()[
+            0
+        ].needs_refresh
+        await self._close(off)
+
+        on = await self._bot(self._config(tmp_path))
+
+        flagged = on.event_store.get_occurrence(occurrence.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+        await self._close(on)
+
+    async def test_restarting_with_the_calendar_unchanged_refreshes_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        first = await self._bot(self._config(tmp_path))
+        event = first.event_store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = first.event_store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        first.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            1234,
+            555,
+            777,
+        )
+        # The post was rendered by this process, so it already names the
+        # calendar this configuration serves.
+        first.event_store.set_occurrence_needs_refresh(
+            occurrence.occurrence_id,
+            False,
+        )
+        await self._close(first)
+
+        second = await self._bot(self._config(tmp_path))
+
+        untouched = second.event_store.get_occurrence(
+            occurrence.occurrence_id
+        )
+        assert untouched is not None
+        assert not untouched.needs_refresh
+        await self._close(second)
 
     async def test_reports_a_started_calendar(self, tmp_path: Path) -> None:
         bot = await self._bot(self._config(tmp_path))

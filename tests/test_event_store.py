@@ -745,6 +745,106 @@ class TestEventStoreOccurrences:
             set()
         )
 
+    def test_marking_posted_occurrences_skips_what_no_pass_refreshes(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A change to what the embed renders - the footer naming the calendar
+        # - reaches a posted message through the refresh flag, because the
+        # maintenance pass skips an occurrence whose status has not moved.
+        event = create_event(store, repeat_frequency=RepeatFrequency.WEEKLY)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+        finished = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 556, 778)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        unposted = store.create_occurrence(event.event_id, START)
+
+        marked = store.mark_posted_occurrences_for_refresh()
+
+        # Only the live post is flagged: a finished run is never refreshed
+        # again, and one still to be posted renders its footer when it is.
+        assert marked == 1
+        flagged = store.get_occurrence(posted.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+        for untouched_id in (finished.occurrence_id, unposted.occurrence_id):
+            untouched = store.get_occurrence(untouched_id)
+            assert untouched is not None
+            assert not untouched.needs_refresh
+
+    def test_reconciling_the_same_calendar_twice_reflags_nothing(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Re-editing every live message on an ordinary restart costs a Discord
+        # call each and changes nothing a member can see.
+        event = create_event(store)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+
+        assert store.reconcile_posted_footers("gw2bot.test/calendar") == 1
+        store.set_occurrence_needs_refresh(posted.occurrence_id, False)
+
+        assert store.reconcile_posted_footers("gw2bot.test/calendar") == 0
+        unflagged = store.get_occurrence(posted.occurrence_id)
+        assert unflagged is not None
+        assert not unflagged.needs_refresh
+
+    def test_a_database_that_never_named_a_calendar_reflags_on_the_first(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The upgrade case: footers rendered before the link existed named no
+        # calendar, which is what a database with no stored address means.
+        event = create_event(store)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+
+        assert store.reconcile_posted_footers(None) == 0
+        assert store.reconcile_posted_footers("gw2bot.test/calendar") == 1
+
+        flagged = store.get_occurrence(posted.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+
+    def test_reconciling_survives_the_store_being_reopened(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # WEB_ENABLED is bootstrap-only, so the calendar going away is a
+        # restart: the address the posts were rendered with has to outlive the
+        # process that rendered them, and losing it either way is wrong.
+        db_path = str(tmp_path / "gw2bot.db")
+        store = EventStore(db_path)
+        try:
+            event = create_event(store)
+            posted = store.create_occurrence(event.event_id, START)
+            store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+            store.reconcile_posted_footers("gw2bot.test/calendar")
+            store.set_occurrence_needs_refresh(posted.occurrence_id, False)
+        finally:
+            store.close()
+
+        restarted = EventStore(db_path)
+        try:
+            # Same calendar across the restart: nothing to re-render.
+            assert restarted.reconcile_posted_footers(
+                "gw2bot.test/calendar"
+            ) == 0
+            unflagged = restarted.get_occurrence(posted.occurrence_id)
+            assert unflagged is not None
+            assert not unflagged.needs_refresh
+
+            # Switched off while the bot was down, which no settings change
+            # reports: the posts still name it, so they are flagged now.
+            assert restarted.reconcile_posted_footers(None) == 1
+            flagged = restarted.get_occurrence(posted.occurrence_id)
+            assert flagged is not None
+            assert flagged.needs_refresh
+        finally:
+            restarted.close()
+
     def test_retire_event_ends_the_runs_it_keeps(
         self,
         store: EventStore,

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from gw2bot.config import Config
 from gw2bot.events.models import (
     CATEGORY_EMOJI,
     EMOJI_ALACRITY,
@@ -38,6 +39,7 @@ EVENT_DURATION_PATTERN = re.compile(r"^(\d{1,3}):([0-5]\d)$")
 EMBED_FIELD_VALUE_LIMIT = 1024
 EMBED_TOTAL_LIMIT = 6000
 EMBED_TITLE_LIMIT = 256
+EMBED_FOOTER_LIMIT = 2048
 EMPTY_FIELD_TEXT = "—"
 # Stands in for a value the commander has not reached yet in the creation flow,
 # so the step-one preview keeps the shape of the finished event.
@@ -52,6 +54,10 @@ WAITLIST_EMOJI = "⌛️"
 # on for screens.
 SINGLE_COLUMN_SQUAD_SIZE = 10
 _TRUNCATION_MARKER = "…"
+# Where the footer sends a member who wants the whole schedule rather than the
+# one event in front of them. The page lives below the site root, so the path
+# is spelled out here rather than assumed from web_base_url.
+CALENDAR_FOOTER_PATH = "/calendar"
 
 _WEEKDAY_NAMES = (
     "monday",
@@ -505,12 +511,59 @@ def _participants_name(count: int, capacity: CategoryCapacity) -> str:
     return f"👥 Participants ({count}/{capacity.total})"
 
 
+def calendar_footer_link(config: Config) -> str | None:
+    """The calendar address an event footer advertises, or None.
+
+    Only a calendar that is actually being served is advertised: pointing
+    members at a page this deployment does not answer would be worse than
+    saying nothing. web_base_url carries the scheme a browser needs, but
+    Discord does not linkify an embed footer, so what is left is the bare
+    "host/calendar" a member reads off the post and types in.
+    """
+    if not config.web_calendar_enabled or config.web_base_url is None:
+        return None
+    host = config.web_base_url.strip().rstrip("/")
+    for scheme in ("https://", "http://"):
+        if host.lower().startswith(scheme):
+            host = host[len(scheme) :]
+            break
+    if not host:
+        return None
+    return f"{host}{CALENDAR_FOOTER_PATH}"
+
+
+def event_footer_text(
+    event_id_text: str,
+    calendar_url: str | None = None,
+) -> str:
+    """The footer every event embed carries: where to find it, and which it is.
+
+    The eventID stays last so the commands that ask for one keep reading off
+    the end of the same line, whether or not a calendar is being served.
+
+    Discord rejects a footer over its own 2,048-character limit, which
+    _fit_within_total_limit cannot rescue - it only spends the 6,000-character
+    aggregate budget. Nothing validates the length of `/settings
+    web_base_url`, so an absurd one would otherwise make every post and every
+    refresh fail with an invalid form body. The eventID is what the commands
+    read, so it is the part that survives.
+    """
+    event_id = f"eventID: {event_id_text}"
+    if calendar_url is None:
+        return event_id[:EMBED_FOOTER_LIMIT]
+    footer = f"{calendar_url} | {event_id}"
+    if len(footer) <= EMBED_FOOTER_LIMIT:
+        return footer
+    return event_id[:EMBED_FOOTER_LIMIT]
+
+
 def event_embed(
     event: Event,
     signups: list[EventSignup],
     status: EventStatus,
     event_id_text: str | None = None,
     start_time: datetime | None = None,
+    calendar_url: str | None = None,
 ) -> discord.Embed:
     capacity = event.capacity
     active = [signup for signup in signups if not signup.waitlisted]
@@ -626,7 +679,7 @@ def event_embed(
     footer_id = event_id_text if event_id_text is not None else str(
         event.event_id
     )
-    embed.set_footer(text=f"eventID: {footer_id}")
+    embed.set_footer(text=event_footer_text(footer_id, calendar_url))
     _fit_within_total_limit(embed)
     return embed
 
@@ -674,6 +727,7 @@ def details_preview_embed(
     channel_id: int | None,
     leader_discord_id: int,
     event_id_text: str = EMPTY_FIELD_TEXT,
+    calendar_url: str | None = None,
 ) -> discord.Embed:
     """Render the event as far as the details step has defined it.
 
@@ -707,7 +761,7 @@ def details_preview_embed(
         ),
         inline=False,
     )
-    embed.set_footer(text=f"eventID: {event_id_text}")
+    embed.set_footer(text=event_footer_text(event_id_text, calendar_url))
     _fit_within_total_limit(embed)
     return embed
 

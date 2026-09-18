@@ -14,6 +14,7 @@ from gw2bot.core.database import (
     EventReminderRecord,
     EventSignupPreferenceRecord,
     EventSignupRecord,
+    SettingRecord,
     create_database_engine,
     initialize_database,
 )
@@ -33,6 +34,17 @@ from gw2bot.events.models import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# The calendar address the posted event footers were last rendered with, kept
+# in the bot's own `metadata` table beside the other watermarks. Comparing it
+# at startup is what makes a change made while the bot was down - WEB_ENABLED
+# flipped, or the base URL edited - reach the messages already posted, while an
+# ordinary restart re-edits nothing. A database with no row predates the link,
+# so its footers named no calendar.
+POSTED_FOOTER_CALENDAR_KEY = "event_footer_calendar_link"
+# Stands in for "advertising no calendar" in that row, because the column is
+# not nullable and an empty string is a value the link itself can never take.
+NO_POSTED_FOOTER_CALENDAR = ""
 
 
 def _serialize_time(value: datetime) -> str:
@@ -487,6 +499,84 @@ class EventStore:
             occurrence_id,
             needs_refresh,
         )
+
+    def mark_posted_occurrences_for_refresh(self) -> int:
+        """Flag every live posted occurrence for a re-render.
+
+        The maintenance pass only refreshes an occurrence whose status has
+        moved or which is already dirty, so a change to what the embed says -
+        rather than to the event behind it - has to be announced here. The
+        next pass then edits the messages, which keeps every Discord call in
+        the one place that owns them. Returns how many were flagged.
+        """
+        pending = (
+            EventOccurrenceRecord.status != EventStatus.OVER.value,
+            EventOccurrenceRecord.message_id.is_not(None),
+            EventOccurrenceRecord.needs_refresh.is_(False),
+        )
+        with self._sessions() as session:
+            marked = session.scalar(
+                select(func.count())
+                .select_from(EventOccurrenceRecord)
+                .where(*pending)
+            )
+            session.execute(
+                update(EventOccurrenceRecord)
+                .where(*pending)
+                .values(needs_refresh=True)
+            )
+            session.commit()
+        LOGGER.debug(
+            "Flagged posted occurrences for a refresh; occurrences=%s",
+            marked,
+        )
+        return marked or 0
+
+    def reconcile_posted_footers(self, calendar_url: str | None) -> int:
+        """Flag the posted events whose footer names the wrong calendar.
+
+        Called at startup and on every settings change, because either can
+        move the address the footer carries: `/settings web_base_url` while
+        the bot runs, and `WEB_ENABLED` - which is bootstrap-only - across the
+        restart that applies it. The address last rendered is stored rather
+        than a version marker, so the comparison covers a change made while
+        the bot was down and an ordinary restart re-edits nothing. Returns how
+        many occurrences were flagged.
+        """
+        advertised = (
+            calendar_url
+            if calendar_url is not None
+            else NO_POSTED_FOOTER_CALENDAR
+        )
+        with self._sessions() as session:
+            record = session.get(SettingRecord, POSTED_FOOTER_CALENDAR_KEY)
+            # No row means a database whose footers were rendered before the
+            # link existed, which is the same as advertising no calendar.
+            rendered = (
+                record.value
+                if record is not None
+                else NO_POSTED_FOOTER_CALENDAR
+            )
+        if rendered == advertised:
+            LOGGER.debug("Posted event footers already name this calendar")
+            return 0
+        # Flagged before the row is written, so a crash between the two leaves
+        # work a later pass repeats rather than work nobody does.
+        marked = self.mark_posted_occurrences_for_refresh()
+        with self._sessions.begin() as session:
+            session.merge(
+                SettingRecord(
+                    key=POSTED_FOOTER_CALENDAR_KEY,
+                    value=advertised,
+                )
+            )
+        LOGGER.info(
+            "Posted event footers now name a different calendar; "
+            "advertised=%s occurrences=%s",
+            bool(calendar_url),
+            marked,
+        )
+        return marked
 
     def get_event(self, event_id: int) -> Event | None:
         with self._sessions() as session:
