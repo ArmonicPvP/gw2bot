@@ -340,11 +340,17 @@ as `gw2bot.example.com/calendar | eventID: N`: the host set with
 `/settings web_base_url`, without its scheme, because Discord does not turn an
 embed footer into a link. A member reading one event can find the rest of the
 schedule from it. Turning the calendar on or off, or moving it to another host,
-refreshes the footer of every event still posted within a maintenance pass; so
-does upgrading to the release that added the link. The address the posts were
-rendered with is remembered, so a change made while the bot is down reaches
-them too — including `WEB_ENABLED`, which only takes effect on a restart — and
-an ordinary restart re-edits nothing.
+refreshes the footer of every event still upcoming or running within a
+maintenance pass; so does upgrading to the release that added the link. The
+address the posts were rendered with is remembered, so a change made while the
+bot is down reaches them too — including `WEB_ENABLED`, which only takes effect
+on a restart — and an ordinary restart re-edits nothing.
+
+A run that has finished keeps the footer it was last rendered with, because
+nothing edits a finished post again: the maintenance pass reads only the runs
+still to come, and the posts a deletion keeps as history (see [Deleting An
+Event](#deleting-an-event)) are a record of what the guild ran rather than a
+page to keep current. Their `eventID: N` stays readable either way.
 
 ### Creating An Event
 
