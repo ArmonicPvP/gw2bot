@@ -25,9 +25,13 @@ DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
 
 _MAX_SESSION_NAME_LENGTH = 64
 _MAX_RETURN_TARGET_LENGTH = 1024
+# The pages a sign-in may return to. The calendar is "/calendar" rather than
+# the site root: the site is served from a path on the main domain, and the
+# root is only the redirect that keeps the old bookmarks working.
 _RETURN_TARGET_PATHS = frozenset(
-    {"/", "/food", "/gold", "/profit", "/roster"}
+    {"/calendar", "/food", "/gold", "/profit", "/roster"}
 )
+CALENDAR_PATH = "/calendar"
 
 # Authorization errors that a silent (prompt=none) attempt raises purely
 # because it was not allowed to show a screen. An interactive retry that lets
@@ -167,7 +171,7 @@ def verify_session(
 
 
 def sanitize_return_target(value: str | None) -> str:
-    """Return a bounded local page target, or the calendar root."""
+    """Return a bounded local page target, or the calendar page."""
     if (
         value is None
         or not value
@@ -177,18 +181,18 @@ def sanitize_return_target(value: str | None) -> str:
             for character in value
         )
     ):
-        return "/"
+        return CALENDAR_PATH
     try:
         parsed = urlsplit(value)
     except ValueError:
-        return "/"
+        return CALENDAR_PATH
     if (
         parsed.scheme
         or parsed.netloc
         or parsed.fragment
         or parsed.path not in _RETURN_TARGET_PATHS
     ):
-        return "/"
+        return CALENDAR_PATH
     return urlunsplit(("", "", parsed.path, parsed.query, ""))
 
 
@@ -197,7 +201,7 @@ def sign_state(
     now: datetime,
     *,
     consent_retry: bool = False,
-    return_to: str = "/",
+    return_to: str = CALENDAR_PATH,
 ) -> tuple[str, str]:
     """Return an opaque state token and its signed cookie value.
 

@@ -82,7 +82,7 @@ override it.
 | `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
 | `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime in seconds. |
 | `/settings timezone` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times, to name event threads, and to define weekly repeat days. |
-| `/settings web_base_url` | unset | Public base URL of the web calendar and dashboards, for example `https://calendar.example.com`. Trailing slashes are removed. |
+| `/settings web_base_url` | unset | Public base URL of the web calendar and dashboards, for example `https://gw2bot.example.com`. The site serves its pages from that host's root (`/calendar`, `/profit`, and so on), so the value names a host, not a path below one. Trailing slashes are removed. |
 | `/settings discord_oauth_client_id` | unset | OAuth2 client ID of the bot's Discord application. |
 | `/settings discord_oauth_client_secret` | unset | OAuth2 client secret of the bot's Discord application. **Encrypted.** |
 | `/settings web_session_secret` | unset | Random secret of at least 32 characters that signs web session cookies. Changing it signs every calendar user out. **Encrypted.** |
@@ -1362,7 +1362,7 @@ To enable it:
    [Discord developer portal](https://discord.com/developers/applications),
    go to OAuth2, and copy the Client ID and Client Secret.
 2. Add `<web_base_url>/oauth/callback` (for example
-   `https://calendar.example.com/oauth/callback`) to the application's
+   `https://gw2bot.example.com/oauth/callback`) to the application's
    OAuth2 redirect URIs.
 3. Set `WEB_ENABLED=true` in `.env`, then run `/settings web_base_url`,
    `/settings discord_oauth_client_id`,
@@ -1375,12 +1375,34 @@ To enable it:
 
 Serve the site behind a reverse proxy that terminates TLS. Discord only
 accepts `https` redirect URIs (localhost excepted), and session cookies are
-marked `Secure` only when `/settings web_base_url` uses `https`.
+marked `Secure` only when `/settings web_base_url` uses `https`. The proxy has
+to pass the whole host root through to `WEB_PORT`: every page, API and sign-in
+path is absolute from the root, so the site cannot be mounted under a path
+prefix such as `/gw2bot/`.
 
 Times are shown in each viewer's local timezone. Weekly repeat days are
 defined in the timezone set with `/settings timezone`, so viewers far from it
 may
 correctly see a repeating event land on an adjacent local weekday.
+
+### The site's addresses
+
+| Path | Page |
+| --- | --- |
+| `/` | Redirects to `/calendar`. |
+| `/calendar` | The guild event calendar. |
+| `/profit` | The Trading Post profit dashboard. |
+| `/food` | The feast usage dashboard. |
+| `/roster` | The guild roster history dashboard. |
+| `/gold` | The guild bank gold history dashboard. |
+
+The calendar answered on the site root before, which suited a host of its own
+such as `calendar.example.com`. It has its own path now, so the whole site
+reads the same way whichever host it is served from, and the root redirect
+keeps the older bookmarks working. If you are moving the site off a
+calendar-specific host, keep the old name answering with a redirect to the new
+one and add the new `<web_base_url>/oauth/callback` to the Discord application
+before switching `/settings web_base_url`.
 
 ### Trading Post Profit Dashboard
 

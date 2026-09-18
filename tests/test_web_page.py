@@ -898,7 +898,7 @@ class TestProfitPage:
 
     def test_calendar_and_profit_pages_link_to_each_other(self) -> None:
         assert '<a href="/profit">Profit</a>' in CALENDAR_PAGE
-        assert '<a href="/">Calendar</a>' in PROFIT_PAGE
+        assert '<a href="/calendar">Calendar</a>' in PROFIT_PAGE
 
 
 class TestDashboardHeaders:
@@ -1230,7 +1230,7 @@ class TestFoodPage:
 
     def test_calendar_link_is_removed(self) -> None:
         # The cross-link back to the calendar is dropped from every layout.
-        assert '<a href="/">Calendar</a>' not in FOOD_PAGE
+        assert '<a href="/calendar">Calendar</a>' not in FOOD_PAGE
 
     def test_graph_is_taller_on_mobile(self) -> None:
         # A taller viewBox on mobile makes the graph read large on a phone,

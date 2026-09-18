@@ -7,6 +7,20 @@ is assembled.*
 for the routes and JSON APIs, `calendar.py` for the calendar entries the
 calendar page draws, and `pages/` for the documents themselves.
 
+## Every path is absolute from the host root
+
+The pages link to each other and fetch their APIs with root-relative paths
+(`/calendar`, `/api/profit`, `/login`), so the site has to be served from the
+root of its host; there is no base-path setting to mount it under a prefix. The
+calendar is one page among the others at `/calendar`, and `/` is only a
+redirect to it, kept for bookmarks of the days the site had a host of its own.
+That redirect is in `PUBLIC_PATHS` because it carries nothing about a member -
+`/calendar` asks for the sign-in itself.
+
+`auth.CALENDAR_PATH` is where an unrecognised sign-in target falls back to, and
+`auth._RETURN_TARGET_PATHS` is the closed set a `?next=` may name. A new page
+needs its path added there or sign-in will drop the reader on the calendar.
+
 ## Documents are built once, at import time
 
 Every page is a fixed string assembled when its module is imported, so serving
