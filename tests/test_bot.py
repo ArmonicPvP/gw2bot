@@ -1457,6 +1457,91 @@ class TestWebCalendarReconcile:
         with patch.object(discord.Client, "close", AsyncMock()):
             await bot.close()
 
+    async def test_starting_with_the_calendar_on_refreshes_posted_footers(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # WEB_ENABLED is an environment variable, so switching the calendar on
+        # is a restart rather than a settings change, and apply_settings_change
+        # never sees it. The events posted before it still carry a footer with
+        # no address in it, so startup is what has to notice.
+        off = await self._bot(self._config(tmp_path, WEB_ENABLED="false"))
+        event = off.event_store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = off.event_store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        off.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            1234,
+            555,
+            777,
+        )
+        assert not off.event_store.get_posted_unfinished_occurrences()[
+            0
+        ].needs_refresh
+        await self._close(off)
+
+        on = await self._bot(self._config(tmp_path))
+
+        flagged = on.event_store.get_occurrence(occurrence.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+        await self._close(on)
+
+    async def test_restarting_with_the_calendar_unchanged_refreshes_nothing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        first = await self._bot(self._config(tmp_path))
+        event = first.event_store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = first.event_store.create_occurrence(
+            event.event_id,
+            event.start_time,
+        )
+        first.event_store.set_occurrence_message(
+            occurrence.occurrence_id,
+            1234,
+            555,
+            777,
+        )
+        # The post was rendered by this process, so it already names the
+        # calendar this configuration serves.
+        first.event_store.set_occurrence_needs_refresh(
+            occurrence.occurrence_id,
+            False,
+        )
+        await self._close(first)
+
+        second = await self._bot(self._config(tmp_path))
+
+        untouched = second.event_store.get_occurrence(
+            occurrence.occurrence_id
+        )
+        assert untouched is not None
+        assert not untouched.needs_refresh
+        await self._close(second)
+
     async def test_reports_a_started_calendar(self, tmp_path: Path) -> None:
         bot = await self._bot(self._config(tmp_path))
 

@@ -179,6 +179,13 @@ class Gw2Bot(discord.Client):
         self._poll_status = PollStatusTracker(self._secrets)
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._event_store = EventStore(config.raffle_db_path)
+        # WEB_ENABLED is bootstrap-only, so turning the calendar on or off is
+        # a restart rather than a settings change: the events already posted
+        # are reconciled here as well as on a live change, or their footers
+        # would name a calendar that has moved until each one's status does.
+        self._event_store.reconcile_posted_footers(
+            calendar_footer_link(config)
+        )
         self._profit_store = ProfitStore(
             config.raffle_db_path,
             self._settings_store.cipher,
@@ -409,9 +416,6 @@ class Gw2Bot(discord.Client):
         lists what was actually restarted rather than everything considered.
         """
         LOGGER.debug("Applying settings change; fields=%s", sorted(changed))
-        # Read before the swap below: the posted event messages carry this in
-        # their footer, so a change to it leaves every live post stale.
-        previous_calendar_footer = calendar_footer_link(self._config)
         self._config = compose_from_store(self._bootstrap, self._settings_store)
         # A credential set while the bot is running has to be redacted by the
         # handler that is already installed, so it is registered before
@@ -481,12 +485,13 @@ class Gw2Bot(discord.Client):
         # A footer naming a calendar that is no longer served - or not naming
         # one that now is - is only corrected when the message is re-rendered,
         # and the maintenance pass will not do that on its own for an event
-        # whose status has not moved. Flagging the occurrences puts every live
-        # post right within a pass.
-        if calendar_footer_link(self._config) != previous_calendar_footer:
-            marked = self._event_store.mark_posted_occurrences_for_refresh()
-            if marked:
-                restarted.append(f"the footer of {marked} posted event(s)")
+        # whose status has not moved. The store compares the address the posts
+        # were rendered with, so this covers exactly the changes that move it.
+        marked = self._event_store.reconcile_posted_footers(
+            calendar_footer_link(self._config)
+        )
+        if marked:
+            restarted.append(f"the footer of {marked} posted event(s)")
 
         if "event_timezone" in changed:
             self._event_timezone = ZoneInfo(self._config.event_timezone)

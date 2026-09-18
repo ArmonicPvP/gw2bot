@@ -14,7 +14,7 @@ from gw2bot.events.models import (
     RepeatFrequency,
     RosterAssignment,
 )
-from gw2bot.events.store import POSTED_FOOTER_REFRESH_KEY, EventStore
+from gw2bot.events.store import EventStore
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 
@@ -773,60 +773,77 @@ class TestEventStoreOccurrences:
             assert untouched is not None
             assert not untouched.needs_refresh
 
-    def test_reopening_the_store_does_not_reflag_posted_occurrences(
+    def test_reconciling_the_same_calendar_twice_reflags_nothing(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Re-editing every live message on an ordinary restart costs a Discord
+        # call each and changes nothing a member can see.
+        event = create_event(store)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+
+        assert store.reconcile_posted_footers("gw2bot.test/calendar") == 1
+        store.set_occurrence_needs_refresh(posted.occurrence_id, False)
+
+        assert store.reconcile_posted_footers("gw2bot.test/calendar") == 0
+        unflagged = store.get_occurrence(posted.occurrence_id)
+        assert unflagged is not None
+        assert not unflagged.needs_refresh
+
+    def test_a_database_that_never_named_a_calendar_reflags_on_the_first(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The upgrade case: footers rendered before the link existed named no
+        # calendar, which is what a database with no stored address means.
+        event = create_event(store)
+        posted = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+
+        assert store.reconcile_posted_footers(None) == 0
+        assert store.reconcile_posted_footers("gw2bot.test/calendar") == 1
+
+        flagged = store.get_occurrence(posted.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
+
+    def test_reconciling_survives_the_store_being_reopened(
         self,
         tmp_path: Path,
     ) -> None:
-        # The upgrade refreshes the events already posted once. Doing it on
-        # every restart would re-edit every live message each time the bot
-        # came up, so the pass leaves a marker behind.
+        # WEB_ENABLED is bootstrap-only, so the calendar going away is a
+        # restart: the address the posts were rendered with has to outlive the
+        # process that rendered them, and losing it either way is wrong.
         db_path = str(tmp_path / "gw2bot.db")
         store = EventStore(db_path)
         try:
             event = create_event(store)
             posted = store.create_occurrence(event.event_id, START)
             store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+            store.reconcile_posted_footers("gw2bot.test/calendar")
             store.set_occurrence_needs_refresh(posted.occurrence_id, False)
         finally:
             store.close()
 
-        reopened = EventStore(db_path)
+        restarted = EventStore(db_path)
         try:
-            unflagged = reopened.get_occurrence(posted.occurrence_id)
+            # Same calendar across the restart: nothing to re-render.
+            assert restarted.reconcile_posted_footers(
+                "gw2bot.test/calendar"
+            ) == 0
+            unflagged = restarted.get_occurrence(posted.occurrence_id)
             assert unflagged is not None
             assert not unflagged.needs_refresh
-        finally:
-            reopened.close()
 
-    def test_a_database_without_the_marker_refreshes_its_posts_once(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        db_path = str(tmp_path / "gw2bot.db")
-        store = EventStore(db_path)
-        try:
-            event = create_event(store)
-            posted = store.create_occurrence(event.event_id, START)
-            store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
-        finally:
-            store.close()
-
-        # An upgraded database is one whose posts predate the marker.
-        engine = create_database_engine(db_path)
-        with engine.begin() as connection:
-            connection.execute(
-                text("DELETE FROM metadata WHERE key = :key"),
-                {"key": POSTED_FOOTER_REFRESH_KEY},
-            )
-        engine.dispose()
-
-        upgraded = EventStore(db_path)
-        try:
-            flagged = upgraded.get_occurrence(posted.occurrence_id)
+            # Switched off while the bot was down, which no settings change
+            # reports: the posts still name it, so they are flagged now.
+            assert restarted.reconcile_posted_footers(None) == 1
+            flagged = restarted.get_occurrence(posted.occurrence_id)
             assert flagged is not None
             assert flagged.needs_refresh
         finally:
-            upgraded.close()
+            restarted.close()
 
     def test_retire_event_ends_the_runs_it_keeps(
         self,

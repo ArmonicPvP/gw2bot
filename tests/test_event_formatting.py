@@ -7,6 +7,7 @@ import pytest
 
 from gw2bot.events.formatting import (
     DRAFT_PENDING_TEXT,
+    EMBED_FOOTER_LIMIT,
     EMBED_TOTAL_LIMIT,
     ROSTER_UPDATE_HEADER,
     WAITLIST_EMOJI,
@@ -17,6 +18,7 @@ from gw2bot.events.formatting import (
     details_confirm_embed,
     details_preview_embed,
     event_embed,
+    event_footer_text,
     event_thread_name,
     format_duration,
     format_role_groups,
@@ -944,6 +946,27 @@ class TestCalendarFooterLink:
         link = calendar_footer_link(web_enabled_config(web_base_url=None))
 
         assert link is None
+
+
+class TestEventFooterText:
+    def test_keeps_the_event_id_when_the_calendar_will_not_fit(self) -> None:
+        # Nothing bounds the length of /settings web_base_url, and a footer
+        # over Discord's own 2,048-character limit is refused outright - which
+        # would fail every post and every refresh of the event. The eventID is
+        # what the commands read off the footer, so it is what survives.
+        absurd = "x" * EMBED_FOOTER_LIMIT
+
+        footer = event_footer_text("7", f"{absurd}/calendar")
+
+        assert footer == "eventID: 7"
+
+    def test_keeps_a_calendar_that_fits(self) -> None:
+        host = "x" * (EMBED_FOOTER_LIMIT - len("/calendar | eventID: 7"))
+
+        footer = event_footer_text("7", f"{host}/calendar")
+
+        assert len(footer) == EMBED_FOOTER_LIMIT
+        assert footer.endswith("/calendar | eventID: 7")
 
 
 class TestDetailsConfirmEmbed:

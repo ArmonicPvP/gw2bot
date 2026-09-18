@@ -341,7 +341,10 @@ as `gw2bot.example.com/calendar | eventID: N`: the host set with
 embed footer into a link. A member reading one event can find the rest of the
 schedule from it. Turning the calendar on or off, or moving it to another host,
 refreshes the footer of every event still posted within a maintenance pass; so
-does upgrading to the release that added the link.
+does upgrading to the release that added the link. The address the posts were
+rendered with is remembered, so a change made while the bot is down reaches
+them too — including `WEB_ENABLED`, which only takes effect on a restart — and
+an ordinary restart re-edits nothing.
 
 ### Creating An Event
 

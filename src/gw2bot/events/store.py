@@ -35,11 +35,16 @@ from gw2bot.events.models import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Marks the one-time pass that re-rendered the events already posted when the
-# calendar link joined their footer. Kept in the bot's own `metadata` table
-# beside the other watermarks, so an upgraded database refreshes its live posts
-# once instead of on every restart.
-POSTED_FOOTER_REFRESH_KEY = "event_footer_calendar_link_v1"
+# The calendar address the posted event footers were last rendered with, kept
+# in the bot's own `metadata` table beside the other watermarks. Comparing it
+# at startup is what makes a change made while the bot was down - WEB_ENABLED
+# flipped, or the base URL edited - reach the messages already posted, while an
+# ordinary restart re-edits nothing. A database with no row predates the link,
+# so its footers named no calendar.
+POSTED_FOOTER_CALENDAR_KEY = "event_footer_calendar_link"
+# Stands in for "advertising no calendar" in that row, because the column is
+# not nullable and an empty string is a value the link itself can never take.
+NO_POSTED_FOOTER_CALENDAR = ""
 
 
 def _serialize_time(value: datetime) -> str:
@@ -180,7 +185,6 @@ class EventStore:
         self._engine = create_database_engine(database_path)
         initialize_database(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
-        self._refresh_posted_footers_once()
         LOGGER.debug("Event store initialized")
 
     def close(self) -> None:
@@ -528,39 +532,51 @@ class EventStore:
         )
         return marked or 0
 
-    def _refresh_posted_footers_once(self) -> None:
-        """Re-render the posts made before the footer named the calendar.
+    def reconcile_posted_footers(self, calendar_url: str | None) -> int:
+        """Flag the posted events whose footer names the wrong calendar.
 
-        The flag is set before the marker row is written, so a crash between
-        the two re-runs a pass that only ever sets a flag already set. Without
-        the marker every restart would re-edit every live event message, and
-        with it the upgrade is the only time that happens.
+        Called at startup and on every settings change, because either can
+        move the address the footer carries: `/settings web_base_url` while
+        the bot runs, and `WEB_ENABLED` - which is bootstrap-only - across the
+        restart that applies it. The address last rendered is stored rather
+        than a version marker, so the comparison covers a change made while
+        the bot was down and an ordinary restart re-edits nothing. Returns how
+        many occurrences were flagged.
         """
+        advertised = (
+            calendar_url
+            if calendar_url is not None
+            else NO_POSTED_FOOTER_CALENDAR
+        )
         with self._sessions() as session:
-            if (
-                session.get(SettingRecord, POSTED_FOOTER_REFRESH_KEY)
-                is not None
-            ):
-                return
+            record = session.get(SettingRecord, POSTED_FOOTER_CALENDAR_KEY)
+            # No row means a database whose footers were rendered before the
+            # link existed, which is the same as advertising no calendar.
+            rendered = (
+                record.value
+                if record is not None
+                else NO_POSTED_FOOTER_CALENDAR
+            )
+        if rendered == advertised:
+            LOGGER.debug("Posted event footers already name this calendar")
+            return 0
+        # Flagged before the row is written, so a crash between the two leaves
+        # work a later pass repeats rather than work nobody does.
         marked = self.mark_posted_occurrences_for_refresh()
         with self._sessions.begin() as session:
             session.merge(
                 SettingRecord(
-                    key=POSTED_FOOTER_REFRESH_KEY,
-                    value="complete",
+                    key=POSTED_FOOTER_CALENDAR_KEY,
+                    value=advertised,
                 )
             )
-        if not marked:
-            # The common case: a new database, or one whose live posts have
-            # all finished. Nothing was flagged, so nothing is worth saying
-            # above debug.
-            LOGGER.debug("No posted event needed a footer refresh")
-            return
         LOGGER.info(
-            "Scheduled a footer refresh for the events already posted; "
-            "occurrences=%s",
+            "Posted event footers now name a different calendar; "
+            "advertised=%s occurrences=%s",
+            bool(calendar_url),
             marked,
         )
+        return marked
 
     def get_event(self, event_id: int) -> Event | None:
         with self._sessions() as session:
