@@ -30,8 +30,11 @@ interpolated into the HTML.
 Dynamic data reaches a page only through the JSON APIs in `server.py` and is
 inserted client-side with `textContent`. Event descriptions additionally pass
 through a small Discord-markdown renderer that only ever builds DOM nodes and
-text nodes, never HTML strings. A change that puts server data into page
-markup breaks that property and needs a much harder look than a layout tweak.
+text nodes, never HTML strings. The profit page's item names are links built
+the same way: the anchor is a node, its text is still set with `textContent`,
+and the only server value that reaches its `href` is the item's id. A change
+that puts server data into page markup breaks that property and needs a much
+harder look than a layout tweak.
 
 ## `pages/` - one module per document
 

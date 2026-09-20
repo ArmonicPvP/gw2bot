@@ -1483,6 +1483,15 @@ by their corresponding matched cost. Each realized item also shows its
 unit-weighted average time from purchase to sale and its signed percentage of
 total realized profit; the percentage is unavailable when total profit is zero.
 
+Every item name on the page links to that item's page on
+[GW2BLTC](https://www.gw2bltc.com/), in each table and in the summary's best
+and worst item rows alike, and opens it in a new tab. The link is drawn in the
+name's own colour and carries no underline, so the tables read exactly as they
+did; the name's tooltip is what says there is a link to follow. GW2BLTC
+publishes its item pages in English, German, Spanish and French, and a link
+follows the first of those the reader's browser asks for — a browser asking for
+any other language gets the English page.
+
 **Realized Profit by Item** carries a search box and a category menu above its
 rows. Typing narrows the table to the items whose names contain what was typed,
 and the menu narrows it to one kind of item — Ring, Amulet, Crafting Material,
