@@ -1780,9 +1780,12 @@ because the incremental cost depends on how much is new and the full one on
 how much there is. The same stored lots are what the unrealized projection
 reads, so it needs no transaction reads either.
 
-The pass also pauses at each month boundary to record what was held at that
-moment, keeping the last two years of those. They are places a rematch can
-start from. Trades do occasionally land behind the watermark — a backfill
+The pass also pauses at each month boundary to record what is held there,
+keeping the last two years of those. They are places a rematch can start
+from, and what one records is the state the matching after it ran from, so a
+pass resuming at one picks up exactly where the pass that wrote it was.
+
+Trades do occasionally land behind the watermark — a backfill
 reaching further than the last one did — and because the newest transaction
 has not moved, the watermark alone would never notice; the bot looks for
 history stored since the last pass but dated before it. When it finds some,
@@ -1796,6 +1799,14 @@ in the queue and the total cost stays exact. Without this an item bought once
 and never sold is carried by every pass forever. What is given up is the split
 between those old purchases, which only shows in the cost basis of stock held
 longer than a year.
+
+The merge happens at those month boundaries, and a lot counts as old against
+the boundary's own date rather than against the clock at the moment a pass
+runs. That is what makes a sale worth the same however it is arrived at: read
+from the stored days, rematched for the **24h** window, or recomputed by a
+rewind. Measured against the clock instead, the same sale could be costed from
+the averaged lot by one pass and from the cheapest purchase behind it by the
+next.
 
 **Unrealized Profit** covers everything the member still holds that is listed
 for sale, drawn from all their stored history rather than from the selected

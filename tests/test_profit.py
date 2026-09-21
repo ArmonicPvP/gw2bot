@@ -3284,6 +3284,153 @@ class TestProfitService:
         assert hourly.realized.total_cost == stored.cost
         assert hourly.realized.total_profit == stored.profit
 
+    async def test_the_hourly_window_agrees_on_a_first_import_too(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The mirror of the test above, and the one a fix aimed only at that
+        # case breaks: here a single pass writes the checkpoint and matches
+        # the sale, so the collapse has to have happened at the boundary for
+        # the two to agree. Nothing records which pass matched a sale, so the
+        # only way both can hold is for the collapse to be decided by the
+        # boundary rather than by when the pass ran.
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-import-member-secret")
+        buys = [
+            transaction(
+                "buy-tiny",
+                price=1,
+                quantity=1,
+                occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-bulk",
+                price=100,
+                quantity=100,
+                occurred_at=datetime(2024, 6, 2, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            transaction(
+                "sell",
+                price=400,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            )
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return list(buys)
+            if path.endswith("history/sells"):
+                return list(sells)
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(return_value=named({1: "Test Item"})),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+
+        hourly = await service.load_report(101, ReportWindow(days=1), now=now)
+        week = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        stored = week.realized.days["2026-08-20"]
+        assert hourly.realized.total_cost == stored.cost
+        assert hourly.realized.total_profit == stored.profit
+
+    async def test_a_checkpoint_holds_what_the_matching_after_it_runs_from(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The property both of those rest on, asserted directly: the lots a
+        # boundary is stored with are already collapsed against that
+        # boundary, so a pass resuming there runs from the same state the
+        # pass that wrote it carried forward.
+        store, _, _ = profit_store
+        store.set_api_key(101, "checkpoint-state-member-secret")
+        buys = [
+            transaction(
+                "buy-tiny",
+                price=1,
+                quantity=1,
+                occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-bulk",
+                price=100,
+                quantity=100,
+                occurred_at=datetime(2024, 6, 2, tzinfo=UTC),
+            ),
+            # Carries the pass across the boundaries being inspected; a pass
+            # only walks as far as the newest trade it has.
+            transaction(
+                "buy-other-item",
+                item_id=2,
+                price=50,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            return list(buys) if path.endswith("history/buys") else []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item", 2: "Other Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200), 2: MarketPrice(10, 20)}
+            ),
+        )
+
+        await service.load_report(
+            101,
+            ReportWindow(days=7),
+            now=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
+        )
+
+        # A boundary from before the lots aged past the cutoff keeps them
+        # apart; one from after it holds the single averaged lot, priced at
+        # the whole stock's cost rather than at the cheapest purchase.
+        early = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2025, 1, 1, tzinfo=UTC)
+        )
+        assert early is not None
+        assert len(early[1][1]) == 2
+        late = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 8, 20, tzinfo=UTC)
+        )
+        assert late is not None
+        assert len(late[1][1]) == 1
+        assert late[1][1][0].remaining == 101
+        assert late[1][1][0].unit_price == 100
+
     async def test_only_a_window_opening_mid_date_is_rematched(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
