@@ -1772,6 +1772,9 @@ class TestFoodPageGate:
         assert response.status == 503
 
 
+DAY_SECONDS = 24 * 60 * 60
+
+
 class TestFoodApi:
     def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
         guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
@@ -1842,6 +1845,103 @@ class TestFoodApi:
         # A feast with no records still appears with empty series.
         assert payload["feasts"][1]["points"] == []
         assert payload["feasts"][1]["removals"] == []
+
+    async def test_serves_a_day_per_window_day_with_rolling_averages(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        # Ten feasts used on each of three days inside a 7d window. The
+        # rolling average is a trailing mean over seven days, so by the third
+        # it covers three busy days and four silent ones.
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 100}, now - 3 * DAY_SECONDS)
+        for index, day in enumerate((2, 1, 0)):
+            raffle_store.record_feast_counts(
+                {1078: 90 - index * 10}, now - day * DAY_SECONDS
+            )
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "7d"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        tracked = (await response.json())["feasts"][0]
+        days = tracked["days"]
+        # One entry per UTC day the window touches, oldest first, quiet days
+        # included so an average cannot step over them.
+        assert len(days) in (8, 9)
+        assert days == sorted(days, key=lambda day: day["t"])
+        assert sum(day["used"] for day in days) == 30
+        assert days[-1]["used_avg"] == pytest.approx(30 / 7)
+        # Nothing has been priced, so there is no cost and no price per feast.
+        assert [day["cost"] for day in days] == [0] * len(days)
+        assert [day["unit_cost"] for day in days] == [None] * len(days)
+        # A feast with no records still carries the whole grid, as zeroes.
+        assert len((await response.json())["feasts"][1]["days"]) == len(days)
+
+    async def test_a_priced_restock_reaches_the_days_it_was_priced_on(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 10}, now - 3000)
+        raffle_store.record_feast_counts({1078: 40}, now - 1000)
+
+        opened = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+        addition = (await opened.json())["feasts"][0]["additions"][0]
+        assert raffle_store.set_feast_addition_cost(addition["log_id"], 60_000)
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        days = (await response.json())["feasts"][0]["days"]
+        priced = [day for day in days if day["cost"]]
+        assert [day["cost"] for day in priced] == [60_000]
+        # Thirty feasts for six gold is two silver each, and the spend is
+        # averaged over the week behind it rather than counted once.
+        assert priced[0]["unit_cost"] == pytest.approx(2_000)
+        assert priced[0]["cost_avg"] == pytest.approx(60_000 / 7)
+
+    async def test_history_before_the_window_averages_into_its_first_day(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        # Usage from before a 24h window is never drawn, but a seven-day
+        # average over that window's days is only that if the week behind it
+        # was read too.
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 200}, now - 5 * DAY_SECONDS)
+        raffle_store.record_feast_counts({1078: 130}, now - 4 * DAY_SECONDS)
+        raffle_store.record_feast_counts({1078: 123}, now - 600)
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        tracked = (await response.json())["feasts"][0]
+        # The chart and the tables see only the window's own drop of seven.
+        assert [point["count"] for point in tracked["points"]] == [123]
+        assert [removal["amount"] for removal in tracked["removals"]] == [7]
+        # The average behind the newest day carries the seventy from four
+        # days before it, which no other part of the payload mentions.
+        assert tracked["days"][-1]["used_avg"] == pytest.approx(77 / 7)
 
     async def test_defaults_to_the_24h_range(
         self,

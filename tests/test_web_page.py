@@ -1576,6 +1576,144 @@ class TestFoodPage:
         assert "innerHTML" not in FOOD_PAGE
 
 
+class TestFoodDailyCharts:
+    """The five day-by-day charts below the stock graph."""
+
+    def test_every_chart_has_its_own_box_status_and_legend(self) -> None:
+        # Each is a card with a chart, a status line, and - except the total,
+        # which sums the others - a legend of its own.
+        for chart_id in (
+            "usage-avg",
+            "cost-avg",
+            "unit-cost",
+            "total-cost",
+            "cost-by-food",
+        ):
+            assert f'<div id="chart-{chart_id}" class="chart-box"></div>' in (
+                FOOD_PAGE
+            )
+            assert f'<div id="status-{chart_id}" class="chart-status"' in (
+                FOOD_PAGE
+            )
+            expected = chart_id != "total-cost"
+            assert (
+                f'<div id="legend-{chart_id}" class="legend"' in FOOD_PAGE
+            ) is expected
+
+    def test_each_chart_names_the_value_it_plots(self) -> None:
+        # A rolling average, a daily figure and a running total look alike
+        # drawn and are not, so each heading has a line under it saying which
+        # it is.
+        for heading in (
+            "<h2>Food usage &ndash; 7-day rolling average</h2>",
+            "<h2>Food cost &ndash; 7-day rolling average</h2>",
+            "<h2>Average food cost by day</h2>",
+            "<h2>Total food cost</h2>",
+            "<h2>Food cost by food</h2>",
+        ):
+            assert heading in FOOD_PAGE
+        assert FOOD_PAGE.count('<p class="chart-note">') == 5
+
+    def test_the_charts_read_the_days_the_server_bucketed(self) -> None:
+        # The averages are worked out over the week before the window, which
+        # the page is never sent, so it plots what it is given rather than
+        # deriving it.
+        for reader in (
+            "return day.used_avg;",
+            "return day.cost_avg;",
+            "return day.unit_cost;",
+            "return day.cost;",
+        ):
+            assert reader in FOOD_PAGE
+        assert "function dayGrid() {" in FOOD_PAGE
+
+    def test_a_day_with_no_answer_is_a_gap_rather_than_a_zero(self) -> None:
+        # No restock priced means no cost per feast that day; drawing it as
+        # zero would read as a day feasts were free.
+        body = FOOD_PAGE.split("function perFeastSeries(spec) {", 1)[1]
+        body = body.split("\n  }", 1)[0]
+        assert 'if (typeof value !== "number") { return; }' in body
+
+    def test_the_total_is_the_running_sum_of_the_drawn_feasts(self) -> None:
+        # Switching a feast off answers "what did the rest cost?" rather than
+        # leaving the total unchanged.
+        body = FOOD_PAGE.split("function totalSeries(spec, grid) {", 1)[1]
+        body = body.split("\n  }", 1)[0]
+        assert "if (!visibleFeasts().length) { return []; }" in body
+        assert "visibleFeasts().forEach(function (feast) {" in body
+        assert "running += spent;" in body
+        # The hover names the running total and what the day alone cost.
+        assert (
+            'formatCoins(running) + " (+" + formatCoins(spent) + ")"' in body
+        )
+
+    def test_a_days_grid_covers_the_quiet_days_too(self) -> None:
+        # A running total that skips a day reads as though the window were
+        # shorter than it is.
+        assert "var points = grid.map(function (t) {" in FOOD_PAGE
+        assert "var spent = perDay[t] || 0;" in FOOD_PAGE
+
+    def test_a_day_is_named_by_the_utc_date_the_server_cut_it_on(self) -> None:
+        # Formatting it locally would show a reader west of Greenwich the day
+        # before the one the figure belongs to.
+        assert 'timeZone: "UTC"' in FOOD_PAGE
+        assert "function formatDay(t) {" in FOOD_PAGE
+
+    def test_money_axes_are_written_in_coins(self) -> None:
+        assert "function formatCoinAxis(copper) {" in FOOD_PAGE
+        assert "if (copper >= COPPER_PER_GOLD) {" in FOOD_PAGE
+        assert "if (copper >= COPPER_PER_SILVER) {" in FOOD_PAGE
+        assert 'left: spec.money ? base.left + 18 : base.left,' in FOOD_PAGE
+
+    def test_an_axis_shows_the_decimals_its_own_step_needs(self) -> None:
+        # A rolling average rarely lands on a whole feast, so an axis stepping
+        # in fifths has to say so rather than labelling three gridlines "0".
+        assert "function decimalsFor(step) {" in FOOD_PAGE
+        assert "if (step >= 1) { return 0; }" in FOOD_PAGE
+        assert "return value.toFixed(decimals);" in FOOD_PAGE
+
+    def test_every_chart_starts_at_zero(self) -> None:
+        # A day nothing was used or spent on is the reading these charts are
+        # read for, so it sits on the floor rather than part-way up the axis.
+        body = FOOD_PAGE.split("function dailyScale(series) {", 1)[1]
+        body = body.split("\n  }", 1)[0]
+        assert "var high = 0;" in body
+        assert "if (!(high > 0)) { return { high: 1, step: 1 }; }" in body
+        assert "var step = niceStep(span, 5);" in body
+
+    def test_a_redraw_releases_each_charts_hover_listeners(self) -> None:
+        # The same teardown the stock chart keeps, one per daily chart, so a
+        # pinned selection cannot outlive the canvas that opened it.
+        assert "var detach = dailyHandles[spec.id];" in FOOD_PAGE
+        assert "if (detach) { detach(); }" in FOOD_PAGE
+        assert (
+            "dailyHandles[spec.id] = attachHover(canvas, plotted, host, "
+            "formatDay);" in FOOD_PAGE
+        )
+
+    def test_the_legend_switches_a_feast_off_on_every_chart(self) -> None:
+        # There is one notion of which feasts the reader is looking at, so a
+        # click redraws the stock chart and all five below it.
+        assert "renderLegend();\n        renderChart();\n" \
+            "        renderDailyCharts();" in FOOD_PAGE
+        assert "if (legendBox) { renderLegend(legendBox); }" in FOOD_PAGE
+        assert "renderDailyCharts();\n    renderTabs();" in FOOD_PAGE
+
+    def test_an_all_off_legend_says_so_on_the_daily_charts_too(self) -> None:
+        # The total has no legend of its own, so it points at the ones it is
+        # summing rather than at a legend that is not there.
+        assert "function dailyStatusText(spec, plottedCount) {" in FOOD_PAGE
+        assert (
+            '"Every feast is switched off in the legends above."'
+            in FOOD_PAGE
+        )
+        assert 'empty: "No feasts were used in this period.",' in FOOD_PAGE
+        assert (
+            'empty: "No feast costs were recorded in this period.",'
+            in FOOD_PAGE
+        )
+
+
 class TestFoodAdditionsSection:
     """The Additions table and the cost editor an officer fills it in with."""
 

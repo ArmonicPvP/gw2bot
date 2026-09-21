@@ -31,11 +31,15 @@ from gw2bot.gw2.feast_stock import (
     TRACKED_FEASTS,
     Feast,
     FeastAddition,
+    FeastDayPoint,
     FeastRestock,
     FeastStockSeries,
     depositors_for_addition,
     feast_additions,
+    feast_day_series,
     feast_removals,
+    history_start,
+    window_series,
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
 from gw2bot.profit.api import ProfitApiError
@@ -1256,25 +1260,48 @@ class WebServer:
 
         # get_feast_stock_series is synchronous SQLite sharing the Discord
         # client's event loop, so run it off-loop like the calendar query.
-        series = await asyncio.to_thread(
+        #
+        # The daily charts carry rolling averages a week wide, so the history
+        # is read that much further back than the window is drawn. Everything
+        # else on the page is about the window itself and is built from the
+        # slice of that history which falls inside it.
+        history = await asyncio.to_thread(
             self._bot.raffle_store.get_feast_stock_series,
-            window.since,
+            history_start(window.since),
             window.until,
         )
+        series = {
+            feast_id: window_series(item, window.since)
+            for feast_id, item in history.items()
+        }
         # Who deposited, and what each restock cost, are read alongside the
         # counts: the Additions table is one row per observed rise, carrying
         # both. Neither read is allowed to cost the reader the chart, so a
         # failure leaves those columns blank rather than failing the page.
         restocks = await self._feast_restocks(window)
-        additions = {
-            feast.guild_storage_id: feast_additions(item)
-            for feast, item in (
-                (feast, series.get(feast.guild_storage_id))
-                for feast in TRACKED_FEASTS
-            )
-            if item is not None
+        # Priced restocks from before the window still count towards the
+        # averages drawn over it, so the costs are read across the whole
+        # history and the Additions table takes the window's own rises from
+        # the same map.
+        history_additions = {
+            feast_id: feast_additions(item)
+            for feast_id, item in history.items()
         }
-        costs = await self._feast_addition_costs(additions)
+        additions = {
+            feast_id: feast_additions(item)
+            for feast_id, item in series.items()
+        }
+        costs = await self._feast_addition_costs(history_additions)
+        days = {
+            feast_id: feast_day_series(
+                feast_removals(item),
+                history_additions.get(feast_id, []),
+                costs,
+                window.since,
+                window.until,
+            )
+            for feast_id, item in history.items()
+        }
         payload = [
             self._serialize_feast(
                 feast,
@@ -1287,12 +1314,13 @@ class WebServer:
                 ],
                 costs,
                 window.since,
+                days.get(feast.guild_storage_id, []),
             )
             for feast in TRACKED_FEASTS
         ]
         LOGGER.debug(
             "Served feast usage; range=%s feasts=%s samples=%s removals=%s "
-            "additions=%s deposits=%s priced=%s",
+            "additions=%s deposits=%s priced=%s days=%s",
             window.key,
             len(payload),
             sum(len(item.samples) for item in series.values()),
@@ -1300,6 +1328,7 @@ class WebServer:
             sum(len(item) for item in additions.values()),
             len(restocks),
             len(costs),
+            sum(len(item) for item in days.values()),
         )
         return self._json(
             {
@@ -1371,6 +1400,7 @@ class WebServer:
         restocks: Sequence[FeastRestock],
         costs: Mapping[int, int],
         window_since: float,
+        days: Sequence[FeastDayPoint],
     ) -> dict[str, object]:
         item = series.get(feast.guild_storage_id)
         if item is None:
@@ -1412,6 +1442,22 @@ class WebServer:
             "points": points,
             "removals": removals,
             "additions": served_additions,
+            # One entry per UTC day of the drawn window, oldest first, each
+            # carrying the day's own figures and the rolling averages ending
+            # on it. ``unit_cost`` is null on a day no restock was priced,
+            # which is a day with no answer rather than a day feasts were
+            # free.
+            "days": [
+                {
+                    "t": day.day,
+                    "used": day.used,
+                    "used_avg": day.used_average,
+                    "cost": day.cost,
+                    "cost_avg": day.cost_average,
+                    "unit_cost": day.unit_cost,
+                }
+                for day in days
+            ],
         }
 
     async def _food_cost(self, request: web.Request) -> web.StreamResponse:

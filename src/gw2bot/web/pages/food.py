@@ -112,6 +112,17 @@ main {
 /* #chart is the positioning context for the hover tooltip, which is an HTML
    box overlaid on the SVG so its text wraps and inherits page styling. */
 #chart { position: relative; }
+/* Every chart below the stock graph is the same box: the positioning context
+   its hover tooltip is placed in. */
+.chart-box { position: relative; }
+/* One line under a heading saying what the chart below it plots, because a
+   rolling average and a daily total look alike and are not. */
+.chart-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: -0.35rem 0 0.6rem;
+}
+.chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .chart-tooltip {
   position: absolute;
   z-index: 2;
@@ -312,6 +323,67 @@ button:focus-visible {
     <div id="chart"></div>
     <div id="legend" class="legend" role="list" aria-label="Feast colours"></div>
     <div id="chart-status" role="status" aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <div class="chart-heading">
+      <h2>Food usage &ndash; 7-day rolling average</h2>
+    </div>
+    <p class="chart-note">Feasts taken per day, averaged over the seven days
+      ending on each date. Days are cut in UTC.</p>
+    <div id="chart-usage-avg" class="chart-box"></div>
+    <div id="legend-usage-avg" class="legend" role="list"
+      aria-label="Feast colours"></div>
+    <div id="status-usage-avg" class="chart-status" role="status"
+      aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <div class="chart-heading">
+      <h2>Food cost &ndash; 7-day rolling average</h2>
+    </div>
+    <p class="chart-note">Recorded spend per day, averaged over the seven days
+      ending on each date. A restock nobody has priced counts as nothing
+      spent.</p>
+    <div id="chart-cost-avg" class="chart-box"></div>
+    <div id="legend-cost-avg" class="legend" role="list"
+      aria-label="Feast colours"></div>
+    <div id="status-cost-avg" class="chart-status" role="status"
+      aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <div class="chart-heading">
+      <h2>Average food cost by day</h2>
+    </div>
+    <p class="chart-note">What one feast cost that day: the day&rsquo;s
+      recorded spend over the feasts those priced restocks added. A day
+      nothing was priced on has no point.</p>
+    <div id="chart-unit-cost" class="chart-box"></div>
+    <div id="legend-unit-cost" class="legend" role="list"
+      aria-label="Feast colours"></div>
+    <div id="status-unit-cost" class="chart-status" role="status"
+      aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <div class="chart-heading">
+      <h2>Total food cost</h2>
+    </div>
+    <p class="chart-note">Every drawn feast&rsquo;s recorded spend, added up
+      across the window. Each point is the running total to the end of that
+      day, and the hover also names what the day alone cost.</p>
+    <div id="chart-total-cost" class="chart-box"></div>
+    <div id="status-total-cost" class="chart-status" role="status"
+      aria-live="polite"></div>
+  </section>
+  <section class="card">
+    <div class="chart-heading">
+      <h2>Food cost by food</h2>
+    </div>
+    <p class="chart-note">Recorded spend per day, one line per feast, so the
+      shelf the gold went on is the line it is read off.</p>
+    <div id="chart-cost-by-food" class="chart-box"></div>
+    <div id="legend-cost-by-food" class="legend" role="list"
+      aria-label="Feast colours"></div>
+    <div id="status-cost-by-food" class="chart-status" role="status"
+      aria-live="polite"></div>
   </section>
   <section class="card">
     <h2>Removals</h2>
@@ -734,7 +806,12 @@ button:focus-visible {
     console.debug("feast chart selection:", action, reason, count);
   }
 
-  function attachHover(canvas, plotted) {
+  // host is the positioning box the tooltip is placed in and headline names a
+  // column; both default to the stock chart's, so its own call site reads the
+  // way it always has while the daily charts below pass their own.
+  function attachHover(canvas, plotted, host, headline) {
+    var box = host || chart;
+    var head = headline || formatMoment;
     var columns = groupColumns(plotted);
     // The viewBox differs between the mobile and desktop layouts, so the hover
     // is pinned to the metrics this canvas was drawn with rather than to
@@ -768,7 +845,7 @@ button:focus-visible {
 
     var tooltip = el("div", "chart-tooltip");
     tooltip.style.visibility = "hidden";
-    chart.appendChild(tooltip);
+    box.appendChild(tooltip);
 
     function nearestColumn(vbX) {
       var best = null;
@@ -782,7 +859,7 @@ button:focus-visible {
 
     function showTooltip(column, emphasized) {
       tooltip.replaceChildren();
-      tooltip.appendChild(el("div", "tip-time", formatMoment(column.t)));
+      tooltip.appendChild(el("div", "tip-time", head(column.t)));
       column.points.forEach(function (point) {
         var row = el("div",
           "tip-row" + (point === emphasized ? " em" : ""));
@@ -790,7 +867,9 @@ button:focus-visible {
         swatch.style.background = point.color;
         row.appendChild(swatch);
         row.appendChild(el("span", "name", point.name));
-        row.appendChild(el("span", "val", String(point.count)));
+        row.appendChild(el("span", "val", point.text !== undefined
+          ? point.text
+          : String(point.count)));
         tooltip.appendChild(row);
       });
       // Anchor to the point nearest the cursor and flip below the axis top
@@ -966,8 +1045,12 @@ button:focus-visible {
     console.debug("feast chart legend:", action, count);
   }
 
-  function renderLegend() {
-    legend.replaceChildren();
+  // host is the box the swatches are drawn into, defaulting to the stock
+  // chart's legend. Every legend on the page switches the same feasts, so a
+  // click redraws all of them along with the charts they belong to.
+  function renderLegend(host) {
+    var box = host || legend;
+    box.replaceChildren();
     feasts().forEach(function (feast, index) {
       // Each entry is a button that switches its feast off and back on. The
       // name is always exposed to assistive tech through aria-label, and
@@ -997,9 +1080,375 @@ button:focus-visible {
         traceLegend(hidden ? "show" : "hide", visibleFeasts().length);
         renderLegend();
         renderChart();
+        renderDailyCharts();
       });
-      legend.appendChild(item);
+      box.appendChild(item);
     });
+  }
+
+  // --- The daily charts ---------------------------------------------------
+
+  // Every chart below the stock graph is the same drawing: one point per UTC
+  // day of the drawn window, read off an axis the values themselves set. Each
+  // entry names the section it fills, the value it takes from a day, and
+  // whether that value is a price, which decides both the axis labels and the
+  // reading in the tooltip.
+  //
+  // The days arrive bucketed and averaged: a seven-day average on the
+  // window's first day is worked out over the week before it, which is a week
+  // the page is never sent.
+  var DAILY_CHARTS = [
+    {
+      id: "usage-avg",
+      label: "Feasts used per day, 7-day rolling average, one line per feast",
+      empty: "No feasts were used in this period.",
+      money: false,
+      value: function (day) { return day.used_avg; }
+    },
+    {
+      id: "cost-avg",
+      label: "Feast spend per day, 7-day rolling average, one line per feast",
+      empty: "No feast costs were recorded in this period.",
+      money: true,
+      value: function (day) { return day.cost_avg; }
+    },
+    {
+      id: "unit-cost",
+      label: "Average cost of one feast by day, one line per feast",
+      empty: "No feast costs were recorded in this period.",
+      money: true,
+      value: function (day) { return day.unit_cost; }
+    },
+    {
+      id: "total-cost",
+      label: "Running total of feast spend across every drawn feast",
+      empty: "No feast costs were recorded in this period.",
+      money: true,
+      total: true,
+      value: function (day) { return day.cost; }
+    },
+    {
+      id: "cost-by-food",
+      label: "Feast spend per day, one line per feast",
+      empty: "No feast costs were recorded in this period.",
+      money: true,
+      value: function (day) { return day.cost; }
+    }
+  ];
+
+  // The total line stands for every feast at once, so it takes a hue none of
+  // them are drawn in; it is the fifth Okabe-Ito colour.
+  var TOTAL_COLOR = "#D55E00";
+  var SECONDS_PER_DAY = 24 * 60 * 60;
+
+  // Each daily chart's hover teardown, so a redraw drops the page-level
+  // listeners a pinned selection left behind on the canvas it replaces.
+  var dailyHandles = {};
+
+  function daysOf(feast) {
+    return (feast && feast.days) || [];
+  }
+
+  // The day grid the window was bucketed into. The server cuts one grid for
+  // the whole window and gives every feast all of it, quiet days included, so
+  // the longest series any feast carries is that grid.
+  function dayGrid() {
+    var grid = [];
+    feasts().forEach(function (feast) {
+      var days = daysOf(feast);
+      if (days.length > grid.length) {
+        grid = days.map(function (day) { return day.t; });
+      }
+    });
+    return grid;
+  }
+
+  // A day is named by the UTC date it opens, the way the server cut it, so a
+  // reader west of Greenwich is not shown the day before.
+  function formatDay(t) {
+    return new Date(t * 1000).toLocaleDateString(
+      undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+  }
+
+  // Money on an axis is written in the largest coin it reaches, so the label
+  // stays short enough to sit beside the plot. The baseline is bare: "0c"
+  // reads as a price where the floor of the axis is not one.
+  function formatCoinAxis(copper) {
+    if (copper <= 0) { return "0"; }
+    if (copper >= COPPER_PER_GOLD) {
+      var gold = copper / COPPER_PER_GOLD;
+      var shown = gold >= 10 ? Math.round(gold) : Math.round(gold * 10) / 10;
+      return shown.toLocaleString() + "g";
+    }
+    if (copper >= COPPER_PER_SILVER) {
+      return Math.round(copper / COPPER_PER_SILVER) + "s";
+    }
+    return Math.round(copper) + "c";
+  }
+
+  // How many decimals an axis needs to tell its own gridlines apart: a step
+  // of 2 reads as whole feasts, a step of 0.2 does not.
+  function decimalsFor(step) {
+    if (step >= 1) { return 0; }
+    return Math.min(3, Math.ceil(-Math.log10(step)));
+  }
+
+  function formatAxisValue(spec, value, decimals) {
+    if (spec.money) { return formatCoinAxis(value); }
+    return value.toFixed(decimals);
+  }
+
+  // What one plotted point reads as in the tooltip: a price in coins, and a
+  // count to one decimal because a rolling average rarely lands on a whole
+  // feast.
+  function formatDailyValue(spec, value) {
+    if (spec.money) { return formatCoins(value); }
+    return (Math.round(value * 10) / 10).toLocaleString();
+  }
+
+  // The lines one chart draws, in legend order. A day with no answer - no
+  // restock priced, so no cost per feast - is a gap rather than a zero, so it
+  // is left out of the line entirely instead of pulling it to the floor.
+  function perFeastSeries(spec) {
+    var series = [];
+    feasts().forEach(function (feast, index) {
+      if (isHidden(feast)) { return; }
+      var points = [];
+      daysOf(feast).forEach(function (day) {
+        var value = spec.value(day);
+        if (typeof value !== "number") { return; }
+        points.push({
+          t: day.t, v: value, text: formatDailyValue(spec, value)
+        });
+      });
+      series.push({
+        name: feast.name,
+        color: COLORS[index % COLORS.length],
+        points: points
+      });
+    });
+    return series;
+  }
+
+  // The total is the running sum of the feasts still switched on, so
+  // switching one off answers "what did the rest cost?" rather than leaving
+  // the total unchanged. Every day of the grid gets a point, including the
+  // quiet ones, because a running total that skips a day reads as though the
+  // window were shorter than it is.
+  function totalSeries(spec, grid) {
+    if (!visibleFeasts().length) { return []; }
+    var perDay = {};
+    visibleFeasts().forEach(function (feast) {
+      daysOf(feast).forEach(function (day) {
+        var value = spec.value(day);
+        if (typeof value !== "number") { return; }
+        perDay[day.t] = (perDay[day.t] || 0) + value;
+      });
+    });
+    var running = 0;
+    var points = grid.map(function (t) {
+      var spent = perDay[t] || 0;
+      running += spent;
+      return {
+        t: t,
+        v: running,
+        text: formatCoins(running) + " (+" + formatCoins(spent) + ")"
+      };
+    });
+    return [{ name: "All feasts", color: TOTAL_COLOR, points: points }];
+  }
+
+  function dailySeries(spec, grid) {
+    return spec.total ? totalSeries(spec, grid) : perFeastSeries(spec);
+  }
+
+  // The axis covers the values actually drawn, from zero up and rounded to a
+  // readable step the way the stock chart's is. Zero is the floor on every
+  // one of these charts: a day nothing was used or spent on is the reading
+  // they are read for, so it has to sit on the floor rather than part-way up.
+  function dailyScale(series) {
+    var high = 0;
+    series.forEach(function (item) {
+      item.points.forEach(function (point) {
+        if (point.v > high) { high = point.v; }
+      });
+    });
+    if (!(high > 0)) { return { high: 1, step: 1 }; }
+    var span = high * 1.1;
+    var step = niceStep(span, 5);
+    return { high: step * Math.ceil(span / step), step: step };
+  }
+
+  // The window's first and last day. A window that covers a single day is
+  // given half a day either side, so its one point sits in the middle of the
+  // plot rather than on the axis.
+  function dayDomain(grid) {
+    var from = grid[0];
+    var to = grid[grid.length - 1];
+    if (!(to > from)) {
+      return {
+        from: from - SECONDS_PER_DAY / 2,
+        to: from + SECONDS_PER_DAY / 2
+      };
+    }
+    return { from: from, to: to };
+  }
+
+  // The daily charts share the stock chart's proportions, a little shorter
+  // because there are several of them down the page now, and with a wider
+  // left margin where the axis carries a coin unit as well as a figure.
+  function dailyMetrics(spec) {
+    var base = metrics();
+    return {
+      w: base.w,
+      h: Math.round(base.h * 0.8),
+      top: base.top,
+      right: base.right,
+      bottom: base.bottom,
+      left: spec.money ? base.left + 18 : base.left,
+      ticks: base.ticks
+    };
+  }
+
+  // What a daily chart says when it has drawn nothing. An empty window and a
+  // legend switched all the way off are different states, and only one of
+  // them is worth waiting for more data over. The total has no legend of its
+  // own, so it points at the ones it is summing.
+  function dailyStatusText(spec, plottedCount) {
+    if (plottedCount) { return ""; }
+    if (feasts().length && !visibleFeasts().length) {
+      return spec.total
+        ? "Every feast is switched off in the legends above."
+        : "Every feast is switched off. Click one in the legend to draw " +
+          "it again.";
+    }
+    return spec.empty;
+  }
+
+  function renderDailyChart(spec) {
+    var host = document.getElementById("chart-" + spec.id);
+    var statusBox = document.getElementById("status-" + spec.id);
+    var legendBox = document.getElementById("legend-" + spec.id);
+    if (!host || !statusBox || !state.data) { return; }
+    var detach = dailyHandles[spec.id];
+    if (detach) { detach(); }
+    dailyHandles[spec.id] = null;
+    if (legendBox) { renderLegend(legendBox); }
+    host.replaceChildren();
+
+    // attachHover reads whichever metrics are current, so this chart's are
+    // made current before it is drawn; the stock chart sets its own back at
+    // the top of every render of its own.
+    var m = dailyMetrics(spec);
+    M = m;
+    var innerW = m.w - m.left - m.right;
+    var innerH = m.h - m.top - m.bottom;
+    var grid = dayGrid();
+    var series = grid.length ? dailySeries(spec, grid) : [];
+    var scale = dailyScale(series);
+    var decimals = decimalsFor(scale.step);
+    var domain = dayDomain(grid.length ? grid : [state.data.since]);
+
+    function x(t) {
+      var span = domain.to - domain.from;
+      var frac = span > 0 ? (t - domain.from) / span : 0;
+      if (frac < 0) { frac = 0; }
+      if (frac > 1) { frac = 1; }
+      return m.left + frac * innerW;
+    }
+    function y(value) {
+      var plotValue = value;
+      if (plotValue < 0) { plotValue = 0; }
+      if (plotValue > scale.high) { plotValue = scale.high; }
+      return m.top + (1 - plotValue / scale.high) * innerH;
+    }
+
+    var canvas = svg("svg", {
+      "class": "chart-svg",
+      viewBox: "0 0 " + m.w + " " + m.h,
+      role: "img",
+      "aria-label": spec.label
+    });
+
+    var lines = Math.round(scale.high / scale.step);
+    for (var line = 0; line <= lines; line += 1) {
+      var value = scale.step * line;
+      var gridY = y(value);
+      canvas.appendChild(svg("line", {
+        "class": line === 0 ? "axis" : "grid",
+        x1: m.left, y1: gridY, x2: m.left + innerW, y2: gridY
+      }));
+      var yLabel = svg("text", {
+        "class": "y-label", x: m.left - 6, y: gridY + 4
+      });
+      yLabel.textContent = formatAxisValue(spec, value, decimals);
+      canvas.appendChild(yLabel);
+    }
+    canvas.appendChild(svg("line", {
+      "class": "axis",
+      x1: m.left, y1: m.top, x2: m.left, y2: m.top + innerH
+    }));
+
+    // Labels name real days rather than points along the window, and they are
+    // spread evenly across the grid so a thirty-day window is not labelled
+    // thirty times over.
+    if (grid.length) {
+      var ticks = Math.min(m.ticks, grid.length - 1);
+      for (var tick = 0; tick <= ticks; tick += 1) {
+        var at = ticks > 0
+          ? Math.round(tick * (grid.length - 1) / ticks)
+          : 0;
+        var xLabel = svg("text", {
+          "class": "x-label", x: x(grid[at]), y: m.top + innerH + 18
+        });
+        xLabel.textContent = formatDay(grid[at]);
+        canvas.appendChild(xLabel);
+      }
+    }
+
+    var plotted = [];
+    series.forEach(function (item, index) {
+      var coords = [];
+      item.points.forEach(function (point) {
+        var px = x(point.t);
+        var py = y(point.v);
+        coords.push(px.toFixed(1) + "," + py.toFixed(1));
+        plotted.push({
+          x: px,
+          y: py,
+          t: point.t,
+          count: point.v,
+          text: point.text,
+          name: item.name,
+          color: item.color,
+          feast: index
+        });
+      });
+      if (coords.length > 1) {
+        canvas.appendChild(svg("polyline", {
+          "class": "series-line",
+          stroke: item.color,
+          points: coords.join(" ")
+        }));
+      }
+      item.points.forEach(function (point) {
+        canvas.appendChild(svg("circle", {
+          "class": "series-dot",
+          cx: x(point.t).toFixed(1),
+          cy: y(point.v).toFixed(1),
+          r: 3,
+          fill: item.color
+        }));
+      });
+    });
+
+    dailyHandles[spec.id] = attachHover(canvas, plotted, host, formatDay);
+    host.appendChild(canvas);
+    statusBox.textContent = dailyStatusText(spec, plotted.length);
+  }
+
+  function renderDailyCharts() {
+    DAILY_CHARTS.forEach(function (spec) { renderDailyChart(spec); });
   }
 
   function renderTabs() {
@@ -1354,6 +1803,7 @@ button:focus-visible {
   function render() {
     renderLegend();
     renderChart();
+    renderDailyCharts();
     renderTabs();
     renderTable();
     renderAdditionTabs();

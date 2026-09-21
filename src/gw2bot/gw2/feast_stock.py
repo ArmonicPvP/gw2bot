@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -42,6 +43,14 @@ FEAST_USAGE_RANGES: dict[str, int] = {
     "7d": 7 * 24 * 60 * 60,
     "30d": 30 * 24 * 60 * 60,
 }
+
+SECONDS_PER_DAY = 24 * 60 * 60
+
+# How many days the dashboard's rolling averages cover, and so how far before
+# a drawn window its history has to be read: an average over the last seven
+# days is only that on the window's first day if the seven days before it were
+# read too.
+ROLLING_AVERAGE_DAYS = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +226,205 @@ def depositors_for_addition(
         if restock.username not in named:
             named.append(restock.username)
     return named
+
+
+def day_of(moment: float) -> float:
+    """The UTC midnight that opens the day ``moment`` falls in.
+
+    Days are cut in UTC rather than in the reader's own zone: the dashboard's
+    daily figures are a property of the window the server drew, so two members
+    in two zones reading the same window have to be shown the same days.
+    """
+    return math.floor(moment / SECONDS_PER_DAY) * SECONDS_PER_DAY
+
+
+def history_start(since: float) -> float:
+    """How far before a drawn window its rolling averages have to be read.
+
+    A whole number of days before the window's own first day, so the history
+    lines up with the day grid it is bucketed into rather than opening
+    part-way through a day and under-counting it.
+    """
+    return day_of(since) - ROLLING_AVERAGE_DAYS * SECONDS_PER_DAY
+
+
+@dataclass(frozen=True, slots=True)
+class FeastDay:
+    """One UTC day of one tracked feast's usage and spend.
+
+    ``day`` is the day's UTC midnight in epoch seconds. ``used`` is how many
+    feasts were observed leaving storage that day, ``cost`` is the copper
+    recorded against the restocks priced that day, and ``priced_amount`` is
+    how many feasts those priced restocks put on the shelf. A restock nobody
+    has priced counts towards neither, so an unpriced deposit cannot drag the
+    day's cost per feast towards zero; it is missing, not free.
+    """
+
+    day: float
+    used: int
+    cost: int
+    priced_amount: int
+
+    @property
+    def unit_cost(self) -> float | None:
+        """What one feast cost that day, or ``None`` if none was priced."""
+        if self.priced_amount <= 0:
+            return None
+        return self.cost / self.priced_amount
+
+
+@dataclass(frozen=True, slots=True)
+class FeastDayPoint:
+    """One day of the dashboard's daily charts, averages included.
+
+    ``used_average`` and ``cost_average`` are the trailing means over
+    :data:`ROLLING_AVERAGE_DAYS` days ending on this one, which is why the
+    series is built over the history before the window and only then cut back
+    to it.
+    """
+
+    day: float
+    used: int
+    used_average: float
+    cost: int
+    cost_average: float
+    unit_cost: float | None
+
+
+def feast_days(
+    removals: Sequence[FeastRemoval],
+    additions: Sequence[FeastAddition],
+    costs: Mapping[int, int],
+    since: float,
+    until: float,
+) -> list[FeastDay]:
+    """One entry per UTC day from ``since`` through ``until``, oldest first.
+
+    A day nothing was used or bought on is still an entry: it is a day the
+    guild ate no feasts and spent nothing, and dropping it would let a rolling
+    average step over the quiet stretch as though it had never happened.
+
+    A removal or addition outside the two bounds is ignored rather than
+    folded into the nearest day, so a series never counts something the
+    window it was read for does not hold.
+    """
+    first = day_of(since)
+    last = day_of(until)
+    used: dict[float, int] = {}
+    spent: dict[float, int] = {}
+    priced: dict[float, int] = {}
+    for removal in removals:
+        if removal.recorded_at < since or removal.recorded_at > until:
+            continue
+        day = day_of(removal.recorded_at)
+        used[day] = used.get(day, 0) + removal.amount
+    for addition in additions:
+        if addition.recorded_at < since or addition.recorded_at > until:
+            continue
+        cost = costs.get(addition.log_id)
+        if cost is None:
+            continue
+        day = day_of(addition.recorded_at)
+        spent[day] = spent.get(day, 0) + cost
+        priced[day] = priced.get(day, 0) + addition.amount
+    days: list[FeastDay] = []
+    day = first
+    while day <= last:
+        days.append(
+            FeastDay(
+                day=day,
+                used=used.get(day, 0),
+                cost=spent.get(day, 0),
+                priced_amount=priced.get(day, 0),
+            )
+        )
+        day += SECONDS_PER_DAY
+    return days
+
+
+def rolling_averages(values: Sequence[float], window: int) -> list[float]:
+    """The mean of the last ``window`` entries, one per entry in ``values``.
+
+    An entry with fewer than ``window`` behind it averages what there is
+    rather than being left out, which is what makes the series continuous at
+    its left edge. The dashboard reads a whole window of days before the one
+    it draws precisely so none of those partial means is ever drawn.
+    """
+    if window <= 0:
+        return [0.0 for _ in values]
+    averages: list[float] = []
+    running = 0.0
+    for index, value in enumerate(values):
+        running += value
+        if index >= window:
+            running -= values[index - window]
+        averages.append(running / min(index + 1, window))
+    return averages
+
+
+def feast_day_series(
+    removals: Sequence[FeastRemoval],
+    additions: Sequence[FeastAddition],
+    costs: Mapping[int, int],
+    since: float,
+    until: float,
+) -> list[FeastDayPoint]:
+    """The drawn window's days, each carrying the averages behind it.
+
+    ``removals`` and ``additions`` have to reach back to
+    :func:`history_start`; the days before ``since`` are what the rolling
+    averages are worked out over and are then dropped, so every day that
+    survives carries a full :data:`ROLLING_AVERAGE_DAYS` of history whether
+    or not the reader asked for a window that wide.
+
+    The newest day is usually still running, so its totals are what has
+    happened so far rather than a finished day - which is also why the
+    averages are trailing means rather than centred ones.
+    """
+    days = feast_days(removals, additions, costs, history_start(since), until)
+    used = rolling_averages(
+        [float(day.used) for day in days], ROLLING_AVERAGE_DAYS
+    )
+    spent = rolling_averages(
+        [float(day.cost) for day in days], ROLLING_AVERAGE_DAYS
+    )
+    drawn_from = day_of(since)
+    return [
+        FeastDayPoint(
+            day=day.day,
+            used=day.used,
+            used_average=used[index],
+            cost=day.cost,
+            cost_average=spent[index],
+            unit_cost=day.unit_cost,
+        )
+        for index, day in enumerate(days)
+        if day.day >= drawn_from
+    ]
+
+
+def window_series(series: FeastStockSeries, since: float) -> FeastStockSeries:
+    """The part of a series that falls inside the window being drawn.
+
+    The dashboard reads a week further back than it draws so its rolling
+    averages have history behind them. Everything else on the page is about
+    the window itself, so it is served this slice instead, and the slice is
+    the series the store would have returned for that window on its own:
+    ``prior_count`` carries the last reading before ``since`` however far
+    back it was, so a drop across the window's start edge is still measured.
+    """
+    prior = series.prior_count
+    samples: list[FeastStockSample] = []
+    for sample in series.samples:
+        if sample.recorded_at < since:
+            prior = sample.count
+        else:
+            samples.append(sample)
+    return FeastStockSeries(
+        guild_storage_id=series.guild_storage_id,
+        prior_count=prior,
+        samples=tuple(samples),
+    )
 
 
 def tracked_feast_counts(storage: list[dict[str, Any]]) -> dict[int, int]:
