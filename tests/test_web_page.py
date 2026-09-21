@@ -1971,6 +1971,33 @@ class TestRosterPendingInvites:
         # A redraw replaces the cell the box hangs off, so it goes first.
         assert 'hideInviteTip("redraw");' in ROSTER_PAGE
 
+    def test_the_box_stays_on_screen_on_the_last_rows(self) -> None:
+        # A box below the last row of a phone screen would hang off the
+        # bottom, and scrolling it into view is not open to the reader
+        # because scrolling is one of the things that puts it away.
+        assert "function placeInviteTip(trigger)" in ROSTER_PAGE
+        assert "placeInviteTip(trigger);" in ROSTER_PAGE
+        assert "if (box.bottom <= viewport) { return; }" in ROSTER_PAGE
+        assert (
+            "if (cell.top - box.height >= 0) "
+            '{ inviteTip.classList.add("above"); }' in ROSTER_PAGE
+        )
+        assert (
+            ".cell-tip.above { top: auto; bottom: calc(100% - 0.25rem); }"
+            in ROSTER_PAGE
+        )
+
+    def test_an_invitation_from_another_year_says_which(self) -> None:
+        # An invitation can sit unanswered across New Year, and "Jun 17,
+        # 9:30 PM" would then be read as this June rather than last.
+        assert "function formatMomentWithYear(t)" in ROSTER_PAGE
+        assert (
+            "if (date.getFullYear() === new Date().getFullYear()) {"
+            in ROSTER_PAGE
+        )
+        assert 'year: "numeric",' in ROSTER_PAGE
+        assert 'return formatMomentWithYear(t) + " | " +' in ROSTER_PAGE
+
     def test_tip_tracing_carries_no_date_or_account(self) -> None:
         # Only a fixed action name and a narrowed event name reach the
         # console.
@@ -1986,7 +2013,10 @@ class TestRosterPendingInvites:
         # "Sep 20, 9:30 PM | 7 days ago": the same moment the membership
         # table's Time column shows, and how long ago it was.
         assert "function formatMomentWithAge(t)" in ROSTER_PAGE
-        assert 'return formatMoment(t) + " | " +' in ROSTER_PAGE
+        # The membership table's own moment, with a year added only when the
+        # invitation is not from this one.
+        assert "return formatMoment(t);" in ROSTER_PAGE
+        assert 'return formatMomentWithYear(t) + " | " +' in ROSTER_PAGE
         assert (
             "formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));"
             in ROSTER_PAGE

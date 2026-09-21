@@ -238,6 +238,8 @@ table.changes .tip-trigger {
   white-space: normal;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
+/* Above its cell instead, for a row with no room under it. */
+.cell-tip.above { top: auto; bottom: calc(100% - 0.25rem); }
 /* An invited account that no application post matched has no Discord name to
    show, and the reason reads as an absence rather than as a name. */
 table.changes td.unmatched { color: var(--muted); }
@@ -509,13 +511,31 @@ button:focus-visible {
     }
     return countedAge(Math.floor(seconds / 86400), "day");
   }
+  // The same moment, with the year when it is not this one. An invitation
+  // can sit unanswered across New Year, and "Jun 17, 9:30 PM" would then be
+  // read as this June rather than last.
+  function formatMomentWithYear(t) {
+    var date = new Date(t * 1000);
+    if (date.getFullYear() === new Date().getFullYear()) {
+      return formatMoment(t);
+    }
+    return date.toLocaleString(
+      undefined,
+      {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+  }
   // "Sep 20, 9:30 PM | 7 days ago": the moment the membership table shows in
   // full, and how long ago it was by the reader's own clock. A clock running
   // a little behind the server's would otherwise date an invite in the
   // future, which formatAge() reads as "just now" rather than as a negative
   // age.
   function formatMomentWithAge(t) {
-    return formatMoment(t) + " | " +
+    return formatMomentWithYear(t) + " | " +
       formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));
   }
 
@@ -1072,6 +1092,7 @@ button:focus-visible {
     hideInviteTip("replaced");
     inviteTip.textContent = text;
     trigger.parentNode.appendChild(inviteTip);
+    placeInviteTip(trigger);
     // Described by the box only while the box is on screen, which is what a
     // screen reader expects of a tooltip.
     trigger.setAttribute("aria-describedby", inviteTip.id);
@@ -1083,6 +1104,20 @@ button:focus-visible {
     window.addEventListener("blur", dismissInviteTip);
     window.addEventListener("resize", dismissInviteTip);
     traceInviteTip("open");
+  }
+
+  // A box below the last rows of a phone screen would hang off the bottom,
+  // and the reader cannot scroll it into view because scrolling is one of the
+  // things that puts it away. It opens upwards instead, unless there is no
+  // room up there either, where below is still the lesser of the two.
+  function placeInviteTip(trigger) {
+    inviteTip.classList.remove("above");
+    var viewport = window.innerHeight ||
+      document.documentElement.clientHeight;
+    var box = inviteTip.getBoundingClientRect();
+    if (box.bottom <= viewport) { return; }
+    var cell = trigger.getBoundingClientRect();
+    if (cell.top - box.height >= 0) { inviteTip.classList.add("above"); }
   }
 
   function hideInviteTip(reason) {

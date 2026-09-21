@@ -224,6 +224,65 @@ class TestRaffleStore:
             }
             store.close()
 
+    def test_forgets_an_account_whose_newer_event_cannot_be_dated(
+        self,
+    ) -> None:
+        # A row that cannot be read leaves the order of an account's events
+        # unknown, and the row before it is not an answer to that question:
+        # falling back to it would date the invitation being held by the one
+        # it replaced, or keep one a later join had already answered.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_invite(
+                        101, "Reinvited.1234", time="2026-01-05T10:00:00.000Z"
+                    ),
+                    guild_invite(102, "Reinvited.1234", time="soon"),
+                    guild_invite(
+                        103, "Rejoined.5678", time="2026-01-05T10:00:00.000Z"
+                    ),
+                    guild_join(104, "Rejoined.5678", time="soon"),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {}
+            store.close()
+
+    def test_breaks_a_same_second_tie_by_the_logs_own_order(self) -> None:
+        # A removal and a fresh invitation inside the same second come back
+        # in the order the log recorded them, so an account reinvited on the
+        # spot keeps the date of the invitation it is holding now.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_leave(
+                        101, "Reinvited.1234", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    guild_invite(
+                        102, "Reinvited.1234", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    # The other way round: invited first, removed in the same
+                    # second, so nothing is outstanding.
+                    guild_invite(
+                        103, "Removed.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    guild_leave(
+                        104, "Removed.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {
+                "reinvited.1234": datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
+            }
+            store.close()
+
     def test_persists_rank_change_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -978,40 +978,67 @@ class RaffleStore:
 
         The log only reaches about a hundred events per type, so an invitation
         sent before the bot first read it was never recorded and is absent
-        here rather than dated by something else.
+        here rather than dated by something else. So is an account with a row
+        this store cannot date at all: which of its events came last is then
+        unknown, and the row before it is not an answer to that question.
         """
+        # Newest invitation, and newest answer to one, per account. Each is
+        # kept as (moment, event id) so a tie between two events recorded in
+        # the same second is broken by the order the log recorded them.
+        invited: dict[str, tuple[datetime, int]] = {}
+        answered: dict[str, tuple[datetime, int]] = {}
+        undatable: set[str] = set()
+
+        def remember(
+            newest: dict[str, tuple[datetime, int]],
+            username: str,
+            event_time: str,
+            event_id: int,
+        ) -> None:
+            key = username.strip().casefold()
+            moment = parse_event_time(event_time)
+            if moment is None:
+                # Nothing about this account can be ordered around a row that
+                # cannot be dated, and falling back to the row before it would
+                # date an invitation by the one it replaced.
+                undatable.add(key)
+                return
+            known = newest.get(key)
+            if known is None or (moment, event_id) > known:
+                newest[key] = (moment, event_id)
+
         with self._sessions() as session:
-            times = _newest_event_times(
-                (record.username, record.event_time)
-                for record in session.scalars(
-                    select(GuildInviteRecord)
-                ).all()
-            )
-            answered = _newest_event_times(
-                (record.username, record.event_time)
-                for record in session.scalars(select(GuildJoinRecord)).all()
-            )
-            for username, moment in _newest_event_times(
-                (record.username, record.event_time)
-                for record in session.scalars(select(GuildLeaveRecord)).all()
-            ).items():
-                known = answered.get(username)
-                if known is None or moment > known:
-                    answered[username] = moment
-        superseded = [
-            username
-            for username, moment in answered.items()
-            # Answered at the same second as the invitation is answered all
-            # the same: an outstanding invitation is worth showing a date for
-            # only when nothing since can have ended it.
-            if username in times and moment >= times[username]
-        ]
-        for username in superseded:
-            del times[username]
+            for invite in session.scalars(select(GuildInviteRecord)).all():
+                remember(
+                    invited,
+                    invite.username,
+                    invite.event_time,
+                    invite.event_id,
+                )
+            for join in session.scalars(select(GuildJoinRecord)).all():
+                remember(
+                    answered, join.username, join.event_time, join.event_id
+                )
+            for leave in session.scalars(select(GuildLeaveRecord)).all():
+                remember(
+                    answered, leave.username, leave.event_time, leave.event_id
+                )
+
+        times: dict[str, datetime] = {}
+        superseded = 0
+        for username, sent in invited.items():
+            if username in undatable:
+                continue
+            settled = answered.get(username)
+            if settled is not None and settled > sent:
+                superseded += 1
+                continue
+            times[username] = sent[0]
         LOGGER.debug(
-            "Loaded invite times for %s accounts; superseded=%s",
+            "Loaded invite times for %s accounts; superseded=%s undatable=%s",
             len(times),
-            len(superseded),
+            superseded,
+            len(undatable),
         )
         return times
 
@@ -2026,27 +2053,6 @@ def _to_gold_withdrawal(record: GuildStashCoinLogRecord) -> GoldWithdrawal:
         coins_withdrawn=record.coins,
         event_time=record.event_time,
     )
-
-
-def _newest_event_times(
-    rows: Iterable[tuple[str, str]],
-) -> dict[str, datetime]:
-    """The newest readable moment per account, keyed by casefolded name.
-
-    A row whose stored timestamp cannot be read dates nothing rather than
-    dating its account with a guess, and account names are matched
-    case-insensitively here as they are everywhere else.
-    """
-    newest: dict[str, datetime] = {}
-    for username, event_time in rows:
-        moment = parse_event_time(event_time)
-        if moment is None:
-            continue
-        key = username.strip().casefold()
-        known = newest.get(key)
-        if known is None or moment > known:
-            newest[key] = moment
-    return newest
 
 
 def _to_guild_leave(record: GuildLeaveRecord) -> GuildLeave:
