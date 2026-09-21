@@ -348,6 +348,7 @@ class ProfitService:
             discord_user_id,
             window_start,
             window_until,
+            loaded_at,
         )
         unrealized = await asyncio.to_thread(
             calculate_unrealized_profit,
@@ -634,6 +635,11 @@ class ProfitService:
         # leaves out of their flipped profit is a choice about the report,
         # not about their history, so it is applied when the rollups are read
         # back and costs nothing to change back.
+        # Lots held past LOT_PRUNE_AFTER_DAYS are collapsed at the month
+        # boundaries inside this, against each boundary's own instant, rather
+        # than here against the clock. What is carried out of the last
+        # boundary is left as it is: it is at most a month of purchases, and
+        # the next pass to cross a boundary collapses it there.
         item_days, carried = self._match_in_segments(
             discord_user_id,
             buys,
@@ -642,10 +648,6 @@ class ProfitService:
             resume_from,
             resume_inclusive,
             newest,
-        )
-        carried = prune_open_lots(
-            carried,
-            older_than=now - timedelta(days=LOT_PRUNE_AFTER_DAYS),
         )
         if resume_from is None:
             self._store.store_rollups(
@@ -665,35 +667,60 @@ class ProfitService:
             len(carried),
         )
 
-    def _match_in_segments(
+    def _match_segments(
         self,
-        discord_user_id: int,
         buys: list[Transaction],
         sells: list[Transaction],
         opening_lots: dict[int, tuple[BuyLot, ...]],
         resume_from: datetime | None,
         resume_inclusive: bool,
-        newest: datetime,
-    ) -> tuple[dict[tuple[int, str], ItemDayProfit], dict[int, tuple[BuyLot, ...]]]:
+        through: datetime,
+        *,
+        counted_from: datetime | None = None,
+        counted_through: datetime | None = None,
+    ) -> tuple[
+        dict[tuple[int, str], ItemDayProfit],
+        dict[int, tuple[BuyLot, ...]],
+        list[tuple[datetime, dict[int, tuple[BuyLot, ...]]]],
+    ]:
         """Match a stretch of history, pausing at each month boundary.
 
         Pausing costs nothing - matching a run of segments in order is the
-        same arithmetic as matching the whole run - and each pause leaves a
-        checkpoint a later rematch can resume from.
+        same arithmetic as matching the whole run - and each pause is a place
+        a later pass can resume from. The pauses are returned rather than
+        stored, because one caller writes them as checkpoints and the other
+        is only reading.
 
-        A checkpoint at a boundary holds what was held *before* that instant,
-        and a rewind to it replays from the instant itself. Keeping those two
-        halves on the same side of the boundary is what stops a trade
-        timestamped exactly at midnight from falling between them: the day it
-        lands on is discarded and rematched whole.
+        What a pause holds is the lots once the ones held past
+        ``LOT_PRUNE_AFTER_DAYS`` **at that boundary** have been collapsed into
+        a single averaged lot. Collapsing there, against the boundary's own
+        instant, is what makes this reproducible: the state a boundary holds
+        is the state the matching after it ran from, in the pass that wrote it
+        and in every pass that resumes from it. Collapsing at the end of a
+        pass against the clock instead made the cost basis depend on when a
+        pass happened to run, so the same sale could be costed from the
+        averaged lot by one pass and from the cheapest purchase behind it by
+        another - and a window rematched from a checkpoint could not agree
+        with the rows already stored for it.
+
+        ``counted_from`` and ``counted_through`` are handed to every segment,
+        so a caller reporting on part of this stretch matches it exactly as a
+        caller reporting on all of it does.
+
+        A boundary belongs to the segment after it, and a resume from one
+        replays that instant itself. Keeping those two halves on the same side
+        of the boundary is what stops a trade timestamped exactly at midnight
+        from falling between them: the day it lands on is discarded and
+        rematched whole.
         """
         occurred = [transaction.occurred_at for transaction in (*buys, *sells)]
-        first = min(occurred) if occurred else newest
+        first = min(occurred) if occurred else through
         boundaries = month_boundaries(
             resume_from if resume_from is not None else first,
-            newest,
+            through,
         )
         item_days: dict[tuple[int, str], ItemDayProfit] = {}
+        paused_at: list[tuple[datetime, dict[int, tuple[BuyLot, ...]]]] = []
         carried = opening_lots
         lower = resume_from
         lower_inclusive = resume_inclusive
@@ -715,29 +742,60 @@ class ProfitService:
 
         for boundary in (*boundaries, None):
             last = boundary is None
-            end = newest if last else boundary
+            end = through if last else boundary
             assert end is not None
             realized = calculate_realized_profit(
                 [row for row in buys if within(row, end, last)],
                 [row for row in sells if within(row, end, last)],
                 with_item_days=True,
                 opening_lots=carried,
+                counted_from=counted_from,
+                counted_through=counted_through,
             )
             item_days.update(realized.item_days)
             carried = realized.unmatched_buys
             if boundary is not None:
-                self._store.store_lot_checkpoint(
-                    discord_user_id,
-                    boundary,
+                carried = prune_open_lots(
                     carried,
+                    older_than=boundary
+                    - timedelta(days=LOT_PRUNE_AFTER_DAYS),
                 )
+                paused_at.append((boundary, carried))
             lower = end
             lower_inclusive = True
+        return item_days, carried, paused_at
+
+    def _match_in_segments(
+        self,
+        discord_user_id: int,
+        buys: list[Transaction],
+        sells: list[Transaction],
+        opening_lots: dict[int, tuple[BuyLot, ...]],
+        resume_from: datetime | None,
+        resume_inclusive: bool,
+        newest: datetime,
+    ) -> tuple[dict[tuple[int, str], ItemDayProfit], dict[int, tuple[BuyLot, ...]]]:
+        """Match a stretch of history and keep every pause it made.
+
+        Each pause becomes the checkpoint a later rematch resumes from, and
+        holds exactly the lots the matching after it ran from - see
+        ``_match_segments`` for why that has to be true.
+        """
+        item_days, carried, paused_at = self._match_segments(
+            buys,
+            sells,
+            opening_lots,
+            resume_from,
+            resume_inclusive,
+            newest,
+        )
+        for boundary, lots in paused_at:
+            self._store.store_lot_checkpoint(discord_user_id, boundary, lots)
         LOGGER.debug(
             "Matched Trading Post history in segments; user_id=%s "
             "checkpoints=%s rows=%s",
             discord_user_id,
-            len(boundaries),
+            len(paused_at),
             len(item_days),
         )
         return item_days, carried
@@ -746,7 +804,8 @@ class ProfitService:
         self,
         discord_user_id: int,
         cutoff: datetime,
-        until: datetime | None = None,
+        until: datetime | None,
+        now: datetime,
     ) -> tuple[
         RealizedProfit,
         dict[str, int],
@@ -766,8 +825,20 @@ class ProfitService:
         opening_day = cutoff.date().isoformat()
         open_lots = self._store.get_open_lots(discord_user_id)
         excluded_items = self._store.get_excluded_profit_items(discord_user_id)
+        # A window opening at a midnight is a sum of whole stored dates. One
+        # opening mid-date - the 24h button - is not, and cutting the date it
+        # opens on at the hour is something only the trades themselves can
+        # answer, so those are matched again for it.
+        opening_midnight = cutoff.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        window_rows = (
+            [row for row in rollups if row[1] >= opening_day]
+            if cutoff == opening_midnight
+            else self._rematch_window(discord_user_id, cutoff, until, now)
+        )
         realized = aggregate_rollups(
-            [row for row in rollups if row[1] >= opening_day],
+            window_rows,
             open_lots,
             excluded_items=excluded_items,
         )
@@ -785,12 +856,13 @@ class ProfitService:
         }
         LOGGER.debug(
             "Read windowed profit report; user_id=%s rollups=%s "
-            "window_days=%s trailing_days=%s hidden_items=%s",
+            "window_days=%s trailing_days=%s hidden_items=%s rematched=%s",
             discord_user_id,
             len(rollups),
             len(realized.days),
             len(trailing_days),
             len(excluded_items),
+            len(window_rows) if cutoff != opening_midnight else 0,
         )
         return (
             realized,
@@ -809,6 +881,80 @@ class ProfitService:
             ),
         )
 
+    def _rematch_window(
+        self,
+        discord_user_id: int,
+        cutoff: datetime,
+        until: datetime | None,
+        now: datetime,
+    ) -> list[tuple[int, str, ItemDayProfit]]:
+        """Match the sales inside a window that opens partway through a date.
+
+        The stored rollups are kept per whole UTC sale date, which is the
+        grain every other window is a sum of whole rows at. The 24h button
+        opens wherever the clock stands, so the date it opens on is a part of
+        a row rather than a row, and no addition over what is stored can cut
+        it at the hour. These sales are matched again for it instead.
+
+        The pass resumes from the newest lot checkpoint at or before the
+        window - the same checkpoints a late-arriving trade rewinds to - so it
+        reads back to the start of a month at worst rather than to the start
+        of the member's history. Sales before the window are matched but not
+        counted, which is what keeps the costs FIFO allocates here the same
+        ones the stored rows were built with.
+
+        It walks the same month segments the pass that stored those rows
+        walked, collapsing long-held lots at each boundary the same way, so
+        it arrives at every sale holding what that pass held. Nothing about
+        the lots is adjusted here: a checkpoint is already the state the
+        matching after it ran from, which is the property ``_match_segments``
+        exists to keep.
+
+        The rows come back in the shape the stored ones have, so the caller
+        adds them up, and applies the member's hidden items to them, exactly
+        as it does for every other window.
+        """
+        resume = self._store.get_lot_checkpoint_at_or_before(
+            discord_user_id, cutoff
+        )
+        # A member whose trading is younger than the first month boundary
+        # behind them has no checkpoint yet, and correspondingly little to
+        # match from the beginning.
+        resume_at: datetime | None = None
+        opening_lots: dict[int, tuple[BuyLot, ...]] = {}
+        if resume is not None:
+            # A checkpoint holds what was held before its instant, so that
+            # instant is replayed rather than skipped.
+            resume_at, opening_lots = resume
+        buys = self._store.get_transactions(
+            discord_user_id, "history_buys", at_or_after=resume_at
+        )
+        sells = self._store.get_transactions(
+            discord_user_id, "history_sells", at_or_after=resume_at
+        )
+        occurred = [transaction.occurred_at for transaction in (*buys, *sells)]
+        item_days, _carried, _paused_at = self._match_segments(
+            buys,
+            sells,
+            opening_lots,
+            resume_at,
+            True,
+            max(occurred) if occurred else now,
+            counted_from=cutoff,
+            counted_through=until,
+        )
+        LOGGER.debug(
+            "Rematched a mid-date profit window; user_id=%s resumed=%s "
+            "transactions=%s rows=%s",
+            discord_user_id,
+            resume is not None,
+            len(buys) + len(sells),
+            len(item_days),
+        )
+        return [
+            (item_id, sold_day, totals)
+            for (item_id, sold_day), totals in item_days.items()
+        ]
 
     async def warm_item_facts(self) -> int:
         """Store the facts about every item the game has, before any report.

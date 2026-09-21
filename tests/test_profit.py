@@ -63,6 +63,7 @@ from gw2bot.profit.service import (
     serialize_profit_report,
 )
 from gw2bot.profit.store import (
+    BOUNDARY_PRUNED_LOTS_KEY,
     ITEM_NAME_TTL_SECONDS,
     MAX_LOT_CHECKPOINTS,
     MAX_REPORT_DAYS,
@@ -158,6 +159,171 @@ class TestProfitCalculation:
         assert result.days["2026-08-04"].profit == 337
         assert result.unmatched_buys[1][0].remaining == 3
         assert result.unmatched_buys[1][1].remaining == 2
+
+    def test_a_sale_before_the_counted_window_still_takes_its_lots(
+        self,
+    ) -> None:
+        # What a window reports and what it matches are different questions.
+        # An earlier sale is not in the 24h report, but it did happen, and it
+        # took the cheap stock with it - so the sale that is in the report
+        # has to be costed against what was actually left.
+        buys = [
+            transaction(
+                "buy-cheap",
+                price=100,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-dear",
+                price=300,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            transaction(
+                "sell-before",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 6, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-inside",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            ),
+        ]
+
+        result = calculate_realized_profit(
+            buys,
+            sells,
+            counted_from=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        )
+
+        # Only the later sale is reported: 5 at 400 is 2000 gross, 1700 net.
+        assert result.total_matched_quantity == 5
+        assert result.total_net_revenue == 1_700
+        # Costed at 300 a unit - the lot the earlier sale left behind - and
+        # not at the 100 it would have found had that sale been dropped.
+        assert result.total_cost == 1_500
+        assert result.total_profit == 200
+        assert list(result.days) == ["2026-08-20"]
+
+    def test_the_counted_window_closes_as_well_as_opens(self) -> None:
+        buys = [
+            transaction(
+                "buy",
+                price=100,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            )
+        ]
+        sells = [
+            transaction(
+                "sell-inside",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-after",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 21, 18, tzinfo=UTC),
+            ),
+        ]
+
+        result = calculate_realized_profit(
+            buys,
+            sells,
+            counted_from=datetime(2026, 8, 20, 12, tzinfo=UTC),
+            counted_through=datetime(2026, 8, 20, 23, 59, 59, tzinfo=UTC),
+        )
+
+        assert list(result.days) == ["2026-08-20"]
+        assert result.total_matched_quantity == 5
+
+    def test_what_is_still_held_ignores_the_counted_window(self) -> None:
+        # The unmatched lots are the member's current position, which no
+        # choice of window changes. The unrealized table is drawn from them.
+        buys = [
+            transaction(
+                "buy",
+                price=100,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            )
+        ]
+        sells = [
+            transaction(
+                "sell-before",
+                price=400,
+                quantity=4,
+                occurred_at=datetime(2026, 8, 20, 6, tzinfo=UTC),
+            )
+        ]
+
+        result = calculate_realized_profit(
+            buys,
+            sells,
+            counted_from=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        )
+
+        assert result.items == {}
+        assert result.unmatched_buys[1][0].remaining == 6
+
+    def test_a_counted_window_reports_the_same_match_the_rollups_hold(
+        self,
+    ) -> None:
+        # The 24h window re-matches trades the stored daily rows already
+        # cover. If the two disagreed, the same sale would be worth one
+        # amount under 24h and another under 7d.
+        buys = [
+            transaction(
+                "buy-cheap",
+                price=100,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-dear",
+                price=300,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            transaction(
+                "sell-before",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 6, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-inside",
+                price=450,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            ),
+        ]
+        whole = calculate_realized_profit(buys, sells, with_item_days=True)
+
+        counted = calculate_realized_profit(
+            buys,
+            sells,
+            with_item_days=True,
+            counted_from=datetime(2026, 8, 20, 12, tzinfo=UTC),
+        )
+
+        # Both matched the same trades; only the reporting differs, so the
+        # counted result is the whole one less the sale left out of it.
+        assert counted.total_profit == (
+            whole.total_profit
+            - (1_700 - 500)  # the earlier sale: 1700 net on 500 of stock
+        )
+        assert counted.unmatched_buys == whole.unmatched_buys
 
     @pytest.mark.parametrize(
         ("buy_quantity", "sell_quantity"),
@@ -1208,6 +1374,47 @@ class TestReportWindow:
         assert span.days == 7
         assert span.start == datetime(2026, 8, 15, tzinfo=UTC)
         assert span.end == now
+
+    def test_the_hourly_preset_runs_back_twenty_four_hours(self) -> None:
+        # The 24h button is named in hours, so it has to mean them. Opening
+        # at the midnight that opened today would make it report five
+        # minutes of trading to a member who pressed it at 00:05 UTC, and a
+        # full day to one who pressed it just before midnight.
+        for hour, minute in ((0, 5), (9, 30), (23, 59)):
+            now = datetime(2026, 8, 21, hour, minute, tzinfo=UTC)
+
+            span = ReportWindow(days=1).span(now)
+
+            assert span.end == now
+            assert span.start == now - timedelta(hours=24)
+            # One day long, whichever dates that lands on.
+            assert span.days == 1
+
+    def test_the_hourly_preset_lands_on_the_two_dates_it_crosses(
+        self,
+    ) -> None:
+        # Read away from midnight it covers the end of one UTC date and the
+        # start of the next, which is what stops it being a sum of whole
+        # stored days.
+        span = ReportWindow(days=1).span(
+            datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+        )
+
+        assert span.start.date().isoformat() == "2026-08-20"
+        assert span.end.date().isoformat() == "2026-08-21"
+
+    def test_the_presets_named_in_days_still_open_at_a_midnight(self) -> None:
+        # Only the hourly button moved. A window measured in whole UTC dates
+        # is what lets every other one be added up from the stored days.
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+
+        for days, opening in ((7, "2026-08-15"), (30, "2026-07-23")):
+            span = ReportWindow(days=days).span(now)
+
+            assert span.start == datetime.fromisoformat(
+                opening + "T00:00:00+00:00"
+            )
+            assert span.end == now
 
     def test_a_picked_pair_covers_the_whole_utc_days_it_names(self) -> None:
         since = int(datetime(2026, 6, 1, tzinfo=UTC).timestamp())
@@ -2813,6 +3020,506 @@ class TestProfitService:
         assert report.sell_transaction_count == 1
         assert report.buy_transaction_count == 1
 
+    async def test_the_hourly_window_cuts_the_date_it_opens_on(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The whole point of the 24h button: a sale earlier on the same UTC
+        # date as the window's opening is outside the last twenty-four hours
+        # and has to be left out, which no sum of whole stored days can do.
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                "buy-cheap",
+                price=100,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-dear",
+                price=300,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            # Yesterday, but before this time yesterday.
+            transaction(
+                "sell-before",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 6, tzinfo=UTC),
+            ),
+            # Yesterday evening, which is inside the last twenty-four hours.
+            transaction(
+                "sell-inside",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+
+        report = await service.load_report(101, ReportWindow(days=1), now=now)
+
+        assert report.range_key == "24h"
+        assert report.days == 1
+        assert report.window_start == datetime(2026, 8, 20, 9, 30, tzinfo=UTC)
+        assert report.window_end == now
+        # The evening sale only: 5 at 400 is 1700 net, against the 300 a unit
+        # lot that the morning sale left behind.
+        assert report.realized.total_matched_quantity == 5
+        assert report.realized.total_net_revenue == 1_700
+        assert report.realized.total_cost == 1_500
+        assert report.realized.total_profit == 200
+        assert list(report.realized.days) == ["2026-08-20"]
+        # The counts are read from the trades themselves, so they are cut at
+        # the same instant the figures above are.
+        assert report.sell_transaction_count == 1
+        assert report.buy_transaction_count == 0
+        # The page draws one bar per UTC date between the two bounds it is
+        # sent, so the payload has to name both dates the window falls on.
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        window = cast(dict[str, Any], payload["window"])
+        assert payload["range"] == "24h"
+        assert payload["days"] == 1
+        assert window["start_date"] == "2026-08-20"
+        assert window["end_date"] == "2026-08-21"
+        assert window["end"] - window["start"] == 24 * 60 * 60
+
+    async def test_the_hourly_window_agrees_with_the_days_it_overlaps(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The same sale is worth the same whichever window is drawn over it.
+        # The 24h figures are re-matched from the trades while the 7d ones
+        # are added up from the stored days, so this is the seam to watch.
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+        buys = [
+            transaction(
+                "buy-cheap",
+                price=100,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-dear",
+                price=300,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 19, 12, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            transaction(
+                "sell-before",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 6, tzinfo=UTC),
+            ),
+            transaction(
+                "sell-inside",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+
+        hourly = await service.load_report(101, ReportWindow(days=1), now=now)
+        week = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        # The week holds both sales on that date; the day holds the later one
+        # only, and the difference is exactly the sale left out of it.
+        assert week.realized.days["2026-08-20"].profit == 1_400
+        assert hourly.realized.days["2026-08-20"].profit == 200
+        assert week.realized.total_profit - hourly.realized.total_profit == (
+            1_200
+        )
+        # What is held is the member's position, not the window's, so both
+        # project the same unrealized result.
+        assert hourly.unrealized == week.unrealized
+
+    async def test_the_hourly_window_costs_from_the_lots_the_rollups_used(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # Stock held past LOT_PRUNE_AFTER_DAYS is collapsed into one averaged
+        # lot when what is still held is stored, so a sale out of it costs the
+        # average. The checkpoints behind it were written before that collapse
+        # and hold the lots apart, so a rematch resuming from one would cost
+        # the cheap lot instead and report a different profit for the very
+        # same sale than the day it is stored under does.
+        store, _, _ = profit_store
+        secret = "pruned-lot-member-secret"
+        store.set_api_key(101, secret)
+        buys = [
+            transaction(
+                "buy-tiny",
+                price=1,
+                quantity=1,
+                occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-bulk",
+                price=100,
+                quantity=100,
+                occurred_at=datetime(2024, 6, 2, tzinfo=UTC),
+            ),
+            # Carries the first pass past the month boundary the 24h window
+            # will later resume from, so a checkpoint is written there.
+            transaction(
+                "buy-other-item",
+                item_id=2,
+                price=50,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+            ),
+        ]
+        sells: list[Transaction] = []
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return list(buys)
+            if path.endswith("history/sells"):
+                return list(sells)
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item", 2: "Other Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200), 2: MarketPrice(10, 20)}
+            ),
+        )
+
+        # The first pass writes the checkpoints and then prunes what is held.
+        await service.load_report(
+            101,
+            ReportWindow(days=7),
+            now=datetime(2026, 8, 15, tzinfo=UTC),
+        )
+        # A single unit sold out of that year-old stock, matched by the next
+        # pass from the averaged lot the first one left behind.
+        sells.append(
+            transaction(
+                "sell",
+                price=400,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            )
+        )
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+
+        hourly = await service.load_report(101, ReportWindow(days=1), now=now)
+        week = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        stored = week.realized.days["2026-08-20"]
+        assert hourly.realized.total_cost == stored.cost
+        assert hourly.realized.total_profit == stored.profit
+
+    async def test_the_hourly_window_agrees_on_a_first_import_too(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The mirror of the test above, and the one a fix aimed only at that
+        # case breaks: here a single pass writes the checkpoint and matches
+        # the sale, so the collapse has to have happened at the boundary for
+        # the two to agree. Nothing records which pass matched a sale, so the
+        # only way both can hold is for the collapse to be decided by the
+        # boundary rather than by when the pass ran.
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-import-member-secret")
+        buys = [
+            transaction(
+                "buy-tiny",
+                price=1,
+                quantity=1,
+                occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-bulk",
+                price=100,
+                quantity=100,
+                occurred_at=datetime(2024, 6, 2, tzinfo=UTC),
+            ),
+        ]
+        sells = [
+            transaction(
+                "sell",
+                price=400,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            )
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return list(buys)
+            if path.endswith("history/sells"):
+                return list(sells)
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(return_value=named({1: "Test Item"})),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+
+        hourly = await service.load_report(101, ReportWindow(days=1), now=now)
+        week = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        stored = week.realized.days["2026-08-20"]
+        assert hourly.realized.total_cost == stored.cost
+        assert hourly.realized.total_profit == stored.profit
+
+    async def test_a_checkpoint_holds_what_the_matching_after_it_runs_from(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The property both of those rest on, asserted directly: the lots a
+        # boundary is stored with are already collapsed against that
+        # boundary, so a pass resuming there runs from the same state the
+        # pass that wrote it carried forward.
+        store, _, _ = profit_store
+        store.set_api_key(101, "checkpoint-state-member-secret")
+        buys = [
+            transaction(
+                "buy-tiny",
+                price=1,
+                quantity=1,
+                occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-bulk",
+                price=100,
+                quantity=100,
+                occurred_at=datetime(2024, 6, 2, tzinfo=UTC),
+            ),
+            # Carries the pass across the boundaries being inspected; a pass
+            # only walks as far as the newest trade it has.
+            transaction(
+                "buy-other-item",
+                item_id=2,
+                price=50,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+            ),
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            return list(buys) if path.endswith("history/buys") else []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item", 2: "Other Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200), 2: MarketPrice(10, 20)}
+            ),
+        )
+
+        await service.load_report(
+            101,
+            ReportWindow(days=7),
+            now=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
+        )
+
+        # A boundary from before the lots aged past the cutoff keeps them
+        # apart; one from after it holds the single averaged lot, priced at
+        # the whole stock's cost rather than at the cheapest purchase.
+        early = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2025, 1, 1, tzinfo=UTC)
+        )
+        assert early is not None
+        assert len(early[1][1]) == 2
+        late = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 8, 20, tzinfo=UTC)
+        )
+        assert late is not None
+        assert len(late[1][1]) == 1
+        assert late[1][1][0].remaining == 101
+        assert late[1][1][0].unit_price == 100
+
+    async def test_only_a_window_opening_mid_date_is_rematched(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Re-matching costs a read back to the last checkpoint, so every
+        # window that opens at a midnight must keep taking the cheap path of
+        # adding up the stored days - including 24h read exactly at one.
+        store, _, _ = profit_store
+        secret = "rematch-trace-member-secret"
+        store.set_api_key(101, secret)
+        buys = [
+            transaction(
+                "buy",
+                price=100,
+                quantity=10,
+                occurred_at=datetime(2026, 8, 19, tzinfo=UTC),
+            )
+        ]
+        sells = [
+            transaction(
+                "sell",
+                price=400,
+                quantity=5,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            )
+        ]
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return buys
+            if path.endswith("history/sells"):
+                return sells
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200)}
+            ),
+        )
+        trace = "Rematched a mid-date profit window"
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await service.load_report(
+                101,
+                ReportWindow(days=7),
+                now=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
+            )
+        assert trace not in caplog.text
+        assert secret not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await service.load_report(
+                101,
+                ReportWindow(days=1),
+                now=datetime(2026, 8, 21, tzinfo=UTC),
+            )
+        assert trace not in caplog.text
+        assert secret not in caplog.text
+
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await service.load_report(
+                101,
+                ReportWindow(days=1),
+                now=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
+            )
+        assert trace in caplog.text
+        # The rematch trace runs inside a workflow holding the member's key,
+        # so the run that emits it is also the run that has to prove the key
+        # never reached the console.
+        assert secret not in caplog.text
+
     async def test_the_six_dates_before_a_window_are_read_for_the_average(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -3201,6 +3908,136 @@ class TestProfitService:
         assert store.get_excluded_profit_items(101) == frozenset({24_292})
         assert await service.set_item_exclusion(101, 24_292, False)
         assert store.get_excluded_profit_items(101) == frozenset()
+
+
+class TestRollupRebase:
+    """The one-time drop of results matched under the old lot rule."""
+
+    @staticmethod
+    def _seed(store: ProfitStore) -> None:
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", price=100, quantity=10)],
+            now=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+        store.store_rollups(
+            101,
+            {(1, "2026-08-20"): ItemDayProfit(5, 500, 1_700, 1_200, 0.0)},
+            {1: (BuyLot(5, 100, datetime(2026, 8, 1, tzinfo=UTC)),)},
+            datetime(2026, 8, 20, tzinfo=UTC),
+            now=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+        store.store_lot_checkpoint(
+            101,
+            datetime(2026, 8, 1, tzinfo=UTC),
+            {1: (BuyLot(5, 100, datetime(2026, 7, 1, tzinfo=UTC)),)},
+        )
+
+    @staticmethod
+    def _forget_the_marker(database: Path) -> None:
+        """Make a database look like one written before the rule changed."""
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "DELETE FROM metadata WHERE key = ?",
+                (BOUNDARY_PRUNED_LOTS_KEY,),
+            )
+
+    def test_results_from_the_old_rule_are_dropped_and_trades_are_kept(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # A checkpoint written under the old rule does not hold the state the
+        # matching after it ran from, so a report resuming at one could cost a
+        # sale differently from the day row it falls in. What was computed
+        # that way goes; what it was computed *from* stays, and the next
+        # report matches it again under one rule.
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        secret = "rebase-member-secret"
+        store.set_api_key(101, secret)
+        self._seed(store)
+        store.close()
+        self._forget_the_marker(database)
+
+        reopened = ProfitStore(str(database), cipher, registry)
+
+        try:
+            assert (
+                reopened.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC))
+                == []
+            )
+            assert reopened.get_open_lots(101) == {}
+            assert reopened.get_rollup_state(101).computed_through is None
+            assert (
+                reopened.get_lot_checkpoint_at_or_before(
+                    101, datetime(2026, 8, 21, tzinfo=UTC)
+                )
+                is None
+            )
+            # The trades are the record and the key is the member's; neither
+            # is a result, so neither is dropped.
+            assert reopened.get_api_key(101) == secret
+            assert len(reopened.get_transactions(101, "history_buys")) == 1
+        finally:
+            reopened.close()
+
+    def test_a_database_already_rebased_is_left_alone(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The second run would cost every member a full rematch for nothing,
+        # so the marker is what decides it rather than the shape of the rows.
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        store.close()
+        self._forget_the_marker(database)
+        rebased = ProfitStore(str(database), cipher, registry)
+        self._seed(rebased)
+        rebased.close()
+
+        reopened = ProfitStore(str(database), cipher, registry)
+
+        try:
+            assert (
+                len(reopened.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)))
+                == 1
+            )
+            assert reopened.get_open_lots(101) != {}
+            assert (
+                reopened.get_lot_checkpoint_at_or_before(
+                    101, datetime(2026, 8, 21, tzinfo=UTC)
+                )
+                is not None
+            )
+        finally:
+            reopened.close()
+
+    def test_the_drop_is_traced_without_naming_a_member(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        secret = "rebase-trace-member-secret"
+        store.set_api_key(101, secret)
+        self._seed(store)
+        store.close()
+        self._forget_the_marker(database)
+
+        with caplog.at_level(logging.INFO, logger="gw2bot"):
+            reopened = ProfitStore(str(database), cipher, registry)
+        reopened.close()
+
+        assert "matched under the old lot rule" in caplog.text
+        assert secret not in caplog.text
 
 
 class TestRollupStore:
