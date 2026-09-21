@@ -3570,6 +3570,36 @@ class TestFoodCostApi:
         assert response.status == 404
         assert await response.json() == {"error": "unknown restock"}
 
+    async def test_refuses_a_row_that_is_not_a_restock(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        # A removal's row is a real row of a tracked feast, so only the rule
+        # that a price belongs to a rise keeps it from being priced through
+        # a hand-made request.
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 10}, now - 3000)
+        raffle_store.record_feast_counts({1078: 40}, now - 2000)
+        raffle_store.record_feast_counts({1078: 30}, now - 1000)
+        samples = raffle_store.get_feast_stock_series(0.0)[1078].samples
+        headers = self._officer_headers(guild)
+
+        for sample in (samples[0], samples[-1]):
+            response = await client.post(
+                "/api/food/cost",
+                json={"log_id": sample.log_id, "cost": 100},
+                headers=headers,
+            )
+
+            assert response.status == 404
+            assert await response.json() == {"error": "unknown restock"}
+
+        assert raffle_store.get_feast_addition_costs(
+            [sample.log_id for sample in samples]
+        ) == {}
+
     async def test_a_failed_write_is_reported_without_its_cause(
         self,
         client: TestClient,

@@ -2209,8 +2209,9 @@ class TestFeastRestocksAndCosts:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")
             store = RaffleStore(database_path, "guild-id")
-            store.record_feast_counts({1078: 40}, 100.0)
-            log_id = store.get_feast_stock_series(0.0)[1078].samples[0].log_id
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            log_id = store.get_feast_stock_series(0.0)[1078].samples[-1].log_id
 
             assert store.set_feast_addition_cost(log_id, 123_456, 202) is True
             assert store.get_feast_addition_costs([log_id]) == {
@@ -2228,8 +2229,9 @@ class TestFeastRestocksAndCosts:
     def test_a_second_cost_replaces_the_first(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
-            store.record_feast_counts({1078: 40}, 100.0)
-            log_id = store.get_feast_stock_series(0.0)[1078].samples[0].log_id
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            log_id = store.get_feast_stock_series(0.0)[1078].samples[-1].log_id
 
             store.set_feast_addition_cost(log_id, 500, 202)
             store.set_feast_addition_cost(log_id, 0, 303)
@@ -2246,6 +2248,45 @@ class TestFeastRestocksAndCosts:
             assert store.get_feast_addition_costs([1, 2, 3]) == {}
             store.close()
 
+    def test_refuses_a_cost_against_a_row_that_is_not_a_restock(self) -> None:
+        # Only a rise can have been paid for. A removal's row, and a feast's
+        # first ever reading, are real rows of a tracked feast, so the id
+        # alone does not make one priceable.
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            store.record_feast_counts({1078: 30}, 300.0)
+            samples = store.get_feast_stock_series(0.0)[1078].samples
+            baseline, restock, removal = (
+                sample.log_id for sample in samples
+            )
+
+            assert store.set_feast_addition_cost(baseline, 100, 202) is False
+            assert store.set_feast_addition_cost(removal, 100, 202) is False
+            # The rise between them is the one row that can carry a price.
+            assert store.set_feast_addition_cost(restock, 100, 202) is True
+
+            assert store.get_feast_addition_costs(
+                [baseline, restock, removal]
+            ) == {restock: 100}
+            store.close()
+
+    def test_an_unchanged_reading_is_not_a_restock(self) -> None:
+        # record_feast_counts only writes changes, but a row written either
+        # side of a restart can repeat the count before it.
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 10}, 200.0)
+            repeated = store.get_feast_stock_series(0.0)[1078].samples[-1]
+
+            assert (
+                store.set_feast_addition_cost(repeated.log_id, 100, 202)
+                is False
+            )
+            store.close()
+
     def test_refuses_a_cost_against_a_row_that_is_not_there(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
@@ -2257,8 +2298,9 @@ class TestFeastRestocksAndCosts:
     def test_refuses_a_cost_outside_what_can_have_been_paid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
-            store.record_feast_counts({1078: 40}, 100.0)
-            log_id = store.get_feast_stock_series(0.0)[1078].samples[0].log_id
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            log_id = store.get_feast_stock_series(0.0)[1078].samples[-1].log_id
 
             with pytest.raises(ValueError):
                 store.set_feast_addition_cost(log_id, -1, 202)

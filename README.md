@@ -836,9 +836,14 @@ tracked feasts are stored, keyed by the guild log's own event id so a restart
 never records one twice; every other upgrade the log reports is ignored.
 
 That ledger is what fills the **User** column of the feast dashboard's
-Additions table. Like the rest of the guild log, it reaches back only as far as
-the log itself does, so a restock older than the log can still show on the
-dashboard with nobody named against it.
+Additions table, and it starts empty. The poller reads the guild log from the
+cursor it left off at, so only deposits made after this feature is deployed are
+recorded — a guild that has been running the bot for months begins with a
+ledger holding nothing, even though the log itself still carries its most
+recent events. Stock history recorded before then therefore lists its restocks
+with nobody named against them, and they fill in as new deposits are made.
+There is no one-time import for this the way `/gold import` recovers the bank
+ledger.
 
 ### Feast Stock Count History
 

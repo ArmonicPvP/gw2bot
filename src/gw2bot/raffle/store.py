@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.config import same_guild_id
@@ -354,6 +354,40 @@ class RaffleStore:
         )
         return costs
 
+    @staticmethod
+    def _is_feast_addition(
+        session: Session,
+        sample: FeastStockLogRecord,
+    ) -> bool:
+        """Whether one stock log row is a rise over the reading before it.
+
+        The same rule :func:`gw2bot.gw2.feast_stock.feast_additions` draws the
+        Additions table by, asked of a single row: rows are ordered by when
+        they were recorded and then by id, and a feast's first reading has
+        nothing to have risen from, so it is a baseline rather than a restock.
+        """
+        previous = session.scalars(
+            select(FeastStockLogRecord)
+            .where(
+                FeastStockLogRecord.guild_storage_id
+                == sample.guild_storage_id,
+                or_(
+                    FeastStockLogRecord.recorded_at < sample.recorded_at,
+                    and_(
+                        FeastStockLogRecord.recorded_at
+                        == sample.recorded_at,
+                        FeastStockLogRecord.log_id < sample.log_id,
+                    ),
+                ),
+            )
+            .order_by(
+                FeastStockLogRecord.recorded_at.desc(),
+                FeastStockLogRecord.log_id.desc(),
+            )
+            .limit(1)
+        ).first()
+        return previous is not None and sample.count > previous.count
+
     def set_feast_addition_cost(
         self,
         log_id: int,
@@ -362,9 +396,12 @@ class RaffleStore:
     ) -> bool:
         """Record what one observed restock cost, reporting whether it exists.
 
-        ``False`` means no stock log row of a tracked feast carries that id,
-        so there is nothing to price; the caller answers the request rather
-        than writing a cost against a row that is not there.
+        ``False`` means the id names no restock: no stock log row of a tracked
+        feast carries it, or the row it carries is not a rise at all. Only a
+        rise can have been paid for, so a removal's row and a feast's first
+        ever reading are refused along with an id that is simply not there,
+        and the caller answers the request rather than storing a price against
+        something the page will never show.
         """
         if copper < 0 or copper > MAX_FEAST_COST_COPPER:
             raise ValueError("cost out of range")
@@ -374,6 +411,13 @@ class RaffleStore:
             if sample is None or sample.guild_storage_id not in tracked:
                 LOGGER.debug(
                     "Rejected a feast restock cost; log_id=%s reason=unknown",
+                    log_id,
+                )
+                return False
+            if not self._is_feast_addition(session, sample):
+                LOGGER.debug(
+                    "Rejected a feast restock cost; log_id=%s "
+                    "reason=not-a-restock",
                     log_id,
                 )
                 return False
