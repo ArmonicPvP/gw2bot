@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from gw2bot.gold.models import DEPOSIT, WITHDRAW, GoldLedgerEntry
+from gw2bot.gw2.feast_stock import TRACKED_FEASTS, FeastDeposit
 from gw2bot.raffle.models import (
     COPPER_PER_GOLD,
     GoldWithdrawal,
@@ -93,6 +94,43 @@ def parse_stash_coin_movement(
             event_time=withdrawal.event_time,
         )
     return None
+
+
+# Guild consumables reach Guild Storage as ``upgrade`` events rather than as
+# ``stash`` ones: the storage endpoint resolves its ids against
+# /v2/guild/upgrades, and so does this event's ``upgrade_id``. A deposit is
+# the ``completed`` action carrying a count of what was placed.
+UPGRADE_COMPLETED = "completed"
+
+
+def parse_feast_deposit(event: dict[str, Any]) -> FeastDeposit | None:
+    """Read one guild-log event as tracked feasts placed in Guild Storage.
+
+    Only the four feasts the dashboard follows are read; every other guild
+    upgrade the log reports is passed over. An event naming no account, or
+    carrying no positive count, says nothing about who restocked what and is
+    passed over with them.
+    """
+    if event.get("type") != "upgrade" or not event.get("user"):
+        return None
+    if event.get("action") != UPGRADE_COMPLETED:
+        return None
+    try:
+        upgrade_id = int(event["upgrade_id"])
+        count = int(event.get("count", 0))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    if upgrade_id not in {feast.guild_storage_id for feast in TRACKED_FEASTS}:
+        return None
+    return FeastDeposit(
+        event_id=int(event["id"]),
+        guild_storage_id=upgrade_id,
+        username=str(event["user"]),
+        count=count,
+        event_time=str(event.get("time", "")),
+    )
 
 
 def parse_guild_leave(event: dict[str, Any]) -> GuildLeave | None:

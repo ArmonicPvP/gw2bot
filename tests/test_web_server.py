@@ -14,7 +14,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from factories import config_from_env, forbidden_error, not_found_error
+from factories import (
+    config_from_env,
+    feast_deposit,
+    forbidden_error,
+    not_found_error,
+)
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.core.dashboard_ranges import StoredRange
@@ -42,6 +47,7 @@ from gw2bot.profit import (
 )
 from gw2bot.profit.api import ProfitApiError
 from gw2bot.profit.service import MissingProfitApiKey, ResolvedWindow
+from gw2bot.gw2.feast_stock import MAX_FEAST_COST_COPPER
 from gw2bot.gw2.guild_members import TrialMemberReportEntry
 from gw2bot.invites import PendingInvites
 from gw2bot.roster import JOIN, KICK, LEAVE, ImportedMembershipEvent
@@ -3251,3 +3257,336 @@ class TestRememberedDashboardWindows:
         assert (await reopened.json())["range"] == "24h"
         assert "Could not remember a food window" in caplog.text
         assert "Could not read a remembered feast usage window" in caplog.text
+
+
+def _log_time(moment: float) -> str:
+    """A guild-log timestamp for ``moment``, in the API's own spelling."""
+    return datetime.fromtimestamp(moment, UTC).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+class TestFoodAdditions:
+    """The Additions table: each observed restock, its depositor and cost."""
+
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    def _restocked(
+        self,
+        raffle_store: RaffleStore,
+        now: float,
+        *,
+        deposit_at: float | None = None,
+        username: str = "Cook.1234",
+    ) -> None:
+        raffle_store.record_feast_counts({1078: 10}, now - 3000)
+        raffle_store.record_feast_counts({1078: 40}, now - 1000)
+        if deposit_at is None:
+            return
+        raffle_store.initialize_cursor(100)
+        raffle_store.process_events(
+            [
+                feast_deposit(
+                    101,
+                    username=username,
+                    count=30,
+                    event_time=_log_time(deposit_at),
+                )
+            ]
+        )
+
+    async def test_returns_each_restock_with_its_depositor(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        self._restocked(raffle_store, now, deposit_at=now - 2000)
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        payload = await response.json()
+        additions = payload["feasts"][0]["additions"]
+        assert [
+            (addition["amount"], addition["remaining"], addition["users"])
+            for addition in additions
+        ] == [(30, 40, ["Cook.1234"])]
+        # Nobody has priced it yet, which is what the page marks.
+        assert additions[0]["cost"] is None
+        assert additions[0]["log_id"] > 0
+        # A feast with no records still carries the key.
+        assert payload["feasts"][1]["additions"] == []
+
+    async def test_a_restock_the_log_cannot_explain_names_nobody(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        self._restocked(raffle_store, now)
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        additions = (await response.json())["feasts"][0]["additions"]
+        assert [addition["users"] for addition in additions] == [[]]
+
+    async def test_a_deposit_after_the_reading_belongs_to_a_later_one(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        # The poll reads the new count after the deposit that raised it, so a
+        # deposit logged later cannot be the one this reading saw.
+        now = time.time()
+        self._restocked(raffle_store, now, deposit_at=now - 500)
+
+        response = await client.get(
+            "/api/food",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        additions = (await response.json())["feasts"][0]["additions"]
+        assert [addition["users"] for addition in additions] == [[]]
+
+    async def test_a_recorded_cost_is_served_with_its_restock(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        now = time.time()
+        self._restocked(raffle_store, now, deposit_at=now - 2000)
+        headers = self._officer_headers(guild)
+        listed = await (
+            await client.get(
+                "/api/food", params={"range": "24h"}, headers=headers
+            )
+        ).json()
+        log_id = listed["feasts"][0]["additions"][0]["log_id"]
+
+        stored = await client.post(
+            "/api/food/cost",
+            json={"log_id": log_id, "cost": 123_456},
+            headers=headers,
+        )
+
+        assert stored.status == 200
+        assert await stored.json() == {"log_id": log_id, "cost": 123_456}
+        reloaded = await (
+            await client.get(
+                "/api/food", params={"range": "24h"}, headers=headers
+            )
+        ).json()
+        assert reloaded["feasts"][0]["additions"][0]["cost"] == 123_456
+
+    async def test_a_cost_of_nothing_is_an_answer(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        # Every box left blank means the restock cost nothing, which is a
+        # recorded price rather than a missing one.
+        now = time.time()
+        self._restocked(raffle_store, now, deposit_at=now - 2000)
+        headers = self._officer_headers(guild)
+        listed = await (
+            await client.get(
+                "/api/food", params={"range": "24h"}, headers=headers
+            )
+        ).json()
+        log_id = listed["feasts"][0]["additions"][0]["log_id"]
+
+        await client.post(
+            "/api/food/cost",
+            json={"log_id": log_id, "cost": 0},
+            headers=headers,
+        )
+
+        reloaded = await (
+            await client.get(
+                "/api/food", params={"range": "24h"}, headers=headers
+            )
+        ).json()
+        assert reloaded["feasts"][0]["additions"][0]["cost"] == 0
+
+
+class TestFoodCostApi:
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    def _priceable(self, raffle_store: RaffleStore) -> int:
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 10}, now - 3000)
+        raffle_store.record_feast_counts({1078: 40}, now - 1000)
+        series = raffle_store.get_feast_stock_series(0.0)
+        return series[1078].samples[-1].log_id
+
+    async def test_member_without_role_is_forbidden(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.post(
+            "/api/food/cost",
+            json={"log_id": 1, "cost": 100},
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert await response.json() == {"error": "forbidden"}
+
+    async def test_rejects_a_malformed_body(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.post(
+            "/api/food/cost",
+            data="not json",
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid request"}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"cost": 100},
+            {"log_id": 1},
+            {"log_id": "1", "cost": 100},
+            {"log_id": 1, "cost": "100"},
+            {"log_id": 1, "cost": -1},
+            {"log_id": 0, "cost": 100},
+            {"log_id": True, "cost": 100},
+            {"log_id": 1, "cost": True},
+            {"log_id": 1, "cost": MAX_FEAST_COST_COPPER + 1},
+        ],
+    )
+    async def test_rejects_a_cost_it_cannot_read(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        body: dict[str, object],
+    ) -> None:
+        response = await client.post(
+            "/api/food/cost",
+            json=body,
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid request"}
+
+    async def test_refuses_a_restock_that_is_not_there(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.post(
+            "/api/food/cost",
+            json={"log_id": 4242, "cost": 100},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 404
+        assert await response.json() == {"error": "unknown restock"}
+
+    async def test_a_failed_write_is_reported_without_its_cause(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        log_id = self._priceable(raffle_store)
+        with patch.object(
+            raffle_store,
+            "set_feast_addition_cost",
+            side_effect=SQLAlchemyError("secret-connection-string"),
+        ):
+            with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+                response = await client.post(
+                    "/api/food/cost",
+                    json={"log_id": log_id, "cost": 100},
+                    headers=self._officer_headers(guild),
+                )
+
+        assert response.status == 500
+        assert await response.json() == {"error": "cost unavailable"}
+        assert "secret-connection-string" not in caplog.text
+
+    async def test_a_ledger_that_cannot_be_read_still_draws_the_page(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The chart and the removals are what the page is read for, so an
+        # unreadable deposit ledger costs the Additions table its names and
+        # nothing else.
+        self._priceable(raffle_store)
+        with patch.object(
+            raffle_store,
+            "get_feast_restocks",
+            side_effect=SQLAlchemyError("secret-connection-string"),
+        ):
+            with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+                response = await client.get(
+                    "/api/food",
+                    params={"range": "24h"},
+                    headers=self._officer_headers(guild),
+                )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert [
+            addition["users"]
+            for addition in payload["feasts"][0]["additions"]
+        ] == [[]]
+        assert "secret-connection-string" not in caplog.text
+
+    async def test_costs_that_cannot_be_read_leave_the_column_empty(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        log_id = self._priceable(raffle_store)
+        raffle_store.set_feast_addition_cost(log_id, 5000, SESSION_USER_ID)
+        with patch.object(
+            raffle_store,
+            "get_feast_addition_costs",
+            side_effect=SQLAlchemyError("secret-connection-string"),
+        ):
+            with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+                response = await client.get(
+                    "/api/food",
+                    params={"range": "24h"},
+                    headers=self._officer_headers(guild),
+                )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert [
+            addition["cost"]
+            for addition in payload["feasts"][0]["additions"]
+        ] == [None]
+        assert "secret-connection-string" not in caplog.text

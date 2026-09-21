@@ -8,8 +8,10 @@ from gw2bot.raffle import (
     parse_guild_leave,
     parse_guild_rank_change,
 )
+from gw2bot.raffle.events import parse_feast_deposit
 
 from factories import (
+    feast_deposit,
     gold_deposit,
     guild_invite,
     guild_join,
@@ -131,3 +133,51 @@ class TestRaffleEventParsing:
         assert self_change.message == (
             "Member.1234's guild rank changed from Trial to Sunborne."
         )
+
+
+class TestFeastDepositParsing:
+    def test_reads_a_tracked_feast_deposit(self) -> None:
+        parsed = parse_feast_deposit(
+            feast_deposit(11, username="Cook.1234", count=25)
+        )
+
+        assert parsed is not None
+        assert parsed.event_id == 11
+        assert parsed.guild_storage_id == 1078
+        assert parsed.username == "Cook.1234"
+        assert parsed.count == 25
+        assert parsed.event_time == "2026-06-07T06:26:17.000Z"
+
+    def test_ignores_an_untracked_guild_upgrade(self) -> None:
+        # Guild upgrades that are not one of the four feasts the dashboard
+        # follows say nothing about the shelves it draws.
+        event = feast_deposit(11, guild_storage_id=42)
+
+        assert parse_feast_deposit(event) is None
+
+    def test_ignores_an_upgrade_that_was_not_completed(self) -> None:
+        event = feast_deposit(11)
+        event["action"] = "queued"
+
+        assert parse_feast_deposit(event) is None
+
+    def test_ignores_an_event_naming_nobody(self) -> None:
+        event = feast_deposit(11)
+        event["user"] = ""
+
+        assert parse_feast_deposit(event) is None
+
+    def test_ignores_an_event_carrying_no_count(self) -> None:
+        assert parse_feast_deposit(feast_deposit(11, count=0)) is None
+
+    def test_ignores_an_unreadable_count_or_upgrade(self) -> None:
+        unreadable = feast_deposit(11)
+        unreadable["count"] = "many"
+        assert parse_feast_deposit(unreadable) is None
+
+        missing = feast_deposit(11)
+        del missing["upgrade_id"]
+        assert parse_feast_deposit(missing) is None
+
+    def test_ignores_a_stash_event(self) -> None:
+        assert parse_feast_deposit(gold_deposit(11)) is None

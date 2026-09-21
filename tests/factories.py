@@ -59,6 +59,29 @@ def gold_withdrawal(
     }
 
 
+def feast_deposit(
+    event_id: int,
+    username: str = "Cook.1234",
+    guild_storage_id: int = 1078,
+    count: int = 25,
+    event_time: str = "2026-06-07T06:26:17.000Z",
+) -> dict[str, object]:
+    """One guild-log event placing tracked feasts into Guild Storage.
+
+    Guild consumables reach storage as ``upgrade`` events, not ``stash``
+    ones, and their ``upgrade_id`` is the same id Guild Storage reports.
+    """
+    return {
+        "id": event_id,
+        "time": event_time,
+        "type": "upgrade",
+        "user": username,
+        "action": "completed",
+        "upgrade_id": guild_storage_id,
+        "count": count,
+    }
+
+
 def guild_leave(
     event_id: int,
     username: str = "Username.1234",

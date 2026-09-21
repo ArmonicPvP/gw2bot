@@ -142,16 +142,117 @@ main {
 #chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.75rem; }
 .tabs button { font-size: 0.8rem; }
-table.removals { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-table.removals th, table.removals td {
+table.removals, table.additions {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+table.removals th, table.removals td,
+table.additions th, table.additions td {
   text-align: left;
   padding: 0.4rem 0.6rem;
   border-bottom: 1px solid var(--border);
 }
-table.removals th { color: var(--muted); font-weight: 600; }
-table.removals td.num {
+table.removals th, table.additions th {
+  color: var(--muted);
+  font-weight: 600;
+}
+table.removals td.num, table.additions td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+/* Additions are that table with three more columns, so they share every rule
+   above and add only what the extra columns need. */
+/* Six narrow columns read as a row, so only the account names wrap; the
+   rest keep their line and the table scrolls instead. */
+table.additions th, table.additions td { white-space: nowrap; }
+table.additions td.user { white-space: normal; }
+table.additions th.actions, table.additions td.actions { text-align: right; }
+/* A restock nobody has priced yet is the row an officer opened this section
+   to act on, so it is tinted rather than left to be found by reading down
+   the column. */
+table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
+/* Six columns are more than a phone has room for, so the table scrolls
+   sideways inside its card rather than pushing the page wider. */
+.table-scroll { overflow-x: auto; }
+.table-scroll table { min-width: 34rem; }
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  line-height: 0;
+}
+.icon-button:hover { color: var(--text); background: var(--panel-2); }
+.icon-button svg { pointer-events: none; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* The cost editor. The shared reset zeroes every margin, which takes the
+   centring a modal dialog normally gets from the user agent with it. */
+.cost-dialog {
+  margin: auto;
+  width: min(22rem, calc(100vw - 2rem));
+  padding: 1rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.cost-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.cost-dialog h2 { font-size: 1rem; margin-bottom: 0.35rem; }
+.cost-subject { color: var(--muted); font-size: 0.82rem; }
+/* The three boxes read as one price: {n}g {n}s {n}c on a single line. */
+.cost-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+  margin: 0.9rem 0 0.4rem;
+}
+.coin-field { display: inline-flex; align-items: baseline; gap: 0.15rem; }
+.coin-field input {
+  width: 4.5rem;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.4rem;
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
+}
+/* The spinner arrows sit on top of a three-digit figure in a box this
+   narrow, and a price is typed rather than stepped to. */
+.coin-field input {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.coin-field input::-webkit-outer-spin-button,
+.coin-field input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.coin-unit { color: var(--muted); font-size: 0.85rem; }
+.cost-error { color: var(--full); font-size: 0.82rem; min-height: 1.2em; }
+.cost-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
 }
 .empty { color: var(--muted); padding: 0.6rem; }
 .pager {
@@ -218,7 +319,44 @@ button:focus-visible {
     <div id="table"></div>
     <div id="pager" class="pager"></div>
   </section>
+  <section class="card">
+    <h2>Additions</h2>
+    <div id="add-tabs" class="tabs"></div>
+    <div id="add-table"></div>
+    <div id="add-pager" class="pager"></div>
+  </section>
 </main>
+<dialog id="cost-dialog" class="cost-dialog" aria-labelledby="cost-title">
+  <form id="cost-form">
+    <h2 id="cost-title">Cost</h2>
+    <p id="cost-subject" class="cost-subject"></p>
+    <div class="cost-row">
+      <span class="coin-field">
+        <label class="visually-hidden" for="cost-gold">Gold</label>
+        <input id="cost-gold" type="number" min="0" step="1"
+          inputmode="numeric" autocomplete="off">
+        <span class="coin-unit" aria-hidden="true">g</span>
+      </span>
+      <span class="coin-field">
+        <label class="visually-hidden" for="cost-silver">Silver</label>
+        <input id="cost-silver" type="number" min="0" step="1"
+          inputmode="numeric" autocomplete="off">
+        <span class="coin-unit" aria-hidden="true">s</span>
+      </span>
+      <span class="coin-field">
+        <label class="visually-hidden" for="cost-copper">Copper</label>
+        <input id="cost-copper" type="number" min="0" step="1"
+          inputmode="numeric" autocomplete="off">
+        <span class="coin-unit" aria-hidden="true">c</span>
+      </span>
+    </div>
+    <p id="cost-error" class="cost-error" role="status" aria-live="polite"></p>
+    <div class="cost-actions">
+      <button type="button" id="cost-cancel">Cancel</button>
+      <button type="submit" id="cost-save">Save</button>
+    </div>
+  </form>
+</dialog>
 <script>
 "use strict";
 (function () {
@@ -226,6 +364,12 @@ button:focus-visible {
   var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
   var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 5;
+  var COPPER_PER_SILVER = 100;
+  var COPPER_PER_GOLD = 100 * COPPER_PER_SILVER;
+  // The ceiling the server holds a recorded cost to, mirrored here so a
+  // mistyped figure is named at the keyboard rather than coming back as a
+  // rejected save.
+  var MAX_COST_COPPER = 2000000 * COPPER_PER_GOLD;
   // Smallest count the y axis ever reaches, so a window that never rose above
   // a couple of feasts still gets readable gridlines rather than a scale
   // squeezed onto one or two of them.
@@ -261,7 +405,12 @@ button:focus-visible {
     // No range until the server answers: the first load asks for the window
     // this member last picked rather than naming one over the top of it.
     range: null, data: null, activeFeast: 0, tablePage: 0, hidden: {},
-    staircase: false, scale: null
+    staircase: false, scale: null,
+    // The Additions table keeps its own feast and page: an officer pricing a
+    // restock is reading a different question than the removals above it.
+    activeAddition: 0, additionPage: 0,
+    // The restock the cost dialog is open over, or null while it is closed.
+    editing: null
   };
 
   // A pinned touch selection listens on the whole page, so the chart it
@@ -275,6 +424,19 @@ button:focus-visible {
   var tabs = document.getElementById("tabs");
   var tableBox = document.getElementById("table");
   var pager = document.getElementById("pager");
+  var addTabs = document.getElementById("add-tabs");
+  var addTableBox = document.getElementById("add-table");
+  var addPager = document.getElementById("add-pager");
+  var costDialog = document.getElementById("cost-dialog");
+  var costForm = document.getElementById("cost-form");
+  var costSubject = document.getElementById("cost-subject");
+  var costError = document.getElementById("cost-error");
+  var costSave = document.getElementById("cost-save");
+  var costFields = {
+    gold: document.getElementById("cost-gold"),
+    silver: document.getElementById("cost-silver"),
+    copper: document.getElementById("cost-copper")
+  };
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -910,11 +1072,292 @@ button:focus-visible {
       " (" + removals.length + " removals)"));
   }
 
+  // --- Additions ----------------------------------------------------------
+
+  // The whole coin price as gold, silver and copper, dropping the units a
+  // price does not reach: 1g 0s 5c keeps its silver, 5c does not gain one.
+  function formatCoins(copper) {
+    var remaining = Math.max(0, Math.round(copper));
+    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
+    remaining -= goldCoins * COPPER_PER_GOLD;
+    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
+    var copperCoins = remaining % COPPER_PER_SILVER;
+    var parts = [];
+    if (goldCoins) { parts.push(goldCoins.toLocaleString() + "g"); }
+    if (silverCoins || goldCoins) { parts.push(silverCoins + "s"); }
+    parts.push(copperCoins + "c");
+    return parts.join(" ");
+  }
+
+  function pencilIcon() {
+    var icon = svg("svg", {
+      viewBox: "0 0 24 24",
+      width: "16",
+      height: "16",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "2",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true"
+    });
+    icon.appendChild(svg("path", {
+      d: "M12 20h9"
+    }));
+    icon.appendChild(svg("path", {
+      d: "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"
+    }));
+    return icon;
+  }
+
+  function additionFeast() {
+    return feasts()[state.activeAddition] || null;
+  }
+
+  function additionsOf(feast) {
+    return (feast && feast.additions) || [];
+  }
+
+  // Sanitized tracing for a cost save: the action and the outcome only. No
+  // account name, price or restock ever reaches the console.
+  function traceCost(action, outcome) {
+    console.debug("feast cost:", action, outcome);
+  }
+
+  function renderAdditionTabs() {
+    addTabs.replaceChildren();
+    feasts().forEach(function (feast, index) {
+      var button = el("button", null, feast.name);
+      button.type = "button";
+      var active = index === state.activeAddition;
+      if (active) { button.classList.add("active"); }
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.addEventListener("click", function () {
+        state.activeAddition = index;
+        state.additionPage = 0;
+        renderAdditionTabs();
+        renderAdditions();
+      });
+      addTabs.appendChild(button);
+    });
+  }
+
+  function renderAdditions() {
+    addTableBox.replaceChildren();
+    addPager.replaceChildren();
+    var feast = additionFeast();
+    var additions = additionsOf(feast);
+    if (!additions.length) {
+      addTableBox.appendChild(
+        el("div", "empty", "No additions were recorded in this period."));
+      return;
+    }
+    var pageCount = Math.ceil(additions.length / TABLE_PAGE_SIZE);
+    if (state.additionPage > pageCount - 1) {
+      state.additionPage = pageCount - 1;
+    }
+    var start = state.additionPage * TABLE_PAGE_SIZE;
+    var pageRows = additions.slice(start, start + TABLE_PAGE_SIZE);
+
+    var table = el("table", "additions");
+    var head = el("tr");
+    head.appendChild(el("th", null, "Time"));
+    head.appendChild(el("th", null, "User"));
+    head.appendChild(el("th", null, "Added"));
+    head.appendChild(el("th", null, "Remaining"));
+    head.appendChild(el("th", null, "Cost"));
+    head.appendChild(el("th", "actions", "Edit"));
+    table.appendChild(head);
+    pageRows.forEach(function (row) {
+      var priced = typeof row.cost === "number";
+      var tr = el("tr", priced ? null : "unpriced");
+      tr.appendChild(el("td", null, formatMoment(row.t)));
+      var users = row.users || [];
+      tr.appendChild(el("td", "user",
+        users.length ? users.join(", ") : "\u2014"));
+      tr.appendChild(el("td", "num", String(row.amount)));
+      tr.appendChild(el("td", "num", String(row.remaining)));
+      tr.appendChild(el("td", "num",
+        priced ? formatCoins(row.cost) : "\u2014"));
+      var actions = el("td", "actions");
+      var edit = el("button", "icon-button");
+      edit.type = "button";
+      edit.setAttribute("aria-haspopup", "dialog");
+      edit.setAttribute("aria-label", "Edit cost");
+      edit.title = "Edit cost";
+      edit.appendChild(pencilIcon());
+      edit.addEventListener("click", function () {
+        openCostDialog(feast, row);
+      });
+      actions.appendChild(edit);
+      tr.appendChild(actions);
+      table.appendChild(tr);
+    });
+    var scroll = el("div", "table-scroll");
+    scroll.appendChild(table);
+    addTableBox.appendChild(scroll);
+
+    var prev = el("button", null, "Prev");
+    prev.type = "button";
+    prev.disabled = state.additionPage <= 0;
+    prev.addEventListener("click", function () {
+      if (state.additionPage > 0) {
+        state.additionPage -= 1;
+        renderAdditions();
+      }
+    });
+    var next = el("button", null, "Next");
+    next.type = "button";
+    next.disabled = state.additionPage >= pageCount - 1;
+    next.addEventListener("click", function () {
+      if (state.additionPage < pageCount - 1) {
+        state.additionPage += 1;
+        renderAdditions();
+      }
+    });
+    addPager.appendChild(prev);
+    addPager.appendChild(next);
+    addPager.appendChild(el("span", null,
+      "Page " + (state.additionPage + 1) + " of " + pageCount +
+      " (" + additions.length + " additions)"));
+  }
+
+  // --- The cost dialog ------------------------------------------------------
+
+  // A recorded price fills the boxes it reaches and leaves the rest blank, so
+  // a cost of 1g opens as 1g rather than as 1g 0s 0c; a restock nobody has
+  // priced opens empty.
+  function fillCostFields(cost) {
+    if (typeof cost !== "number") {
+      costFields.gold.value = "";
+      costFields.silver.value = "";
+      costFields.copper.value = "";
+      return;
+    }
+    var remaining = Math.max(0, Math.round(cost));
+    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
+    remaining -= goldCoins * COPPER_PER_GOLD;
+    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
+    var copperCoins = remaining % COPPER_PER_SILVER;
+    costFields.gold.value = goldCoins ? String(goldCoins) : "";
+    costFields.silver.value = silverCoins ? String(silverCoins) : "";
+    costFields.copper.value = copperCoins ? String(copperCoins) : "";
+  }
+
+  function openCostDialog(feast, addition) {
+    state.editing = { feastId: feast ? feast.id : null, addition: addition };
+    costError.textContent = "";
+    costSave.disabled = false;
+    costSubject.textContent =
+      (feast ? feast.name : "") + " \u00b7 " + formatMoment(addition.t) +
+      " \u00b7 " + addition.amount + " added";
+    fillCostFields(addition.cost);
+    traceCost("open", typeof addition.cost === "number" ? "priced" : "empty");
+    costDialog.showModal();
+    costFields.gold.focus();
+  }
+
+  function closeCostDialog() {
+    state.editing = null;
+    if (costDialog.open) { costDialog.close(); }
+  }
+
+  // A blank box is zero, which is what makes 5c a price a reader can type as
+  // one box rather than three. Anything that is not a whole count of coins is
+  // refused instead of being rounded into a price nobody entered.
+  function readCoinField(input) {
+    var raw = input.value.trim();
+    if (raw === "") { return 0; }
+    if (!/^[0-9]+$/.test(raw)) { return null; }
+    var value = Number(raw);
+    return Number.isSafeInteger(value) ? value : null;
+  }
+
+  function readCost() {
+    var goldCoins = readCoinField(costFields.gold);
+    var silverCoins = readCoinField(costFields.silver);
+    var copperCoins = readCoinField(costFields.copper);
+    if (goldCoins === null || silverCoins === null || copperCoins === null) {
+      return { error: "Enter whole numbers of coins, or leave a box blank." };
+    }
+    var total = goldCoins * COPPER_PER_GOLD +
+      silverCoins * COPPER_PER_SILVER + copperCoins;
+    if (total > MAX_COST_COPPER) {
+      return { error: "That is more gold than an account can hold." };
+    }
+    return { cost: total };
+  }
+
+  function saveCost() {
+    var editing = state.editing;
+    if (!editing) { return; }
+    var read = readCost();
+    if (read.error) {
+      costError.textContent = read.error;
+      traceCost("reject", "fields");
+      return;
+    }
+    var addition = editing.addition;
+    costError.textContent = "";
+    costSave.disabled = true;
+    fetch("/api/food/cost", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ log_id: addition.log_id, cost: read.cost })
+    })
+      .then(function (response) {
+        if (response.status === 401) {
+          location.href = "/login";
+          throw new Error("unauthorized");
+        }
+        if (!response.ok) { throw new Error("failed"); }
+        return response.json();
+      })
+      .then(function (payload) {
+        addition.cost = payload.cost;
+        traceCost("save", "stored");
+        closeCostDialog();
+        renderAdditions();
+      })
+      .catch(function (error) {
+        // Only the error's type and message are logged; no price, account or
+        // response body is ever passed through.
+        console.error(
+          "feast cost save failed:",
+          error && error.name, error && error.message);
+        costSave.disabled = false;
+        costError.textContent = "Could not save that cost.";
+      });
+  }
+
+  costForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    saveCost();
+  });
+  var costCancel = document.getElementById("cost-cancel");
+  costCancel.addEventListener("click", function () {
+    traceCost("cancel", "button");
+    closeCostDialog();
+  });
+  // Escape closes a dialog itself; this keeps the page's own record of what
+  // is open in step with it.
+  costDialog.addEventListener("close", function () { state.editing = null; });
+  costDialog.addEventListener("click", function (event) {
+    // A modal dialog's backdrop is part of the dialog element, so a click
+    // that lands on the element itself landed outside the form.
+    if (event.target === costDialog) {
+      traceCost("cancel", "backdrop");
+      closeCostDialog();
+    }
+  });
+
   function render() {
     renderLegend();
     renderChart();
     renderTabs();
     renderTable();
+    renderAdditionTabs();
+    renderAdditions();
   }
 
 """
@@ -937,7 +1380,14 @@ button:focus-visible {
         if (state.activeFeast >= (payload.feasts || []).length) {
           state.activeFeast = 0;
         }
+        if (state.activeAddition >= (payload.feasts || []).length) {
+          state.activeAddition = 0;
+        }
         state.tablePage = 0;
+        state.additionPage = 0;
+        // The rows behind the dialog have just been replaced, so whatever it
+        // was opened over is gone.
+        closeCostDialog();
         render();
       })
       .catch(function (error) {

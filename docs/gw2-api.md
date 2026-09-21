@@ -265,6 +265,15 @@ Accounts with the exact rank `Officer` receive raffle tickets only for
 individual deposits of 10 gold or less. Larger Officer deposits are ignored by
 the raffle workflow and do not produce deposit notifications.
 
+Guild consumables reach Guild Storage as `upgrade` events rather than as
+`stash` ones. A deposit is the `completed` action carrying `user`, `upgrade_id`
+and `count`, and that `upgrade_id` resolves against `/v2/guild/upgrades` - the
+same ids `/v2/guild/:id/storage` reports, which is what lets a deposit be
+matched to a tracked feast. The bot stores those for the four tracked feasts so
+the feast dashboard's Additions table can name who restocked, and ignores every
+other upgrade action (`queued`, `cancelled`, `sped_up`) and every untracked
+upgrade id.
+
 Voluntary member departures are `kick` events where `user` and `kicked_by` are
 the same account. A `kick` event with a different `kicked_by` account means
 someone removed the member and is not reported as a voluntary leave. The bot
