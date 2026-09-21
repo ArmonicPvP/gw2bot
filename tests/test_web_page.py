@@ -1909,6 +1909,53 @@ class TestRosterPendingInvites:
             ROSTER_PAGE
         )
 
+    def test_each_invite_says_when_it_was_sent(self) -> None:
+        # A short date is as much as the column has room for, so the rest of
+        # the moment rides on the cell's tooltip rather than being dropped.
+        assert 'el("th", null, "Invite sent")' in ROSTER_PAGE
+        assert (
+            'el("td", "invited", formatShortDate(invite.invited_at))'
+            in ROSTER_PAGE
+        )
+        assert "sent.title = formatMomentWithAge(invite.invited_at);" in (
+            ROSTER_PAGE
+        )
+        assert "function formatShortDate(t)" in ROSTER_PAGE
+        assert 'undefined, { month: "short", day: "numeric" });' in ROSTER_PAGE
+        # Two words that must not be split across lines for the sake of three
+        # characters.
+        assert "table.changes td.invited { white-space: nowrap; }" in (
+            ROSTER_PAGE
+        )
+
+    def test_the_tooltip_reads_as_a_moment_and_an_age(self) -> None:
+        # "Sep 20, 9:30 PM | 7 days ago": the same moment the membership
+        # table's Time column shows, and how long ago it was.
+        assert "function formatMomentWithAge(t)" in ROSTER_PAGE
+        assert 'return formatMoment(t) + " | " +' in ROSTER_PAGE
+        assert (
+            "formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));"
+            in ROSTER_PAGE
+        )
+        # Minutes, hours and days, and a singular unit counted as one.
+        assert 'if (seconds < 60) { return "just now"; }' in ROSTER_PAGE
+        assert 'countedAge(Math.floor(seconds / 60), "minute")' in ROSTER_PAGE
+        assert 'countedAge(Math.floor(seconds / 3600), "hour")' in ROSTER_PAGE
+        assert 'countedAge(Math.floor(seconds / 86400), "day")' in ROSTER_PAGE
+        assert (
+            'return value + " " + unit + (value === 1 ? "" : "s") + " ago";'
+            in ROSTER_PAGE
+        )
+
+    def test_an_invite_the_api_did_not_date_is_not_given_one(self) -> None:
+        # The GW2 API may date a member with nothing at all, and an age drawn
+        # from a stand-in date would be an assertion the server never made.
+        assert 'if (typeof invite.invited_at === "number") {' in ROSTER_PAGE
+        assert 'el("td", "invited undated", "Unknown")' in ROSTER_PAGE
+        assert "table.changes td.undated { color: var(--muted); }" in (
+            ROSTER_PAGE
+        )
+
     def test_tracing_carries_no_account_or_discord_name(self) -> None:
         # Only a fixed action name and a row count reach the console.
         assert 'console.debug("roster pending invites:", action, count)' in (

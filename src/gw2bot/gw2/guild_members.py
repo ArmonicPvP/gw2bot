@@ -289,6 +289,33 @@ def get_pending_invite_members(
     return result
 
 
+def get_pending_invite_times(
+    members: list[dict[str, Any]],
+) -> dict[str, datetime]:
+    """When each invited account was sent its invitation, by account name.
+
+    An invited account carries the same ``joined`` timestamp an accepted one
+    does, and because it has not accepted anything yet, that moment is when the
+    invitation was sent. The field is optional - the API has always been
+    allowed to answer with ``null`` - so an account whose timestamp is missing
+    or unreadable is absent here rather than dated with a guess.
+    """
+    times: dict[str, datetime] = {}
+    for member in members:
+        if str(member.get("rank", "")).strip().casefold() != INVITED_RANK:
+            continue
+        name = str(member.get("name", "")).strip()
+        invited = _parse_api_datetime(member.get("joined"))
+        if name and invited is not None:
+            times[name] = invited
+    LOGGER.debug(
+        "Evaluated %s guild members; pending_invites_dated=%s",
+        len(members),
+        len(times),
+    )
+    return times
+
+
 def partition_tracked_overdue_members(
     overdue: list[str],
     tracked: set[str],

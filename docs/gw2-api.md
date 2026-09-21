@@ -280,7 +280,15 @@ guild log at each boundary before posting contributors.
 Returns account name, rank, join timestamp, and WvW membership selection for
 each guild member. The bot checks this endpoint daily at 17:00 UTC, then
 reports members whose rank is `Trial` and whose join timestamp is at
-least 14 days old. Before posting the report, the bot searches the configured
+least 14 days old.
+
+An account that has been invited and has not accepted yet is on this list with
+the lowercase rank `invited`, and its `joined` is the moment the invitation was
+sent - it has joined nothing to be dated by. That is what the roster page's
+**Invite sent** column reads. `joined` is optional on every member, invited or
+not: the API has always been allowed to answer `null` for it, so a pending
+invite with no readable timestamp is left undated rather than dated with a
+guess. Before posting the report, the bot searches the configured
 Discord Trial application forum's `Accepted` posts for each GW2 account name
 and includes the linked post creator's Discord mention. The cached or current
 Trial or Sunborne role is included when available.

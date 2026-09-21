@@ -195,6 +195,12 @@ table.changes .dot {
 /* A Discord display name has no spaces to break at either, so it is bounded
    the same way an account name is. */
 table.changes td.discord { overflow-wrap: anywhere; }
+/* A short date is two words with a space in the middle, and wrapping at it
+   would cost the row a second line for the sake of three characters. */
+table.changes td.invited { white-space: nowrap; }
+/* An invited account the GW2 API dated with nothing has no invite date to
+   show, so the word standing in for one reads as an absence. */
+table.changes td.undated { color: var(--muted); }
 /* An invited account that no application post matched has no Discord name to
    show, and the reason reads as an absence rather than as a name. */
 table.changes td.unmatched { color: var(--muted); }
@@ -441,6 +447,39 @@ button:focus-visible {
         hour: "numeric",
         minute: "2-digit"
       });
+  }
+  // "Jun 17": as much of a moment as a narrow column has room for. What it
+  // leaves out is on the cell's tooltip rather than lost.
+  function formatShortDate(t) {
+    return new Date(t * 1000).toLocaleDateString(
+      undefined, { month: "short", day: "numeric" });
+  }
+  function countedAge(value, unit) {
+    return value + " " + unit + (value === 1 ? "" : "s") + " ago";
+  }
+  // "3 minutes ago", "7 days ago". Coarse on purpose: the moment itself is
+  // beside it, and what an age is read for is how stale something is rather
+  // than a count to the second. Days are the largest unit, so a wait of weeks
+  // is still counted in a unit a reader can compare against the 14-day Trial
+  // clock without converting it back.
+  function formatAge(seconds) {
+    if (seconds < 60) { return "just now"; }
+    if (seconds < 3600) {
+      return countedAge(Math.floor(seconds / 60), "minute");
+    }
+    if (seconds < 86400) {
+      return countedAge(Math.floor(seconds / 3600), "hour");
+    }
+    return countedAge(Math.floor(seconds / 86400), "day");
+  }
+  // "Sep 20, 9:30 PM | 7 days ago": the moment the membership table shows in
+  // full, and how long ago it was by the reader's own clock. A clock running
+  // a little behind the server's would otherwise date an invite in the
+  // future, which formatAge() reads as "just now" rather than as a negative
+  // age.
+  function formatMomentWithAge(t) {
+    return formatMoment(t) + " | " +
+      formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));
   }
 
   function renderChart() {
@@ -992,6 +1031,7 @@ button:focus-visible {
     var head = el("tr");
     head.appendChild(el("th", null, "Account"));
     head.appendChild(el("th", null, "Discord"));
+    head.appendChild(el("th", null, "Invite sent"));
     table.appendChild(head);
     invites.forEach(function (invite) {
       var row = el("tr");
@@ -1008,6 +1048,17 @@ button:focus-visible {
         : el("td", "discord unmatched", matched
           ? "No application matched"
           : "Could not be checked"));
+      // The column has room for the date alone, so the rest of the moment and
+      // how long ago it was are on the cell's tooltip. The GW2 API may date a
+      // member with nothing at all, and a row it told us nothing about says
+      // so rather than standing in a date of its own.
+      if (typeof invite.invited_at === "number") {
+        var sent = el("td", "invited", formatShortDate(invite.invited_at));
+        sent.title = formatMomentWithAge(invite.invited_at);
+        row.appendChild(sent);
+      } else {
+        row.appendChild(el("td", "invited undated", "Unknown"));
+      }
       table.appendChild(row);
     });
     pendingBox.appendChild(table);

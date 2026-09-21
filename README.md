@@ -1913,10 +1913,17 @@ Below the changes, a **Pending invites** section lists the accounts that have
 been invited in-game and have not accepted yet — the `y` of the `x/500 (y
 pending)` channel description, named rather than counted. Each row carries the
 account name and the display name of the Discord account whose `Accepted`
-application post matched it, or "No application matched" when none did. If the
-application forum could not be read in full, the rows without a name say
-"Could not be checked" instead - a name that is shown was matched either way -
-and that answer is not cached, because an unread post is not evidence that
+application post matched it, or "No application matched" when none did. An
+**Invite sent** column dates each one as a short date such as `Jun 17`, with
+the moment in full and how long ago it was — `Sep 20, 9:30 PM | 7 days ago`,
+`Mar 9, 12:16 AM | 3 minutes ago` — on hover. The date is the timestamp the
+GW2 API carries for the invited account, which, having accepted nothing, is
+when the invitation went out; the API is allowed to carry none at all, and a
+row it dated with nothing reads "Unknown" rather than being given a date of
+its own. If the application forum could not be read in full, the rows without
+a name say "Could not be checked" instead - a name that is shown was matched
+either way - and that answer is not cached, because an unread post is not
+evidence that
 nobody applied. A Discord name the API could not answer for is not cached
 either, so it is retried rather than held at "Unknown" for the rest of the
 window. The

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -26,8 +27,12 @@ from gw2bot.invites import (
 from gw2bot.trials.reports import TrialForumMatches
 
 
-def guild_member(name: str, rank: str) -> dict[str, object]:
-    return {"name": name, "rank": rank}
+def guild_member(
+    name: str,
+    rank: str,
+    joined: str | None = None,
+) -> dict[str, object]:
+    return {"name": name, "rank": rank, "joined": joined}
 
 
 def api_bot(members: list[dict[str, object]], **attributes: object):
@@ -80,12 +85,41 @@ class TestPendingInviteEntries:
             ["Waiting.1234"], resolve_status=False
         )
 
+    async def test_dates_each_invite_from_the_guild_member_list(self) -> None:
+        # An invited account has accepted nothing, so the timestamp the GW2
+        # API gives it is the moment the invitation was sent. An account the
+        # API dated with nothing is absent rather than dated with a guess.
+        bot = api_bot(
+            [
+                guild_member(
+                    "Waiting.1234", "invited", "2026-06-17T21:30:00Z"
+                ),
+                guild_member("Undated.5678", "invited"),
+                guild_member(
+                    "Member.9012", "Sunborne", "2026-01-01T00:00:00Z"
+                ),
+            ]
+        )
+
+        pending = await build_pending_invite_entries(cast(Gw2Bot, bot))
+
+        assert pending.invited_at == {
+            "Waiting.1234": datetime(2026, 6, 17, 21, 30, tzinfo=UTC),
+        }
+        # The dates are keyed by the same names the entries carry, so a
+        # caller can pair them up without matching on anything else.
+        assert [entry.username for entry in pending.entries] == [
+            "Undated.5678",
+            "Waiting.1234",
+        ]
+
     async def test_does_not_touch_discord_when_nobody_is_waiting(self) -> None:
         bot = api_bot([guild_member("Member.9012", "Sunborne")])
 
         pending = await build_pending_invite_entries(cast(Gw2Bot, bot))
 
         assert pending.entries == []
+        assert pending.invited_at == {}
         # Nothing was asked about, so nothing is unmatched.
         assert pending.forum_read
         # Matching costs a refresh of the Trial application forum index, and
