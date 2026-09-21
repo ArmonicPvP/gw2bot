@@ -527,10 +527,14 @@ PROFIT_SCRIPT = (
       trace("charts-invalid-window", 0);
       return [];
     }
-    var expectedStart = new Date(end.getTime());
-    expectedStart.setUTCDate(expectedStart.getUTCDate() - data.days + 1);
-    if (isoDay(start) !== isoDay(expectedStart)) {
-      trace("charts-window-mismatch", 0);
+    // One bar per UTC date the window touches, which is what the window's
+    // two bounds say and not what its length in days says: 24h is one day
+    // long and lands on two dates whenever it is read away from midnight.
+    // Counted in whole days from the two midnights, so the hour either bound
+    // falls on never rounds a date off the axis.
+    var dates = Math.round((end - start) / 86400000) + 1;
+    if (dates > MAX_CUSTOM_DAYS + 1) {
+      trace("charts-window-too-wide", dates);
       return [];
     }
     var points = [];
@@ -543,7 +547,7 @@ PROFIT_SCRIPT = (
     // sum and are drawn nowhere.
     var cursor = new Date(start.getTime());
     cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));
-    var buckets = data.days + ROLLING_DAYS - 1;
+    var buckets = dates + ROLLING_DAYS - 1;
     for (var bucket = 0; bucket < buckets; bucket += 1) {
       var date = isoDay(cursor);
       var trailed = Object.prototype.hasOwnProperty.call(trailingByDate, date)
@@ -1155,11 +1159,20 @@ PROFIT_SCRIPT = (
     var worstDay = extreme(data.days_table, false);
     // A rolling window is named by its length, because that is what the
     // member asked for; a picked pair is named by the dates themselves,
-    // which is what they asked for instead.
-    var windowLabel = data.range === "custom"
-      ? shortDate(data.window.start_date, showYear) + " \u2013 "
-        + shortDate(data.window.end_date, showYear)
-      : "Last " + data.days + " day" + (data.days === 1 ? "" : "s");
+    // which is what they asked for instead. The 24h button is named in the
+    // unit it is measured in: it covers the last twenty-four hours, not the
+    // date it opens partway through, and "Last 1 day" would read as that
+    // date to anyone who opened it in the morning.
+    var windowLabel;
+    if (data.range === "custom") {
+      windowLabel = shortDate(data.window.start_date, showYear) + " \u2013 "
+        + shortDate(data.window.end_date, showYear);
+    } else if (data.range === "24h") {
+      windowLabel = "Last 24 hours";
+    } else {
+      windowLabel = "Last " + data.days + " day"
+        + (data.days === 1 ? "" : "s");
+    }
     var rows = [
       ["Window", windowLabel],
       ["Buy transactions", summary.buy_transactions],

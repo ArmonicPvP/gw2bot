@@ -766,8 +766,20 @@ class ProfitService:
         opening_day = cutoff.date().isoformat()
         open_lots = self._store.get_open_lots(discord_user_id)
         excluded_items = self._store.get_excluded_profit_items(discord_user_id)
+        # A window opening at a midnight is a sum of whole stored dates. One
+        # opening mid-date - the 24h button - is not, and cutting the date it
+        # opens on at the hour is something only the trades themselves can
+        # answer, so those are matched again for it.
+        opening_midnight = cutoff.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        window_rows = (
+            [row for row in rollups if row[1] >= opening_day]
+            if cutoff == opening_midnight
+            else self._rematch_window(discord_user_id, cutoff, until)
+        )
         realized = aggregate_rollups(
-            [row for row in rollups if row[1] >= opening_day],
+            window_rows,
             open_lots,
             excluded_items=excluded_items,
         )
@@ -785,12 +797,13 @@ class ProfitService:
         }
         LOGGER.debug(
             "Read windowed profit report; user_id=%s rollups=%s "
-            "window_days=%s trailing_days=%s hidden_items=%s",
+            "window_days=%s trailing_days=%s hidden_items=%s rematched=%s",
             discord_user_id,
             len(rollups),
             len(realized.days),
             len(trailing_days),
             len(excluded_items),
+            len(window_rows) if cutoff != opening_midnight else 0,
         )
         return (
             realized,
@@ -809,6 +822,76 @@ class ProfitService:
             ),
         )
 
+    def _rematch_window(
+        self,
+        discord_user_id: int,
+        cutoff: datetime,
+        until: datetime | None,
+    ) -> list[tuple[int, str, ItemDayProfit]]:
+        """Match the sales inside a window that opens partway through a date.
+
+        The stored rollups are kept per whole UTC sale date, which is the
+        grain every other window is a sum of whole rows at. The 24h button
+        opens wherever the clock stands, so the date it opens on is a part of
+        a row rather than a row, and no addition over what is stored can cut
+        it at the hour. These sales are matched again for it instead.
+
+        The pass resumes from the newest lot checkpoint at or before the
+        window - the same checkpoints a late-arriving trade rewinds to - so it
+        reads back to the start of a month at worst rather than to the start
+        of the member's history. Sales before the window are matched but not
+        counted, which is what keeps the costs FIFO allocates here the same
+        ones the stored rows were built with.
+
+        A checkpoint holds the lots as they were, unpruned, which is what a
+        rewind resumes from too. So stock held past ``LOT_PRUNE_AFTER_DAYS``
+        and sold inside this window is costed from the purchases that built
+        it rather than from the averaged lot the stored rows may have merged
+        them into - a difference of rounding on positions older than a year,
+        and the same one a rewind already writes back.
+
+        The rows come back in the shape the stored ones have, so the caller
+        adds them up, and applies the member's hidden items to them, exactly
+        as it does for every other window.
+        """
+        resume = self._store.get_lot_checkpoint_at_or_before(
+            discord_user_id, cutoff
+        )
+        # A member whose trading is younger than the first month boundary
+        # behind them has no checkpoint yet, and correspondingly little to
+        # match from the beginning.
+        resume_at: datetime | None = None
+        opening_lots: dict[int, tuple[BuyLot, ...]] = {}
+        if resume is not None:
+            # A checkpoint holds what was held before its instant, so that
+            # instant is replayed rather than skipped.
+            resume_at, opening_lots = resume
+        buys = self._store.get_transactions(
+            discord_user_id, "history_buys", at_or_after=resume_at
+        )
+        sells = self._store.get_transactions(
+            discord_user_id, "history_sells", at_or_after=resume_at
+        )
+        realized = calculate_realized_profit(
+            buys,
+            sells,
+            with_item_days=True,
+            opening_lots=opening_lots,
+            counted_from=cutoff,
+            counted_through=until,
+        )
+        LOGGER.debug(
+            "Rematched a mid-date profit window; user_id=%s resumed=%s "
+            "transactions=%s rows=%s",
+            discord_user_id,
+            resume is not None,
+            len(buys) + len(sells),
+            len(realized.item_days),
+        )
+        return [
+            (item_id, sold_day, totals)
+            for (item_id, sold_day), totals in realized.item_days.items()
+        ]
 
     async def warm_item_facts(self) -> int:
         """Store the facts about every item the game has, before any report.

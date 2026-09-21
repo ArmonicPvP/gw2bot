@@ -184,9 +184,12 @@ class ProfitCommands(app_commands.Group):
         name="view",
         description="Open your Trading Post profit dashboard",
     )
+    # Discord caps an option's description at 100 characters, which this is
+    # comfortably inside; the 24h note earns its room because 1 is the one
+    # length that does not mean a run of whole UTC dates.
     @app_commands.describe(
         days=(
-            f"Days to report, from {MIN_REPORT_DAYS} through "
+            f"Days to report, {MIN_REPORT_DAYS} (the last 24h) through "
             f"{MAX_REPORT_DAYS}; leave empty to reopen your last window"
         )
     )

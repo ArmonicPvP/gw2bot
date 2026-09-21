@@ -21,6 +21,14 @@ ROLLING_AVERAGE_DAYS = 7
 # gold dashboards carry, so every page on the site reads the same way.
 PRESET_REPORT_RANGES: dict[str, int] = {"24h": 1, "7d": 7, "30d": 30}
 
+# The one preset named in hours rather than in days, and measured that way:
+# it covers the twenty-four hours before the report is read, the way the same
+# button does on the feast usage, roster and gold dashboards. Every other
+# window opens at a UTC midnight, which is what lets it be added up from the
+# stored daily results; this one opens wherever the clock says and is matched
+# from the trades themselves - see ``ProfitService._rematch_window``.
+HOURLY_PRESET_RANGE = "24h"
+
 
 # The category names the item endpoint gives with no useful meaning of their
 # own. An upgrade component is a "Default" one when it is neither a rune nor a
@@ -236,8 +244,11 @@ class OpenBuyOrder:
 class ReportSpan:
     """The two instants one report was built between.
 
-    ``days`` is how many whole UTC sale dates fall between them, which is the
-    number of buckets every daily table and chart draws.
+    ``days`` is the window's length in days, which is what the per-day
+    figures on the dashboard are divided by. It is not a count of the dates
+    the window touches: **24h** is one day long and lands on two UTC dates
+    whenever it is read at anything other than midnight. The daily table and
+    the charts take their buckets from the two instants instead.
     """
 
     days: int
@@ -253,7 +264,10 @@ class ReportWindow:
     whenever the report is read - or a pair of dates the member picked, in
     which case both bounds are set and ``days`` is how many whole UTC dates
     they span. The three preset buttons are rolling windows of 1, 7 and 30
-    days, so a preset costs nothing to store beyond its length.
+    days, so a preset costs nothing to store beyond its length. The one-day
+    preset is the **24h** button and is measured in hours from the present
+    rather than from midnight; ``span`` is where that parts company with the
+    rest.
     """
 
     days: int
@@ -327,9 +341,22 @@ class ReportWindow:
         second of its last day, or at the present when that day has not
         finished yet: nothing has been recorded for a moment that has not
         happened, and a window drawn out to one would trail a flat run.
+
+        **24h** is the exception every other bound here is worth reading
+        against: it opens twenty-four hours back rather than at the midnight
+        that opened today, because a button named in hours that reported five
+        minutes of trading at 00:05 UTC is not reporting the last twenty-four
+        hours. It is the only window that opens mid-date, so it is the only
+        one the daily results cannot simply be added up for.
         """
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         if self.start is None or self.end is None:
+            if self.range_key == HOURLY_PRESET_RANGE:
+                return ReportSpan(
+                    days=self.days,
+                    start=now - timedelta(days=self.days),
+                    end=now,
+                )
             return ReportSpan(
                 days=self.days,
                 start=midnight - timedelta(days=self.days - 1),
@@ -530,6 +557,8 @@ def calculate_realized_profit(
     *,
     with_item_days: bool = False,
     opening_lots: dict[int, tuple[BuyLot, ...]] | None = None,
+    counted_from: datetime | None = None,
+    counted_through: datetime | None = None,
 ) -> RealizedProfit:
     """Match sales to earlier purchases FIFO, mirroring the original bot.
 
@@ -540,6 +569,16 @@ def calculate_realized_profit(
     earlier pass. That is what lets a day's new sales be matched against the
     stock a member was already holding, without re-reading the years of
     history that established it.
+
+    ``counted_from`` and ``counted_through`` narrow what is *reported* without
+    narrowing what is *matched*: a sale outside them still takes its units
+    from the queue, because FIFO is a statement about the order trades
+    happened in and dropping one would hand its purchases to the next sale
+    along. Only sales inside them reach the totals. That is what lets a window
+    opening mid-date - the **24h** button - be reported on at all, since the
+    stored daily results cannot be cut at an hour. ``unmatched_buys`` is
+    unaffected: what is still held is what is still held, whichever sales were
+    counted.
     """
     events_by_item: dict[int, list[_Event]] = defaultdict(list)
     carried = {} if opening_lots is None else opening_lots
@@ -607,6 +646,16 @@ def calculate_realized_profit(
 
             sell_remaining = event.quantity
             sell_matched = 0
+            # Whether this sale is one the caller asked to be reported on.
+            # An uncounted sale is still matched below, and still empties the
+            # lots it takes, so the sales after it are costed from the
+            # purchases actually left rather than from ones already sold.
+            counted = (
+                counted_from is None or event.occurred_at >= counted_from
+            ) and (
+                counted_through is None
+                or event.occurred_at <= counted_through
+            )
             while (
                 sell_remaining > 0
                 and buy_lots
@@ -614,35 +663,36 @@ def calculate_realized_profit(
             ):
                 buy_lot = buy_lots[0]
                 matched = min(sell_remaining, buy_lot.remaining)
-                cost = buy_lot.unit_price * matched
-                net_revenue = allocated_net_revenue(
-                    event.unit_price,
-                    event.quantity,
-                    matched,
-                    previously_matched_quantity=sell_matched,
-                )
-                profit = net_revenue - cost
-                holding_seconds = max(
-                    0.0,
-                    (
-                        event.occurred_at - buy_lot.occurred_at
-                    ).total_seconds(),
-                )
-                holding_durations.append(
-                    (holding_seconds, matched)
-                )
-                item.matched_quantity += matched
-                item.cost += cost
-                item.net_revenue += net_revenue
-                item.profit += profit
+                if counted:
+                    cost = buy_lot.unit_price * matched
+                    net_revenue = allocated_net_revenue(
+                        event.unit_price,
+                        event.quantity,
+                        matched,
+                        previously_matched_quantity=sell_matched,
+                    )
+                    profit = net_revenue - cost
+                    holding_seconds = max(
+                        0.0,
+                        (
+                            event.occurred_at - buy_lot.occurred_at
+                        ).total_seconds(),
+                    )
+                    holding_durations.append(
+                        (holding_seconds, matched)
+                    )
+                    item.matched_quantity += matched
+                    item.cost += cost
+                    item.net_revenue += net_revenue
+                    item.profit += profit
 
-                sold_day = event.occurred_at.date().isoformat()
-                day = item_days[sold_day]
-                day.matched_quantity += matched
-                day.cost += cost
-                day.net_revenue += net_revenue
-                day.profit += profit
-                day.hold_seconds += holding_seconds * matched
+                    sold_day = event.occurred_at.date().isoformat()
+                    day = item_days[sold_day]
+                    day.matched_quantity += matched
+                    day.cost += cost
+                    day.net_revenue += net_revenue
+                    day.profit += profit
+                    day.hold_seconds += holding_seconds * matched
 
                 buy_lot.remaining -= matched
                 sell_remaining -= matched
@@ -713,13 +763,14 @@ def calculate_realized_profit(
     )
     LOGGER.debug(
         "Calculated realized Trading Post profit; buys=%s sells=%s "
-        "items=%s days=%s matched=%s unmatched_items=%s",
+        "items=%s days=%s matched=%s unmatched_items=%s counted_window=%s",
         len(buys),
         len(sells),
         len(result.items),
         len(result.days),
         result.total_matched_quantity,
         unmatched_items,
+        counted_from is not None or counted_through is not None,
     )
     return result
 

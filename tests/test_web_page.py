@@ -366,8 +366,11 @@ class TestProfitPage:
             PROFIT_PAGE
         )
         assert "date.getUTCFullYear() + \"-\" +" in PROFIT_PAGE
-        # A picked pair is named by its dates; a preset by its length.
-        assert 'var windowLabel = data.range === "custom"' in PROFIT_PAGE
+        # A picked pair is named by its dates; a preset by its length, and
+        # the one preset measured in hours by those.
+        assert 'if (data.range === "custom") {' in PROFIT_PAGE
+        assert '} else if (data.range === "24h") {' in PROFIT_PAGE
+        assert 'windowLabel = "Last 24 hours";' in PROFIT_PAGE
         # A length no button stands for stays a length - in the request, in
         # the address bar and in the browser's copy - so a reload keeps asking
         # for the last sixty days rather than for the dates they fell on.
@@ -783,10 +786,13 @@ class TestProfitPage:
         assert 'id="rolling-profit-chart"' in PROFIT_PAGE
         assert 'id="cumulative-profit-chart"' in PROFIT_PAGE
         assert 'profitByDate[date] : 0' in PROFIT_PAGE
+        # One bar per UTC date between the window's two bounds. The window's
+        # length in days does not decide that: 24h is one day long and falls
+        # on two dates unless it is read exactly at midnight.
         assert (
-            "expectedStart.setUTCDate("
-            "expectedStart.getUTCDate() - data.days + 1);"
+            "var dates = Math.round((end - start) / 86400000) + 1;"
         ) in PROFIT_PAGE
+        assert "expectedStart" not in PROFIT_PAGE
         assert (
             "for (var bucket = 0; bucket < buckets; bucket += 1)"
             in PROFIT_PAGE
@@ -808,7 +814,7 @@ class TestProfitPage:
             "cursor.setUTCDate(cursor.getUTCDate() - (ROLLING_DAYS - 1));"
             in PROFIT_PAGE
         )
-        assert "var buckets = data.days + ROLLING_DAYS - 1;" in PROFIT_PAGE
+        assert "var buckets = dates + ROLLING_DAYS - 1;" in PROFIT_PAGE
         assert "if (trailing.length > ROLLING_DAYS) {" in PROFIT_PAGE
         assert "rolling: trailingTotal / ROLLING_DAYS," in PROFIT_PAGE
         assert "if (bucket >= ROLLING_DAYS - 1) {" in PROFIT_PAGE

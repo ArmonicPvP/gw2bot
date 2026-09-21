@@ -1439,12 +1439,14 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   sells, current buys, and `/v2/commerce/delivery` endpoints.
 - `/profit view [days]` privately links to the signed-in `/profit` page. The
   window accepts 1 through 3650 UTC calendar dates, including today, though it
-  can only show what has been collected so far. Left empty, the link names no
-  window and the page reopens the one the member last used, defaulting to 30
-  days until they pick one. If the web session has expired, Discord sign-in
-  returns the member to that same profit window. The page itself offers the
-  24-hour, 7-day, 30-day and custom windows the other dashboards do; this
-  argument is the way to name a length none of those buttons covers.
+  can only show what has been collected so far. A `days` of 1 is the **24h**
+  button, so it names the last twenty-four hours rather than today's date.
+  Left empty, the link names no window and the page reopens the one the member
+  last used, defaulting to 30 days until they pick one. If the web session has
+  expired, Discord sign-in returns the member to that same profit window. The
+  page itself offers the 24-hour, 7-day, 30-day and custom windows the other
+  dashboards do; this argument is the way to name a length none of those
+  buttons covers.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
   data, remembered report window, and both lists of hidden items — the Open
   Orders one and the realized-profit one. It cannot affect any other member's
@@ -1621,17 +1623,36 @@ and dashes where the cost would be, and the costs appear on their next visit.
 #### Choosing the window
 
 The header carries the same four buttons every other dashboard has: **24h**,
-**7d**, **30d** and **Custom**. The three presets are the last 1, 7 and 30
-whole UTC dates, ending at the moment the page is opened. **Custom** opens a
-pair of date fields beside them, and the window they describe is drawn once
-**Apply** is pressed — the preset buttons keep working until then. Those dates
-are UTC calendar dates, because every table and chart below them groups by UTC
-sale date. A pair running past today stops at the present, and one wider than
-3650 days, or ending before it starts, is refused with the reason in the header
+**7d**, **30d** and **Custom**. **24h** is the last twenty-four hours, counted
+back from the moment the page is opened, the way that button works on every
+other dashboard: opened at 09:30 UTC it starts at 09:30 yesterday, not at
+midnight this morning. **7d** and **30d** are the last 7 and 30 whole UTC
+dates, ending at the moment the page is opened. **Custom** opens a pair of
+date fields beside them, and the window they describe is drawn once **Apply**
+is pressed — the preset buttons keep working until then. Those dates are UTC
+calendar dates, because every table and chart below them groups by UTC sale
+date. A pair running past today stops at the present, and one wider than 3650
+days, or ending before it starts, is refused with the reason in the header
 rather than loaded. **Reload** beside the buttons is the only control that
 re-reads the Trading Post; picking a window draws it from what is already
-stored. The summary's **Window** row names a preset by its length and a picked
-pair by its two dates.
+stored. The summary's **Window** row names **24h** as `Last 24 hours`, another
+preset by its length, and a picked pair by its two dates.
+
+Because **24h** is measured in hours while the tables below it group by UTC
+sale date, it lands on two dates whenever it is opened away from midnight: the
+daily table and the daily charts then show yesterday and today, each holding
+the part of itself that falls inside the window. Its per-day figures divide by
+the one day the window is long. The seven-day trailing average is a daily
+series and is unaffected — it keeps reading whole UTC dates, which is one
+more reason it can sit a little apart from the bars beside it.
+
+That window is also the only one the stored daily results cannot simply be
+added up for, so the trades inside it are matched again on each load, resuming
+from the most recent checkpoint behind it rather than from the start of the
+member's history. The costs it allocates are the ones the stored days hold: a
+sale earlier in the window's opening date is still matched, so the stock it
+took is not handed back to a later sale. That is what keeps a sale worth the
+same under **24h** as under **7d**.
 
 The window is remembered: whenever a member loads a report the window they
 picked is stored against their Discord account, and opening `/profit` without
