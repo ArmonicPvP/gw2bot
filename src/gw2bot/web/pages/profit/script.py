@@ -187,9 +187,56 @@ PROFIT_SCRIPT = (
     return value < 0 ? "negative" : "positive";
   }
 
+  // GW2BLTC serves an item page per language, in the four the game itself
+  // ships. It answers anything else in English, so a browser asking for a
+  // language it does not publish is sent straight there rather than through
+  // a redirect.
+  var BLTC_LANGUAGES = ["en", "de", "es", "fr"];
+
+  function bltcLanguage() {
+    var asked = navigator.languages && navigator.languages.length
+      ? navigator.languages
+      : [navigator.language];
+    for (var index = 0; index < asked.length; index += 1) {
+      // "en-GB" and "en" name the same item pages; only the primary subtag
+      // decides which of them is served.
+      var tag = String(asked[index] || "").toLowerCase().split("-")[0];
+      if (BLTC_LANGUAGES.indexOf(tag) !== -1) { return tag; }
+    }
+    return "en";
+  }
+
+  // Decided once: the browser's languages do not change while the page is
+  // open, and every row on it is linked the same way.
+  var BLTC_LANGUAGE = bltcLanguage();
+
+  // An item's name as a link to its GW2BLTC page. GW2BLTC rewrites the
+  // address to carry the name as well, so the id alone is the whole link.
+  // The name is the link's text rather than part of its address, so it is
+  // still set with textContent like every other value on the page.
+  function itemLink(item) {
+    var link = document.createElement("a");
+    link.className = "item-link";
+    link.href = "https://www.gw2bltc.com/" + BLTC_LANGUAGE + "/item/"
+      + encodeURIComponent(item.item_id);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = item.name;
+    // The link is drawn in the text's own colour, so the title is what says
+    // there is one to follow.
+    link.title = item.name + " on GW2BLTC";
+    return link;
+  }
+
   function cell(row, value, className, sortValue) {
     var node = document.createElement("td");
-    node.textContent = String(value);
+    // Most values are text; an item's name arrives as the link built above,
+    // and the summary's best and worst items as a fragment wrapping one.
+    if (value instanceof Node) {
+      node.appendChild(value);
+    } else {
+      node.textContent = String(value);
+    }
     if (className) { node.className = className; }
     if (sortValue !== undefined) {
       node.dataset.sortValue = String(sortValue);
@@ -1086,7 +1133,17 @@ PROFIT_SCRIPT = (
       : labelFor(entry) + " (" + coin(entry.profit) + ")";
   }
 
-  function itemName(entry) { return entry.name; }
+  // The best and worst item are named by the same link their table uses,
+  // with the profit beside it; the days are named in plain text.
+  function itemHighlight(entry) {
+    if (entry === null) { return "\u2014"; }
+    var label = document.createDocumentFragment();
+    label.appendChild(itemLink(entry));
+    label.appendChild(
+      document.createTextNode(" (" + coin(entry.profit) + ")"));
+    return label;
+  }
+
   function dayLabel(entry) { return shortDate(entry.date, showYear); }
 
   function renderSummary(data) {
@@ -1116,8 +1173,8 @@ PROFIT_SCRIPT = (
       ["Average daily profit", coin(Math.round(summary.profit / data.days)), summary.profit],
       ["Unrealized profit", coin(unrealized.projected_profit), unrealized.projected_profit],
       ["Unrealized ROI", percent(unrealized.roi_percent), unrealized.roi_percent],
-      ["Best item", highlight(bestItem, itemName), bestItem && bestItem.profit],
-      ["Worst item", highlight(worstItem, itemName), worstItem && worstItem.profit],
+      ["Best item", itemHighlight(bestItem), bestItem && bestItem.profit],
+      ["Worst item", itemHighlight(worstItem), worstItem && worstItem.profit],
       ["Best trading day", highlight(bestDay, dayLabel), bestDay && bestDay.profit],
       ["Worst trading day", highlight(worstDay, dayLabel), worstDay && worstDay.profit]
     ];
@@ -1146,7 +1203,7 @@ PROFIT_SCRIPT = (
       // the row's place in the data changes every time a column is sorted,
       // and its identity does not.
       row.dataset.itemId = String(item.item_id);
-      cell(row, item.name, "name", item.name);
+      cell(row, itemLink(item), "name", item.name);
       cell(row, item.units, "", item.units);
       cell(row, coin(item.cost), "", item.cost);
       cell(row, coin(item.net_revenue), "", item.net_revenue);
@@ -1351,7 +1408,7 @@ PROFIT_SCRIPT = (
         || left.name.localeCompare(right.name);
     }).forEach(function (item, index) {
       var row = sortableRow(index);
-      cell(row, item.name, "name", item.name);
+      cell(row, itemLink(item), "name", item.name);
       cell(row, coin(item.buy_price), "", item.buy_price);
       cell(row, coin(item.sell_price), "", item.sell_price);
       profitCell(row, item.profit);
@@ -1393,7 +1450,7 @@ PROFIT_SCRIPT = (
     body.replaceChildren();
     unrealized.items.forEach(function (item, index) {
       var row = sortableRow(index);
-      cell(row, item.name, "name", item.name);
+      cell(row, itemLink(item), "name", item.name);
       cell(row, item.units, "", item.units);
       cell(row, coin(item.unit_price), "", item.unit_price);
       cell(row, coin(item.cost), "", item.cost);
@@ -1595,7 +1652,7 @@ PROFIT_SCRIPT = (
     body.replaceChildren();
     shown.forEach(function (item) {
       var row = document.createElement("tr");
-      cell(row, item.name, "name");
+      cell(row, itemLink(item), "name");
       cell(row, "", "actions").appendChild(
         restoreButton(item.name, function (button) {
           setExclusion(group, item, false, button);
@@ -1634,7 +1691,7 @@ PROFIT_SCRIPT = (
     var unpriced = 0;
     kept.forEach(function (order, index) {
       var row = sortableRow(index);
-      cell(row, order.name, "name", order.name);
+      cell(row, itemLink(order), "name", order.name);
       cell(row, order.quantity, "", order.quantity);
       cell(row, coin(order.unit_price), "", order.unit_price);
       cell(row, coin(order.cost), "", order.cost);
@@ -1704,7 +1761,7 @@ PROFIT_SCRIPT = (
     var partial = 0;
     items.forEach(function (item, index) {
       var row = sortableRow(index);
-      cell(row, item.name, "name", item.name);
+      cell(row, itemLink(item), "name", item.name);
       cell(row, item.quantity, "positive", item.quantity);
       optionalCoinCell(row, item.unit_price);
       var costCell = optionalCoinCell(row, item.cost);

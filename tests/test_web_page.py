@@ -654,6 +654,58 @@ class TestProfitPage:
         assert "innerHTML" not in PROFIT_PAGE
         assert "textContent" in PROFIT_PAGE
 
+    def test_item_names_link_to_their_gw2bltc_page(self) -> None:
+        assert 'link.className = "item-link";' in PROFIT_PAGE
+        assert (
+            'link.href = "https://www.gw2bltc.com/" + BLTC_LANGUAGE '
+            '+ "/item/"\n      + encodeURIComponent(item.item_id);'
+            in PROFIT_PAGE
+        )
+        # The name stays text rather than becoming part of the address:
+        # GW2BLTC rewrites the id to carry it.
+        assert "link.textContent = item.name;" in PROFIT_PAGE
+        assert 'link.target = "_blank";' in PROFIT_PAGE
+        assert 'link.rel = "noopener noreferrer";' in PROFIT_PAGE
+        # Every table that names an item, and the hidden-item windows.
+        assert PROFIT_PAGE.count('cell(row, itemLink(item), "name"') == 5
+        assert 'cell(row, itemLink(order), "name", order.name);' in PROFIT_PAGE
+        # The summary's best and worst items are the same link.
+        assert "label.appendChild(itemLink(entry));" in PROFIT_PAGE
+
+    def test_item_links_keep_the_name_unstyled(self) -> None:
+        assert ".item-link { color: inherit; text-decoration: none; }" in (
+            PROFIT_PAGE
+        )
+        assert (
+            ".item-link:hover { color: inherit; text-decoration: none; }"
+            in PROFIT_PAGE
+        )
+        assert ".item-link:focus-visible {" in PROFIT_PAGE
+        assert "outline: 2px solid var(--accent);" in PROFIT_PAGE
+
+    def test_item_links_follow_the_browsers_language(self) -> None:
+        assert 'var BLTC_LANGUAGES = ["en", "de", "es", "fr"];' in PROFIT_PAGE
+        assert "navigator.languages && navigator.languages.length" in (
+            PROFIT_PAGE
+        )
+        assert "[navigator.language]" in PROFIT_PAGE
+        # A region drops off: "en-GB" and "en" name the same pages.
+        assert (
+            'String(asked[index] || "").toLowerCase().split("-")[0]'
+            in PROFIT_PAGE
+        )
+        assert "if (BLTC_LANGUAGES.indexOf(tag) !== -1) { return tag; }" in (
+            PROFIT_PAGE
+        )
+        # A language GW2BLTC does not publish is sent to English.
+        assert 'return "en";' in PROFIT_PAGE
+        assert "var BLTC_LANGUAGE = bltcLanguage();" in PROFIT_PAGE
+
+    def test_a_cell_takes_a_node_as_well_as_a_value(self) -> None:
+        assert "if (value instanceof Node) {" in PROFIT_PAGE
+        assert "node.appendChild(value);" in PROFIT_PAGE
+        assert "node.textContent = String(value);" in PROFIT_PAGE
+
     def test_missing_key_points_to_the_prefixed_command(self) -> None:
         assert "/profit setkey" in PROFIT_PAGE
 
@@ -706,8 +758,8 @@ class TestProfitPage:
         assert "item.roi_percent" in PROFIT_PAGE
 
     def test_summary_contains_best_and_worst_highlights(self) -> None:
-        assert '["Best item", highlight(bestItem, itemName)' in PROFIT_PAGE
-        assert '["Worst item", highlight(worstItem, itemName)' in PROFIT_PAGE
+        assert '["Best item", itemHighlight(bestItem)' in PROFIT_PAGE
+        assert '["Worst item", itemHighlight(worstItem)' in PROFIT_PAGE
         assert (
             '["Best trading day", highlight(bestDay, dayLabel)'
             in PROFIT_PAGE

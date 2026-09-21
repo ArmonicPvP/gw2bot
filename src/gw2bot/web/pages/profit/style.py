@@ -278,6 +278,18 @@ th:first-child .sort-button { justify-content: flex-start; }
 th[aria-sort="ascending"] .sort-button::after { content: "\\25B2"; color: var(--text); }
 th[aria-sort="descending"] .sort-button::after { content: "\\25BC"; color: var(--text); }
 td.name { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
+/* An item's name links to its GW2BLTC page while reading as the name it
+   already was: it keeps the colour of the cell around it - which is the
+   tone of the figure in the summary's best and worst rows - and carries no
+   underline. Keyboard focus still shows itself, the way the sort buttons
+   do. */
+.item-link { color: inherit; text-decoration: none; }
+.item-link:hover { color: inherit; text-decoration: none; }
+.item-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
 tfoot td { font-weight: 700; background: var(--panel-2); }
 .positive { color: #74dc9a; }
 .negative { color: #ff8f86; }
