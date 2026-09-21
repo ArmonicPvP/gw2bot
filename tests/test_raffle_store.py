@@ -18,6 +18,7 @@ from sqlalchemy import (
 )
 
 from gw2bot.core.dashboard_ranges import StoredRange
+from gw2bot.gw2.feast_stock import MAX_FEAST_COST_COPPER
 from gw2bot.settings.crypto import SettingsCipher
 from gw2bot.settings.store import SettingsStore
 from gw2bot.raffle import (
@@ -28,6 +29,7 @@ from gw2bot.raffle import (
 )
 
 from factories import (
+    feast_deposit,
     gold_deposit,
     guild_invite,
     guild_join,
@@ -2110,4 +2112,202 @@ class TestRememberedDashboardWindows:
                 )
 
             assert store.get_dashboard_range(101, "food") is None
+            store.close()
+
+
+class TestFeastRestocksAndCosts:
+    """Who filled the feast shelves, and what the fill cost."""
+
+    def test_records_feast_deposits_from_the_guild_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+
+            store.process_events(
+                [
+                    feast_deposit(
+                        101,
+                        username="Cook.1234",
+                        count=25,
+                        event_time="2026-06-07T06:00:00.000Z",
+                    ),
+                    # Not one of the four tracked feasts, so it is passed over.
+                    feast_deposit(102, guild_storage_id=42),
+                ]
+            )
+
+            restocks = store.get_feast_restocks(0.0, 4_000_000_000.0)
+            assert [
+                (restock.guild_storage_id, restock.username, restock.count)
+                for restock in restocks
+            ] == [(1078, "Cook.1234", 25)]
+            store.close()
+
+    def test_a_replayed_deposit_is_not_written_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events([feast_deposit(101)])
+            store.close()
+
+            # A restart rewinds nothing, but the same event reaching the store
+            # twice must still leave one row behind it.
+            reopened = RaffleStore(database_path, "guild-id")
+            reopened.initialize_cursor(100)
+            reopened.process_events([feast_deposit(101)])
+
+            assert len(reopened.get_feast_restocks(0.0, 4_000_000_000.0)) == 1
+            reopened.close()
+
+    def test_restocks_outside_the_window_are_left_out(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    feast_deposit(
+                        101,
+                        username="Early.1234",
+                        event_time="2026-06-01T00:00:00.000Z",
+                    ),
+                    feast_deposit(
+                        102,
+                        username="Inside.1234",
+                        event_time="2026-06-07T00:00:00.000Z",
+                    ),
+                    feast_deposit(
+                        103,
+                        username="Late.1234",
+                        event_time="2026-06-30T00:00:00.000Z",
+                    ),
+                ]
+            )
+            since = datetime(2026, 6, 5, tzinfo=UTC).timestamp()
+            until = datetime(2026, 6, 10, tzinfo=UTC).timestamp()
+
+            restocks = store.get_feast_restocks(since, until)
+
+            assert [restock.username for restock in restocks] == [
+                "Inside.1234"
+            ]
+            store.close()
+
+    def test_a_deposit_with_an_unreadable_time_is_dropped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [feast_deposit(101, event_time="whenever")]
+            )
+
+            assert store.get_feast_restocks(0.0, 4_000_000_000.0) == []
+            store.close()
+
+    def test_stores_and_reads_a_restock_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            log_id = store.get_feast_stock_series(0.0)[1078].samples[-1].log_id
+
+            assert store.set_feast_addition_cost(log_id, 123_456, 202) is True
+            assert store.get_feast_addition_costs([log_id]) == {
+                log_id: 123_456
+            }
+            store.close()
+
+            # The cost outlives the process that recorded it.
+            reopened = RaffleStore(database_path, "guild-id")
+            assert reopened.get_feast_addition_costs([log_id]) == {
+                log_id: 123_456
+            }
+            reopened.close()
+
+    def test_a_second_cost_replaces_the_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            log_id = store.get_feast_stock_series(0.0)[1078].samples[-1].log_id
+
+            store.set_feast_addition_cost(log_id, 500, 202)
+            store.set_feast_addition_cost(log_id, 0, 303)
+
+            # Zero is an answer, not a missing one, so it is still recorded.
+            assert store.get_feast_addition_costs([log_id]) == {log_id: 0}
+            store.close()
+
+    def test_an_unpriced_restock_is_simply_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            assert store.get_feast_addition_costs([]) == {}
+            assert store.get_feast_addition_costs([1, 2, 3]) == {}
+            store.close()
+
+    def test_refuses_a_cost_against_a_row_that_is_not_a_restock(self) -> None:
+        # Only a rise can have been paid for. A removal's row, and a feast's
+        # first ever reading, are real rows of a tracked feast, so the id
+        # alone does not make one priceable.
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            store.record_feast_counts({1078: 30}, 300.0)
+            samples = store.get_feast_stock_series(0.0)[1078].samples
+            baseline, restock, removal = (
+                sample.log_id for sample in samples
+            )
+
+            assert store.set_feast_addition_cost(baseline, 100, 202) is False
+            assert store.set_feast_addition_cost(removal, 100, 202) is False
+            # The rise between them is the one row that can carry a price.
+            assert store.set_feast_addition_cost(restock, 100, 202) is True
+
+            assert store.get_feast_addition_costs(
+                [baseline, restock, removal]
+            ) == {restock: 100}
+            store.close()
+
+    def test_an_unchanged_reading_is_not_a_restock(self) -> None:
+        # record_feast_counts only writes changes, but a row written either
+        # side of a restart can repeat the count before it.
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 10}, 200.0)
+            repeated = store.get_feast_stock_series(0.0)[1078].samples[-1]
+
+            assert (
+                store.set_feast_addition_cost(repeated.log_id, 100, 202)
+                is False
+            )
+            store.close()
+
+    def test_refuses_a_cost_against_a_row_that_is_not_there(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+
+            assert store.set_feast_addition_cost(999, 100, 202) is False
+            assert store.get_feast_addition_costs([999]) == {}
+            store.close()
+
+    def test_refuses_a_cost_outside_what_can_have_been_paid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RaffleStore(str(Path(directory) / "raffle.db"), "guild-id")
+            store.record_feast_counts({1078: 10}, 100.0)
+            store.record_feast_counts({1078: 40}, 200.0)
+            log_id = store.get_feast_stock_series(0.0)[1078].samples[-1].log_id
+
+            with pytest.raises(ValueError):
+                store.set_feast_addition_cost(log_id, -1, 202)
+            with pytest.raises(ValueError):
+                store.set_feast_addition_cost(
+                    log_id, MAX_FEAST_COST_COPPER + 1, 202
+                )
+
+            assert store.get_feast_addition_costs([log_id]) == {}
             store.close()

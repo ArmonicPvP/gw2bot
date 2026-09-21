@@ -265,6 +265,21 @@ Accounts with the exact rank `Officer` receive raffle tickets only for
 individual deposits of 10 gold or less. Larger Officer deposits are ignored by
 the raffle workflow and do not produce deposit notifications.
 
+Guild consumables reach Guild Storage as `upgrade` events rather than as
+`stash` ones. A deposit is the `completed` action carrying `user`, `upgrade_id`
+and `count`; the wiki's field list is explicit that `completed` "will also
+generate a new `count` field indicating how many upgrades were added", and both
+of its worked examples carry one, so a completed upgrade without a count is
+outside the documented contract rather than the ordinary case. A scribed
+upgrade also carries `recipe_id`, which is the shape a feast arrives in, and
+`item_id` appears when the upgrade was made by consuming one. That
+`upgrade_id` resolves against `/v2/guild/upgrades` - the same ids
+`/v2/guild/:id/storage` reports, which is what lets a deposit be matched to a
+tracked feast. The bot stores those for the four tracked feasts so
+the feast dashboard's Additions table can name who restocked, and ignores every
+other upgrade action (`queued`, `cancelled`, `sped_up`) and every untracked
+upgrade id.
+
 An `invited` event carries the account invited, the officer who invited it, and
 the moment it was sent. The bot stores each one to post the invitation
 notification once, and that stored moment is also what dates a row in the

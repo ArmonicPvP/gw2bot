@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.config import same_guild_id
@@ -14,7 +14,9 @@ from gw2bot.core.dashboard_ranges import StoredRange
 from gw2bot.core.database import (
     PENDING_LEGACY_TOTALS_KEY,
     DashboardRangeRecord,
+    FeastAdditionCostRecord,
     FeastAlertRecord,
+    FeastDepositLogRecord,
     FeastStockLogRecord,
     GuildInviteRecord,
     GuildJoinRecord,
@@ -38,7 +40,9 @@ from gw2bot.core.database import (
     initialize_database,
 )
 from gw2bot.gw2.feast_stock import (
+    MAX_FEAST_COST_COPPER,
     TRACKED_FEASTS,
+    FeastRestock,
     FeastStockSample,
     FeastStockSeries,
 )
@@ -52,6 +56,7 @@ from gw2bot.gold.models import (
 from gw2bot.raffle.events import (
     event_in_window,
     parse_event_time,
+    parse_feast_deposit,
     parse_gold_deposit,
     parse_guild_invite,
     parse_guild_join,
@@ -271,6 +276,7 @@ class RaffleStore:
                         FeastStockSample(
                             recorded_at=row.recorded_at,
                             count=row.count,
+                            log_id=row.log_id,
                         )
                         for row in rows
                     ),
@@ -282,6 +288,160 @@ class RaffleStore:
             until is not None,
         )
         return series
+
+    def get_feast_restocks(
+        self,
+        since: float,
+        until: float,
+    ) -> list[FeastRestock]:
+        """Every recorded feast deposit that fell inside a window.
+
+        Timestamps are the guild log's own text, so they are parsed here
+        rather than compared in SQL, the way the gold ledger's are. A row
+        whose time cannot be read is dropped: it could not be lined up with
+        the poll that saw the stock rise, so naming it would be a guess.
+        """
+        unreadable = 0
+        restocks: list[FeastRestock] = []
+        with self._sessions() as session:
+            rows = session.scalars(select(FeastDepositLogRecord)).all()
+        for row in rows:
+            occurred_at = _row_moment(row.event_time)
+            if occurred_at is None:
+                unreadable += 1
+                continue
+            if occurred_at < since or occurred_at > until:
+                continue
+            restocks.append(
+                FeastRestock(
+                    occurred_at=occurred_at,
+                    guild_storage_id=row.guild_storage_id,
+                    username=row.username,
+                    count=row.count,
+                )
+            )
+        restocks.sort(key=lambda restock: restock.occurred_at)
+        LOGGER.debug(
+            "Loaded feast deposits; rows=%s in_window=%s unreadable=%s",
+            len(rows),
+            len(restocks),
+            unreadable,
+        )
+        return restocks
+
+    def get_feast_addition_costs(
+        self,
+        log_ids: Sequence[int],
+    ) -> dict[int, int]:
+        """The recorded cost of each named restock, in copper.
+
+        A restock nobody has priced is simply absent, which is what tells the
+        page to mark it - a cost of zero is an answer, not a missing one.
+        """
+        if not log_ids:
+            return {}
+        with self._sessions() as session:
+            records = session.scalars(
+                select(FeastAdditionCostRecord).where(
+                    FeastAdditionCostRecord.log_id.in_(log_ids)
+                )
+            ).all()
+            costs = {record.log_id: record.copper for record in records}
+        LOGGER.debug(
+            "Loaded feast restock costs; asked=%s found=%s",
+            len(log_ids),
+            len(costs),
+        )
+        return costs
+
+    @staticmethod
+    def _is_feast_addition(
+        session: Session,
+        sample: FeastStockLogRecord,
+    ) -> bool:
+        """Whether one stock log row is a rise over the reading before it.
+
+        The same rule :func:`gw2bot.gw2.feast_stock.feast_additions` draws the
+        Additions table by, asked of a single row: rows are ordered by when
+        they were recorded and then by id, and a feast's first reading has
+        nothing to have risen from, so it is a baseline rather than a restock.
+        """
+        previous = session.scalars(
+            select(FeastStockLogRecord)
+            .where(
+                FeastStockLogRecord.guild_storage_id
+                == sample.guild_storage_id,
+                or_(
+                    FeastStockLogRecord.recorded_at < sample.recorded_at,
+                    and_(
+                        FeastStockLogRecord.recorded_at
+                        == sample.recorded_at,
+                        FeastStockLogRecord.log_id < sample.log_id,
+                    ),
+                ),
+            )
+            .order_by(
+                FeastStockLogRecord.recorded_at.desc(),
+                FeastStockLogRecord.log_id.desc(),
+            )
+            .limit(1)
+        ).first()
+        return previous is not None and sample.count > previous.count
+
+    def set_feast_addition_cost(
+        self,
+        log_id: int,
+        copper: int,
+        recorded_by_discord_user_id: int | None = None,
+    ) -> bool:
+        """Record what one observed restock cost, reporting whether it exists.
+
+        ``False`` means the id names no restock: no stock log row of a tracked
+        feast carries it, or the row it carries is not a rise at all. Only a
+        rise can have been paid for, so a removal's row and a feast's first
+        ever reading are refused along with an id that is simply not there,
+        and the caller answers the request rather than storing a price against
+        something the page will never show.
+        """
+        if copper < 0 or copper > MAX_FEAST_COST_COPPER:
+            raise ValueError("cost out of range")
+        tracked = {feast.guild_storage_id for feast in TRACKED_FEASTS}
+        with self._sessions.begin() as session:
+            sample = session.get(FeastStockLogRecord, log_id)
+            if sample is None or sample.guild_storage_id not in tracked:
+                LOGGER.debug(
+                    "Rejected a feast restock cost; log_id=%s reason=unknown",
+                    log_id,
+                )
+                return False
+            if not self._is_feast_addition(session, sample):
+                LOGGER.debug(
+                    "Rejected a feast restock cost; log_id=%s "
+                    "reason=not-a-restock",
+                    log_id,
+                )
+                return False
+            record = session.get(FeastAdditionCostRecord, log_id)
+            updated_at = datetime.now(UTC).isoformat()
+            if record is None:
+                session.add(
+                    FeastAdditionCostRecord(
+                        log_id=log_id,
+                        copper=copper,
+                        recorded_by_discord_user_id=(
+                            recorded_by_discord_user_id
+                        ),
+                        updated_at=updated_at,
+                    )
+                )
+            else:
+                record.copper = copper
+                record.recorded_by_discord_user_id = (
+                    recorded_by_discord_user_id
+                )
+                record.updated_at = updated_at
+        LOGGER.debug("Recorded a feast restock cost; log_id=%s", log_id)
+        return True
 
     def record_member_count(
         self,
@@ -723,6 +883,7 @@ class RaffleStore:
         officer_deposits_skipped = 0
         coin_movements = 0
         withdrawals = 0
+        feast_deposits = 0
         joins = 0
         leaves = 0
         invites = 0
@@ -800,6 +961,28 @@ class RaffleStore:
                     if movement.operation == WITHDRAW:
                         withdrawals += 1
 
+                # Who restocked the feast shelves. The stock poller sees
+                # the counts move; only the log says whose deposit moved
+                # them, and the /food page's Additions table joins the two.
+                feast_deposit = parse_feast_deposit(event)
+                if (
+                    feast_deposit is not None
+                    and session.get(
+                        FeastDepositLogRecord, feast_deposit.event_id
+                    )
+                    is None
+                ):
+                    session.add(
+                        FeastDepositLogRecord(
+                            event_id=feast_deposit.event_id,
+                            guild_storage_id=feast_deposit.guild_storage_id,
+                            username=feast_deposit.username,
+                            count=feast_deposit.count,
+                            event_time=feast_deposit.event_time,
+                        )
+                    )
+                    feast_deposits += 1
+
                 join = parse_guild_join(event)
                 if (
                     join is not None
@@ -870,7 +1053,7 @@ class RaffleStore:
         LOGGER.debug(
             "Processed guild log events; fetched=%s new=%s deposits=%s "
             "officer_deposits_skipped=%s excluded_deposits=%s "
-            "coin_movements=%s withdrawals=%s joins=%s "
+            "coin_movements=%s withdrawals=%s feast_deposits=%s joins=%s "
             "leaves=%s invites=%s rank_changes=%s cursor=%s",
             len(events),
             processed,
@@ -879,6 +1062,7 @@ class RaffleStore:
             excluded_deposits,
             coin_movements,
             withdrawals,
+            feast_deposits,
             joins,
             leaves,
             invites,

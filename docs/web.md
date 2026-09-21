@@ -36,6 +36,11 @@ and the only server value that reaches its `href` is the item's id. A change
 that puts server data into page markup breaks that property and needs a much
 harder look than a layout tweak.
 
+A page writes back through a JSON API too. The feast dashboard's cost editor
+posts to `/api/food/cost` as whole copper against the stock log row the restock
+was observed as, gated by the same role the page is; the profit dashboard's
+hidden-item controls post the same way.
+
 ## `pages/` - one module per document
 
 | Module | What it holds |
@@ -43,7 +48,7 @@ harder look than a layout tweak.
 | `shared.py` | The frame every dashboard is built from: the stylesheet, the header, and the time-range picker. A change to the frame is one edit here rather than four. |
 | `notices.py` | The one-card pages: sign-in, signed-out, and the access refusals. Fixed strings except the sign-in page's login URL, which is escaped after `server.py` has validated it as a local path. |
 | `calendar.py` | The guild event calendar. |
-| `food.py` | The feast usage dashboard. |
+| `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
 | `roster.py` | The guild roster history dashboard. |
 | `gold.py` | The guild bank gold history dashboard. |
 | `profit/` | The Trading Post profit dashboard, split further - see below. |

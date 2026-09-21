@@ -1,3 +1,5 @@
+import pytest
+
 from gw2bot.raffle import (
     RAFFLE_DRAW_TIERS,
     RAFFLE_REWARD_TIERS,
@@ -8,8 +10,10 @@ from gw2bot.raffle import (
     parse_guild_leave,
     parse_guild_rank_change,
 )
+from gw2bot.raffle.events import parse_feast_deposit
 
 from factories import (
+    feast_deposit,
     gold_deposit,
     guild_invite,
     guild_join,
@@ -131,3 +135,97 @@ class TestRaffleEventParsing:
         assert self_change.message == (
             "Member.1234's guild rank changed from Trial to Sunborne."
         )
+
+
+class TestFeastDepositParsing:
+    def test_reads_a_tracked_feast_deposit(self) -> None:
+        parsed = parse_feast_deposit(
+            feast_deposit(11, username="Cook.1234", count=25)
+        )
+
+        assert parsed is not None
+        assert parsed.event_id == 11
+        assert parsed.guild_storage_id == 1078
+        assert parsed.username == "Cook.1234"
+        assert parsed.count == 25
+        assert parsed.event_time == "2026-06-07T06:26:17.000Z"
+
+    def test_ignores_an_untracked_guild_upgrade(self) -> None:
+        # Guild upgrades that are not one of the four feasts the dashboard
+        # follows say nothing about the shelves it draws.
+        event = feast_deposit(11, guild_storage_id=42)
+
+        assert parse_feast_deposit(event) is None
+
+    def test_ignores_an_upgrade_that_was_not_completed(self) -> None:
+        event = feast_deposit(11)
+        event["action"] = "queued"
+
+        assert parse_feast_deposit(event) is None
+
+    def test_ignores_an_event_naming_nobody(self) -> None:
+        event = feast_deposit(11)
+        event["user"] = ""
+
+        assert parse_feast_deposit(event) is None
+
+    def test_ignores_an_event_carrying_no_count(self) -> None:
+        assert parse_feast_deposit(feast_deposit(11, count=0)) is None
+
+    def test_ignores_an_unreadable_count_or_upgrade(self) -> None:
+        unreadable = feast_deposit(11)
+        unreadable["count"] = "many"
+        assert parse_feast_deposit(unreadable) is None
+
+        missing = feast_deposit(11)
+        del missing["upgrade_id"]
+        assert parse_feast_deposit(missing) is None
+
+    def test_ignores_a_stash_event(self) -> None:
+        assert parse_feast_deposit(gold_deposit(11)) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            # The two `completed` upgrade events the GW2 wiki documents by
+            # example, with the upgrade id swapped to a tracked feast so the
+            # tracking filter is not what decides the outcome. The first is
+            # the scribe-station shape, which carries a recipe_id beside the
+            # count; feasts are scribed, so that is the shape this reads in
+            # practice.
+            {
+                "id": 1470,
+                "time": "2016-12-19T20:36:03.000Z",
+                "type": "upgrade",
+                "recipe_id": 11856,
+                "upgrade_id": 1078,
+                "count": 1,
+                "action": "completed",
+                "user": "Lawton Campbell.9413",
+            },
+            {
+                "id": 1522,
+                "time": "2016-12-19T20:48:11.000Z",
+                "type": "upgrade",
+                "upgrade_id": 1078,
+                "count": 1,
+                "action": "completed",
+                "user": "Lawton Campbell.9413",
+            },
+        ],
+    )
+    def test_reads_the_event_shapes_the_api_documents(
+        self,
+        event: dict[str, object],
+    ) -> None:
+        # A `completed` upgrade carries a count - the wiki's field list says
+        # the action "will also generate a new count field indicating how
+        # many upgrades were added", and both of its examples show one. This
+        # pins that contract: a deposit of a single feast is the smallest
+        # real event there is, and it must not be read as nothing.
+        parsed = parse_feast_deposit(event)
+
+        assert parsed is not None
+        assert parsed.guild_storage_id == 1078
+        assert parsed.username == "Lawton Campbell.9413"
+        assert parsed.count == 1

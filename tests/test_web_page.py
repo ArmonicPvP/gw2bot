@@ -1513,12 +1513,14 @@ class TestFoodPage:
         assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
-        # Every console call is a sanitized workflow trace or the load failure
-        # that logs an error's type and message.
+        # Every console call is a sanitized workflow trace, or one of the two
+        # failures that log an error's type and message.
         assert re.findall(r"console\.\w+", FOOD_PAGE) == [
             "console.debug",
             "console.debug",
             "console.debug",
+            "console.debug",
+            "console.error",
             "console.debug",
             "console.error",
         ]
@@ -1526,6 +1528,7 @@ class TestFoodPage:
             ['"feast chart mode:"', "mode", "count"],
             ['"feast chart selection:"', "action", "reason", "count"],
             ['"feast chart legend:"', "action", "count"],
+            ['"feast cost:"', "action", "outcome"],
             ['"feast chart range:"', "action", "reason", "days"],
         ]
 
@@ -1565,6 +1568,99 @@ class TestFoodPage:
         # Like the calendar, feast names and rows are only ever set through
         # textContent or attributes, never innerHTML.
         assert "innerHTML" not in FOOD_PAGE
+
+
+class TestFoodAdditionsSection:
+    """The Additions table and the cost editor an officer fills it in with."""
+
+    def test_the_section_carries_its_own_tabs_and_pager(self) -> None:
+        # An officer pricing a restock is reading a different question than
+        # the removals above, so the section keeps its own feast and page.
+        assert "<h2>Additions</h2>" in FOOD_PAGE
+        assert '<div id="add-tabs" class="tabs"></div>' in FOOD_PAGE
+        assert '<div id="add-table"></div>' in FOOD_PAGE
+        assert '<div id="add-pager" class="pager"></div>' in FOOD_PAGE
+        assert "activeAddition: 0, additionPage: 0," in FOOD_PAGE
+
+    def test_the_table_names_its_six_columns(self) -> None:
+        body = FOOD_PAGE.split("function renderAdditions() {", 1)[1]
+        assert 'head.appendChild(el("th", null, "Time"));' in body
+        assert 'head.appendChild(el("th", null, "User"));' in body
+        assert 'head.appendChild(el("th", null, "Added"));' in body
+        assert 'head.appendChild(el("th", null, "Remaining"));' in body
+        assert 'head.appendChild(el("th", null, "Cost"));' in body
+        assert 'head.appendChild(el("th", "actions", "Edit"));' in body
+
+    def test_a_restock_nobody_has_priced_is_marked(self) -> None:
+        # The tint is what an officer scans for, so the row carries a class
+        # and the stylesheet gives it the light red behind it.
+        assert 'var priced = typeof row.cost === "number";' in FOOD_PAGE
+        assert 'var tr = el("tr", priced ? null : "unpriced");' in FOOD_PAGE
+        assert (
+            "table.additions tr.unpriced td "
+            "{ background: rgba(231, 76, 60, 0.22); }"
+        ) in FOOD_PAGE
+
+    def test_the_edit_button_opens_the_cost_dialog(self) -> None:
+        assert 'edit.setAttribute("aria-haspopup", "dialog");' in FOOD_PAGE
+        assert 'edit.setAttribute("aria-label", "Edit cost");' in FOOD_PAGE
+        assert "edit.appendChild(pencilIcon());" in FOOD_PAGE
+        assert "openCostDialog(feast, row);" in FOOD_PAGE
+        assert "costDialog.showModal();" in FOOD_PAGE
+
+    def test_the_dialog_asks_for_gold_silver_and_copper_in_one_row(
+        self,
+    ) -> None:
+        assert '<dialog id="cost-dialog"' in FOOD_PAGE
+        row = FOOD_PAGE.split('<div class="cost-row">', 1)[1].split(
+            "</div>", 1
+        )[0]
+        assert row.index('id="cost-gold"') < row.index('id="cost-silver"')
+        assert row.index('id="cost-silver"') < row.index('id="cost-copper"')
+        for unit in ("g", "s", "c"):
+            assert (
+                f'<span class="coin-unit" aria-hidden="true">{unit}</span>'
+                in row
+            )
+
+    def test_a_blank_box_is_zero_and_a_zero_opens_blank(self) -> None:
+        # Both halves of the same rule: nothing typed is nothing paid, and a
+        # price that does not reach a unit leaves that box empty rather than
+        # showing a 0 to delete.
+        assert 'if (raw === "") { return 0; }' in FOOD_PAGE
+        assert (
+            'costFields.gold.value = goldCoins ? String(goldCoins) : "";'
+            in FOOD_PAGE
+        )
+        assert (
+            'costFields.silver.value = silverCoins ? String(silverCoins) : "";'
+            in FOOD_PAGE
+        )
+        assert (
+            'costFields.copper.value = copperCoins ? String(copperCoins) : "";'
+            in FOOD_PAGE
+        )
+        assert 'if (typeof cost !== "number") {' in FOOD_PAGE
+
+    def test_a_price_is_refused_rather_than_rounded(self) -> None:
+        assert "if (!/^[0-9]+$/.test(raw)) { return null; }" in FOOD_PAGE
+        assert "var MAX_COST_COPPER = 2000000 * COPPER_PER_GOLD;" in FOOD_PAGE
+        assert "if (total > MAX_COST_COPPER) {" in FOOD_PAGE
+
+    def test_the_cost_is_saved_as_whole_copper(self) -> None:
+        assert 'fetch("/api/food/cost", {' in FOOD_PAGE
+        assert (
+            "body: JSON.stringify({ log_id: addition.log_id, "
+            "cost: read.cost })"
+        ) in FOOD_PAGE
+        assert (
+            "var total = goldCoins * COPPER_PER_GOLD +\n"
+            "      silverCoins * COPPER_PER_SILVER + copperCoins;"
+        ) in FOOD_PAGE
+
+    def test_a_reloaded_window_closes_the_dialog_over_it(self) -> None:
+        # The rows the dialog was opened over have just been replaced.
+        assert "closeCostDialog();\n        render();" in FOOD_PAGE
 
 
 class TestCustomRangePicker:

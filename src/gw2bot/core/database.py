@@ -475,6 +475,49 @@ class FeastStockLogRecord(Base):
     recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class FeastDepositLogRecord(Base):
+    """One guild-log event placing tracked feasts into Guild Storage.
+
+    The stock log says a shelf filled; this says who filled it. The two are
+    joined by time rather than by a shared key, because the poll that notices
+    a new count runs on its own schedule and the guild log never mentions it.
+
+    ``event_id`` is the guild log's own id, which is what keeps the poller
+    idempotent against itself after a restart.
+    """
+
+    __tablename__ = "feast_deposit_log"
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    guild_storage_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_time: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class FeastAdditionCostRecord(Base):
+    """What one observed feast restock cost, as an officer recorded it.
+
+    Keyed by the stock log row the restock was observed as: a timestamp names
+    when a count rose, but the row id names that one observation for good, so
+    a cost stays attached to it however the window around it is later drawn.
+
+    ``copper`` is the whole price in copper, and zero is a real answer - a
+    feast that cost nothing is recorded as costing nothing. A restock with no
+    row here is one nobody has priced yet, which is what the page marks.
+    """
+
+    __tablename__ = "feast_addition_cost"
+
+    log_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    copper: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_by_discord_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class GuildMemberCountLogRecord(Base):
     """One observed guild member count, written only when it changes.
 

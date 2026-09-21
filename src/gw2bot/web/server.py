@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -27,9 +27,14 @@ from gw2bot.core.dashboard_ranges import (
 from gw2bot.core.discord_utils import resolve_display_name, user_has_role
 from gw2bot.gw2.feast_stock import (
     FEAST_USAGE_RANGES,
+    MAX_FEAST_COST_COPPER,
     TRACKED_FEASTS,
     Feast,
+    FeastAddition,
+    FeastRestock,
     FeastStockSeries,
+    depositors_for_addition,
+    feast_additions,
     feast_removals,
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
@@ -210,6 +215,10 @@ class WebServer:
                 web.get("/api/events", self._events),
                 web.get("/food", self._food),
                 web.get("/api/food", self._food_data),
+                # POST, not GET: it writes what a restock cost, and the
+                # SameSite=Lax session cookie is withheld from a cross-site
+                # POST, so no third-party page can fire it.
+                web.post("/api/food/cost", self._food_cost),
                 web.get("/roster", self._roster),
                 web.get("/api/roster", self._roster_data),
                 web.get("/api/pending", self._pending_data),
@@ -1252,15 +1261,45 @@ class WebServer:
             window.since,
             window.until,
         )
+        # Who deposited, and what each restock cost, are read alongside the
+        # counts: the Additions table is one row per observed rise, carrying
+        # both. Neither read is allowed to cost the reader the chart, so a
+        # failure leaves those columns blank rather than failing the page.
+        restocks = await self._feast_restocks(window)
+        additions = {
+            feast.guild_storage_id: feast_additions(item)
+            for feast, item in (
+                (feast, series.get(feast.guild_storage_id))
+                for feast in TRACKED_FEASTS
+            )
+            if item is not None
+        }
+        costs = await self._feast_addition_costs(additions)
         payload = [
-            self._serialize_feast(feast, series) for feast in TRACKED_FEASTS
+            self._serialize_feast(
+                feast,
+                series,
+                additions.get(feast.guild_storage_id, []),
+                [
+                    restock
+                    for restock in restocks
+                    if restock.guild_storage_id == feast.guild_storage_id
+                ],
+                costs,
+                window.since,
+            )
+            for feast in TRACKED_FEASTS
         ]
         LOGGER.debug(
-            "Served feast usage; range=%s feasts=%s samples=%s removals=%s",
+            "Served feast usage; range=%s feasts=%s samples=%s removals=%s "
+            "additions=%s deposits=%s priced=%s",
             window.key,
             len(payload),
             sum(len(item.samples) for item in series.values()),
             sum(len(feast_removals(item)) for item in series.values()),
+            sum(len(item) for item in additions.values()),
+            len(restocks),
+            len(costs),
         )
         return self._json(
             {
@@ -1275,10 +1314,63 @@ class WebServer:
             }
         )
 
+    async def _feast_restocks(self, window: _Window) -> list[FeastRestock]:
+        """The feast deposits logged inside a window, or none of them.
+
+        The chart and the removals table are what the page is read for, so a
+        ledger that cannot be read leaves the Additions table unattributed
+        instead of failing the whole request.
+        """
+        try:
+            return await asyncio.to_thread(
+                self._bot.raffle_store.get_feast_restocks,
+                window.since,
+                window.until,
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.warning(
+                "Could not read feast deposits; error_type=%s",
+                type(exc).__name__,
+            )
+            return []
+
+    async def _feast_addition_costs(
+        self,
+        additions: Mapping[int, Sequence[FeastAddition]],
+    ) -> dict[int, int]:
+        """What each restock in ``additions`` cost, as far as it is recorded.
+
+        Read in one go across every feast, and forgiving in the same way the
+        deposits above are: an unreadable cost table leaves the column empty
+        rather than taking the page with it.
+        """
+        log_ids = [
+            addition.log_id
+            for feast_additions_ in additions.values()
+            for addition in feast_additions_
+        ]
+        if not log_ids:
+            return {}
+        try:
+            return await asyncio.to_thread(
+                self._bot.raffle_store.get_feast_addition_costs,
+                log_ids,
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.warning(
+                "Could not read feast restock costs; error_type=%s",
+                type(exc).__name__,
+            )
+            return {}
+
     @staticmethod
     def _serialize_feast(
         feast: Feast,
         series: dict[int, FeastStockSeries],
+        additions: Sequence[FeastAddition],
+        restocks: Sequence[FeastRestock],
+        costs: Mapping[int, int],
+        window_since: float,
     ) -> dict[str, object]:
         item = series.get(feast.guild_storage_id)
         if item is None:
@@ -1298,12 +1390,92 @@ class WebServer:
                 }
                 for removal in reversed(feast_removals(item))
             ]
+        # Additions are turned round the same way, and each carries the names
+        # the guild log gives it and the cost an officer recorded - null
+        # where nobody has, which is the row the page marks.
+        served_additions = [
+            {
+                "log_id": addition.log_id,
+                "t": addition.recorded_at,
+                "amount": addition.amount,
+                "remaining": addition.remaining,
+                "users": depositors_for_addition(
+                    addition, restocks, window_since
+                ),
+                "cost": costs.get(addition.log_id),
+            }
+            for addition in reversed(additions)
+        ]
         return {
             "id": feast.guild_storage_id,
             "name": feast.name,
             "points": points,
             "removals": removals,
+            "additions": served_additions,
         }
+
+    async def _food_cost(self, request: web.Request) -> web.StreamResponse:
+        """Record what one observed restock cost.
+
+        The window the row was read in does not come into it: a cost is filed
+        against the stock log row the restock was observed as, so it stays
+        with that restock however the page is later drawn.
+        """
+        denied = await self._require_food_access(request)
+        if denied is not None:
+            return denied
+        session = request[SESSION_KEY]
+        try:
+            body = await request.json()
+        except ValueError:
+            LOGGER.debug(
+                "Rejected a feast restock cost; user_id=%s reason=malformed",
+                session.user_id,
+            )
+            return self._json({"error": "invalid request"}, status=400)
+        log_id = body.get("log_id") if isinstance(body, dict) else None
+        cost = body.get("cost") if isinstance(body, dict) else None
+        if (
+            not isinstance(log_id, int)
+            or isinstance(log_id, bool)
+            or log_id <= 0
+            or not isinstance(cost, int)
+            or isinstance(cost, bool)
+            or cost < 0
+            or cost > MAX_FEAST_COST_COPPER
+        ):
+            LOGGER.debug(
+                "Rejected a feast restock cost; user_id=%s reason=fields",
+                session.user_id,
+            )
+            return self._json({"error": "invalid request"}, status=400)
+        try:
+            stored = await asyncio.to_thread(
+                self._bot.raffle_store.set_feast_addition_cost,
+                log_id,
+                cost,
+                session.user_id,
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not store a feast restock cost; user_id=%s "
+                "error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "cost unavailable"}, status=500)
+        if not stored:
+            LOGGER.info(
+                "Rejected a feast restock cost; user_id=%s reason=unknown-row",
+                session.user_id,
+            )
+            return self._json({"error": "unknown restock"}, status=404)
+        LOGGER.info(
+            "Stored a feast restock cost; user_id=%s log_id=%s",
+            session.user_id,
+            log_id,
+        )
+        return self._json({"log_id": log_id, "cost": cost})
 
     async def _roster(self, request: web.Request) -> web.StreamResponse:
         denied = await self._require_roster_access(request)

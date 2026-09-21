@@ -1,8 +1,11 @@
 from gw2bot.gw2.feast_stock import (
     LOW_STOCK_REMINDER_SECONDS,
+    FeastRestock,
     FeastStockSample,
     FeastStockSeries,
     changed_feast_counts,
+    depositors_for_addition,
+    feast_additions,
     feast_removals,
     get_due_low_stock_alerts,
     tracked_feast_counts,
@@ -168,3 +171,147 @@ class TestFeastRemovals:
 
     def test_empty_series_yields_no_removals(self) -> None:
         assert feast_removals(_series(None, [])) == []
+
+
+class TestFeastAdditions:
+    def test_reports_each_increase_with_amount_and_remaining(self) -> None:
+        series = _series(None, [(1.0, 10), (2.0, 34), (3.0, 40)])
+
+        additions = feast_additions(series)
+
+        assert [(a.recorded_at, a.amount, a.remaining) for a in additions] == [
+            (2.0, 24, 34),
+            (3.0, 6, 40),
+        ]
+
+    def test_ignores_removals_and_unchanged_samples(self) -> None:
+        series = _series(None, [(1.0, 40), (2.0, 20), (3.0, 20), (4.0, 45)])
+
+        additions = feast_additions(series)
+
+        assert [(a.amount, a.remaining) for a in additions] == [(25, 45)]
+
+    def test_uses_prior_count_for_a_restock_across_the_window_edge(
+        self,
+    ) -> None:
+        series = _series(12, [(10.0, 40), (11.0, 44)])
+
+        additions = feast_additions(series)
+
+        assert [(a.recorded_at, a.amount, a.remaining) for a in additions] == [
+            (10.0, 28, 40),
+            (11.0, 4, 44),
+        ]
+
+    def test_no_prior_count_makes_the_first_sample_a_baseline(self) -> None:
+        # The shelf was not observed filling, it was observed for the first
+        # time, so the first reading is not a restock.
+        series = _series(None, [(1.0, 30), (2.0, 35)])
+
+        additions = feast_additions(series)
+
+        assert [(a.amount, a.remaining) for a in additions] == [(5, 35)]
+
+    def test_each_addition_carries_its_stock_log_row(self) -> None:
+        # The row id is what a recorded cost is filed against, so it has to
+        # survive the walk over the samples.
+        series = FeastStockSeries(
+            guild_storage_id=1078,
+            prior_count=10,
+            samples=(
+                FeastStockSample(recorded_at=1.0, count=40, log_id=7),
+                FeastStockSample(recorded_at=2.0, count=44, log_id=9),
+            ),
+        )
+
+        assert [addition.log_id for addition in feast_additions(series)] == [
+            7,
+            9,
+        ]
+
+    def test_previous_at_opens_at_the_reading_the_restock_rose_from(
+        self,
+    ) -> None:
+        # The first in-window addition rose from a reading outside it, which
+        # has no timestamp here; every later one names the reading before it.
+        series = _series(10, [(10.0, 40), (20.0, 44)])
+
+        additions = feast_additions(series)
+
+        assert [addition.previous_at for addition in additions] == [None, 10.0]
+
+    def test_empty_series_yields_no_additions(self) -> None:
+        assert feast_additions(_series(None, [])) == []
+
+
+def _restock(occurred_at: float, username: str) -> FeastRestock:
+    return FeastRestock(
+        occurred_at=occurred_at,
+        guild_storage_id=1078,
+        username=username,
+        count=10,
+    )
+
+
+class TestDepositorsForAddition:
+    def test_names_the_deposits_between_the_two_readings(self) -> None:
+        addition = feast_additions(_series(10, [(10.0, 20), (20.0, 40)]))[1]
+
+        named = depositors_for_addition(
+            addition,
+            [
+                _restock(9.0, "Before.1234"),
+                _restock(15.0, "Cook.1234"),
+                _restock(25.0, "After.1234"),
+            ],
+            window_since=5.0,
+        )
+
+        assert named == ["Cook.1234"]
+
+    def test_a_deposit_at_the_reading_itself_belongs_to_it(self) -> None:
+        # The poll reads the new count at or after the deposit that raised it,
+        # never before, so the closing edge is inclusive and the opening one
+        # is not.
+        addition = feast_additions(_series(10, [(10.0, 20), (20.0, 40)]))[1]
+
+        named = depositors_for_addition(
+            addition,
+            [_restock(10.0, "Early.1234"), _restock(20.0, "Cook.1234")],
+            window_since=5.0,
+        )
+
+        assert named == ["Cook.1234"]
+
+    def test_several_depositors_are_all_named_once_each(self) -> None:
+        addition = feast_additions(_series(10, [(10.0, 20), (20.0, 40)]))[1]
+
+        named = depositors_for_addition(
+            addition,
+            [
+                _restock(12.0, "Cook.1234"),
+                _restock(14.0, "Baker.5678"),
+                _restock(16.0, "Cook.1234"),
+            ],
+            window_since=5.0,
+        )
+
+        assert named == ["Cook.1234", "Baker.5678"]
+
+    def test_the_window_edge_opens_the_first_addition(self) -> None:
+        # Its previous reading predates the window, which is the only stretch
+        # the deposits were loaded for, so the window's own start stands in.
+        addition = feast_additions(_series(10, [(10.0, 40)]))[0]
+
+        named = depositors_for_addition(
+            addition,
+            [_restock(4.0, "Outside.1234"), _restock(6.0, "Cook.1234")],
+            window_since=5.0,
+        )
+
+        assert named == ["Cook.1234"]
+
+    def test_an_unattributable_addition_names_nobody(self) -> None:
+        addition = feast_additions(_series(10, [(10.0, 20), (20.0, 40)]))[1]
+
+        assert depositors_for_addition(addition, [], window_since=5.0) == []
