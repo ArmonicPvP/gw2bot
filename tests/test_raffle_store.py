@@ -188,6 +188,42 @@ class TestRaffleStore:
             }
             store.close()
 
+    def test_forgets_an_invitation_the_account_already_answered(self) -> None:
+        # An account that joined or left after its newest recorded invitation
+        # answered that one. If it is invited again and the bot never saw the
+        # new event, the roster page has to say so rather than show a date
+        # from before the membership that has since ended.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_invite(
+                        101, "Rejoined.1234", time="2026-01-05T10:00:00.000Z"
+                    ),
+                    guild_join(
+                        102, "Rejoined.1234", time="2026-01-06T10:00:00.000Z"
+                    ),
+                    guild_leave(
+                        103, "Rejoined.1234", time="2026-02-01T10:00:00.000Z"
+                    ),
+                    # Left before being invited, so this invitation is the
+                    # one outstanding and keeps its date.
+                    guild_leave(
+                        104, "Returning.5678", time="2026-03-01T10:00:00.000Z"
+                    ),
+                    guild_invite(
+                        105, "Returning.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {
+                "returning.5678": datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
+            }
+            store.close()
+
     def test_persists_rank_change_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")

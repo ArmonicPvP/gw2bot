@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -960,7 +960,7 @@ class RaffleStore:
             return results
 
     def get_guild_invite_times(self) -> dict[str, datetime]:
-        """When each account was last invited, keyed by casefolded name.
+        """When each outstanding invitation was sent, by casefolded name.
 
         The guild log is the only place an invitation is dated: the member
         list gives an invited account no date of its own, and the log event
@@ -968,27 +968,51 @@ class RaffleStore:
         the invitation was sent. An account invited more than once keeps the
         newest of them, because that is the invitation still outstanding.
 
+        An invitation the account has already answered is dropped rather than
+        offered for a later one. Joining accepts an invitation and leaving
+        ends the membership it started, so a recorded join or leave that came
+        after the newest recorded invitation means that invitation is spent -
+        and an account that is invited again today is holding one this store
+        knows nothing about, which is not the same as holding the one from
+        before it joined.
+
         The log only reaches about a hundred events per type, so an invitation
         sent before the bot first read it was never recorded and is absent
         here rather than dated by something else.
         """
-        statement = select(GuildInviteRecord).order_by(
-            GuildInviteRecord.event_id
-        )
-        times: dict[str, datetime] = {}
         with self._sessions() as session:
-            for record in session.scalars(statement).all():
-                sent_at = parse_event_time(record.event_time)
-                if sent_at is None:
-                    continue
-                key = record.username.strip().casefold()
-                known = times.get(key)
-                # Event ids rise with time, so the last row for an account is
-                # normally its newest invitation; comparing the timestamps
-                # keeps that true for rows imported out of order.
-                if known is None or sent_at > known:
-                    times[key] = sent_at
-        LOGGER.debug("Loaded invite times for %s accounts", len(times))
+            times = _newest_event_times(
+                (record.username, record.event_time)
+                for record in session.scalars(
+                    select(GuildInviteRecord)
+                ).all()
+            )
+            answered = _newest_event_times(
+                (record.username, record.event_time)
+                for record in session.scalars(select(GuildJoinRecord)).all()
+            )
+            for username, moment in _newest_event_times(
+                (record.username, record.event_time)
+                for record in session.scalars(select(GuildLeaveRecord)).all()
+            ).items():
+                known = answered.get(username)
+                if known is None or moment > known:
+                    answered[username] = moment
+        superseded = [
+            username
+            for username, moment in answered.items()
+            # Answered at the same second as the invitation is answered all
+            # the same: an outstanding invitation is worth showing a date for
+            # only when nothing since can have ended it.
+            if username in times and moment >= times[username]
+        ]
+        for username in superseded:
+            del times[username]
+        LOGGER.debug(
+            "Loaded invite times for %s accounts; superseded=%s",
+            len(times),
+            len(superseded),
+        )
         return times
 
     def get_pending_rank_change_notifications(self) -> list[GuildRankChange]:
@@ -2002,6 +2026,27 @@ def _to_gold_withdrawal(record: GuildStashCoinLogRecord) -> GoldWithdrawal:
         coins_withdrawn=record.coins,
         event_time=record.event_time,
     )
+
+
+def _newest_event_times(
+    rows: Iterable[tuple[str, str]],
+) -> dict[str, datetime]:
+    """The newest readable moment per account, keyed by casefolded name.
+
+    A row whose stored timestamp cannot be read dates nothing rather than
+    dating its account with a guess, and account names are matched
+    case-insensitively here as they are everywhere else.
+    """
+    newest: dict[str, datetime] = {}
+    for username, event_time in rows:
+        moment = parse_event_time(event_time)
+        if moment is None:
+            continue
+        key = username.strip().casefold()
+        known = newest.get(key)
+        if known is None or moment > known:
+            newest[key] = moment
+    return newest
 
 
 def _to_guild_leave(record: GuildLeaveRecord) -> GuildLeave:

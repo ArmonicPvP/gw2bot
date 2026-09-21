@@ -1924,7 +1924,9 @@ date is the moment the guild log recorded the invitation, which is the only
 place an invitation is dated — the member list gives an invited account no
 date of its own. The log reaches back about a hundred events per type, so an
 invitation sent before the bot first read it was never recorded, and that row
-reads "Unknown" rather than being given a date. If the application forum could
+reads "Unknown" rather than being given a date. So does a row whose account
+joined or left after the last invitation the bot recorded: that invitation was
+answered, and the one the account holds now is one the bot never saw. If the application forum could
 not be read in full, the rows without
 a name say "Could not be checked" instead - a name that is shown was matched
 either way - and that answer is not cached, because an unread post is not

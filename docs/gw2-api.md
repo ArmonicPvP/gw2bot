@@ -271,7 +271,11 @@ notification once, and that stored moment is also what dates a row in the
 roster page's **Invite sent** column - the member list has no date to give an
 invited account. Because the log reaches back only about a hundred events per
 type, an invitation sent before the bot first read it was never recorded, and
-such a row is left undated rather than dated from somewhere else.
+such a row is left undated rather than dated from somewhere else. A recorded
+`joined` or `kick` event that came after the newest recorded invitation
+answers it - joining accepts an invitation, leaving ends the membership it
+started - so that date is dropped too rather than offered for the later
+invitation the bot did not see.
 
 Voluntary member departures are `kick` events where `user` and `kicked_by` are
 the same account. A `kick` event with a different `kicked_by` account means
