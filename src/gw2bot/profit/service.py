@@ -348,6 +348,7 @@ class ProfitService:
             discord_user_id,
             window_start,
             window_until,
+            loaded_at,
         )
         unrealized = await asyncio.to_thread(
             calculate_unrealized_profit,
@@ -746,7 +747,8 @@ class ProfitService:
         self,
         discord_user_id: int,
         cutoff: datetime,
-        until: datetime | None = None,
+        until: datetime | None,
+        now: datetime,
     ) -> tuple[
         RealizedProfit,
         dict[str, int],
@@ -776,7 +778,7 @@ class ProfitService:
         window_rows = (
             [row for row in rollups if row[1] >= opening_day]
             if cutoff == opening_midnight
-            else self._rematch_window(discord_user_id, cutoff, until)
+            else self._rematch_window(discord_user_id, cutoff, until, now)
         )
         realized = aggregate_rollups(
             window_rows,
@@ -827,6 +829,7 @@ class ProfitService:
         discord_user_id: int,
         cutoff: datetime,
         until: datetime | None,
+        now: datetime,
     ) -> list[tuple[int, str, ItemDayProfit]]:
         """Match the sales inside a window that opens partway through a date.
 
@@ -843,12 +846,13 @@ class ProfitService:
         counted, which is what keeps the costs FIFO allocates here the same
         ones the stored rows were built with.
 
-        A checkpoint holds the lots as they were, unpruned, which is what a
-        rewind resumes from too. So stock held past ``LOT_PRUNE_AFTER_DAYS``
-        and sold inside this window is costed from the purchases that built
-        it rather than from the averaged lot the stored rows may have merged
-        them into - a difference of rounding on positions older than a year,
-        and the same one a rewind already writes back.
+        A checkpoint holds the lots as they were, before the sync collapsed
+        the ones held past ``LOT_PRUNE_AFTER_DAYS`` into a single averaged
+        lot. The stored rows for a sale out of that stock were matched from
+        the collapsed lot, so resuming from the checkpoint as it stands would
+        cost the same sale from the cheapest purchase behind it instead - a
+        whole cost basis apart, not a rounding. The lots are put through the
+        same collapse here before anything is matched against them.
 
         The rows come back in the shape the stored ones have, so the caller
         adds them up, and applies the member's hidden items to them, exactly
@@ -866,6 +870,10 @@ class ProfitService:
             # A checkpoint holds what was held before its instant, so that
             # instant is replayed rather than skipped.
             resume_at, opening_lots = resume
+            opening_lots = prune_open_lots(
+                opening_lots,
+                older_than=now - timedelta(days=LOT_PRUNE_AFTER_DAYS),
+            )
         buys = self._store.get_transactions(
             discord_user_id, "history_buys", at_or_after=resume_at
         )

@@ -3194,6 +3194,96 @@ class TestProfitService:
         # project the same unrealized result.
         assert hourly.unrealized == week.unrealized
 
+    async def test_the_hourly_window_costs_from_the_lots_the_rollups_used(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # Stock held past LOT_PRUNE_AFTER_DAYS is collapsed into one averaged
+        # lot when what is still held is stored, so a sale out of it costs the
+        # average. The checkpoints behind it were written before that collapse
+        # and hold the lots apart, so a rematch resuming from one would cost
+        # the cheap lot instead and report a different profit for the very
+        # same sale than the day it is stored under does.
+        store, _, _ = profit_store
+        secret = "pruned-lot-member-secret"
+        store.set_api_key(101, secret)
+        buys = [
+            transaction(
+                "buy-tiny",
+                price=1,
+                quantity=1,
+                occurred_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+            transaction(
+                "buy-bulk",
+                price=100,
+                quantity=100,
+                occurred_at=datetime(2024, 6, 2, tzinfo=UTC),
+            ),
+            # Carries the first pass past the month boundary the 24h window
+            # will later resume from, so a checkpoint is written there.
+            transaction(
+                "buy-other-item",
+                item_id=2,
+                price=50,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 10, tzinfo=UTC),
+            ),
+        ]
+        sells: list[Transaction] = []
+
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return list(buys)
+            if path.endswith("history/sells"):
+                return list(sells)
+            return []
+
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                return_value=named({1: "Test Item", 2: "Other Item"})
+            ),
+            fetch_market_prices=AsyncMock(
+                return_value={1: MarketPrice(100, 200), 2: MarketPrice(10, 20)}
+            ),
+        )
+
+        # The first pass writes the checkpoints and then prunes what is held.
+        await service.load_report(
+            101,
+            ReportWindow(days=7),
+            now=datetime(2026, 8, 15, tzinfo=UTC),
+        )
+        # A single unit sold out of that year-old stock, matched by the next
+        # pass from the averaged lot the first one left behind.
+        sells.append(
+            transaction(
+                "sell",
+                price=400,
+                quantity=1,
+                occurred_at=datetime(2026, 8, 20, 18, tzinfo=UTC),
+            )
+        )
+        now = datetime(2026, 8, 21, 9, 30, tzinfo=UTC)
+
+        hourly = await service.load_report(101, ReportWindow(days=1), now=now)
+        week = await service.load_report(101, ReportWindow(days=7), now=now)
+
+        stored = week.realized.days["2026-08-20"]
+        assert hourly.realized.total_cost == stored.cost
+        assert hourly.realized.total_profit == stored.profit
+
     async def test_only_a_window_opening_mid_date_is_rematched(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
@@ -3203,7 +3293,8 @@ class TestProfitService:
         # window that opens at a midnight must keep taking the cheap path of
         # adding up the stored days - including 24h read exactly at one.
         store, _, _ = profit_store
-        store.set_api_key(101, "member-secret")
+        secret = "rematch-trace-member-secret"
+        store.set_api_key(101, secret)
         buys = [
             transaction(
                 "buy",
@@ -3256,6 +3347,7 @@ class TestProfitService:
                 now=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
             )
         assert trace not in caplog.text
+        assert secret not in caplog.text
 
         caplog.clear()
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
@@ -3265,6 +3357,7 @@ class TestProfitService:
                 now=datetime(2026, 8, 21, tzinfo=UTC),
             )
         assert trace not in caplog.text
+        assert secret not in caplog.text
 
         caplog.clear()
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
@@ -3274,6 +3367,10 @@ class TestProfitService:
                 now=datetime(2026, 8, 21, 9, 30, tzinfo=UTC),
             )
         assert trace in caplog.text
+        # The rematch trace runs inside a workflow holding the member's key,
+        # so the run that emits it is also the run that has to prove the key
+        # never reached the console.
+        assert secret not in caplog.text
 
     async def test_the_six_dates_before_a_window_are_read_for_the_average(
         self,
