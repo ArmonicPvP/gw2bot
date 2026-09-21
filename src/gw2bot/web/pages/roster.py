@@ -195,6 +195,51 @@ table.changes .dot {
 /* A Discord display name has no spaces to break at either, so it is bounded
    the same way an account name is. */
 table.changes td.discord { overflow-wrap: anywhere; }
+/* A short date is two words with a space in the middle, and wrapping at it
+   would cost the row a second line for the sake of three characters. The cell
+   is also the positioning context for the box the date opens. */
+table.changes td.invited { position: relative; white-space: nowrap; }
+/* An account with no recorded invitation has no date to show, so the word
+   standing in for one reads as an absence. */
+table.changes td.undated { color: var(--muted); }
+/* The date is a button rather than plain text because a tooltip a mouse has
+   to hover reaches nobody on a phone and nobody working by keyboard. It is
+   styled back down to the text it replaced, keeping the dotted underline that
+   says there is more behind it. */
+table.changes .tip-trigger {
+  appearance: none;
+  -webkit-appearance: none;
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2rem;
+}
+/* Hangs below its cell rather than over the next row's text, and grows to the
+   left from the cell's right edge, which is what keeps the last column's box
+   inside the card on a phone. */
+.cell-tip {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% - 0.25rem);
+  right: 0;
+  width: max-content;
+  max-width: min(15rem, 62vw);
+  padding: 0.4rem 0.55rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+  white-space: normal;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+/* Above its cell instead, for a row with no room under it. */
+.cell-tip.above { top: auto; bottom: calc(100% - 0.25rem); }
 /* An invited account that no application post matched has no Discord name to
    show, and the reason reads as an absence rather than as a name. */
 table.changes td.unmatched { color: var(--muted); }
@@ -442,6 +487,57 @@ button:focus-visible {
         minute: "2-digit"
       });
   }
+  // "Jun 17": as much of a moment as a narrow column has room for. What it
+  // leaves out is on the cell's tooltip rather than lost.
+  function formatShortDate(t) {
+    return new Date(t * 1000).toLocaleDateString(
+      undefined, { month: "short", day: "numeric" });
+  }
+  function countedAge(value, unit) {
+    return value + " " + unit + (value === 1 ? "" : "s") + " ago";
+  }
+  // "3 minutes ago", "7 days ago". Coarse on purpose: the moment itself is
+  // beside it, and what an age is read for is how stale something is rather
+  // than a count to the second. Days are the largest unit, so a wait of weeks
+  // is still counted in a unit a reader can compare against the 14-day Trial
+  // clock without converting it back.
+  function formatAge(seconds) {
+    if (seconds < 60) { return "just now"; }
+    if (seconds < 3600) {
+      return countedAge(Math.floor(seconds / 60), "minute");
+    }
+    if (seconds < 86400) {
+      return countedAge(Math.floor(seconds / 3600), "hour");
+    }
+    return countedAge(Math.floor(seconds / 86400), "day");
+  }
+  // The same moment, with the year when it is not this one. An invitation
+  // can sit unanswered across New Year, and "Jun 17, 9:30 PM" would then be
+  // read as this June rather than last.
+  function formatMomentWithYear(t) {
+    var date = new Date(t * 1000);
+    if (date.getFullYear() === new Date().getFullYear()) {
+      return formatMoment(t);
+    }
+    return date.toLocaleString(
+      undefined,
+      {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+  }
+  // "Sep 20, 9:30 PM | 7 days ago": the moment the membership table shows in
+  // full, and how long ago it was by the reader's own clock. A clock running
+  // a little behind the server's would otherwise date an invite in the
+  // future, which formatAge() reads as "just now" rather than as a negative
+  // age.
+  function formatMomentWithAge(t) {
+    return formatMomentWithYear(t) + " | " +
+      formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));
+  }
 
   function renderChart() {
     M = metrics();
@@ -596,7 +692,8 @@ button:focus-visible {
   function eventKind(event) {
     var name = event && event.type;
     if (name === "pointerdown" || name === "wheel" ||
-        name === "keydown" || name === "blur") {
+        name === "keydown" || name === "blur" ||
+        name === "scroll" || name === "resize") {
       return name;
     }
     return "other";
@@ -976,7 +1073,129 @@ button:focus-visible {
     console.debug("roster pending invites:", action, count);
   }
 
+  // The moment-and-age box the "Invite sent" column opens: one node, moved
+  // into whichever cell is showing it. A title attribute was a desktop-only
+  // answer - a phone has no hover to give, and neither has a keyboard.
+  var inviteTip = el("div", "cell-tip");
+  inviteTip.id = "invite-tip";
+  inviteTip.setAttribute("role", "tooltip");
+  var inviteTipTrigger = null;
+
+  // Sanitized tracing for the box, so a console trace can explain why one
+  // opened or went away: a fixed action name and, for a dismissal, one of the
+  // narrowed event names above. No date, account name or payload is passed.
+  function traceInviteTip(action, reason) {
+    console.debug("roster invite tip:", action, reason || "");
+  }
+
+  function showInviteTip(trigger, text) {
+    hideInviteTip("replaced");
+    inviteTip.textContent = text;
+    trigger.parentNode.appendChild(inviteTip);
+    placeInviteTip(trigger);
+    // Described by the box only while the box is on screen, which is what a
+    // screen reader expects of a tooltip.
+    trigger.setAttribute("aria-describedby", inviteTip.id);
+    inviteTipTrigger = trigger;
+    document.addEventListener("pointerdown", dismissInviteTip, true);
+    document.addEventListener("wheel", dismissInviteTip, true);
+    document.addEventListener("scroll", dismissInviteTip, true);
+    document.addEventListener("keydown", dismissInviteTip, true);
+    window.addEventListener("blur", dismissInviteTip);
+    window.addEventListener("resize", dismissInviteTip);
+    traceInviteTip("open");
+  }
+
+  // A box below the last rows of a phone screen would hang off the bottom,
+  // and the reader cannot scroll it into view because scrolling is one of the
+  // things that puts it away. It opens upwards instead, unless there is no
+  // room up there either, where below is still the lesser of the two.
+  function placeInviteTip(trigger) {
+    inviteTip.classList.remove("above");
+    var viewport = window.innerHeight ||
+      document.documentElement.clientHeight;
+    var box = inviteTip.getBoundingClientRect();
+    if (box.bottom <= viewport) { return; }
+    var cell = trigger.getBoundingClientRect();
+    if (cell.top - box.height >= 0) { inviteTip.classList.add("above"); }
+  }
+
+  function hideInviteTip(reason) {
+    if (!inviteTipTrigger) { return; }
+    inviteTipTrigger.removeAttribute("aria-describedby");
+    inviteTipTrigger = null;
+    inviteTip.remove();
+    document.removeEventListener("pointerdown", dismissInviteTip, true);
+    document.removeEventListener("wheel", dismissInviteTip, true);
+    document.removeEventListener("scroll", dismissInviteTip, true);
+    document.removeEventListener("keydown", dismissInviteTip, true);
+    window.removeEventListener("blur", dismissInviteTip);
+    window.removeEventListener("resize", dismissInviteTip);
+    traceInviteTip("close", reason);
+  }
+
+  // Anything but the box itself closes it: a tap or click elsewhere on the
+  // page, a scroll either way, a wheel, a key, a resize, or the window losing
+  // focus.
+  function dismissInviteTip(event) {
+    var target = event && event.target;
+    // A press inside the box is someone reading it, not dismissing it, so it
+    // is the one place a press leaves it standing.
+    if (target && target.nodeType && inviteTip.contains(target)) { return; }
+    // A press on a date is left to that date's own click, which opens its box
+    // or closes the one it opened. Closing here first would let that click
+    // reopen what the press meant to dismiss.
+    if (event && event.type === "pointerdown" && target && target.closest &&
+        target.closest(".tip-trigger")) {
+      return;
+    }
+    // Enter and Space on the open date reach here before the click they turn
+    // into, and are left to it for the same reason. Every other key, Escape
+    // and Tab included, closes the box.
+    if (event && event.type === "keydown" && target === inviteTipTrigger &&
+        (event.key === "Enter" || event.key === " " ||
+          event.key === "Spacebar")) {
+      return;
+    }
+    hideInviteTip("page-" + eventKind(event));
+  }
+
+  // The cell for an invitation that has a date: the short date as a button,
+  // which opens the box on a tap, a click or a keypress and on a mouse's
+  // hover. The age is worked out as the box opens rather than as the row is
+  // drawn, so a page left open overnight cannot still call the invitation
+  // three minutes old.
+  function inviteSentCell(sentAt) {
+    var cell = el("td", "invited");
+    var trigger = el("button", "tip-trigger", formatShortDate(sentAt));
+    trigger.type = "button";
+    trigger.addEventListener("click", function () {
+      if (inviteTipTrigger === trigger) {
+        hideInviteTip("toggle");
+        return;
+      }
+      showInviteTip(trigger, formatMomentWithAge(sentAt));
+    });
+    trigger.addEventListener("pointerenter", function (event) {
+      if (isHoverPointer(event)) {
+        showInviteTip(trigger, formatMomentWithAge(sentAt));
+      }
+    });
+    trigger.addEventListener("pointerleave", function (event) {
+      // A finger's pointerleave arrives as it lifts off the glass, and acting
+      // on it would close the box the tap had just opened.
+      if (isHoverPointer(event) && inviteTipTrigger === trigger) {
+        hideInviteTip("pointer-leave");
+      }
+    });
+    cell.appendChild(trigger);
+    return cell;
+  }
+
   function renderPending(invites, matched) {
+    // The rows the open box was anchored to are about to be replaced, and a
+    // box left behind would hang off a cell that is no longer on the page.
+    hideInviteTip("redraw");
     pendingBox.replaceChildren();
     pendingCount.textContent = invites.length
       ? "\\u2014 " + invites.length + " waiting"
@@ -992,6 +1211,7 @@ button:focus-visible {
     var head = el("tr");
     head.appendChild(el("th", null, "Account"));
     head.appendChild(el("th", null, "Discord"));
+    head.appendChild(el("th", null, "Invite sent"));
     table.appendChild(head);
     invites.forEach(function (invite) {
       var row = el("tr");
@@ -1008,6 +1228,13 @@ button:focus-visible {
         : el("td", "discord unmatched", matched
           ? "No application matched"
           : "Could not be checked"));
+      // The column has room for the date alone, so the rest of the moment and
+      // how long ago it was are in the box the date opens. An invitation the
+      // bot never recorded a guild-log event for has no date to show, and the
+      // row says so rather than standing in a date of its own.
+      row.appendChild(typeof invite.invited_at === "number"
+        ? inviteSentCell(invite.invited_at)
+        : el("td", "invited undated", "Unknown"));
       table.appendChild(row);
     });
     pendingBox.appendChild(table);

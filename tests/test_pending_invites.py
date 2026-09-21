@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, call
@@ -52,6 +53,12 @@ def api_bot(members: list[dict[str, object]], **attributes: object):
         ),
     )
     attributes.setdefault("_config", default_config(gw2_guild_id="guild-id"))
+    # An invitation is dated from the guild-log event the bot stored for it,
+    # so a bot that has recorded none dates nothing.
+    attributes.setdefault(
+        "_raffle_store",
+        SimpleNamespace(get_guild_invite_times=lambda: {}),
+    )
     return configured_bot(
         _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=members)),
         **attributes,
@@ -80,12 +87,48 @@ class TestPendingInviteEntries:
             ["Waiting.1234"], resolve_status=False
         )
 
+    async def test_dates_each_invite_from_its_recorded_guild_log_event(
+        self,
+    ) -> None:
+        # The member list dates an invited account with nothing, so the
+        # invitation's own guild-log event is what says when it was sent. The
+        # log reaches only so far back, and an account with no recorded event
+        # is left undated rather than dated with a guess.
+        sent_at = datetime(2026, 6, 17, 21, 30, tzinfo=UTC)
+        bot = api_bot(
+            [
+                guild_member("Waiting.1234", "invited"),
+                guild_member("Unrecorded.5678", "invited"),
+                guild_member("Member.9012", "Sunborne"),
+            ],
+            _raffle_store=SimpleNamespace(
+                # Stored casefolded, because an account name is matched
+                # case-insensitively everywhere else too.
+                get_guild_invite_times=lambda: {
+                    "waiting.1234": sent_at,
+                    "gone.3456": datetime(2026, 1, 1, tzinfo=UTC),
+                }
+            ),
+        )
+
+        pending = await build_pending_invite_entries(cast(Gw2Bot, bot))
+
+        # Keyed by the same names the entries carry, so a caller can pair
+        # them up without matching on anything else, and holding nothing
+        # about accounts that are not waiting.
+        assert pending.invited_at == {"Waiting.1234": sent_at}
+        assert [entry.username for entry in pending.entries] == [
+            "Unrecorded.5678",
+            "Waiting.1234",
+        ]
+
     async def test_does_not_touch_discord_when_nobody_is_waiting(self) -> None:
         bot = api_bot([guild_member("Member.9012", "Sunborne")])
 
         pending = await build_pending_invite_entries(cast(Gw2Bot, bot))
 
         assert pending.entries == []
+        assert pending.invited_at == {}
         # Nothing was asked about, so nothing is unmatched.
         assert pending.forum_read
         # Matching costs a refresh of the Trial application forum index, and
