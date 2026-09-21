@@ -21,6 +21,7 @@ from gw2bot.core.database import (
     ProfitRollupRecord,
     ProfitRollupStateRecord,
     ProfitTransactionRecord,
+    SettingRecord,
     create_database_engine,
     initialize_database,
 )
@@ -47,6 +48,13 @@ MIN_REPORT_DAYS = 1
 # is enough to rewind any late arrival the GW2 API can still be reporting,
 # and bounds what an inactive account costs to store.
 MAX_LOT_CHECKPOINTS = 24
+
+# Marks a database whose stored results were matched under the rule that
+# collapses long-held lots at each month boundary rather than at the end of a
+# pass. Results computed the old way are dropped once, because a checkpoint
+# written then does not hold the state the matching after it ran from, which
+# is what every report now reads it as.
+BOUNDARY_PRUNED_LOTS_KEY = "profit_boundary_pruned_lots_v1"
 
 # An item's name is fixed for the life of the game build, so it is cached for
 # a month rather than for the five minutes a transaction snapshot lasts. This
@@ -112,7 +120,63 @@ class ProfitStore:
         # to account for. Sessions reconnect on first real use.
         self._engine.dispose()
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
+        try:
+            self._rebase_rollups_if_pending()
+        except Exception:
+            self.close()
+            raise
         LOGGER.debug("Profit store initialized")
+
+    def _rebase_rollups_if_pending(self) -> None:
+        """Drop results matched under the old collapse rule, once ever.
+
+        Lots held past a year used to be collapsed at the end of a pass,
+        against the clock, and are now collapsed at each month boundary
+        against the boundary's own date. A checkpoint written the old way
+        does not hold the state the matching after it ran from, so a report
+        resuming at one can cost a sale differently from the stored day it
+        falls in - which is the disagreement the new rule exists to make
+        impossible.
+
+        Only *results* go: every rollup, checkpoint, open lot and watermark.
+        The transactions they were matched from are the record and are left
+        alone, so each member's next report rebuilds all of it from the same
+        trades, under one rule. That costs them a single full rematch, which
+        is the first pass every member paid once already.
+
+        Keyed rather than inferred, because a database already rebuilt must
+        never be rebuilt again: the second run would cost every member that
+        pass for nothing.
+        """
+        cleared = 0
+        with self._sessions.begin() as session:
+            if session.get(SettingRecord, BOUNDARY_PRUNED_LOTS_KEY) is not None:
+                return
+            for record_type in (
+                ProfitRollupRecord,
+                ProfitLotCheckpointIndexRecord,
+                ProfitLotCheckpointRecord,
+                ProfitOpenLotRecord,
+                ProfitRollupStateRecord,
+            ):
+                # Counted before the delete rather than read back off it:
+                # what a delete reports is a driver detail, and this is the
+                # same count the rest of the store takes.
+                total = session.scalar(
+                    select(func.count()).select_from(record_type)
+                )
+                cleared += int(total or 0)
+                session.execute(delete(record_type))
+            session.add(
+                SettingRecord(key=BOUNDARY_PRUNED_LOTS_KEY, value="complete")
+            )
+        # A database that had nothing stored - a new one, most of them - says
+        # so with a zero rather than staying silent about a pass that ran.
+        LOGGER.info(
+            "Dropped Trading Post results matched under the old lot rule; "
+            "rows=%s",
+            cleared,
+        )
 
     def close(self) -> None:
         LOGGER.debug("Closing profit store")

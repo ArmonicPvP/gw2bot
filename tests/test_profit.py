@@ -63,6 +63,7 @@ from gw2bot.profit.service import (
     serialize_profit_report,
 )
 from gw2bot.profit.store import (
+    BOUNDARY_PRUNED_LOTS_KEY,
     ITEM_NAME_TTL_SECONDS,
     MAX_LOT_CHECKPOINTS,
     MAX_REPORT_DAYS,
@@ -3907,6 +3908,136 @@ class TestProfitService:
         assert store.get_excluded_profit_items(101) == frozenset({24_292})
         assert await service.set_item_exclusion(101, 24_292, False)
         assert store.get_excluded_profit_items(101) == frozenset()
+
+
+class TestRollupRebase:
+    """The one-time drop of results matched under the old lot rule."""
+
+    @staticmethod
+    def _seed(store: ProfitStore) -> None:
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("buy", price=100, quantity=10)],
+            now=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+        store.store_rollups(
+            101,
+            {(1, "2026-08-20"): ItemDayProfit(5, 500, 1_700, 1_200, 0.0)},
+            {1: (BuyLot(5, 100, datetime(2026, 8, 1, tzinfo=UTC)),)},
+            datetime(2026, 8, 20, tzinfo=UTC),
+            now=datetime(2026, 8, 21, tzinfo=UTC),
+        )
+        store.store_lot_checkpoint(
+            101,
+            datetime(2026, 8, 1, tzinfo=UTC),
+            {1: (BuyLot(5, 100, datetime(2026, 7, 1, tzinfo=UTC)),)},
+        )
+
+    @staticmethod
+    def _forget_the_marker(database: Path) -> None:
+        """Make a database look like one written before the rule changed."""
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "DELETE FROM metadata WHERE key = ?",
+                (BOUNDARY_PRUNED_LOTS_KEY,),
+            )
+
+    def test_results_from_the_old_rule_are_dropped_and_trades_are_kept(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # A checkpoint written under the old rule does not hold the state the
+        # matching after it ran from, so a report resuming at one could cost a
+        # sale differently from the day row it falls in. What was computed
+        # that way goes; what it was computed *from* stays, and the next
+        # report matches it again under one rule.
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        secret = "rebase-member-secret"
+        store.set_api_key(101, secret)
+        self._seed(store)
+        store.close()
+        self._forget_the_marker(database)
+
+        reopened = ProfitStore(str(database), cipher, registry)
+
+        try:
+            assert (
+                reopened.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC))
+                == []
+            )
+            assert reopened.get_open_lots(101) == {}
+            assert reopened.get_rollup_state(101).computed_through is None
+            assert (
+                reopened.get_lot_checkpoint_at_or_before(
+                    101, datetime(2026, 8, 21, tzinfo=UTC)
+                )
+                is None
+            )
+            # The trades are the record and the key is the member's; neither
+            # is a result, so neither is dropped.
+            assert reopened.get_api_key(101) == secret
+            assert len(reopened.get_transactions(101, "history_buys")) == 1
+        finally:
+            reopened.close()
+
+    def test_a_database_already_rebased_is_left_alone(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The second run would cost every member a full rematch for nothing,
+        # so the marker is what decides it rather than the shape of the rows.
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        store.close()
+        self._forget_the_marker(database)
+        rebased = ProfitStore(str(database), cipher, registry)
+        self._seed(rebased)
+        rebased.close()
+
+        reopened = ProfitStore(str(database), cipher, registry)
+
+        try:
+            assert (
+                len(reopened.get_rollups(101, datetime(2026, 1, 1, tzinfo=UTC)))
+                == 1
+            )
+            assert reopened.get_open_lots(101) != {}
+            assert (
+                reopened.get_lot_checkpoint_at_or_before(
+                    101, datetime(2026, 8, 21, tzinfo=UTC)
+                )
+                is not None
+            )
+        finally:
+            reopened.close()
+
+    def test_the_drop_is_traced_without_naming_a_member(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        secret = "rebase-trace-member-secret"
+        store.set_api_key(101, secret)
+        self._seed(store)
+        store.close()
+        self._forget_the_marker(database)
+
+        with caplog.at_level(logging.INFO, logger="gw2bot"):
+            reopened = ProfitStore(str(database), cipher, registry)
+        reopened.close()
+
+        assert "matched under the old lot rule" in caplog.text
+        assert secret not in caplog.text
 
 
 class TestRollupStore:

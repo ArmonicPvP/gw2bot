@@ -1808,6 +1808,16 @@ rewind. Measured against the clock instead, the same sale could be costed from
 the averaged lot by one pass and from the cheapest purchase behind it by the
 next.
 
+A database written before that rule was adopted holds results matched the old
+way, which the boundaries it kept no longer describe. Those results — every
+rollup, month boundary, held lot and watermark — are dropped once, the first
+time the bot opens such a database, and the console says how many rows went.
+Nothing a member would have to re-enter goes with them: their key, their
+hidden items and their stored trades are all kept, and the next `/profit`
+report each member opens rematches their history from those trades in one
+pass. That first report is as slow as their first one ever was; every report
+after it is as quick as before.
+
 **Unrealized Profit** covers everything the member still holds that is listed
 for sale, drawn from all their stored history rather than from the selected
 window: a purchase made before the window began is still stock they are holding
