@@ -251,6 +251,36 @@ class TestRaffleStore:
             assert store.get_guild_invite_times() == {}
             store.close()
 
+    def test_keeps_a_date_an_older_undated_row_cannot_have_ended(
+        self,
+    ) -> None:
+        # A row the store cannot date still has its place in the log, and an
+        # invitation recorded after it is not in doubt because of it. Only a
+        # row that could be the later one makes the invitation unsafe.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_join(101, "Returned.1234", time="soon"),
+                    guild_invite(
+                        102, "Returned.1234", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    # The other way round: the undated row came after the
+                    # invitation and could be what answered it.
+                    guild_invite(
+                        103, "Doubtful.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    guild_join(104, "Doubtful.5678", time="soon"),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {
+                "returned.1234": datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
+            }
+            store.close()
+
     def test_breaks_a_same_second_tie_by_the_logs_own_order(self) -> None:
         # A removal and a fresh invitation inside the same second come back
         # in the order the log recorded them, so an account reinvited on the

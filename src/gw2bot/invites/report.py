@@ -6,6 +6,7 @@ forum index, the same matching the Trial reports use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -69,8 +70,12 @@ async def build_pending_invite_entries(bot: Gw2Bot) -> PendingInvites:
     # The member list dates an invited account with nothing - it has joined
     # nothing to be dated by - so the invitation's own guild-log event is what
     # says when it was sent. The bot already stores those to post the invite
-    # notification once.
-    invite_times = bot._raffle_store.get_guild_invite_times()
+    # notification once. The membership ledger grows for as long as the guild
+    # does and the read walks all of it, so it goes to a thread rather than
+    # holding up the event loop every other page has to share.
+    invite_times = await asyncio.to_thread(
+        bot._raffle_store.get_guild_invite_times
+    )
     invited_at = {
         username: sent_at
         for username in usernames

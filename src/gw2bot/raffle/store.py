@@ -978,16 +978,20 @@ class RaffleStore:
 
         The log only reaches about a hundred events per type, so an invitation
         sent before the bot first read it was never recorded and is absent
-        here rather than dated by something else. So is an account with a row
-        this store cannot date at all: which of its events came last is then
-        unknown, and the row before it is not an answer to that question.
+        here rather than dated by something else. So is an account whose own
+        history holds a row this store cannot date and cannot rule out as the
+        later one, because the row before an undated event is not an answer to
+        what that event was.
         """
         # Newest invitation, and newest answer to one, per account. Each is
         # kept as (moment, event id) so a tie between two events recorded in
         # the same second is broken by the order the log recorded them.
         invited: dict[str, tuple[datetime, int]] = {}
         answered: dict[str, tuple[datetime, int]] = {}
-        undatable: set[str] = set()
+        # The newest undated row per account, by log event id, and whether one
+        # of them cannot be placed by id at all.
+        undated: dict[str, int] = {}
+        unordered: set[str] = set()
 
         def remember(
             newest: dict[str, tuple[datetime, int]],
@@ -998,10 +1002,21 @@ class RaffleStore:
             key = username.strip().casefold()
             moment = parse_event_time(event_time)
             if moment is None:
-                # Nothing about this account can be ordered around a row that
-                # cannot be dated, and falling back to the row before it would
-                # date an invitation by the one it replaced.
-                undatable.add(key)
+                # A row with no readable time still has its place in the log,
+                # and an invitation recorded after it is unaffected by it. It
+                # is only a row that could be the later one that makes the
+                # invitation unsafe to date - the row before an undated event
+                # is not an answer to what that event was.
+                if event_id < 0:
+                    # The one-time log channel import keys its rows by a
+                    # negated Discord message id, which says nothing about
+                    # where the row falls among the log's own. Nothing about
+                    # this account can be ordered around it.
+                    unordered.add(key)
+                    return
+                known = undated.get(key)
+                if known is None or event_id > known:
+                    undated[key] = event_id
                 return
             known = newest.get(key)
             if known is None or (moment, event_id) > known:
@@ -1026,8 +1041,13 @@ class RaffleStore:
 
         times: dict[str, datetime] = {}
         superseded = 0
+        undatable = 0
         for username, sent in invited.items():
-            if username in undatable:
+            newest_undated = undated.get(username)
+            if username in unordered or (
+                newest_undated is not None and newest_undated > sent[1]
+            ):
+                undatable += 1
                 continue
             settled = answered.get(username)
             if settled is not None and settled > sent:
@@ -1038,7 +1058,7 @@ class RaffleStore:
             "Loaded invite times for %s accounts; superseded=%s undatable=%s",
             len(times),
             superseded,
-            len(undatable),
+            undatable,
         )
         return times
 
