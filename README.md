@@ -1914,13 +1914,18 @@ been invited in-game and have not accepted yet — the `y` of the `x/500 (y
 pending)` channel description, named rather than counted. Each row carries the
 account name and the display name of the Discord account whose `Accepted`
 application post matched it, or "No application matched" when none did. An
-**Invite sent** column dates each one as a short date such as `Jun 17`, with
-the moment in full and how long ago it was — `Sep 20, 9:30 PM | 7 days ago`,
-`Mar 9, 12:16 AM | 3 minutes ago` — on hover. The date is the timestamp the
-GW2 API carries for the invited account, which, having accepted nothing, is
-when the invitation went out; the API is allowed to carry none at all, and a
-row it dated with nothing reads "Unknown" rather than being given a date of
-its own. If the application forum could not be read in full, the rows without
+**Invite sent** column dates each one as a short date such as `Jun 17`.
+Hovering it with a mouse, tapping it on a phone, or reaching it by keyboard
+and pressing Enter opens the moment in full with how long ago it was — `Sep
+20, 9:30 PM | 7 days ago`, `Mar 9, 12:16 AM | 3 minutes ago`. The box stays
+while it is read and closes on the next thing the reader does: another tap on
+the date, a tap or click anywhere else, a scroll, a keypress or a resize. The
+date is the moment the guild log recorded the invitation, which is the only
+place an invitation is dated — the member list gives an invited account no
+date of its own. The log reaches back about a hundred events per type, so an
+invitation sent before the bot first read it was never recorded, and that row
+reads "Unknown" rather than being given a date. If the application forum could
+not be read in full, the rows without
 a name say "Could not be checked" instead - a name that is shown was matched
 either way - and that answer is not cached, because an unread post is not
 evidence that

@@ -265,6 +265,14 @@ Accounts with the exact rank `Officer` receive raffle tickets only for
 individual deposits of 10 gold or less. Larger Officer deposits are ignored by
 the raffle workflow and do not produce deposit notifications.
 
+An `invited` event carries the account invited, the officer who invited it, and
+the moment it was sent. The bot stores each one to post the invitation
+notification once, and that stored moment is also what dates a row in the
+roster page's **Invite sent** column - the member list has no date to give an
+invited account. Because the log reaches back only about a hundred events per
+type, an invitation sent before the bot first read it was never recorded, and
+such a row is left undated rather than dated from somewhere else.
+
 Voluntary member departures are `kick` events where `user` and `kicked_by` are
 the same account. A `kick` event with a different `kicked_by` account means
 someone removed the member and is not reported as a voluntary leave. The bot
@@ -283,12 +291,13 @@ reports members whose rank is `Trial` and whose join timestamp is at
 least 14 days old.
 
 An account that has been invited and has not accepted yet is on this list with
-the lowercase rank `invited`, and its `joined` is the moment the invitation was
-sent - it has joined nothing to be dated by. That is what the roster page's
-**Invite sent** column reads. `joined` is optional on every member, invited or
-not: the API has always been allowed to answer `null` for it, so a pending
-invite with no readable timestamp is left undated rather than dated with a
-guess. Before posting the report, the bot searches the configured
+the lowercase rank `invited`. It carries no usable date: `joined` is what it
+says it is, and an account that has joined nothing has none, so the roster
+page's **Invite sent** column is dated from the guild log's `invited` events
+instead - see above. `joined` is optional on every member in any case, because
+join dates were not tracked before March 2013.
+
+Before posting the report, the bot searches the configured
 Discord Trial application forum's `Accepted` posts for each GW2 account name
 and includes the linked post creator's Discord mention. The cached or current
 Trial or Sunborne role is included when available.

@@ -27,12 +27,8 @@ from gw2bot.invites import (
 from gw2bot.trials.reports import TrialForumMatches
 
 
-def guild_member(
-    name: str,
-    rank: str,
-    joined: str | None = None,
-) -> dict[str, object]:
-    return {"name": name, "rank": rank, "joined": joined}
+def guild_member(name: str, rank: str) -> dict[str, object]:
+    return {"name": name, "rank": rank}
 
 
 def api_bot(members: list[dict[str, object]], **attributes: object):
@@ -57,6 +53,12 @@ def api_bot(members: list[dict[str, object]], **attributes: object):
         ),
     )
     attributes.setdefault("_config", default_config(gw2_guild_id="guild-id"))
+    # An invitation is dated from the guild-log event the bot stored for it,
+    # so a bot that has recorded none dates nothing.
+    attributes.setdefault(
+        "_raffle_store",
+        SimpleNamespace(get_guild_invite_times=lambda: {}),
+    )
     return configured_bot(
         _api=SimpleNamespace(get_guild_members=AsyncMock(return_value=members)),
         **attributes,
@@ -85,31 +87,38 @@ class TestPendingInviteEntries:
             ["Waiting.1234"], resolve_status=False
         )
 
-    async def test_dates_each_invite_from_the_guild_member_list(self) -> None:
-        # An invited account has accepted nothing, so the timestamp the GW2
-        # API gives it is the moment the invitation was sent. An account the
-        # API dated with nothing is absent rather than dated with a guess.
+    async def test_dates_each_invite_from_its_recorded_guild_log_event(
+        self,
+    ) -> None:
+        # The member list dates an invited account with nothing, so the
+        # invitation's own guild-log event is what says when it was sent. The
+        # log reaches only so far back, and an account with no recorded event
+        # is left undated rather than dated with a guess.
+        sent_at = datetime(2026, 6, 17, 21, 30, tzinfo=UTC)
         bot = api_bot(
             [
-                guild_member(
-                    "Waiting.1234", "invited", "2026-06-17T21:30:00Z"
-                ),
-                guild_member("Undated.5678", "invited"),
-                guild_member(
-                    "Member.9012", "Sunborne", "2026-01-01T00:00:00Z"
-                ),
-            ]
+                guild_member("Waiting.1234", "invited"),
+                guild_member("Unrecorded.5678", "invited"),
+                guild_member("Member.9012", "Sunborne"),
+            ],
+            _raffle_store=SimpleNamespace(
+                # Stored casefolded, because an account name is matched
+                # case-insensitively everywhere else too.
+                get_guild_invite_times=lambda: {
+                    "waiting.1234": sent_at,
+                    "gone.3456": datetime(2026, 1, 1, tzinfo=UTC),
+                }
+            ),
         )
 
         pending = await build_pending_invite_entries(cast(Gw2Bot, bot))
 
-        assert pending.invited_at == {
-            "Waiting.1234": datetime(2026, 6, 17, 21, 30, tzinfo=UTC),
-        }
-        # The dates are keyed by the same names the entries carry, so a
-        # caller can pair them up without matching on anything else.
+        # Keyed by the same names the entries carry, so a caller can pair
+        # them up without matching on anything else, and holding nothing
+        # about accounts that are not waiting.
+        assert pending.invited_at == {"Waiting.1234": sent_at}
         assert [entry.username for entry in pending.entries] == [
-            "Undated.5678",
+            "Unrecorded.5678",
             "Waiting.1234",
         ]
 

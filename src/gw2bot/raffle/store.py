@@ -959,6 +959,38 @@ class RaffleStore:
             LOGGER.debug("Loaded %s pending guild-invite notifications", len(results))
             return results
 
+    def get_guild_invite_times(self) -> dict[str, datetime]:
+        """When each account was last invited, keyed by casefolded name.
+
+        The guild log is the only place an invitation is dated: the member
+        list gives an invited account no date of its own, and the log event
+        the bot already stores for the invite notification carries the moment
+        the invitation was sent. An account invited more than once keeps the
+        newest of them, because that is the invitation still outstanding.
+
+        The log only reaches about a hundred events per type, so an invitation
+        sent before the bot first read it was never recorded and is absent
+        here rather than dated by something else.
+        """
+        statement = select(GuildInviteRecord).order_by(
+            GuildInviteRecord.event_id
+        )
+        times: dict[str, datetime] = {}
+        with self._sessions() as session:
+            for record in session.scalars(statement).all():
+                sent_at = parse_event_time(record.event_time)
+                if sent_at is None:
+                    continue
+                key = record.username.strip().casefold()
+                known = times.get(key)
+                # Event ids rise with time, so the last row for an account is
+                # normally its newest invitation; comparing the timestamps
+                # keeps that true for rows imported out of order.
+                if known is None or sent_at > known:
+                    times[key] = sent_at
+        LOGGER.debug("Loaded invite times for %s accounts", len(times))
+        return times
+
     def get_pending_rank_change_notifications(self) -> list[GuildRankChange]:
         statement = (
             select(GuildRankChangeRecord)

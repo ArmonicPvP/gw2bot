@@ -15,7 +15,6 @@ from gw2bot.gw2.guild_members import (
     TrialMemberReportEntry,
     format_pending_invite_report,
     get_pending_invite_members,
-    get_pending_invite_times,
 )
 
 if TYPE_CHECKING:
@@ -34,9 +33,11 @@ class PendingInvites:
     non-matches or keep them as an answer.
 
     ``invited_at`` says when each invitation was sent, keyed by the same
-    account name its entry carries. An account the GW2 API gave no readable
-    timestamp for is absent from it rather than dated with a guess, so a
-    caller has to be ready for a name it holds nothing about.
+    account name its entry carries. The dates come from the guild log events
+    the bot recorded, which only reach as far back as the log did when it
+    first read it, so an account with no recorded invitation is absent rather
+    than dated with a guess and a caller has to be ready for a name it holds
+    nothing about.
     """
 
     entries: list[TrialMemberReportEntry]
@@ -65,7 +66,17 @@ async def build_pending_invite_entries(bot: Gw2Bot) -> PendingInvites:
             len(members),
         )
         return PendingInvites([], True)
-    invited_at = get_pending_invite_times(members)
+    # The member list dates an invited account with nothing - it has joined
+    # nothing to be dated by - so the invitation's own guild-log event is what
+    # says when it was sent. The bot already stores those to post the invite
+    # notification once.
+    invite_times = bot._raffle_store.get_guild_invite_times()
+    invited_at = {
+        username: sent_at
+        for username in usernames
+        if (sent_at := invite_times.get(username.strip().casefold()))
+        is not None
+    }
     # Only the match matters here: the report drops the in-game status label
     # an invited account has no rank for, and the roster page names the
     # matched Discord account itself. Asking for the status would cost a

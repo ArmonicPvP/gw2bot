@@ -16,7 +16,6 @@ from gw2bot.gw2.guild_members import (
     format_pending_invite_report,
     get_overdue_trial_members,
     get_pending_invite_members,
-    get_pending_invite_times,
     get_recent_trial_members,
     partition_tracked_overdue_members,
     seconds_until_trial_report,
@@ -497,52 +496,6 @@ class TestTrialMemberReport:
             "Invited.1234",
             "Shouting.5678",
         ]
-
-    def test_dates_each_invitation_from_the_members_join_timestamp(
-        self,
-    ) -> None:
-        # An account that has not accepted has joined nothing, so the
-        # timestamp the API gives it is when the invitation was sent.
-        members = [
-            {
-                "name": "Invited.1234",
-                "rank": "invited",
-                "joined": "2026-06-17T21:30:00Z",
-            },
-            {
-                "name": "Shouting.5678",
-                "rank": "Invited",
-                "joined": "2026-09-01T04:05:06+02:00",
-            },
-            {
-                "name": "Accepted.9012",
-                "rank": "Trial",
-                "joined": "2026-01-02T03:04:05Z",
-            },
-        ]
-
-        assert get_pending_invite_times(members) == {
-            "Invited.1234": datetime(2026, 6, 17, 21, 30, tzinfo=UTC),
-            "Shouting.5678": datetime(2026, 9, 1, 2, 5, 6, tzinfo=UTC),
-        }
-
-    def test_an_invitation_the_api_did_not_date_is_left_undated(self) -> None:
-        # The join timestamp has always been optional, and a date the bot
-        # made up would read as the day the invitation went out.
-        members = [
-            {"name": "Missing.1234", "rank": "invited"},
-            {"name": "Null.5678", "rank": "invited", "joined": None},
-            {"name": "Junk.9012", "rank": "invited", "joined": "soon"},
-            {
-                "name": "Dated.3456",
-                "rank": "invited",
-                "joined": "2026-06-17T21:30:00Z",
-            },
-        ]
-
-        assert get_pending_invite_times(members) == {
-            "Dated.3456": datetime(2026, 6, 17, 21, 30, tzinfo=UTC),
-        }
 
     def test_formats_pending_invite_report_without_status_or_congrats(
         self,

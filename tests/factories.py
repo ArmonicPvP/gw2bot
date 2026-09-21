@@ -102,10 +102,11 @@ def guild_invite(
     event_id: int,
     username: str = "Invited.1234",
     invited_by: str = "Officer.5678",
+    time: str = "2026-06-07T06:26:17.000Z",
 ) -> dict[str, object]:
     return {
         "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
+        "time": time,
         "type": "invited",
         "user": username,
         "invited_by": invited_by,

@@ -153,6 +153,41 @@ class TestRaffleStore:
             assert reopened.get_pending_invite_notifications() == []
             reopened.close()
 
+    def test_dates_each_account_by_its_newest_invitation(self) -> None:
+        # The roster page dates a pending invite from the log event the bot
+        # already stores for the notification, and an account invited more
+        # than once is dated by the invitation still outstanding.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_invite(
+                        101, "Invited.1234", time="2026-06-07T06:26:17.000Z"
+                    ),
+                    guild_invite(
+                        102, "Invited.1234", time="2026-09-01T12:00:00.000Z"
+                    ),
+                    guild_invite(
+                        103, "Other.5678", time="2026-08-15T09:30:00.000Z"
+                    ),
+                    # A timestamp that cannot be read dates nothing rather
+                    # than dating the account with a guess.
+                    guild_invite(104, "Broken.9012", time="soon"),
+                ]
+            )
+
+            times = store.get_guild_invite_times()
+
+            # Keyed casefolded, because an account name is matched
+            # case-insensitively everywhere else too.
+            assert times == {
+                "invited.1234": datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+                "other.5678": datetime(2026, 8, 15, 9, 30, tzinfo=UTC),
+            }
+            store.close()
+
     def test_persists_rank_change_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")
