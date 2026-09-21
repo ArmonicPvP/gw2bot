@@ -377,29 +377,41 @@ def feast_day_series(
     survives carries a full :data:`ROLLING_AVERAGE_DAYS` of history whether
     or not the reader asked for a window that wide.
 
-    The newest day is usually still running, so its totals are what has
-    happened so far rather than a finished day - which is also why the
-    averages are trailing means rather than centred ones.
+    Both of the window's edges cut a day in half, and both are honoured:
+    the newest day is usually still running, and the oldest holds only the
+    part of itself the window opened over. So the totals drawn are the
+    window's own, the way the removals and additions tables beside them are,
+    rather than whole days reaching back over hours the reader did not ask
+    for. That is also why the averages are trailing means rather than
+    centred ones.
+
+    The averages stay whole-day means over whole days of history, because
+    that is what an average over the last seven days is; they are worked out
+    on the history buckets and looked up by day.
     """
-    days = feast_days(removals, additions, costs, history_start(since), until)
+    history = feast_days(
+        removals, additions, costs, history_start(since), until
+    )
     used = rolling_averages(
-        [float(day.used) for day in days], ROLLING_AVERAGE_DAYS
+        [float(day.used) for day in history], ROLLING_AVERAGE_DAYS
     )
     spent = rolling_averages(
-        [float(day.cost) for day in days], ROLLING_AVERAGE_DAYS
+        [float(day.cost) for day in history], ROLLING_AVERAGE_DAYS
     )
-    drawn_from = day_of(since)
+    averages = {
+        day.day: (used[index], spent[index])
+        for index, day in enumerate(history)
+    }
     return [
         FeastDayPoint(
             day=day.day,
             used=day.used,
-            used_average=used[index],
+            used_average=averages[day.day][0],
             cost=day.cost,
-            cost_average=spent[index],
+            cost_average=averages[day.day][1],
             unit_cost=day.unit_cost,
         )
-        for index, day in enumerate(days)
-        if day.day >= drawn_from
+        for day in feast_days(removals, additions, costs, since, until)
     ]
 
 

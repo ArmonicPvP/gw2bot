@@ -1699,6 +1699,33 @@ class TestFoodDailyCharts:
         assert "if (legendBox) { renderLegend(legendBox); }" in FOOD_PAGE
         assert "renderDailyCharts();\n    renderTabs();" in FOOD_PAGE
 
+    def test_a_line_is_drawn_only_between_neighbouring_days(self) -> None:
+        # A day nothing was priced on has no cost per feast, so carrying the
+        # line across it would assert a price on a day nobody bought
+        # anything. The runs are split there and the dots are left to stand
+        # on their own.
+        assert (
+            "if (previousDay !== null && point.t - previousDay > "
+            "SECONDS_PER_DAY) {" in FOOD_PAGE
+        )
+        assert "runs.push(run);\n          run = [];" in FOOD_PAGE
+        assert "runs.forEach(function (coords) {" in FOOD_PAGE
+        assert "if (coords.length > 1) {" in FOOD_PAGE
+
+    def test_a_saved_cost_re_reads_the_window_for_the_charts(self) -> None:
+        # The daily cost charts are drawn from days the server bucketed and
+        # averaged, so a price recorded in the dialog reaches them only
+        # through another read - and the officer who saved it keeps the tab
+        # and page they were working down.
+        assert "refresh({ keepPlace: true });" in FOOD_PAGE
+        assert "var keepPlace = !!(options && options.keepPlace);" in (
+            FOOD_PAGE
+        )
+        assert (
+            "if (!keepPlace) {\n          state.tablePage = 0;\n"
+            "          state.additionPage = 0;\n        }" in FOOD_PAGE
+        )
+
     def test_an_all_off_legend_says_so_on_the_daily_charts_too(self) -> None:
         # The total has no legend of its own, so it points at the ones it is
         # summing rather than at a legend that is not there.

@@ -1956,8 +1956,11 @@ point per day of the window rather than one per recorded sample:
 
 Days are cut in UTC, so two members in two time zones reading the same window
 are shown the same days. A day nothing happened on is still a day: it is drawn
-as zero rather than skipped, so a quiet stretch reads as one. The newest day is
-usually still running, so its figures are what has happened so far.
+as zero rather than skipped, so a quiet stretch reads as one. Both edges of the
+window cut a day in half and both are honoured: the newest day is usually still
+running, and the oldest holds only the part of itself the window opened over,
+so these charts count the same activity the removals and additions tables do
+and nothing from the hours either side.
 
 The rolling averages are worked out over the seven days *before* the window as
 well as the days in it, so the average on the window's first day covers a full
@@ -1968,9 +1971,16 @@ window itself and nothing older.
 A restock nobody has priced counts as nothing spent and, on **Average food cost
 by day**, is left out of the division entirely rather than counted as free
 feasts. A day on which nothing at all was priced has no point on that chart,
-because there is no answer for it. Cost axes are labelled in the largest coin
-they reach (`4g`, `30s`, `12c`) and the hover reads the full price in coins;
-the **Total food cost** hover also names what the day alone cost.
+because there is no answer for it, and the line is broken across it rather than
+carried through — a segment spanning those days would assert a price on days
+nobody bought anything on. Cost axes are labelled in the largest coin they
+reach (`4g`, `30s`, `12c`) and the hover reads the full price in coins; the
+**Total food cost** hover also names what the day alone cost.
+
+The four cost charts are drawn from figures the server works out, so recording
+a price in the Additions editor re-reads the window to bring them up to date.
+The tab and page being worked down are kept across that, so pricing a run of
+restocks does not send an officer back to the first page each time.
 
 Every one of these charts starts at zero, and each carries the same legend as
 the stock chart above. The legends switch the same feasts: clicking a colour in

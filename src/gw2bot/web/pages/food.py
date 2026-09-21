@@ -1408,11 +1408,24 @@ button:focus-visible {
 
     var plotted = [];
     series.forEach(function (item, index) {
-      var coords = [];
+      // A line is drawn only between days that sit next to each other in the
+      // grid. Where a day is missing - one nothing was priced on, which has
+      // no cost per feast at all - the line is left broken rather than
+      // carried across it, because the segment would assert a price on days
+      // nobody bought anything on. The other charts have a point on every
+      // day, so they are one run and are drawn unbroken.
+      var runs = [];
+      var run = [];
+      var previousDay = null;
       item.points.forEach(function (point) {
         var px = x(point.t);
         var py = y(point.v);
-        coords.push(px.toFixed(1) + "," + py.toFixed(1));
+        if (previousDay !== null && point.t - previousDay > SECONDS_PER_DAY) {
+          runs.push(run);
+          run = [];
+        }
+        run.push(px.toFixed(1) + "," + py.toFixed(1));
+        previousDay = point.t;
         plotted.push({
           x: px,
           y: py,
@@ -1424,13 +1437,16 @@ button:focus-visible {
           feast: index
         });
       });
-      if (coords.length > 1) {
-        canvas.appendChild(svg("polyline", {
-          "class": "series-line",
-          stroke: item.color,
-          points: coords.join(" ")
-        }));
-      }
+      runs.push(run);
+      runs.forEach(function (coords) {
+        if (coords.length > 1) {
+          canvas.appendChild(svg("polyline", {
+            "class": "series-line",
+            stroke: item.color,
+            points: coords.join(" ")
+          }));
+        }
+      });
       item.points.forEach(function (point) {
         canvas.appendChild(svg("circle", {
           "class": "series-dot",
@@ -1767,6 +1783,13 @@ button:focus-visible {
         traceCost("save", "stored");
         closeCostDialog();
         renderAdditions();
+        // The daily cost charts are drawn from days the server bucketed and
+        // averaged, so a price recorded here only reaches them through
+        // another read of the window. Patching them in the page would mean
+        // working out a seven-day average over a week the page was never
+        // sent. The officer who saved it is still reading the table it came
+        // from, so their tab and page are kept across the fetch.
+        refresh({ keepPlace: true });
       })
       .catch(function (error) {
         // Only the error's type and message are logged; no price, account or
@@ -1813,7 +1836,11 @@ button:focus-visible {
 """
     + range_picker_js("feast")
     + """
-  function refresh() {
+  // options.keepPlace holds the reader's tab and page across the fetch, for
+  // the re-read a saved cost asks for: the rows are the ones they were just
+  // working down, not a window they have only now opened.
+  function refresh(options) {
+    var keepPlace = !!(options && options.keepPlace);
     chartStatus.textContent = "Loading\\u2026";
     fetch("/api/food" + rangeQuery())
       .then(function (response) {
@@ -1833,8 +1860,10 @@ button:focus-visible {
         if (state.activeAddition >= (payload.feasts || []).length) {
           state.activeAddition = 0;
         }
-        state.tablePage = 0;
-        state.additionPage = 0;
+        if (!keepPlace) {
+          state.tablePage = 0;
+          state.additionPage = 0;
+        }
         // The rows behind the dialog have just been replaced, so whatever it
         // was opened over is gone.
         closeCostDialog();

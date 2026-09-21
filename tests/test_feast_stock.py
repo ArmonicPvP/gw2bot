@@ -507,6 +507,45 @@ class TestFeastDaySeries:
         assert series[0].used_average == 14 / 7
         assert series[1].used == 0
 
+    def test_the_first_day_holds_only_the_part_the_window_opened_over(
+        self,
+    ) -> None:
+        # A preset window opens part-way through a day, so the day it opens
+        # on is cut in half the way the day it closes on is. The figures
+        # drawn have to be the window's own, the way the removals and
+        # additions tables beside them are.
+        opened = DAY + 14 * 60 * 60
+        before = [_removal(DAY + 6 * 60 * 60, 99)]
+        inside = [_removal(DAY + 20 * 60 * 60, 5)]
+
+        series = feast_day_series(
+            before + inside, [], {}, opened, opened + SECONDS_PER_DAY
+        )
+
+        assert series[0].day == DAY
+        assert series[0].used == 5
+        # The hours before the window still count towards the average, which
+        # is a mean over whole days and reads a week of them for that reason.
+        assert series[0].used_average == 104 / 7
+
+    def test_spend_before_the_window_stays_out_of_its_totals(self) -> None:
+        # The total cost chart adds these up across the window, so an
+        # addition priced in the hours before it opened would overstate what
+        # the window itself cost.
+        opened = DAY + 14 * 60 * 60
+
+        series = feast_day_series(
+            [],
+            [_addition(1, DAY + 6 * 60 * 60, 10), _addition(2, opened + 60, 4)],
+            {1: 500_000, 2: 8_000},
+            opened,
+            opened + SECONDS_PER_DAY,
+        )
+
+        assert series[0].cost == 8_000
+        assert series[0].unit_cost == 2_000.0
+        assert series[0].cost_average == 508_000 / 7
+
     def test_costs_carry_their_own_average_and_price_per_feast(self) -> None:
         series = feast_day_series(
             [],
