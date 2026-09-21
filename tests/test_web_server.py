@@ -2387,6 +2387,23 @@ class TestPendingInviteApi:
         guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
         return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
 
+    @staticmethod
+    def _row(
+        name: str,
+        discord_name: str | None = None,
+        invited_at: float | None = None,
+    ) -> dict[str, object]:
+        """One served row, with the columns a test is not about defaulted.
+
+        The tests below are about caching and refusals rather than about the
+        payload's shape, which the two tests that assert it in full carry.
+        """
+        return {
+            "name": name,
+            "discord_name": discord_name,
+            "invited_at": invited_at,
+        }
+
     async def test_member_without_role_is_forbidden(
         self,
         client: TestClient,
@@ -2428,10 +2445,56 @@ class TestPendingInviteApi:
             "available": True,
             "matched": True,
             "invites": [
-                {"name": "Apple.1234", "discord_name": "Applicant"},
-                {"name": "Zebra.9999", "discord_name": None},
+                {
+                    "name": "Apple.1234",
+                    "discord_name": "Applicant",
+                    "invited_at": None,
+                },
+                {
+                    "name": "Zebra.9999",
+                    "discord_name": None,
+                    "invited_at": None,
+                },
             ],
         }
+
+    async def test_serves_each_invites_moment_rather_than_its_age(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        bot: FakeBot,
+    ) -> None:
+        # The page works the age out from the reader's own clock, so a row
+        # served from the five-minute cache reads as truly then as when it was
+        # built. An account the GW2 API dated with nothing carries null rather
+        # than a stand-in date no invitation was ever sent on.
+        headers = self._officer_headers(guild)
+        invited = datetime(2026, 6, 17, 21, 30, tzinfo=UTC)
+        bot.build_pending_invite_entries = AsyncMock(
+            return_value=PendingInvites(
+                [
+                    TrialMemberReportEntry("Apple.1234"),
+                    TrialMemberReportEntry("Zebra.9999"),
+                ],
+                True,
+                {"Apple.1234": invited},
+            )
+        )
+
+        response = await client.get("/api/pending", headers=headers)
+
+        assert (await response.json())["invites"] == [
+            {
+                "name": "Apple.1234",
+                "discord_name": None,
+                "invited_at": invited.timestamp(),
+            },
+            {
+                "name": "Zebra.9999",
+                "discord_name": None,
+                "invited_at": None,
+            },
+        ]
 
     async def test_is_built_once_and_served_from_the_cache(
         self,
@@ -2477,10 +2540,10 @@ class TestPendingInviteApi:
         recovered = await client.get("/api/pending", headers=headers)
 
         assert (await unknown.json())["invites"] == [
-            {"name": "Apple.1234", "discord_name": "Unknown"}
+            self._row("Apple.1234", "Unknown")
         ]
         assert (await recovered.json())["invites"] == [
-            {"name": "Apple.1234", "discord_name": "Applicant"}
+            self._row("Apple.1234", "Applicant")
         ]
 
     async def test_a_member_actually_called_unknown_is_still_cached(
@@ -2505,7 +2568,7 @@ class TestPendingInviteApi:
         second = await client.get("/api/pending", headers=headers)
 
         assert (await first.json())["invites"] == [
-            {"name": "Apple.1234", "discord_name": "Unknown"}
+            self._row("Apple.1234", "Unknown")
         ]
         assert await second.json() == await first.json()
         bot.build_pending_invite_entries.assert_awaited_once()
@@ -2555,10 +2618,10 @@ class TestPendingInviteApi:
         second = await client.get("/api/pending", headers=headers)
 
         assert (await first.json())["invites"] == [
-            {"name": "Old.1234", "discord_name": None}
+            self._row("Old.1234")
         ]
         assert (await second.json())["invites"] == [
-            {"name": "New.5678", "discord_name": None}
+            self._row("New.5678")
         ]
 
     async def test_unreachable_gw2_api_returns_503_json(
@@ -2598,7 +2661,7 @@ class TestPendingInviteApi:
         assert await recovered.json() == {
             "available": True,
             "matched": True,
-            "invites": [{"name": "Apple.1234", "discord_name": None}],
+            "invites": [self._row("Apple.1234")],
         }
 
     async def test_a_database_failure_is_reported_rather_than_raised(
@@ -2646,12 +2709,12 @@ class TestPendingInviteApi:
         assert await unmatched.json() == {
             "available": True,
             "matched": False,
-            "invites": [{"name": "Apple.1234", "discord_name": None}],
+            "invites": [self._row("Apple.1234")],
         }
         assert await rebuilt.json() == {
             "available": True,
             "matched": True,
-            "invites": [{"name": "Apple.1234", "discord_name": "Applicant"}],
+            "invites": [self._row("Apple.1234", "Applicant")],
         }
 
     async def test_failure_logging_omits_the_upstream_detail(

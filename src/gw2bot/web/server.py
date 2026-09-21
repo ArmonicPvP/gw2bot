@@ -1452,6 +1452,10 @@ class WebServer:
                 if entry.discord_user_id is not None
             }
         )
+        invited_at = {
+            username: moment.timestamp()
+            for username, moment in pending.invited_at.items()
+        }
         invites: list[dict[str, object]] = [
             {
                 "name": entry.username,
@@ -1464,6 +1468,13 @@ class WebServer:
                     if entry.discord_user_id is None
                     else names.get(entry.discord_user_id, UNKNOWN_NAME)
                 ),
+                # A moment rather than an age, the way every other timestamp
+                # this site serves is: the page works out how long ago it was
+                # from the reader's own clock, so a row served from the cache
+                # five minutes later still reads correctly. An account the GW2
+                # API dated with nothing carries null, and the page says so
+                # rather than showing an age it does not have.
+                "invited_at": invited_at.get(entry.username),
             }
             for entry in sorted(
                 pending.entries,

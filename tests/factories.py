@@ -62,10 +62,11 @@ def gold_withdrawal(
 def guild_leave(
     event_id: int,
     username: str = "Username.1234",
+    time: str = "2026-06-07T06:26:17.000Z",
 ) -> dict[str, object]:
     return {
         "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
+        "time": time,
         "type": "kick",
         "user": username,
         "kicked_by": username,
@@ -89,10 +90,11 @@ def guild_kick(
 def guild_join(
     event_id: int,
     username: str = "Username.1234",
+    time: str = "2026-06-07T06:26:17.000Z",
 ) -> dict[str, object]:
     return {
         "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
+        "time": time,
         "type": "joined",
         "user": username,
     }
@@ -102,10 +104,11 @@ def guild_invite(
     event_id: int,
     username: str = "Invited.1234",
     invited_by: str = "Officer.5678",
+    time: str = "2026-06-07T06:26:17.000Z",
 ) -> dict[str, object]:
     return {
         "id": event_id,
-        "time": "2026-06-07T06:26:17.000Z",
+        "time": time,
         "type": "invited",
         "user": username,
         "invited_by": invited_by,

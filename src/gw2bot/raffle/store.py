@@ -959,6 +959,109 @@ class RaffleStore:
             LOGGER.debug("Loaded %s pending guild-invite notifications", len(results))
             return results
 
+    def get_guild_invite_times(self) -> dict[str, datetime]:
+        """When each outstanding invitation was sent, by casefolded name.
+
+        The guild log is the only place an invitation is dated: the member
+        list gives an invited account no date of its own, and the log event
+        the bot already stores for the invite notification carries the moment
+        the invitation was sent. An account invited more than once keeps the
+        newest of them, because that is the invitation still outstanding.
+
+        An invitation the account has already answered is dropped rather than
+        offered for a later one. Joining accepts an invitation and leaving
+        ends the membership it started, so a recorded join or leave that came
+        after the newest recorded invitation means that invitation is spent -
+        and an account that is invited again today is holding one this store
+        knows nothing about, which is not the same as holding the one from
+        before it joined.
+
+        The log only reaches about a hundred events per type, so an invitation
+        sent before the bot first read it was never recorded and is absent
+        here rather than dated by something else. So is an account whose own
+        history holds a row this store cannot date and cannot rule out as the
+        later one, because the row before an undated event is not an answer to
+        what that event was.
+        """
+        # Newest invitation, and newest answer to one, per account. Each is
+        # kept as (moment, event id) so a tie between two events recorded in
+        # the same second is broken by the order the log recorded them.
+        invited: dict[str, tuple[datetime, int]] = {}
+        answered: dict[str, tuple[datetime, int]] = {}
+        # The newest undated row per account, by log event id, and whether one
+        # of them cannot be placed by id at all.
+        undated: dict[str, int] = {}
+        unordered: set[str] = set()
+
+        def remember(
+            newest: dict[str, tuple[datetime, int]],
+            username: str,
+            event_time: str,
+            event_id: int,
+        ) -> None:
+            key = username.strip().casefold()
+            moment = parse_event_time(event_time)
+            if moment is None:
+                # A row with no readable time still has its place in the log,
+                # and an invitation recorded after it is unaffected by it. It
+                # is only a row that could be the later one that makes the
+                # invitation unsafe to date - the row before an undated event
+                # is not an answer to what that event was.
+                if event_id < 0:
+                    # The one-time log channel import keys its rows by a
+                    # negated Discord message id, which says nothing about
+                    # where the row falls among the log's own. Nothing about
+                    # this account can be ordered around it.
+                    unordered.add(key)
+                    return
+                known = undated.get(key)
+                if known is None or event_id > known:
+                    undated[key] = event_id
+                return
+            known = newest.get(key)
+            if known is None or (moment, event_id) > known:
+                newest[key] = (moment, event_id)
+
+        with self._sessions() as session:
+            for invite in session.scalars(select(GuildInviteRecord)).all():
+                remember(
+                    invited,
+                    invite.username,
+                    invite.event_time,
+                    invite.event_id,
+                )
+            for join in session.scalars(select(GuildJoinRecord)).all():
+                remember(
+                    answered, join.username, join.event_time, join.event_id
+                )
+            for leave in session.scalars(select(GuildLeaveRecord)).all():
+                remember(
+                    answered, leave.username, leave.event_time, leave.event_id
+                )
+
+        times: dict[str, datetime] = {}
+        superseded = 0
+        undatable = 0
+        for username, sent in invited.items():
+            newest_undated = undated.get(username)
+            if username in unordered or (
+                newest_undated is not None and newest_undated > sent[1]
+            ):
+                undatable += 1
+                continue
+            settled = answered.get(username)
+            if settled is not None and settled > sent:
+                superseded += 1
+                continue
+            times[username] = sent[0]
+        LOGGER.debug(
+            "Loaded invite times for %s accounts; superseded=%s undatable=%s",
+            len(times),
+            superseded,
+            undatable,
+        )
+        return times
+
     def get_pending_rank_change_notifications(self) -> list[GuildRankChange]:
         statement = (
             select(GuildRankChangeRecord)

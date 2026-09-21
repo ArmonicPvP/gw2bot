@@ -1909,6 +1909,142 @@ class TestRosterPendingInvites:
             ROSTER_PAGE
         )
 
+    def test_each_invite_says_when_it_was_sent(self) -> None:
+        # A short date is as much as the column has room for, so the rest of
+        # the moment rides in the box it opens rather than being dropped.
+        assert 'el("th", null, "Invite sent")' in ROSTER_PAGE
+        assert "function inviteSentCell(sentAt)" in ROSTER_PAGE
+        assert (
+            'el("button", "tip-trigger", formatShortDate(sentAt))'
+            in ROSTER_PAGE
+        )
+        assert "function formatShortDate(t)" in ROSTER_PAGE
+        assert 'undefined, { month: "short", day: "numeric" });' in ROSTER_PAGE
+        # Two words that must not be split across lines for the sake of three
+        # characters, in a cell that positions the box it opens.
+        assert (
+            "table.changes td.invited { position: relative; "
+            "white-space: nowrap; }" in ROSTER_PAGE
+        )
+
+    def test_the_box_opens_by_tap_and_keypress_as_well_as_hover(self) -> None:
+        # A tooltip a mouse has to hover reaches nobody on a phone and nobody
+        # working by keyboard, so the date is a button that opens the box on
+        # a click, a tap or a keypress, and on a mouse's hover as before.
+        assert "trigger.type = \"button\";" in ROSTER_PAGE
+        assert 'trigger.addEventListener("click", function () {' in ROSTER_PAGE
+        assert "showInviteTip(trigger, formatMomentWithAge(sentAt));" in (
+            ROSTER_PAGE
+        )
+        assert 'if (isHoverPointer(event)) {' in ROSTER_PAGE
+        # Tapping the date again closes the box it opened.
+        assert "if (inviteTipTrigger === trigger) {" in ROSTER_PAGE
+        assert 'hideInviteTip("toggle");' in ROSTER_PAGE
+        # A screen reader is told about the box only while it is on screen.
+        assert 'trigger.setAttribute("aria-describedby", inviteTip.id);' in (
+            ROSTER_PAGE
+        )
+        assert 'inviteTip.setAttribute("role", "tooltip");' in ROSTER_PAGE
+
+    def test_anything_but_the_box_itself_closes_it(self) -> None:
+        # A press inside the box is someone reading it; everything else - a
+        # press elsewhere, a scroll either way, a wheel, a key, a resize, or
+        # the window losing focus - puts it away.
+        assert "function dismissInviteTip(event)" in ROSTER_PAGE
+        assert (
+            "if (target && target.nodeType && inviteTip.contains(target)) "
+            "{ return; }" in ROSTER_PAGE
+        )
+        for listener in [
+            'document.addEventListener("pointerdown", dismissInviteTip, true)',
+            'document.addEventListener("wheel", dismissInviteTip, true)',
+            'document.addEventListener("scroll", dismissInviteTip, true)',
+            'document.addEventListener("keydown", dismissInviteTip, true)',
+            'window.addEventListener("blur", dismissInviteTip)',
+            'window.addEventListener("resize", dismissInviteTip)',
+        ]:
+            assert listener + ";" in ROSTER_PAGE
+            assert listener.replace("add", "remove") + ";" in ROSTER_PAGE
+        # A press on a date is left to that date's own click, or the click
+        # would reopen the box the press meant to dismiss.
+        assert 'target.closest(".tip-trigger")' in ROSTER_PAGE
+        # A redraw replaces the cell the box hangs off, so it goes first.
+        assert 'hideInviteTip("redraw");' in ROSTER_PAGE
+
+    def test_the_box_stays_on_screen_on_the_last_rows(self) -> None:
+        # A box below the last row of a phone screen would hang off the
+        # bottom, and scrolling it into view is not open to the reader
+        # because scrolling is one of the things that puts it away.
+        assert "function placeInviteTip(trigger)" in ROSTER_PAGE
+        assert "placeInviteTip(trigger);" in ROSTER_PAGE
+        assert "if (box.bottom <= viewport) { return; }" in ROSTER_PAGE
+        assert (
+            "if (cell.top - box.height >= 0) "
+            '{ inviteTip.classList.add("above"); }' in ROSTER_PAGE
+        )
+        assert (
+            ".cell-tip.above { top: auto; bottom: calc(100% - 0.25rem); }"
+            in ROSTER_PAGE
+        )
+
+    def test_an_invitation_from_another_year_says_which(self) -> None:
+        # An invitation can sit unanswered across New Year, and "Jun 17,
+        # 9:30 PM" would then be read as this June rather than last.
+        assert "function formatMomentWithYear(t)" in ROSTER_PAGE
+        assert (
+            "if (date.getFullYear() === new Date().getFullYear()) {"
+            in ROSTER_PAGE
+        )
+        assert 'year: "numeric",' in ROSTER_PAGE
+        assert 'return formatMomentWithYear(t) + " | " +' in ROSTER_PAGE
+
+    def test_tip_tracing_carries_no_date_or_account(self) -> None:
+        # Only a fixed action name and a narrowed event name reach the
+        # console.
+        assert 'console.debug("roster invite tip:", action, reason || "")' in (
+            ROSTER_PAGE
+        )
+        assert 'hideInviteTip("page-" + eventKind(event));' in ROSTER_PAGE
+        assert (
+            'name === "scroll" || name === "resize") {' in ROSTER_PAGE
+        )
+
+    def test_the_box_reads_as_a_moment_and_an_age(self) -> None:
+        # "Sep 20, 9:30 PM | 7 days ago": the same moment the membership
+        # table's Time column shows, and how long ago it was.
+        assert "function formatMomentWithAge(t)" in ROSTER_PAGE
+        # The membership table's own moment, with a year added only when the
+        # invitation is not from this one.
+        assert "return formatMoment(t);" in ROSTER_PAGE
+        assert 'return formatMomentWithYear(t) + " | " +' in ROSTER_PAGE
+        assert (
+            "formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));"
+            in ROSTER_PAGE
+        )
+        # Minutes, hours and days, and a singular unit counted as one.
+        assert 'if (seconds < 60) { return "just now"; }' in ROSTER_PAGE
+        assert 'countedAge(Math.floor(seconds / 60), "minute")' in ROSTER_PAGE
+        assert 'countedAge(Math.floor(seconds / 3600), "hour")' in ROSTER_PAGE
+        assert 'countedAge(Math.floor(seconds / 86400), "day")' in ROSTER_PAGE
+        assert (
+            'return value + " " + unit + (value === 1 ? "" : "s") + " ago";'
+            in ROSTER_PAGE
+        )
+
+    def test_an_invitation_with_no_recorded_event_is_not_given_a_date(
+        self,
+    ) -> None:
+        # The guild log only reaches so far back, and a date drawn from
+        # somewhere else would be an assertion the server never made.
+        assert (
+            'row.appendChild(typeof invite.invited_at === "number"'
+            in ROSTER_PAGE
+        )
+        assert 'el("td", "invited undated", "Unknown")' in ROSTER_PAGE
+        assert "table.changes td.undated { color: var(--muted); }" in (
+            ROSTER_PAGE
+        )
+
     def test_tracing_carries_no_account_or_discord_name(self) -> None:
         # Only a fixed action name and a row count reach the console.
         assert 'console.debug("roster pending invites:", action, count)' in (

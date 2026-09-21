@@ -153,6 +153,166 @@ class TestRaffleStore:
             assert reopened.get_pending_invite_notifications() == []
             reopened.close()
 
+    def test_dates_each_account_by_its_newest_invitation(self) -> None:
+        # The roster page dates a pending invite from the log event the bot
+        # already stores for the notification, and an account invited more
+        # than once is dated by the invitation still outstanding.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_invite(
+                        101, "Invited.1234", time="2026-06-07T06:26:17.000Z"
+                    ),
+                    guild_invite(
+                        102, "Invited.1234", time="2026-09-01T12:00:00.000Z"
+                    ),
+                    guild_invite(
+                        103, "Other.5678", time="2026-08-15T09:30:00.000Z"
+                    ),
+                    # A timestamp that cannot be read dates nothing rather
+                    # than dating the account with a guess.
+                    guild_invite(104, "Broken.9012", time="soon"),
+                ]
+            )
+
+            times = store.get_guild_invite_times()
+
+            # Keyed casefolded, because an account name is matched
+            # case-insensitively everywhere else too.
+            assert times == {
+                "invited.1234": datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+                "other.5678": datetime(2026, 8, 15, 9, 30, tzinfo=UTC),
+            }
+            store.close()
+
+    def test_forgets_an_invitation_the_account_already_answered(self) -> None:
+        # An account that joined or left after its newest recorded invitation
+        # answered that one. If it is invited again and the bot never saw the
+        # new event, the roster page has to say so rather than show a date
+        # from before the membership that has since ended.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_invite(
+                        101, "Rejoined.1234", time="2026-01-05T10:00:00.000Z"
+                    ),
+                    guild_join(
+                        102, "Rejoined.1234", time="2026-01-06T10:00:00.000Z"
+                    ),
+                    guild_leave(
+                        103, "Rejoined.1234", time="2026-02-01T10:00:00.000Z"
+                    ),
+                    # Left before being invited, so this invitation is the
+                    # one outstanding and keeps its date.
+                    guild_leave(
+                        104, "Returning.5678", time="2026-03-01T10:00:00.000Z"
+                    ),
+                    guild_invite(
+                        105, "Returning.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {
+                "returning.5678": datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
+            }
+            store.close()
+
+    def test_forgets_an_account_whose_newer_event_cannot_be_dated(
+        self,
+    ) -> None:
+        # A row that cannot be read leaves the order of an account's events
+        # unknown, and the row before it is not an answer to that question:
+        # falling back to it would date the invitation being held by the one
+        # it replaced, or keep one a later join had already answered.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_invite(
+                        101, "Reinvited.1234", time="2026-01-05T10:00:00.000Z"
+                    ),
+                    guild_invite(102, "Reinvited.1234", time="soon"),
+                    guild_invite(
+                        103, "Rejoined.5678", time="2026-01-05T10:00:00.000Z"
+                    ),
+                    guild_join(104, "Rejoined.5678", time="soon"),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {}
+            store.close()
+
+    def test_keeps_a_date_an_older_undated_row_cannot_have_ended(
+        self,
+    ) -> None:
+        # A row the store cannot date still has its place in the log, and an
+        # invitation recorded after it is not in doubt because of it. Only a
+        # row that could be the later one makes the invitation unsafe.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_join(101, "Returned.1234", time="soon"),
+                    guild_invite(
+                        102, "Returned.1234", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    # The other way round: the undated row came after the
+                    # invitation and could be what answered it.
+                    guild_invite(
+                        103, "Doubtful.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    guild_join(104, "Doubtful.5678", time="soon"),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {
+                "returned.1234": datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
+            }
+            store.close()
+
+    def test_breaks_a_same_second_tie_by_the_logs_own_order(self) -> None:
+        # A removal and a fresh invitation inside the same second come back
+        # in the order the log recorded them, so an account reinvited on the
+        # spot keeps the date of the invitation it is holding now.
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = str(Path(directory) / "raffle.db")
+            store = RaffleStore(database_path, "guild-id")
+            store.initialize_cursor(100)
+            store.process_events(
+                [
+                    guild_leave(
+                        101, "Reinvited.1234", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    guild_invite(
+                        102, "Reinvited.1234", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    # The other way round: invited first, removed in the same
+                    # second, so nothing is outstanding.
+                    guild_invite(
+                        103, "Removed.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                    guild_leave(
+                        104, "Removed.5678", time="2026-09-10T08:00:00.000Z"
+                    ),
+                ]
+            )
+
+            assert store.get_guild_invite_times() == {
+                "reinvited.1234": datetime(2026, 9, 10, 8, 0, tzinfo=UTC),
+            }
+            store.close()
+
     def test_persists_rank_change_notification_and_prevents_duplicates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = str(Path(directory) / "raffle.db")
