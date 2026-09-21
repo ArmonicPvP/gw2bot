@@ -267,9 +267,15 @@ the raffle workflow and do not produce deposit notifications.
 
 Guild consumables reach Guild Storage as `upgrade` events rather than as
 `stash` ones. A deposit is the `completed` action carrying `user`, `upgrade_id`
-and `count`, and that `upgrade_id` resolves against `/v2/guild/upgrades` - the
-same ids `/v2/guild/:id/storage` reports, which is what lets a deposit be
-matched to a tracked feast. The bot stores those for the four tracked feasts so
+and `count`; the wiki's field list is explicit that `completed` "will also
+generate a new `count` field indicating how many upgrades were added", and both
+of its worked examples carry one, so a completed upgrade without a count is
+outside the documented contract rather than the ordinary case. A scribed
+upgrade also carries `recipe_id`, which is the shape a feast arrives in, and
+`item_id` appears when the upgrade was made by consuming one. That
+`upgrade_id` resolves against `/v2/guild/upgrades` - the same ids
+`/v2/guild/:id/storage` reports, which is what lets a deposit be matched to a
+tracked feast. The bot stores those for the four tracked feasts so
 the feast dashboard's Additions table can name who restocked, and ignores every
 other upgrade action (`queued`, `cancelled`, `sped_up`) and every untracked
 upgrade id.

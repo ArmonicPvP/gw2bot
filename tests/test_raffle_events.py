@@ -1,3 +1,5 @@
+import pytest
+
 from gw2bot.raffle import (
     RAFFLE_DRAW_TIERS,
     RAFFLE_REWARD_TIERS,
@@ -181,3 +183,49 @@ class TestFeastDepositParsing:
 
     def test_ignores_a_stash_event(self) -> None:
         assert parse_feast_deposit(gold_deposit(11)) is None
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            # The two `completed` upgrade events the GW2 wiki documents by
+            # example, with the upgrade id swapped to a tracked feast so the
+            # tracking filter is not what decides the outcome. The first is
+            # the scribe-station shape, which carries a recipe_id beside the
+            # count; feasts are scribed, so that is the shape this reads in
+            # practice.
+            {
+                "id": 1470,
+                "time": "2016-12-19T20:36:03.000Z",
+                "type": "upgrade",
+                "recipe_id": 11856,
+                "upgrade_id": 1078,
+                "count": 1,
+                "action": "completed",
+                "user": "Lawton Campbell.9413",
+            },
+            {
+                "id": 1522,
+                "time": "2016-12-19T20:48:11.000Z",
+                "type": "upgrade",
+                "upgrade_id": 1078,
+                "count": 1,
+                "action": "completed",
+                "user": "Lawton Campbell.9413",
+            },
+        ],
+    )
+    def test_reads_the_event_shapes_the_api_documents(
+        self,
+        event: dict[str, object],
+    ) -> None:
+        # A `completed` upgrade carries a count - the wiki's field list says
+        # the action "will also generate a new count field indicating how
+        # many upgrades were added", and both of its examples show one. This
+        # pins that contract: a deposit of a single feast is the smallest
+        # real event there is, and it must not be read as nothing.
+        parsed = parse_feast_deposit(event)
+
+        assert parsed is not None
+        assert parsed.guild_storage_id == 1078
+        assert parsed.username == "Lawton Campbell.9413"
+        assert parsed.count == 1
