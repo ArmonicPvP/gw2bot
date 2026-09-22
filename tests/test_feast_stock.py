@@ -1,14 +1,24 @@
 from gw2bot.gw2.feast_stock import (
     LOW_STOCK_REMINDER_SECONDS,
+    ROLLING_AVERAGE_DAYS,
+    SECONDS_PER_DAY,
+    FeastAddition,
+    FeastRemoval,
     FeastRestock,
     FeastStockSample,
     FeastStockSeries,
     changed_feast_counts,
+    day_of,
     depositors_for_addition,
     feast_additions,
+    feast_day_series,
+    feast_days,
     feast_removals,
     get_due_low_stock_alerts,
+    history_start,
+    rolling_averages,
     tracked_feast_counts,
+    window_series,
 )
 
 
@@ -315,3 +325,271 @@ class TestDepositorsForAddition:
         addition = feast_additions(_series(10, [(10.0, 20), (20.0, 40)]))[1]
 
         assert depositors_for_addition(addition, [], window_since=5.0) == []
+
+
+
+# A round UTC midnight to build day grids from, so a test reads as the days it
+# means rather than as arithmetic on whatever today happens to be.
+DAY = 1_750_000_000 // SECONDS_PER_DAY * SECONDS_PER_DAY
+
+# The last second of a day, so a window that covers whole days is written as
+# the moments it runs between rather than as a midnight that cuts one short.
+DAY_END = SECONDS_PER_DAY - 1
+
+
+def _removal(at: float, amount: int) -> FeastRemoval:
+    return FeastRemoval(recorded_at=at, amount=amount, remaining=0)
+
+
+def _addition(log_id: int, at: float, amount: int) -> FeastAddition:
+    return FeastAddition(
+        log_id=log_id,
+        recorded_at=at,
+        previous_at=None,
+        amount=amount,
+        remaining=0,
+    )
+
+
+class TestDayGrid:
+    def test_a_moment_is_placed_in_the_utc_day_it_falls_in(self) -> None:
+        assert day_of(DAY) == DAY
+        assert day_of(DAY + 1) == DAY
+        assert day_of(DAY + SECONDS_PER_DAY - 1) == DAY
+        assert day_of(DAY + SECONDS_PER_DAY) == DAY + SECONDS_PER_DAY
+
+    def test_history_reaches_a_whole_week_before_the_window_opens(
+        self,
+    ) -> None:
+        # A whole number of days back from the window's own first day, so the
+        # history lines up with the grid it is bucketed into instead of
+        # opening part-way through a day and under-counting it.
+        opened = DAY + 13 * 60 * 60
+        assert history_start(opened) == DAY - ROLLING_AVERAGE_DAYS * (
+            SECONDS_PER_DAY
+        )
+
+
+class TestFeastDays:
+    def test_a_quiet_day_is_still_a_day(self) -> None:
+        # Dropping it would let a rolling average step over the quiet stretch
+        # as though it had never happened.
+        days = feast_days(
+            [_removal(DAY + 10, 4)],
+            [],
+            {},
+            DAY,
+            DAY + 2 * SECONDS_PER_DAY,
+        )
+
+        assert [day.day for day in days] == [
+            DAY,
+            DAY + SECONDS_PER_DAY,
+            DAY + 2 * SECONDS_PER_DAY,
+        ]
+        assert [day.used for day in days] == [4, 0, 0]
+
+    def test_removals_and_priced_restocks_are_bucketed_by_their_day(
+        self,
+    ) -> None:
+        days = feast_days(
+            [
+                _removal(DAY + 60, 3),
+                _removal(DAY + 120, 2),
+                _removal(DAY + SECONDS_PER_DAY + 60, 5),
+            ],
+            [
+                _addition(1, DAY + 300, 10),
+                _addition(2, DAY + SECONDS_PER_DAY + 300, 20),
+            ],
+            {1: 1000, 2: 4000},
+            DAY,
+            DAY + SECONDS_PER_DAY + DAY_END,
+        )
+
+        assert [(day.used, day.cost, day.priced_amount) for day in days] == [
+            (5, 1000, 10),
+            (5, 4000, 20),
+        ]
+        assert [day.unit_cost for day in days] == [100.0, 200.0]
+
+    def test_an_unpriced_restock_counts_towards_neither_side(self) -> None:
+        # It is missing, not free: counting its feasts would drag the day's
+        # cost per feast towards zero on the strength of a figure nobody has
+        # recorded yet.
+        days = feast_days(
+            [],
+            [_addition(1, DAY + 60, 10), _addition(2, DAY + 120, 90)],
+            {1: 5000},
+            DAY,
+            DAY + DAY_END,
+        )
+
+        assert (days[0].cost, days[0].priced_amount) == (5000, 10)
+        assert days[0].unit_cost == 500.0
+
+    def test_a_day_nothing_was_priced_on_has_no_cost_per_feast(self) -> None:
+        days = feast_days([_removal(DAY + 60, 3)], [], {}, DAY, DAY + DAY_END)
+
+        assert days[0].cost == 0
+        assert days[0].unit_cost is None
+
+    def test_anything_outside_the_bounds_is_left_out(self) -> None:
+        days = feast_days(
+            [_removal(DAY - 60, 99), _removal(DAY + SECONDS_PER_DAY, 99)],
+            [_addition(1, DAY - 60, 99)],
+            {1: 9999},
+            DAY,
+            DAY + DAY_END,
+        )
+
+        assert [(day.used, day.cost) for day in days] == [(0, 0)]
+
+
+class TestRollingAverages:
+    def test_a_full_window_averages_the_last_entries_only(self) -> None:
+        assert rolling_averages([1, 2, 3, 4, 5, 6, 7, 8], 7) == [
+            1.0,
+            1.5,
+            2.0,
+            2.5,
+            3.0,
+            3.5,
+            4.0,
+            (2 + 3 + 4 + 5 + 6 + 7 + 8) / 7,
+        ]
+
+    def test_an_early_entry_averages_what_there_is(self) -> None:
+        # Continuity at the left edge is what the dashboard reads a whole
+        # window of days before the one it draws for.
+        assert rolling_averages([4, 8], 7) == [4.0, 6.0]
+
+    def test_an_empty_series_averages_nothing(self) -> None:
+        assert rolling_averages([], 7) == []
+
+
+class TestFeastDaySeries:
+    def test_the_history_is_averaged_over_and_then_dropped(self) -> None:
+        # Seven days of history, one feast used a day, and then the window's
+        # own first day: the average on it covers the week behind it rather
+        # than starting over at the window's edge.
+        opened = DAY
+        removals = [
+            _removal(history_start(opened) + index * SECONDS_PER_DAY + 60, 7)
+            for index in range(ROLLING_AVERAGE_DAYS)
+        ]
+        removals.append(_removal(opened + 60, 7))
+
+        series = feast_day_series(removals, [], {}, opened, opened + DAY_END)
+
+        assert [point.day for point in series] == [opened]
+        assert series[0].used == 7
+        assert series[0].used_average == 7.0
+
+    def test_a_window_without_history_still_starts_at_its_first_day(
+        self,
+    ) -> None:
+        series = feast_day_series(
+            [_removal(DAY + 60, 14)],
+            [],
+            {},
+            DAY,
+            DAY + SECONDS_PER_DAY + DAY_END,
+        )
+
+        assert [point.day for point in series] == [
+            DAY,
+            DAY + SECONDS_PER_DAY,
+        ]
+        # Seven silent days behind the window pull the average down, which is
+        # what a week with one busy day in it looks like.
+        assert series[0].used == 14
+        assert series[0].used_average == 14 / 7
+        assert series[1].used == 0
+
+    def test_the_first_day_holds_only_the_part_the_window_opened_over(
+        self,
+    ) -> None:
+        # A preset window opens part-way through a day, so the day it opens
+        # on is cut in half the way the day it closes on is. The figures
+        # drawn have to be the window's own, the way the removals and
+        # additions tables beside them are.
+        opened = DAY + 14 * 60 * 60
+        before = [_removal(DAY + 6 * 60 * 60, 99)]
+        inside = [_removal(DAY + 20 * 60 * 60, 5)]
+
+        series = feast_day_series(
+            before + inside, [], {}, opened, opened + SECONDS_PER_DAY
+        )
+
+        assert series[0].day == DAY
+        assert series[0].used == 5
+        # The hours before the window still count towards the average, which
+        # is a mean over whole days and reads a week of them for that reason.
+        assert series[0].used_average == 104 / 7
+
+    def test_spend_before_the_window_stays_out_of_its_totals(self) -> None:
+        # The total cost chart adds these up across the window, so an
+        # addition priced in the hours before it opened would overstate what
+        # the window itself cost.
+        opened = DAY + 14 * 60 * 60
+
+        series = feast_day_series(
+            [],
+            [_addition(1, DAY + 6 * 60 * 60, 10), _addition(2, opened + 60, 4)],
+            {1: 500_000, 2: 8_000},
+            opened,
+            opened + SECONDS_PER_DAY,
+        )
+
+        assert series[0].cost == 8_000
+        assert series[0].unit_cost == 2_000.0
+        assert series[0].cost_average == 508_000 / 7
+
+    def test_costs_carry_their_own_average_and_price_per_feast(self) -> None:
+        series = feast_day_series(
+            [],
+            [_addition(1, DAY + 60, 4)],
+            {1: 8000},
+            DAY,
+            DAY + DAY_END,
+        )
+
+        assert series[0].cost == 8000
+        assert series[0].cost_average == 8000 / 7
+        assert series[0].unit_cost == 2000.0
+
+
+class TestWindowSeries:
+    def test_the_window_keeps_only_its_own_samples(self) -> None:
+        series = _series(
+            None,
+            [(DAY - 100, 50), (DAY + 100, 44), (DAY + 200, 40)],
+        )
+
+        drawn = window_series(series, DAY)
+
+        assert [sample.count for sample in drawn.samples] == [44, 40]
+
+    def test_the_count_the_window_opened_on_becomes_its_prior(self) -> None:
+        # A drop across the window's start edge is still measured, the way
+        # the store's own read of that window would have measured it.
+        series = _series(None, [(DAY - 100, 50), (DAY + 100, 44)])
+
+        drawn = window_series(series, DAY)
+
+        assert drawn.prior_count == 50
+        assert [removal.amount for removal in feast_removals(drawn)] == [6]
+
+    def test_a_feast_untouched_for_longer_than_the_history_keeps_its_prior(
+        self,
+    ) -> None:
+        # Counts are only written when they change, so a feast nobody has
+        # touched for weeks has no sample in the history at all; the count it
+        # entered the window on is the one the store read before it.
+        series = _series(37, [(DAY + 100, 30)])
+
+        drawn = window_series(series, DAY)
+
+        assert drawn.prior_count == 37
+        assert [removal.amount for removal in feast_removals(drawn)] == [7]

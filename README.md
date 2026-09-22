@@ -1941,6 +1941,53 @@ The chart starts with straight lines between samples. The icon at the far
 right of its heading switches between that regular `╱` line and a staircase
 `⎿` line; the same control is available on the roster and gold charts.
 
+#### The daily charts
+
+Five more charts sit between the stock graph and the removals, each drawing one
+point per day of the window rather than one per recorded sample:
+
+| Chart | What each point is |
+| --- | --- |
+| **Food usage – 7-day rolling average** | Feasts taken per day, averaged over the seven days ending on that date. One line per feast. |
+| **Food cost – 7-day rolling average** | Recorded spend per day, averaged the same way. One line per feast. |
+| **Average food cost by day** | What one feast cost that day: the day's recorded spend divided by the feasts those priced restocks added. One line per feast. |
+| **Total food cost** | The running total of recorded spend across every feast still switched on, to the end of that day. One line. |
+| **Food cost by food** | Recorded spend on that day alone, one line per feast. |
+
+Days are cut in UTC, so two members in two time zones reading the same window
+are shown the same days. A day nothing happened on is still a day: it is drawn
+as zero rather than skipped, so a quiet stretch reads as one. Both edges of the
+window cut a day in half and both are honoured: the newest day is usually still
+running, and the oldest holds only the part of itself the window opened over,
+so these charts count the same activity the removals and additions tables do
+and nothing from the hours either side.
+
+The rolling averages are worked out over the seven days *before* the window as
+well as the days in it, so the average on the window's first day covers a full
+week rather than starting over at the edge. That history is read for the
+averages only; the stock chart, the removals and the additions still show the
+window itself and nothing older.
+
+A restock nobody has priced counts as nothing spent and, on **Average food cost
+by day**, is left out of the division entirely rather than counted as free
+feasts. A day on which nothing at all was priced has no point on that chart,
+because there is no answer for it, and the line is broken across it rather than
+carried through — a segment spanning those days would assert a price on days
+nobody bought anything on. Cost axes are labelled in the largest coin they
+reach (`4g`, `30s`, `12c`) and the hover reads the full price in coins; the
+**Total food cost** hover also names what the day alone cost.
+
+The four cost charts are drawn from figures the server works out, so recording
+a price in the Additions editor re-reads the window to bring them up to date.
+The tab and page being worked down are kept across that, so pricing a run of
+restocks does not send an officer back to the first page each time.
+
+Every one of these charts starts at zero, and each carries the same legend as
+the stock chart above. The legends switch the same feasts: clicking a colour in
+any one of them drops that feast from every chart on the page at once, the
+total included, so the total answers "what did the rest cost?" rather than
+staying put. **Total food cost** has no legend of its own for that reason.
+
 The y axis covers the counts the window actually reached rather than a fixed
 ceiling, so a stock held well above fifty is drawn in full instead of flattened
 along the top of the chart. It always starts at zero, so a feast that has run
