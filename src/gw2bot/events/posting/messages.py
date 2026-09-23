@@ -18,7 +18,7 @@ import discord
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.events.formatting import (
-    calendar_footer_link,
+    calendar_link,
     event_embed,
     event_thread_name,
     message_link,
@@ -87,7 +87,7 @@ def occurrence_embed(
         # Read per render rather than captured: /settings can turn the
         # calendar on or off while events are posted, and the footer of every
         # message refreshed after that has to say what is true then.
-        calendar_url=calendar_footer_link(bot._config),
+        calendar_url=calendar_link(bot._config),
     )
 
 

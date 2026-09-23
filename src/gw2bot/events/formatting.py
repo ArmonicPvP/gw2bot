@@ -54,10 +54,11 @@ WAITLIST_EMOJI = "⌛️"
 # on for screens.
 SINGLE_COLUMN_SQUAD_SIZE = 10
 _TRUNCATION_MARKER = "…"
-# Where the footer sends a member who wants the whole schedule rather than the
-# one event in front of them. The page lives below the site root, so the path
-# is spelled out here rather than assumed from web_base_url.
-CALENDAR_FOOTER_PATH = "/calendar"
+# Where the calendar field sends a member who wants the whole schedule rather
+# than the one event in front of them. The page lives below the site root, so
+# the path is spelled out here rather than assumed from web_base_url.
+CALENDAR_PATH = "/calendar"
+CALENDAR_FIELD_NAME = "🗓️ Calendar"
 
 _WEEKDAY_NAMES = (
     "monday",
@@ -511,50 +512,73 @@ def _participants_name(count: int, capacity: CategoryCapacity) -> str:
     return f"👥 Participants ({count}/{capacity.total})"
 
 
-def calendar_footer_link(config: Config) -> str | None:
-    """The calendar address an event footer advertises, or None.
+def calendar_link(config: Config) -> str | None:
+    """The calendar URL an event embed links to, or None.
 
     Only a calendar that is actually being served is advertised: pointing
     members at a page this deployment does not answer would be worse than
-    saying nothing. web_base_url carries the scheme a browser needs, but
-    Discord does not linkify an embed footer, so what is left is the bare
-    "host/calendar" a member reads off the post and types in.
+    saying nothing. web_base_url is validated to carry its scheme, which the
+    link needs for Discord to make it clickable.
     """
     if not config.web_calendar_enabled or config.web_base_url is None:
         return None
-    host = config.web_base_url.strip().rstrip("/")
-    for scheme in ("https://", "http://"):
-        if host.lower().startswith(scheme):
-            host = host[len(scheme) :]
-            break
-    if not host:
+    base = config.web_base_url.strip().rstrip("/")
+    if not base:
         return None
-    return f"{host}{CALENDAR_FOOTER_PATH}"
+    return f"{base}{CALENDAR_PATH}"
 
 
-def event_footer_text(
+def _calendar_field_value(calendar_url: str) -> str | None:
+    # The link reads as the bare "host/calendar"; the scheme lives only in
+    # the target, where Discord needs it.
+    shown = calendar_url
+    for scheme in ("https://", "http://"):
+        if shown.lower().startswith(scheme):
+            shown = shown[len(scheme) :]
+            break
+    value = f"[{shown}]({calendar_url})"
+    # Nothing bounds the length of /settings web_base_url, and Discord refuses
+    # a field over its own limit outright - which would fail every post and
+    # every refresh of the event. Dropping the link keeps the event postable.
+    if len(value) > EMBED_FIELD_VALUE_LIMIT:
+        return None
+    return value
+
+
+def _finish_event_embed(
+    embed: discord.Embed,
     event_id_text: str,
-    calendar_url: str | None = None,
-) -> str:
-    """The footer every event embed carries: where to find it, and which it is.
+    calendar_url: str | None,
+) -> None:
+    """Add the footer and the calendar field, and fit the embed to Discord.
 
-    The eventID stays last so the commands that ask for one keep reading off
-    the end of the same line, whether or not a calendar is being served.
-
-    Discord rejects a footer over its own 2,048-character limit, which
-    _fit_within_total_limit cannot rescue - it only spends the 6,000-character
-    aggregate budget. Nothing validates the length of `/settings
-    web_base_url`, so an absurd one would otherwise make every post and every
-    refresh fail with an invalid form body. The eventID is what the commands
-    read, so it is the part that survives.
+    The calendar field is the last field on the embed, so it is added after
+    the roster is trimmed: _fit_within_total_limit reclaims budget from the
+    trailing fields first, and the link would otherwise be the first thing it
+    dropped. Its length is reserved up front instead.
     """
-    event_id = f"eventID: {event_id_text}"
-    if calendar_url is None:
-        return event_id[:EMBED_FOOTER_LIMIT]
-    footer = f"{calendar_url} | {event_id}"
-    if len(footer) <= EMBED_FOOTER_LIMIT:
-        return footer
-    return event_id[:EMBED_FOOTER_LIMIT]
+    embed.set_footer(text=event_footer_text(event_id_text))
+    value = (
+        _calendar_field_value(calendar_url)
+        if calendar_url is not None
+        else None
+    )
+    if value is None:
+        _fit_within_total_limit(embed)
+        return
+    _fit_within_total_limit(
+        embed,
+        reserve=len(CALENDAR_FIELD_NAME) + len(value),
+    )
+    embed.add_field(name=CALENDAR_FIELD_NAME, value=value, inline=False)
+
+
+def event_footer_text(event_id_text: str) -> str:
+    """The footer every event embed carries: which event it is.
+
+    The commands that ask for an eventID read it off this line.
+    """
+    return f"eventID: {event_id_text}"[:EMBED_FOOTER_LIMIT]
 
 
 def event_embed(
@@ -679,23 +703,23 @@ def event_embed(
     footer_id = event_id_text if event_id_text is not None else str(
         event.event_id
     )
-    embed.set_footer(text=event_footer_text(footer_id, calendar_url))
-    _fit_within_total_limit(embed)
+    _finish_event_embed(embed, footer_id, calendar_url)
     return embed
 
 
-def _fit_within_total_limit(embed: discord.Embed) -> None:
+def _fit_within_total_limit(embed: discord.Embed, reserve: int = 0) -> None:
     # Discord rejects any embed whose title, description, field names/values
     # and footer exceed 6000 characters in aggregate. A long author
     # description combined with a growing roster (the waitlist is unbounded)
     # can cross that line, which would make every signup/removal edit fail and
     # leave the public message stale forever. Reclaim budget from the author
     # description first, then from trailing roster fields, so the embed always
-    # stays sendable.
-    if len(embed) <= EMBED_TOTAL_LIMIT:
+    # stays sendable. `reserve` holds back room for a field added afterwards.
+    limit = EMBED_TOTAL_LIMIT - reserve
+    if len(embed) <= limit:
         return
     if embed.description:
-        overflow = len(embed) - EMBED_TOTAL_LIMIT
+        overflow = len(embed) - limit
         keep = len(embed.description) - overflow - len(_TRUNCATION_MARKER)
         if keep > 0:
             embed.description = (
@@ -703,11 +727,11 @@ def _fit_within_total_limit(embed: discord.Embed) -> None:
             )
         else:
             embed.description = None
-    while len(embed) > EMBED_TOTAL_LIMIT and embed.fields:
+    while len(embed) > limit and embed.fields:
         index = len(embed.fields) - 1
         field = embed.fields[index]
         value = field.value or ""
-        overflow = len(embed) - EMBED_TOTAL_LIMIT
+        overflow = len(embed) - limit
         if len(value) > overflow + len(_TRUNCATION_MARKER):
             trimmed = value[: len(value) - overflow - len(_TRUNCATION_MARKER)]
             embed.set_field_at(
@@ -761,8 +785,7 @@ def details_preview_embed(
         ),
         inline=False,
     )
-    embed.set_footer(text=event_footer_text(event_id_text, calendar_url))
-    _fit_within_total_limit(embed)
+    _finish_event_embed(embed, event_id_text, calendar_url)
     return embed
 
 

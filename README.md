@@ -335,18 +335,19 @@ Every subcommand except `/event new` takes an `event_id`, autocompleted from the
 active events as `[Category] Title — id N`. That id is also printed in the footer
 of each event post as `eventID: N`, so it can be read off the message itself.
 
-When the [web calendar](#web-calendar) is enabled, the footer names it first,
-as `gw2bot.example.com/calendar | eventID: N`: the host set with
-`/settings web_base_url`, without its scheme, because Discord does not turn an
-embed footer into a link. A member reading one event can find the rest of the
-schedule from it. Turning the calendar on or off, or moving it to another host,
-refreshes the footer of every event still upcoming or running within a
-maintenance pass; so does upgrading to the release that added the link. The
-address the posts were rendered with is remembered, so a change made while the
-bot is down reaches them too — including `WEB_ENABLED`, which only takes effect
-on a restart — and an ordinary restart re-edits nothing.
+When the [web calendar](#web-calendar) is enabled, the last field of each event
+post is a **🗓️ Calendar** link to it, shown as `gw2bot.example.com/calendar` and
+pointing at `<web_base_url>/calendar`. It sits in a field rather than the footer
+because Discord does not turn an embed footer into a link. A member reading one
+event can find the rest of the schedule from it. Turning the calendar on or off,
+or moving it to another host, refreshes the link on every event still upcoming
+or running within a maintenance pass; so does upgrading to the release that
+moved the link out of the footer. The address the posts were rendered with is
+remembered, so a change made while the bot is down reaches them too — including
+`WEB_ENABLED`, which only takes effect on a restart — and an ordinary restart
+re-edits nothing.
 
-A run that has finished keeps the footer it was last rendered with, because
+A run that has finished keeps the link it was last rendered with, because
 nothing edits a finished post again: the maintenance pass reads only the runs
 still to come, and the posts a deletion keeps as history (see [Deleting An
 Event](#deleting-an-event)) are a record of what the guild ran rather than a
@@ -1416,7 +1417,7 @@ to pass the whole host root through to `WEB_PORT`: every page, API and sign-in
 path is absolute from the root, so the site cannot be mounted under a path
 prefix such as `/gw2bot/`.
 
-Every posted event names the calendar in its footer once the site is serving
+Every posted event links the calendar in its last field once the site is serving
 (see [Guild Events](#guild-events)), so a member who found one event in Discord
 can reach the whole schedule.
 

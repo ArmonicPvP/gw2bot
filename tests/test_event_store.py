@@ -749,7 +749,7 @@ class TestEventStoreOccurrences:
         self,
         store: EventStore,
     ) -> None:
-        # A change to what the embed renders - the footer naming the calendar
+        # A change to what the embed renders - the field linking the calendar
         # - reaches a posted message through the refresh flag, because the
         # maintenance pass skips an occurrence whose status has not moved.
         event = create_event(store, repeat_frequency=RepeatFrequency.WEEKLY)
@@ -763,7 +763,7 @@ class TestEventStoreOccurrences:
         marked = store.mark_posted_occurrences_for_refresh()
 
         # Only the live post is flagged: a finished run is never refreshed
-        # again, and one still to be posted renders its footer when it is.
+        # again, and one still to be posted renders its link when it is.
         assert marked == 1
         flagged = store.get_occurrence(posted.occurrence_id)
         assert flagged is not None
