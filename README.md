@@ -135,7 +135,7 @@ that nothing answers to is how a guild silently loses a feature.
 
 | Subcommand | Default | Gates |
 | --- | --- | --- |
-| `/settings roles raffle_draw` | `1317124663847157880` | `/raffle draw` and `/raffle removetickets`. |
+| `/settings roles raffle_draw` | `1317638909735342201` | `/raffle draw` and `/raffle removetickets`. |
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
 | `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, `/pending`, and `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
@@ -143,8 +143,8 @@ that nothing answers to is how a guild silently loses a feature.
 | `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
 | `/settings roles sunborne` | `1317140660188352584` | Marks a Discord member as a full member in the same reports. |
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
-| `/settings roles roster_page` | `1317124663847157880` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
-| `/settings roles gold_page` | `1317124663847157880` | The guild bank gold history page. Set it to a wider role to open the history to the whole guild. |
+| `/settings roles roster_page` | `1317638909735342201` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
+| `/settings roles gold_page` | `1317638909735342201` | The guild bank gold history page. Set it to a wider role to open the history to the whole guild. |
 | `/settings channels event_ping` | unset | Where an event posted inside a forum post pings its roles. While it is unset those events ping inside the post. |
 | `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
 | `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
@@ -1043,7 +1043,7 @@ server ID, then reinstall the application into that server with both the `bot`
 and `applications.commands` scopes. The bot continues monitoring while command
 registration is unavailable.
 
-- `/raffle draw`: requires role `1317124663847157880`. Randomly selects the
+- `/raffle draw`: requires role `1317638909735342201`. Randomly selects the
   tier-configured number of winners, weighted by each user's current tickets
   after refreshing the guild log. One winning ticket leaves the pool after
   each selection, so users with multiple tickets may win multiple times. The
@@ -2012,7 +2012,7 @@ opens on **24h**. Each dashboard remembers its own window, and each member
 theirs.
 
 Access is narrower than the calendar's: on top of being a signed-in guild
-member, the viewer must hold role `1317124663847157880`, the role that also
+member, the viewer must hold role `1317638909735342201`, the role that also
 gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
 officers-only page. Membership and the role are re-checked on the same schedule
 as calendar access, so a member who loses the role loses the page within
