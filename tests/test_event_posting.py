@@ -320,6 +320,7 @@ def create_event(
     delete_previous_on_repeat: bool = False,
     channel_id: int = 1234,
     ping_role_ids: tuple[int, ...] = (),
+    requirements: str = "",
 ):
     return store.create_event(
         category=category,
@@ -333,6 +334,7 @@ def create_event(
         repeat_days=repeat_days,
         delete_previous_on_repeat=delete_previous_on_repeat,
         ping_role_ids=ping_role_ids,
+        requirements=requirements,
     )
 
 
@@ -1126,11 +1128,13 @@ class TestPingingAForumPostEventFromAnotherChannel:
         store: EventStore,
         post: FakeForumPost,
         ping_role_ids: tuple[int, ...] = (11, 22),
+        requirements: str = "",
     ) -> Any:
         event = create_event(
             store,
             channel_id=post.id,
             ping_role_ids=ping_role_ids,
+            requirements=requirements,
         )
         occurrence = store.create_occurrence(event.event_id, event.start_time)
         posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
@@ -1194,6 +1198,38 @@ class TestPingingAForumPostEventFromAnotherChannel:
             f"<t:{int(posted.start_time.timestamp())}:R>"
             in ping_channel.sent[0]["content"]
         )
+
+    async def test_the_announcement_carries_the_requirements(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        _, posted = await self.post_event_in_post(
+            bot, store, post, requirements="Level 80, exotic gear"
+        )
+
+        lines = ping_channel.sent[0]["content"].split("\n")
+        assert "📌 **Requirements:** Level 80, exotic gear" in lines
+        # The link stays last, so Discord's preview of the post renders below
+        # the text rather than splitting it.
+        assert lines[-1] == (
+            f"https://discord.com/channels/5678/{post.id}/{posted.message_id}"
+        )
+
+    async def test_an_event_without_requirements_announces_none(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+
+        await self.post_event_in_post(bot, store, post)
+
+        assert "Requirements" not in ping_channel.sent[0]["content"]
 
     async def test_an_event_with_no_roles_left_announces_nothing(
         self,
@@ -1760,6 +1796,31 @@ class TestPingingAForumPostEventFromAnotherChannel:
         assert [
             role.id for role in edit.kwargs["allowed_mentions"].roles
         ] == [11, 22]
+
+    async def test_an_edit_corrects_the_announced_requirements(
+        self,
+        store: EventStore,
+    ) -> None:
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        event, posted = await self.post_event_in_post(
+            bot, store, post, requirements="Level 80"
+        )
+
+        await refresh_occurrence_message(
+            bot,
+            replace(event, requirements="Exotic gear"),
+            posted,
+            BEFORE_START,
+            force_thread_rename=True,
+        )
+
+        edit = ping_channel.partial_message.edit.await_args
+        assert edit is not None
+        content = edit.kwargs["content"]
+        assert "📌 **Requirements:** Exotic gear" in content
+        assert "Level 80" not in content
 
     async def test_an_ordinary_refresh_leaves_the_announcement_alone(
         self,

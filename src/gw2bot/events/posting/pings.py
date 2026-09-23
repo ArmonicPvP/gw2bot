@@ -210,6 +210,7 @@ async def announce_occurrence_ping(
                 occurrence.start_time,
                 role_ids,
                 link,
+                event.requirements,
             ),
             allowed_mentions=role_ping_mentions(role_ids),
         )
@@ -449,9 +450,10 @@ async def refresh_occurrence_announcement(
 ) -> bool:
     """Bring an occurrence's announcement back in line with its event.
 
-    The announcement repeats the title and the start time, and a commander can
-    change both after it was sent - its link then opens an event that no longer
-    matches what the members it pinged were told. It is refreshed on the same
+    The announcement repeats the title, the start time and the requirements,
+    and a commander can change any of them after it was sent - its link then
+    opens an event that no longer matches what the members it pinged were
+    told. It is refreshed on the same
     trigger as the thread name, which carries the date and time for the same
     reason, so an edit corrects every surface the occurrence has.
 
@@ -503,6 +505,7 @@ async def refresh_occurrence_announcement(
             occurrence_channel_id(event, occurrence),
             occurrence.message_id,
         ),
+        event.requirements,
     )
     LOGGER.debug(
         "Correcting an event's ping announcement; occurrence_id=%s "

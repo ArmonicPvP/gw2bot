@@ -272,6 +272,7 @@ def format_role_groups(roles: tuple[EventRole, ...]) -> str:
 ROSTER_UPDATE_HEADER = "🔀 **Roster update**"
 
 PING_ANNOUNCEMENT_HEADER = "📣 **Event posted**"
+PING_REQUIREMENTS_HEADER = "📌 **Requirements:**"
 
 
 def roster_update_messages(update: RosterUpdate) -> list[str]:
@@ -837,6 +838,7 @@ def ping_announcement_content(
     start_time: datetime,
     role_ids: Sequence[int],
     link: str,
+    requirements: str = "",
 ) -> str:
     """Announce an event that was posted somewhere its roles will not see it.
 
@@ -846,15 +848,22 @@ def ping_announcement_content(
     wrapped in angle brackets so Discord renders its preview of the post.
 
     The start is a relative timestamp for the same reason the reminders use
-    one - every member reads it in their own locale. Nothing here can outgrow
-    a Discord message: an event carries at most three roles, and its title is
-    capped at the length the creation modal accepts.
+    one - every member reads it in their own locale. The requirements come
+    along so a pinged member can tell whether the run is for them before
+    opening it; an event without any leaves the line out.
+
+    Nothing here can outgrow a Discord message: an event carries at most three
+    roles, and its title and requirements are capped at the lengths the
+    creation modals accept.
     """
     lines = [
         f"{PING_ANNOUNCEMENT_HEADER} {title} starts "
         f"<t:{int(start_time.timestamp())}:R>",
-        link,
     ]
+    if requirements:
+        lines.append(f"{PING_REQUIREMENTS_HEADER} {requirements}")
+    # Last, so Discord's preview of the post renders below everything else.
+    lines.append(link)
     if role_ids:
         # An announcement is only ever sent because there are roles to ping, so
         # this is empty only when a later edit dropped every one of them. The

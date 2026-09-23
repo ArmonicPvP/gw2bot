@@ -654,9 +654,9 @@ A forum post only notifies the members already following it, so mentioning a
 role inside one reaches almost nobody it was meant for. Set
 `/settings channels event_ping` to a text channel and an event posted into a
 forum post announces itself there instead: the mentions go to that channel with
-the event's title, its start as a relative timestamp, and a link straight to the
-event's message in the post. The post itself then carries no mentions, so nobody
-is pinged twice for one event.
+the event's title, its start as a relative timestamp, its requirements when it
+has any, and a link straight to the event's message in the post. The post
+itself then carries no mentions, so nobody is pinged twice for one event.
 
 The setting is global — one channel for every event — and answers only for an
 event posted into a forum post. An event posted to a channel keeps pinging its
@@ -670,15 +670,15 @@ The bot needs `Send Messages` and `Mention @everyone, @here and All Roles` in
 the ping channel; an announcement Discord refuses is logged and costs that
 occurrence its ping alone — the event stays posted and its buttons keep working.
 
-The announcement repeats the event's title and its start, so an edit to either
-corrects it in place: it is refreshed on the same trigger as the thread name,
-which carries the date and time for the same reason. Its mentions are left
-exactly as they were sent. Editing a message notifies nobody, so re-rendering
-them from a changed role pick would claim roles that were never alerted — the
-announcement keeps naming who actually heard about the event, and changing the
-roles only takes effect on the next occurrence posted. One somebody deleted by
-hand is forgotten rather than retried, and an edit Discord refuses is logged
-without holding back the event — the post is the record, and the announcement
+The announcement repeats the event's title, its start and its requirements,
+so an edit to any of them corrects it in place: it is refreshed on the same
+trigger as the thread name, which carries the date and time for the same
+reason. Its mentions are left exactly as they were sent. Editing a message
+notifies nobody, so re-rendering them from a changed role pick would claim roles
+that were never alerted — the announcement keeps naming who actually heard about
+the event, and changing the roles only takes effect on the next occurrence
+posted. One somebody deleted by hand is forgotten rather than retried, and an
+edit Discord refuses is logged without holding back the event — the post is the record, and the announcement
 is a notice that has already been delivered.
 
 An announcement is only ever a pointer at the event's message, so it is stored
