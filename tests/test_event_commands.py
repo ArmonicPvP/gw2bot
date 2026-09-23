@@ -101,7 +101,14 @@ from factories import (
     forbidden_error,
     not_found_error,
 )
-from test_event_posting import FakeBot, FakeChannel, FakeThread, FakeUser
+from test_event_posting import (
+    FakeBot,
+    FakeChannel,
+    FakeForumPost,
+    FakeThread,
+    FakeUser,
+    forum_post_bot,
+)
 
 FUTURE_START_TEXT = "01.30.2107 20:00"
 # A commander id distinctive enough to register as a secret and look
@@ -4491,6 +4498,78 @@ class TestRequirementsEndToEnd:
             field.name == "📌 Requirements" and field.value == "Level 80"
             for field in embed.fields
         )
+
+    async def test_a_forum_post_event_announces_what_the_schedule_step_took(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The whole path a commander takes: the requirements typed in the
+        # schedule step, the event posted into a forum post, and the separate
+        # announcement sent to the ping channel.
+        post = FakeForumPost()
+        ping_channel = FakeChannel(channel_id=4321)
+        bot = forum_post_bot(store, post, ping_channel=ping_channel)
+        bot._config = replace(
+            bot._config,
+            event_create_role_id=EVENT_CREATE_ROLE_ID,
+        )
+        draft = EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.STORY,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=post.id,
+            ping_role_ids=(11,),
+        )
+        schedule = EventScheduleModal(bot, draft)
+        schedule.start_input._value = FUTURE_START_TEXT
+        schedule.duration_input._value = "01:30"
+        schedule.repeat._values = ["no"]
+        schedule.requirements_input._value = "Level 80, exotic gear"
+        await schedule.on_submit(make_interaction())
+        view = EventConfirmView(bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        # The post carries the section, and no mentions of its own.
+        assert post.sent[0]["content"] is None
+        assert any(
+            field.name == "📌 Requirements"
+            and field.value == "Level 80, exotic gear"
+            for field in post.sent[0]["embed"].fields
+        )
+        announcement = ping_channel.sent[0]["content"]
+        assert announcement.startswith("<@&11>")
+        assert "📌 **Requirements:** Level 80, exotic gear" in announcement
+
+    async def test_a_channel_post_carries_the_requirements_only_once(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # In a channel the mentions ride above the embed, which already shows
+        # the section, so the ping line itself stays just the mentions.
+        draft = replace(
+            make_complete_draft(),
+            ping_role_ids=(10,),
+            requirements="Level 80",
+        )
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        assert channel.sent[0]["content"] == "<@&10>"
 
     async def test_editing_can_clear_the_requirements(
         self,
