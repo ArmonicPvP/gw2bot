@@ -352,7 +352,7 @@ button:focus-visible {
   </section>
   <section class="card">
     <div class="chart-heading">
-      <h2>Average food cost by day</h2>
+      <h2>Food cost by day</h2>
     </div>
     <p class="chart-note">What the feasts used that day had cost, priced the
       same way, with no averaging: two feasts used from a restock of thirty

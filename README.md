@@ -1975,7 +1975,7 @@ point per day of the window rather than one per recorded sample:
 | --- | --- |
 | **Food usage – 7-day rolling average** | Feasts taken per day, averaged over the seven days ending on that date. One line per feast. |
 | **Food cost – 7-day rolling average** | What the feasts used each day had cost, averaged the same way. One line per feast. |
-| **Average food cost by day** | What the feasts used that day had cost, with no averaging. The hover names how many were used and what each cost. One line per feast. |
+| **Food cost by day** | What the feasts used that day had cost. The hover names how many were used and what each cost. One line per feast. |
 | **Total food cost** | The running total of what the feasts used had cost, across every feast still switched on, to the end of that day. One line. |
 | **Food cost by food** | The same running total, one line per feast. |
 

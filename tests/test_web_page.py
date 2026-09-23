@@ -1607,7 +1607,7 @@ class TestFoodDailyCharts:
         for heading in (
             "<h2>Food usage &ndash; 7-day rolling average</h2>",
             "<h2>Food cost &ndash; 7-day rolling average</h2>",
-            "<h2>Average food cost by day</h2>",
+            "<h2>Food cost by day</h2>",
             "<h2>Total food cost</h2>",
             "<h2>Food cost by food</h2>",
         ):
