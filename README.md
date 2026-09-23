@@ -1980,10 +1980,33 @@ point per day of the window rather than one per recorded sample:
 | Chart | What each point is |
 | --- | --- |
 | **Food usage – 7-day rolling average** | Feasts taken per day, averaged over the seven days ending on that date. One line per feast. |
-| **Food cost – 7-day rolling average** | Recorded spend per day, averaged the same way. One line per feast. |
-| **Average food cost by day** | What one feast cost that day: the day's recorded spend divided by the feasts those priced restocks added. One line per feast. |
-| **Total food cost** | The running total of recorded spend across every feast still switched on, to the end of that day. One line. |
-| **Food cost by food** | Recorded spend on that day alone, one line per feast. |
+| **Food cost – 7-day rolling average** | What the feasts used each day had cost, averaged the same way. One line per feast. |
+| **Food cost by day** | What the feasts used that day had cost. The hover names how many were used and what each cost. One line per feast. |
+| **Total food cost** | The running total of what the feasts used had cost, across every feast still switched on, to the end of that day. One line. |
+| **Food cost by food** | The same running total, one line per feast. |
+
+The cost charts count what was **eaten**, not what was bought. Each feast's
+stock is kept as a queue of lots, oldest first: every restock adds a lot at the
+price recorded against it, and every feast used is taken from the oldest lot
+still on the shelf, at that lot's price. So a restock of thirty feasts bought
+for thirty gold costs nothing on the day it is deposited; each feast then costs
+one gold as it is used, two a day costing two gold a day. A dearer restock
+waits behind the stock before it and only raises the cost once that stock is
+gone. For example:
+
+| | On the shelf | Cost charged |
+| --- | --- | --- |
+| Ten feasts on hand that nobody priced | 10 at 0g | |
+| Thirty bought for 30g | 10 at 0g, 30 at 1g | |
+| Thirty used | 10 at 1g | 10 × 0g + 20 × 1g = **20g** |
+| Thirty bought for 60g | 10 at 1g, 30 at 2g | |
+| Thirty used | 10 at 2g | 10 × 1g + 20 × 2g = **50g** |
+
+Stock that was on the shelf before anything was bought at a recorded price
+costs nothing and leaves first, and so does a restock nobody has priced yet,
+until an officer records what it cost. The shelf is replayed from the first
+count the bot ever recorded, so a feast eaten this week is priced at the
+restock it came from however long ago that was.
 
 Days are cut in UTC, so two members in two time zones reading the same window
 are shown the same days. A day nothing happened on is still a day: it is drawn
@@ -1999,17 +2022,13 @@ week rather than starting over at the edge. That history is read for the
 averages only; the stock chart, the removals and the additions still show the
 window itself and nothing older.
 
-A restock nobody has priced counts as nothing spent and, on **Average food cost
-by day**, is left out of the division entirely rather than counted as free
-feasts. A day on which nothing at all was priced has no point on that chart,
-because there is no answer for it, and the line is broken across it rather than
-carried through — a segment spanning those days would assert a price on days
-nobody bought anything on. Cost axes are labelled in the largest coin they
-reach (`4g`, `30s`, `12c`) and the hover reads the full price in coins; the
-**Total food cost** hover also names what the day alone cost.
+Cost axes are labelled in the largest coin they reach (`4g`, `30s`, `12c`) and
+the hover reads the full price in coins; the running-total hovers also name
+what the day alone added.
 
 The four cost charts are drawn from figures the server works out, so recording
-a price in the Additions editor re-reads the window to bring them up to date.
+a price in the Additions editor re-reads the window to bring them up to date,
+re-costing every feast already eaten from that restock.
 The tab and page being worked down are kept across that, so pricing a run of
 restocks does not send an officer back to the first page each time.
 

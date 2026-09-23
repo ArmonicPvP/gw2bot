@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -249,28 +250,104 @@ def history_start(since: float) -> float:
 
 
 @dataclass(frozen=True, slots=True)
+class FeastConsumption:
+    """One observed drop in a feast's count, with what the feasts that left
+    had cost.
+
+    ``cost`` is in copper, worked out first in, first out: the feasts that
+    leave are the oldest still on the shelf, at the price the restock that
+    put them there was recorded at. That is what makes the cost of a week the
+    cost of what was eaten in it, rather than of whatever was bought in it.
+    """
+
+    recorded_at: float
+    amount: int
+    cost: int
+
+
+def feast_consumptions(
+    series: FeastStockSeries,
+    costs: Mapping[int, int],
+) -> list[FeastConsumption]:
+    """Every drop in ``series``, each costed from the stock it drew down.
+
+    The shelf is kept as a queue of lots, oldest first. Every rise adds a
+    lot of the feasts it put there, carrying the cost recorded against it,
+    and every drop takes its feasts from the front of the queue. Stock that
+    was already there when the series opens - its ``prior_count``, or the
+    first count ever recorded - was not seen being bought, so it is a lot
+    that cost nothing and is used up first. A restock nobody has priced yet
+    is a lot that costs nothing too, until an officer records what it cost.
+
+    A lot is held as its feasts and the copper still on them rather than as a
+    price per feast, and a drop that takes part of a lot takes that share of
+    its copper, rounded. So a lot's copper is spent exactly by the time its
+    last feast leaves, however unevenly it divides.
+
+    The series has to reach back to the feast's first recorded count for the
+    lots to be right: a lot bought before the series opens would otherwise be
+    read as stock that cost nothing.
+    """
+    lots: deque[list[int]] = deque()
+    consumptions: list[FeastConsumption] = []
+    previous = series.prior_count
+    if previous is not None and previous > 0:
+        lots.append([previous, 0])
+    for sample in series.samples:
+        if previous is None:
+            if sample.count > 0:
+                lots.append([sample.count, 0])
+        elif sample.count > previous:
+            lots.append(
+                [sample.count - previous, costs.get(sample.log_id, 0)]
+            )
+        elif sample.count < previous:
+            amount = previous - sample.count
+            consumptions.append(
+                FeastConsumption(
+                    recorded_at=sample.recorded_at,
+                    amount=amount,
+                    cost=_draw_down(lots, amount),
+                )
+            )
+        previous = sample.count
+    return consumptions
+
+
+def _draw_down(lots: deque[list[int]], amount: int) -> int:
+    """Take ``amount`` feasts from the front of ``lots``; return their cost.
+
+    The queue holds exactly the feasts the counts say are on the shelf, so it
+    cannot run dry; if a hand-edited log ever made it, the feasts beyond it
+    are counted as costing nothing rather than refused.
+    """
+    cost = 0
+    wanted = amount
+    while wanted > 0 and lots:
+        lot = lots[0]
+        taken = min(wanted, lot[0])
+        share = round(lot[1] * taken / lot[0])
+        cost += share
+        lot[0] -= taken
+        lot[1] -= share
+        wanted -= taken
+        if lot[0] == 0:
+            lots.popleft()
+    return cost
+
+
+@dataclass(frozen=True, slots=True)
 class FeastDay:
-    """One UTC day of one tracked feast's usage and spend.
+    """One UTC day of one tracked feast's usage and what it cost.
 
     ``day`` is the day's UTC midnight in epoch seconds. ``used`` is how many
-    feasts were observed leaving storage that day, ``cost`` is the copper
-    recorded against the restocks priced that day, and ``priced_amount`` is
-    how many feasts those priced restocks put on the shelf. A restock nobody
-    has priced counts towards neither, so an unpriced deposit cannot drag the
-    day's cost per feast towards zero; it is missing, not free.
+    feasts were observed leaving storage that day and ``cost`` is what those
+    feasts had cost, in copper, first in, first out.
     """
 
     day: float
     used: int
     cost: int
-    priced_amount: int
-
-    @property
-    def unit_cost(self) -> float | None:
-        """What one feast cost that day, or ``None`` if none was priced."""
-        if self.priced_amount <= 0:
-            return None
-        return self.cost / self.priced_amount
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,55 +365,38 @@ class FeastDayPoint:
     used_average: float
     cost: int
     cost_average: float
-    unit_cost: float | None
 
 
 def feast_days(
-    removals: Sequence[FeastRemoval],
-    additions: Sequence[FeastAddition],
-    costs: Mapping[int, int],
+    consumptions: Sequence[FeastConsumption],
     since: float,
     until: float,
 ) -> list[FeastDay]:
     """One entry per UTC day from ``since`` through ``until``, oldest first.
 
-    A day nothing was used or bought on is still an entry: it is a day the
-    guild ate no feasts and spent nothing, and dropping it would let a rolling
+    A day nothing was used on is still an entry: it is a day the guild ate no
+    feasts and so spent nothing on them, and dropping it would let a rolling
     average step over the quiet stretch as though it had never happened.
 
-    A removal or addition outside the two bounds is ignored rather than
-    folded into the nearest day, so a series never counts something the
-    window it was read for does not hold.
+    A drop outside the two bounds is ignored rather than folded into the
+    nearest day, so a series never counts something the window it was read
+    for does not hold.
     """
     first = day_of(since)
     last = day_of(until)
     used: dict[float, int] = {}
     spent: dict[float, int] = {}
-    priced: dict[float, int] = {}
-    for removal in removals:
-        if removal.recorded_at < since or removal.recorded_at > until:
+    for consumption in consumptions:
+        if consumption.recorded_at < since or consumption.recorded_at > until:
             continue
-        day = day_of(removal.recorded_at)
-        used[day] = used.get(day, 0) + removal.amount
-    for addition in additions:
-        if addition.recorded_at < since or addition.recorded_at > until:
-            continue
-        cost = costs.get(addition.log_id)
-        if cost is None:
-            continue
-        day = day_of(addition.recorded_at)
-        spent[day] = spent.get(day, 0) + cost
-        priced[day] = priced.get(day, 0) + addition.amount
+        day = day_of(consumption.recorded_at)
+        used[day] = used.get(day, 0) + consumption.amount
+        spent[day] = spent.get(day, 0) + consumption.cost
     days: list[FeastDay] = []
     day = first
     while day <= last:
         days.append(
-            FeastDay(
-                day=day,
-                used=used.get(day, 0),
-                cost=spent.get(day, 0),
-                priced_amount=priced.get(day, 0),
-            )
+            FeastDay(day=day, used=used.get(day, 0), cost=spent.get(day, 0))
         )
         day += SECONDS_PER_DAY
     return days
@@ -363,19 +423,17 @@ def rolling_averages(values: Sequence[float], window: int) -> list[float]:
 
 
 def feast_day_series(
-    removals: Sequence[FeastRemoval],
-    additions: Sequence[FeastAddition],
-    costs: Mapping[int, int],
+    consumptions: Sequence[FeastConsumption],
     since: float,
     until: float,
 ) -> list[FeastDayPoint]:
     """The drawn window's days, each carrying the averages behind it.
 
-    ``removals`` and ``additions`` have to reach back to
-    :func:`history_start`; the days before ``since`` are what the rolling
-    averages are worked out over and are then dropped, so every day that
-    survives carries a full :data:`ROLLING_AVERAGE_DAYS` of history whether
-    or not the reader asked for a window that wide.
+    ``consumptions`` have to reach back to :func:`history_start`; the days
+    before ``since`` are what the rolling averages are worked out over and
+    are then dropped, so every day that survives carries a full
+    :data:`ROLLING_AVERAGE_DAYS` of history whether or not the reader asked
+    for a window that wide.
 
     Both of the window's edges cut a day in half, and both are honoured:
     the newest day is usually still running, and the oldest holds only the
@@ -389,9 +447,7 @@ def feast_day_series(
     that is what an average over the last seven days is; they are worked out
     on the history buckets and looked up by day.
     """
-    history = feast_days(
-        removals, additions, costs, history_start(since), until
-    )
+    history = feast_days(consumptions, history_start(since), until)
     used = rolling_averages(
         [float(day.used) for day in history], ROLLING_AVERAGE_DAYS
     )
@@ -409,9 +465,8 @@ def feast_day_series(
             used_average=averages[day.day][0],
             cost=day.cost,
             cost_average=averages[day.day][1],
-            unit_cost=day.unit_cost,
         )
-        for day in feast_days(removals, additions, costs, since, until)
+        for day in feast_days(consumptions, since, until)
     ]
 
 

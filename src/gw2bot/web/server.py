@@ -36,9 +36,9 @@ from gw2bot.gw2.feast_stock import (
     FeastStockSeries,
     depositors_for_addition,
     feast_additions,
+    feast_consumptions,
     feast_day_series,
     feast_removals,
-    history_start,
     window_series,
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
@@ -104,6 +104,11 @@ UNKNOWN_NAME = "Unknown"
 # than a page is reloaded, so the list is cached rather than rebuilt per
 # request.
 PENDING_INVITE_CACHE_TTL_SECONDS = 300
+
+# Where the feast dashboard's replay of the shelf starts: the epoch, so the
+# read covers every count ever recorded and the first of them opens the queue
+# of lots the daily costs are drawn from.
+FEAST_HISTORY_ORIGIN = 0.0
 
 # The feast usage dashboard is gated behind the role /settings roles food_page
 # names, which follows /raffle removetickets' role until it is set apart, the
@@ -1261,13 +1266,15 @@ class WebServer:
         # get_feast_stock_series is synchronous SQLite sharing the Discord
         # client's event loop, so run it off-loop like the calendar query.
         #
-        # The daily charts carry rolling averages a week wide, so the history
-        # is read that much further back than the window is drawn. Everything
-        # else on the page is about the window itself and is built from the
-        # slice of that history which falls inside it.
+        # The daily cost charts price each feast used at what the restock it
+        # came from cost, first in, first out, so the shelf has to be replayed
+        # from the first count ever recorded: stock bought before any shorter
+        # read would otherwise count as having cost nothing. Everything else
+        # on the page is about the window itself and is built from the slice
+        # of that history which falls inside it.
         history = await asyncio.to_thread(
             self._bot.raffle_store.get_feast_stock_series,
-            history_start(window.since),
+            FEAST_HISTORY_ORIGIN,
             window.until,
         )
         series = {
@@ -1279,10 +1286,9 @@ class WebServer:
         # both. Neither read is allowed to cost the reader the chart, so a
         # failure leaves those columns blank rather than failing the page.
         restocks = await self._feast_restocks(window)
-        # Priced restocks from before the window still count towards the
-        # averages drawn over it, so the costs are read across the whole
-        # history and the Additions table takes the window's own rises from
-        # the same map.
+        # A feast eaten inside the window may have been bought long before
+        # it, so the costs are read for every restock in the history, and the
+        # Additions table takes the window's own rises from the same map.
         history_additions = {
             feast_id: feast_additions(item)
             for feast_id, item in history.items()
@@ -1294,9 +1300,7 @@ class WebServer:
         costs = await self._feast_addition_costs(history_additions)
         days = {
             feast_id: feast_day_series(
-                feast_removals(item),
-                history_additions.get(feast_id, []),
-                costs,
+                feast_consumptions(item, costs),
                 window.since,
                 window.until,
             )
@@ -1444,9 +1448,9 @@ class WebServer:
             "additions": served_additions,
             # One entry per UTC day of the drawn window, oldest first, each
             # carrying the day's own figures and the rolling averages ending
-            # on it. ``unit_cost`` is null on a day no restock was priced,
-            # which is a day with no answer rather than a day feasts were
-            # free.
+            # on it. ``cost`` is what the feasts used that day had cost,
+            # first in, first out - the cost of what was eaten, not of what
+            # was bought.
             "days": [
                 {
                     "t": day.day,
@@ -1454,7 +1458,6 @@ class WebServer:
                     "used_avg": day.used_average,
                     "cost": day.cost,
                     "cost_avg": day.cost_average,
-                    "unit_cost": day.unit_cost,
                 }
                 for day in days
             ],

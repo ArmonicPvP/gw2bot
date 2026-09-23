@@ -1585,7 +1585,7 @@ class TestFoodDailyCharts:
         for chart_id in (
             "usage-avg",
             "cost-avg",
-            "unit-cost",
+            "cost-by-day",
             "total-cost",
             "cost-by-food",
         ):
@@ -1607,7 +1607,7 @@ class TestFoodDailyCharts:
         for heading in (
             "<h2>Food usage &ndash; 7-day rolling average</h2>",
             "<h2>Food cost &ndash; 7-day rolling average</h2>",
-            "<h2>Average food cost by day</h2>",
+            "<h2>Food cost by day</h2>",
             "<h2>Total food cost</h2>",
             "<h2>Food cost by food</h2>",
         ):
@@ -1621,15 +1621,18 @@ class TestFoodDailyCharts:
         for reader in (
             "return day.used_avg;",
             "return day.cost_avg;",
-            "return day.unit_cost;",
             "return day.cost;",
         ):
             assert reader in FOOD_PAGE
         assert "function dayGrid() {" in FOOD_PAGE
+        # The cost a day is charged is what the feasts eaten that day had
+        # cost, worked out on the server; the price per feast the page used
+        # to divide out of what was bought is gone.
+        assert "unit_cost" not in FOOD_PAGE
 
     def test_a_day_with_no_answer_is_a_gap_rather_than_a_zero(self) -> None:
-        # No restock priced means no cost per feast that day; drawing it as
-        # zero would read as a day feasts were free.
+        # Every chart has a value on every day today, but one arriving
+        # without one is left out of the line rather than drawn as zero.
         body = FOOD_PAGE.split("function perFeastSeries(spec) {", 1)[1]
         body = body.split("\n  }", 1)[0]
         assert 'if (typeof value !== "number") { return; }' in body
@@ -1646,6 +1649,28 @@ class TestFoodDailyCharts:
         assert (
             'formatCoins(running) + " (+" + formatCoins(spent) + ")"' in body
         )
+
+    def test_cost_by_food_is_each_feasts_running_total(self) -> None:
+        # The per-feast counterpart of the total: each line adds up what that
+        # feast's eaten stock cost, and its hover names what the day added.
+        spec = FOOD_PAGE.split('id: "cost-by-food",', 1)[1].split("}", 1)[0]
+        assert "cumulative: true," in spec
+        body = FOOD_PAGE.split("function perFeastSeries(spec) {", 1)[1]
+        body = body.split("\n  }", 1)[0]
+        assert "if (spec.cumulative) {" in body
+        assert "running += value;" in body
+        assert (
+            'formatCoins(running) + " (+" + formatCoins(value) + ")"' in body
+        )
+
+    def test_the_days_cost_names_how_many_were_used_and_at_what(self) -> None:
+        # The day's cost alone does not say whether it was many cheap feasts
+        # or a few dear ones, so the hover gives both halves.
+        spec = FOOD_PAGE.split('id: "cost-by-day",', 1)[1]
+        spec = spec.split('id: "total-cost",', 1)[0]
+        assert "return day.cost;" in spec
+        assert "if (!day.used) { return formatCoins(value); }" in spec
+        assert "formatCoins(value / day.used)" in spec
 
     def test_a_days_grid_covers_the_quiet_days_too(self) -> None:
         # A running total that skips a day reads as though the window were
@@ -1734,11 +1759,11 @@ class TestFoodDailyCharts:
             '"Every feast is switched off in the legends above."'
             in FOOD_PAGE
         )
-        assert 'empty: "No feasts were used in this period.",' in FOOD_PAGE
-        assert (
-            'empty: "No feast costs were recorded in this period.",'
-            in FOOD_PAGE
-        )
+        # A cost is charged as feasts are used, so a window nobody ate in has
+        # nothing on any of the charts, costs included.
+        assert FOOD_PAGE.count(
+            'empty: "No feasts were used in this period.",'
+        ) == 5
 
 
 class TestFoodAdditionsSection:
