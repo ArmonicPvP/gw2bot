@@ -70,7 +70,7 @@ BOOTSTRAP_VARIABLES = (
 # the feature modules until they became settings; they stay here as the values a
 # guild falls back to when the matching setting is unset, so an install that
 # never touches /settings behaves exactly as it did before.
-DEFAULT_RAFFLE_DRAW_ROLE_ID = 1317124663847157880
+DEFAULT_RAFFLE_DRAW_ROLE_ID = 1317638909735342201
 DEFAULT_RAFFLE_ADDTICKET_ROLE_ID = 1318357141521825872
 DEFAULT_RAFFLE_OFFICER_ROLE_ID = 1317638909735342201
 DEFAULT_GUILD_ROSTER_ROLE_ID = 1317202210152513606
