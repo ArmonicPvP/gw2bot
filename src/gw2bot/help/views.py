@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 import discord
 
 from gw2bot.core.discord_utils import log_discord_failure
-from gw2bot.help.pages import build_help_messages
+from gw2bot.help.pages import build_help_messages, registered_commands
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -72,7 +72,7 @@ class HelpPageButton(
     async def callback(self, interaction: discord.Interaction) -> None:
         bot = cast("Gw2Bot", interaction.client)
         pages = build_help_messages(
-            bot.tree.get_commands(),
+            registered_commands(bot.tree, interaction.guild),
             interaction.user,
             interaction.guild,
             bot._config,
