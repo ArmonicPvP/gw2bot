@@ -340,9 +340,10 @@ button:focus-visible {
     <div class="chart-heading">
       <h2>Food cost &ndash; 7-day rolling average</h2>
     </div>
-    <p class="chart-note">Recorded spend per day, averaged over the seven days
-      ending on each date. A restock nobody has priced counts as nothing
-      spent.</p>
+    <p class="chart-note">What the feasts used each day had cost, averaged
+      over the seven days ending on each date. Each feast is priced at the
+      restock it came from, oldest stock first, so a new deposit is not a
+      spike: it only raises the cost once the older stock is used up.</p>
     <div id="chart-cost-avg" class="chart-box"></div>
     <div id="legend-cost-avg" class="legend" role="list"
       aria-label="Feast colours"></div>
@@ -353,22 +354,23 @@ button:focus-visible {
     <div class="chart-heading">
       <h2>Average food cost by day</h2>
     </div>
-    <p class="chart-note">What one feast cost that day: the day&rsquo;s
-      recorded spend over the feasts those priced restocks added. A day
-      nothing was priced on has no point.</p>
-    <div id="chart-unit-cost" class="chart-box"></div>
-    <div id="legend-unit-cost" class="legend" role="list"
+    <p class="chart-note">What the feasts used that day had cost, priced the
+      same way, with no averaging: two feasts used from a restock of thirty
+      bought for thirty gold is two gold. The hover names how many were used
+      and what each cost.</p>
+    <div id="chart-cost-by-day" class="chart-box"></div>
+    <div id="legend-cost-by-day" class="legend" role="list"
       aria-label="Feast colours"></div>
-    <div id="status-unit-cost" class="chart-status" role="status"
+    <div id="status-cost-by-day" class="chart-status" role="status"
       aria-live="polite"></div>
   </section>
   <section class="card">
     <div class="chart-heading">
       <h2>Total food cost</h2>
     </div>
-    <p class="chart-note">Every drawn feast&rsquo;s recorded spend, added up
-      across the window. Each point is the running total to the end of that
-      day, and the hover also names what the day alone cost.</p>
+    <p class="chart-note">What every drawn feast used in the window had cost,
+      added up. Each point is the running total to the end of that day, and
+      the hover also names what the day alone cost.</p>
     <div id="chart-total-cost" class="chart-box"></div>
     <div id="status-total-cost" class="chart-status" role="status"
       aria-live="polite"></div>
@@ -377,7 +379,7 @@ button:focus-visible {
     <div class="chart-heading">
       <h2>Food cost by food</h2>
     </div>
-    <p class="chart-note">Recorded spend per day, one line per feast, so the
+    <p class="chart-note">The same running total, one line per feast, so the
       shelf the gold went on is the line it is read off.</p>
     <div id="chart-cost-by-food" class="chart-box"></div>
     <div id="legend-cost-by-food" class="legend" role="list"
@@ -1107,31 +1109,41 @@ button:focus-visible {
     },
     {
       id: "cost-avg",
-      label: "Feast spend per day, 7-day rolling average, one line per feast",
-      empty: "No feast costs were recorded in this period.",
+      label: "Cost of the feasts used per day, 7-day rolling average, " +
+        "one line per feast",
+      empty: "No feasts were used in this period.",
       money: true,
       value: function (day) { return day.cost_avg; }
     },
     {
-      id: "unit-cost",
-      label: "Average cost of one feast by day, one line per feast",
-      empty: "No feast costs were recorded in this period.",
+      id: "cost-by-day",
+      label: "Cost of the feasts used each day, one line per feast",
+      empty: "No feasts were used in this period.",
       money: true,
-      value: function (day) { return day.unit_cost; }
+      value: function (day) { return day.cost; },
+      // The day's cost alone does not say whether it was many cheap feasts
+      // or a few dear ones, so the hover names both halves of it.
+      text: function (day, value) {
+        if (!day.used) { return formatCoins(value); }
+        return formatCoins(value) + " (" + day.used + " \u00d7 " +
+          formatCoins(value / day.used) + ")";
+      }
     },
     {
       id: "total-cost",
-      label: "Running total of feast spend across every drawn feast",
-      empty: "No feast costs were recorded in this period.",
+      label: "Running total of the cost of feasts used, across every " +
+        "drawn feast",
+      empty: "No feasts were used in this period.",
       money: true,
       total: true,
       value: function (day) { return day.cost; }
     },
     {
       id: "cost-by-food",
-      label: "Feast spend per day, one line per feast",
-      empty: "No feast costs were recorded in this period.",
+      label: "Running total of the cost of feasts used, one line per feast",
+      empty: "No feasts were used in this period.",
       money: true,
+      cumulative: true,
       value: function (day) { return day.cost; }
     }
   ];
@@ -1206,19 +1218,37 @@ button:focus-visible {
     return (Math.round(value * 10) / 10).toLocaleString();
   }
 
-  // The lines one chart draws, in legend order. A day with no answer - no
-  // restock priced, so no cost per feast - is a gap rather than a zero, so it
-  // is left out of the line entirely instead of pulling it to the floor.
+  // The lines one chart draws, in legend order. Every chart has a value on
+  // every day today, but a day that ever arrives without one is a gap rather
+  // than a zero, so it is left out of the line instead of pulling it to the
+  // floor.
+  //
+  // A cumulative chart draws each feast's running total instead, and its
+  // hover names what the day alone added to it, the way the total's does.
   function perFeastSeries(spec) {
     var series = [];
     feasts().forEach(function (feast, index) {
       if (isHidden(feast)) { return; }
       var points = [];
+      var running = 0;
       daysOf(feast).forEach(function (day) {
         var value = spec.value(day);
         if (typeof value !== "number") { return; }
+        if (spec.cumulative) {
+          running += value;
+          points.push({
+            t: day.t,
+            v: running,
+            text: formatCoins(running) + " (+" + formatCoins(value) + ")"
+          });
+          return;
+        }
         points.push({
-          t: day.t, v: value, text: formatDailyValue(spec, value)
+          t: day.t,
+          v: value,
+          text: spec.text
+            ? spec.text(day, value)
+            : formatDailyValue(spec, value)
         });
       });
       series.push({
@@ -1409,11 +1439,10 @@ button:focus-visible {
     var plotted = [];
     series.forEach(function (item, index) {
       // A line is drawn only between days that sit next to each other in the
-      // grid. Where a day is missing - one nothing was priced on, which has
-      // no cost per feast at all - the line is left broken rather than
-      // carried across it, because the segment would assert a price on days
-      // nobody bought anything on. The other charts have a point on every
-      // day, so they are one run and are drawn unbroken.
+      // grid. Where a day is missing the line is left broken rather than
+      // carried across it, because the segment would assert a value on days
+      // that have none. A chart with a point on every day is one run and is
+      // drawn unbroken.
       var runs = [];
       var run = [];
       var previousDay = null;

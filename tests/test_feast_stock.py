@@ -1,9 +1,10 @@
+from collections import deque
+
 from gw2bot.gw2.feast_stock import (
     LOW_STOCK_REMINDER_SECONDS,
     ROLLING_AVERAGE_DAYS,
     SECONDS_PER_DAY,
-    FeastAddition,
-    FeastRemoval,
+    FeastConsumption,
     FeastRestock,
     FeastStockSample,
     FeastStockSeries,
@@ -11,6 +12,7 @@ from gw2bot.gw2.feast_stock import (
     day_of,
     depositors_for_addition,
     feast_additions,
+    feast_consumptions,
     feast_day_series,
     feast_days,
     feast_removals,
@@ -20,6 +22,7 @@ from gw2bot.gw2.feast_stock import (
     tracked_feast_counts,
     window_series,
 )
+from gw2bot.gw2.feast_stock import _draw_down  # pyright: ignore[reportPrivateUsage]  # the dry-queue branch is unreachable through the public API
 
 
 def _series(
@@ -337,17 +340,30 @@ DAY = 1_750_000_000 // SECONDS_PER_DAY * SECONDS_PER_DAY
 DAY_END = SECONDS_PER_DAY - 1
 
 
-def _removal(at: float, amount: int) -> FeastRemoval:
-    return FeastRemoval(recorded_at=at, amount=amount, remaining=0)
+# A gold coin in copper, so the prices below read the way an officer types
+# them.
+GOLD = 10_000
 
 
-def _addition(log_id: int, at: float, amount: int) -> FeastAddition:
-    return FeastAddition(
-        log_id=log_id,
-        recorded_at=at,
-        previous_at=None,
-        amount=amount,
-        remaining=0,
+def _used(at: float, amount: int, cost: int = 0) -> FeastConsumption:
+    return FeastConsumption(recorded_at=at, amount=amount, cost=cost)
+
+
+def _shelf(
+    counts: list[int], prior_count: int | None = None
+) -> FeastStockSeries:
+    """A feast whose count went through ``counts``, one reading a second.
+
+    Each reading's log id is its position plus one, so a test prices the
+    restock read at position ``n`` by giving ``n + 1`` a cost.
+    """
+    return FeastStockSeries(
+        guild_storage_id=1078,
+        prior_count=prior_count,
+        samples=tuple(
+            FeastStockSample(recorded_at=index + 1, count=count, log_id=index + 1)
+            for index, count in enumerate(counts)
+        ),
     )
 
 
@@ -370,14 +386,104 @@ class TestDayGrid:
         )
 
 
+class TestFeastConsumptions:
+    """Each feast used is priced at the restock it came from, oldest first."""
+
+    def test_stock_that_was_never_priced_leaves_first_and_costs_nothing(
+        self,
+    ) -> None:
+        # Ten on the shelf nobody paid for, then thirty bought for thirty
+        # gold. Thirty used takes the ten free ones first and twenty of the
+        # new lot, so it cost twenty gold, not thirty.
+        series = _shelf([10, 40, 10])
+
+        used = feast_consumptions(series, {2: 30 * GOLD})
+
+        assert [(c.amount, c.cost) for c in used] == [(30, 20 * GOLD)]
+
+    def test_a_dearer_restock_waits_behind_the_stock_before_it(self) -> None:
+        # The ten left of the one-gold lot go before any of the two-gold lot,
+        # so the next thirty cost 10 x 1g + 20 x 2g.
+        series = _shelf([10, 40, 10, 40, 10])
+
+        used = feast_consumptions(series, {2: 30 * GOLD, 4: 60 * GOLD})
+
+        assert [c.cost for c in used] == [20 * GOLD, 50 * GOLD]
+
+    def test_a_deposit_is_not_a_cost_until_its_feasts_are_used(self) -> None:
+        # Buying is not spending on this chart: a restock nobody has eaten
+        # from yet adds nothing, and each feast costs its share as it goes.
+        series = _shelf([0, 30, 28, 26])
+
+        used = feast_consumptions(series, {2: 30 * GOLD})
+
+        assert [(c.amount, c.cost) for c in used] == [
+            (2, 2 * GOLD),
+            (2, 2 * GOLD),
+        ]
+
+    def test_stock_already_there_before_the_series_opened_is_a_free_lot(
+        self,
+    ) -> None:
+        # prior_count is stock the replay did not see bought.
+        series = _shelf([35, 5], prior_count=5)
+
+        used = feast_consumptions(series, {1: 30 * GOLD})
+
+        assert [c.cost for c in used] == [25 * GOLD]
+
+    def test_a_restock_nobody_has_priced_is_free_until_it_is(self) -> None:
+        series = _shelf([0, 10, 0])
+
+        assert [c.cost for c in feast_consumptions(series, {})] == [0]
+        assert [c.cost for c in feast_consumptions(series, {2: 7 * GOLD})] == [
+            7 * GOLD
+        ]
+
+    def test_an_uneven_price_is_spent_exactly_by_the_last_feast(self) -> None:
+        # Ten copper over three feasts does not divide; each drop takes its
+        # rounded share and the last takes what is left, so nothing is lost
+        # or invented along the way.
+        series = _shelf([0, 3, 2, 1, 0])
+
+        used = feast_consumptions(series, {2: 10})
+
+        assert sum(c.cost for c in used) == 10
+        assert [c.cost for c in used] == [3, 4, 3]
+
+    def test_a_drop_spanning_two_lots_pays_each_its_own_price(self) -> None:
+        series = _shelf([0, 4, 10, 1])
+
+        used = feast_consumptions(series, {2: 4 * GOLD, 3: 12 * GOLD})
+
+        assert [(c.amount, c.cost) for c in used] == [
+            (9, 4 * GOLD + 5 * 2 * GOLD)
+        ]
+
+    def test_a_first_reading_is_stock_and_not_a_restock(self) -> None:
+        # The shelf was not seen filling, it was seen for the first time.
+        series = _shelf([20, 15])
+
+        used = feast_consumptions(series, {1: 99 * GOLD})
+
+        assert [c.cost for c in used] == [0]
+
+    def test_a_drop_the_shelf_cannot_account_for_costs_nothing(self) -> None:
+        # The queue follows the counts, so it cannot run dry through
+        # feast_consumptions; a hand-edited log that ever made it would price
+        # the feasts beyond it at nothing rather than refuse the page.
+        lots: deque[list[int]] = deque([[2, 4 * GOLD]])
+
+        assert _draw_down(lots, 5) == 4 * GOLD
+        assert not lots
+
+
 class TestFeastDays:
     def test_a_quiet_day_is_still_a_day(self) -> None:
         # Dropping it would let a rolling average step over the quiet stretch
         # as though it had never happened.
         days = feast_days(
-            [_removal(DAY + 10, 4)],
-            [],
-            {},
+            [_used(DAY + 10, 4, 400)],
             DAY,
             DAY + 2 * SECONDS_PER_DAY,
         )
@@ -387,58 +493,34 @@ class TestFeastDays:
             DAY + SECONDS_PER_DAY,
             DAY + 2 * SECONDS_PER_DAY,
         ]
-        assert [day.used for day in days] == [4, 0, 0]
+        assert [(day.used, day.cost) for day in days] == [
+            (4, 400),
+            (0, 0),
+            (0, 0),
+        ]
 
-    def test_removals_and_priced_restocks_are_bucketed_by_their_day(
-        self,
-    ) -> None:
+    def test_usage_and_its_cost_are_bucketed_by_their_day(self) -> None:
         days = feast_days(
             [
-                _removal(DAY + 60, 3),
-                _removal(DAY + 120, 2),
-                _removal(DAY + SECONDS_PER_DAY + 60, 5),
+                _used(DAY + 60, 3, 300),
+                _used(DAY + 120, 2, 200),
+                _used(DAY + SECONDS_PER_DAY + 60, 5, 1000),
             ],
-            [
-                _addition(1, DAY + 300, 10),
-                _addition(2, DAY + SECONDS_PER_DAY + 300, 20),
-            ],
-            {1: 1000, 2: 4000},
             DAY,
             DAY + SECONDS_PER_DAY + DAY_END,
         )
 
-        assert [(day.used, day.cost, day.priced_amount) for day in days] == [
-            (5, 1000, 10),
-            (5, 4000, 20),
+        assert [(day.used, day.cost) for day in days] == [
+            (5, 500),
+            (5, 1000),
         ]
-        assert [day.unit_cost for day in days] == [100.0, 200.0]
-
-    def test_an_unpriced_restock_counts_towards_neither_side(self) -> None:
-        # It is missing, not free: counting its feasts would drag the day's
-        # cost per feast towards zero on the strength of a figure nobody has
-        # recorded yet.
-        days = feast_days(
-            [],
-            [_addition(1, DAY + 60, 10), _addition(2, DAY + 120, 90)],
-            {1: 5000},
-            DAY,
-            DAY + DAY_END,
-        )
-
-        assert (days[0].cost, days[0].priced_amount) == (5000, 10)
-        assert days[0].unit_cost == 500.0
-
-    def test_a_day_nothing_was_priced_on_has_no_cost_per_feast(self) -> None:
-        days = feast_days([_removal(DAY + 60, 3)], [], {}, DAY, DAY + DAY_END)
-
-        assert days[0].cost == 0
-        assert days[0].unit_cost is None
 
     def test_anything_outside_the_bounds_is_left_out(self) -> None:
         days = feast_days(
-            [_removal(DAY - 60, 99), _removal(DAY + SECONDS_PER_DAY, 99)],
-            [_addition(1, DAY - 60, 99)],
-            {1: 9999},
+            [
+                _used(DAY - 60, 99, 9999),
+                _used(DAY + SECONDS_PER_DAY, 99, 9999),
+            ],
             DAY,
             DAY + DAY_END,
         )
@@ -470,17 +552,17 @@ class TestRollingAverages:
 
 class TestFeastDaySeries:
     def test_the_history_is_averaged_over_and_then_dropped(self) -> None:
-        # Seven days of history, one feast used a day, and then the window's
-        # own first day: the average on it covers the week behind it rather
-        # than starting over at the window's edge.
+        # Seven days of history, seven feasts used a day, and then the
+        # window's own first day: the average on it covers the week behind it
+        # rather than starting over at the window's edge.
         opened = DAY
-        removals = [
-            _removal(history_start(opened) + index * SECONDS_PER_DAY + 60, 7)
+        used = [
+            _used(history_start(opened) + index * SECONDS_PER_DAY + 60, 7)
             for index in range(ROLLING_AVERAGE_DAYS)
         ]
-        removals.append(_removal(opened + 60, 7))
+        used.append(_used(opened + 60, 7))
 
-        series = feast_day_series(removals, [], {}, opened, opened + DAY_END)
+        series = feast_day_series(used, opened, opened + DAY_END)
 
         assert [point.day for point in series] == [opened]
         assert series[0].used == 7
@@ -490,9 +572,7 @@ class TestFeastDaySeries:
         self,
     ) -> None:
         series = feast_day_series(
-            [_removal(DAY + 60, 14)],
-            [],
-            {},
+            [_used(DAY + 60, 14)],
             DAY,
             DAY + SECONDS_PER_DAY + DAY_END,
         )
@@ -507,6 +587,34 @@ class TestFeastDaySeries:
         assert series[0].used_average == 14 / 7
         assert series[1].used == 0
 
+    def test_a_week_of_steady_use_averages_to_what_a_day_costs(self) -> None:
+        # Thirty feasts bought for thirty gold, two eaten a day: every day
+        # costs two gold, so the seven-day average is two gold too. It does
+        # not spike on the day the restock was bought and then fall away,
+        # which is what averaging what was bought used to draw.
+        opened = DAY
+        counts = [30] + [30 - 2 * day for day in range(1, 15)]
+        samples = tuple(
+            FeastStockSample(
+                recorded_at=history_start(opened) + index * SECONDS_PER_DAY + 60,
+                count=count,
+                log_id=index + 1,
+            )
+            for index, count in enumerate(counts)
+        )
+        shelf = FeastStockSeries(
+            guild_storage_id=1078, prior_count=0, samples=samples
+        )
+
+        series = feast_day_series(
+            feast_consumptions(shelf, {1: 30 * GOLD}),
+            opened,
+            opened + 6 * SECONDS_PER_DAY + DAY_END,
+        )
+
+        assert [point.cost for point in series] == [2 * GOLD] * 7
+        assert [point.cost_average for point in series] == [2 * GOLD] * 7
+
     def test_the_first_day_holds_only_the_part_the_window_opened_over(
         self,
     ) -> None:
@@ -515,49 +623,19 @@ class TestFeastDaySeries:
         # drawn have to be the window's own, the way the removals and
         # additions tables beside them are.
         opened = DAY + 14 * 60 * 60
-        before = [_removal(DAY + 6 * 60 * 60, 99)]
-        inside = [_removal(DAY + 20 * 60 * 60, 5)]
+        before = [_used(DAY + 6 * 60 * 60, 99, 500_000)]
+        inside = [_used(DAY + 20 * 60 * 60, 5, 8_000)]
 
         series = feast_day_series(
-            before + inside, [], {}, opened, opened + SECONDS_PER_DAY
+            before + inside, opened, opened + SECONDS_PER_DAY
         )
 
         assert series[0].day == DAY
-        assert series[0].used == 5
-        # The hours before the window still count towards the average, which
-        # is a mean over whole days and reads a week of them for that reason.
+        assert (series[0].used, series[0].cost) == (5, 8_000)
+        # The hours before the window still count towards the averages, which
+        # are means over whole days and read a week of them for that reason.
         assert series[0].used_average == 104 / 7
-
-    def test_spend_before_the_window_stays_out_of_its_totals(self) -> None:
-        # The total cost chart adds these up across the window, so an
-        # addition priced in the hours before it opened would overstate what
-        # the window itself cost.
-        opened = DAY + 14 * 60 * 60
-
-        series = feast_day_series(
-            [],
-            [_addition(1, DAY + 6 * 60 * 60, 10), _addition(2, opened + 60, 4)],
-            {1: 500_000, 2: 8_000},
-            opened,
-            opened + SECONDS_PER_DAY,
-        )
-
-        assert series[0].cost == 8_000
-        assert series[0].unit_cost == 2_000.0
         assert series[0].cost_average == 508_000 / 7
-
-    def test_costs_carry_their_own_average_and_price_per_feast(self) -> None:
-        series = feast_day_series(
-            [],
-            [_addition(1, DAY + 60, 4)],
-            {1: 8000},
-            DAY,
-            DAY + DAY_END,
-        )
-
-        assert series[0].cost == 8000
-        assert series[0].cost_average == 8000 / 7
-        assert series[0].unit_cost == 2000.0
 
 
 class TestWindowSeries:

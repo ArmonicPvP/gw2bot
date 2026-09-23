@@ -1877,29 +1877,29 @@ class TestFoodApi:
         assert days == sorted(days, key=lambda day: day["t"])
         assert sum(day["used"] for day in days) == 30
         assert days[-1]["used_avg"] == pytest.approx(30 / 7)
-        # Nothing has been priced, so there is no cost and no price per feast.
+        # The stock was there before anything was bought at a recorded price,
+        # so the feasts used from it cost nothing.
         assert [day["cost"] for day in days] == [0] * len(days)
-        assert [day["unit_cost"] for day in days] == [None] * len(days)
+        assert "unit_cost" not in days[0]
         # A feast with no records still carries the whole grid, as zeroes.
         assert len((await response.json())["feasts"][1]["days"]) == len(days)
 
-    async def test_a_priced_restock_reaches_the_days_it_was_priced_on(
+    async def test_feasts_are_costed_at_the_restock_they_came_from(
         self,
         client: TestClient,
         guild: FakeGuild,
         raffle_store: RaffleStore,
     ) -> None:
+        # Thirty feasts bought for six gold eleven days ago - well before a
+        # 24h window and the week of history its averages read - and four of
+        # them eaten inside it. They cost what that restock paid for them,
+        # which is only known by replaying the shelf from its first count.
         now = time.time()
-        raffle_store.record_feast_counts({1078: 10}, now - 3000)
-        raffle_store.record_feast_counts({1078: 40}, now - 1000)
-
-        opened = await client.get(
-            "/api/food",
-            params={"range": "24h"},
-            headers=self._officer_headers(guild),
-        )
-        addition = (await opened.json())["feasts"][0]["additions"][0]
-        assert raffle_store.set_feast_addition_cost(addition["log_id"], 60_000)
+        raffle_store.record_feast_counts({1078: 0}, now - 12 * DAY_SECONDS)
+        raffle_store.record_feast_counts({1078: 30}, now - 11 * DAY_SECONDS)
+        raffle_store.record_feast_counts({1078: 26}, now - 1000)
+        restock = raffle_store.get_feast_stock_series(0)[1078].samples[1]
+        assert raffle_store.set_feast_addition_cost(restock.log_id, 60_000)
 
         response = await client.get(
             "/api/food",
@@ -1908,12 +1908,43 @@ class TestFoodApi:
         )
 
         days = (await response.json())["feasts"][0]["days"]
-        priced = [day for day in days if day["cost"]]
-        assert [day["cost"] for day in priced] == [60_000]
-        # Thirty feasts for six gold is two silver each, and the spend is
-        # averaged over the week behind it rather than counted once.
-        assert priced[0]["unit_cost"] == pytest.approx(2_000)
-        assert priced[0]["cost_avg"] == pytest.approx(60_000 / 7)
+        assert sum(day["used"] for day in days) == 4
+        # Two silver each, spent as they were eaten rather than on the day
+        # the restock was bought.
+        assert sum(day["cost"] for day in days) == 4 * 2_000
+        assert days[-1]["cost_avg"] == pytest.approx(4 * 2_000 / 7)
+
+    async def test_a_price_recorded_later_reaches_the_feasts_already_used(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        raffle_store: RaffleStore,
+    ) -> None:
+        # A restock nobody has priced is free until an officer prices it, and
+        # then everything eaten from it is re-costed on the next read.
+        now = time.time()
+        raffle_store.record_feast_counts({1078: 10}, now - 3000)
+        raffle_store.record_feast_counts({1078: 40}, now - 2000)
+        raffle_store.record_feast_counts({1078: 5}, now - 1000)
+        headers = self._officer_headers(guild)
+
+        before = await client.get(
+            "/api/food", params={"range": "24h"}, headers=headers
+        )
+        unpriced = (await before.json())["feasts"][0]
+        assert sum(day["cost"] for day in unpriced["days"]) == 0
+        addition = unpriced["additions"][0]
+        assert raffle_store.set_feast_addition_cost(addition["log_id"], 60_000)
+
+        after = await client.get(
+            "/api/food", params={"range": "24h"}, headers=headers
+        )
+
+        days = (await after.json())["feasts"][0]["days"]
+        # Thirty-five used: the ten that were already there cost nothing, and
+        # twenty-five of the thirty bought for six gold cost two silver each.
+        assert sum(day["used"] for day in days) == 35
+        assert sum(day["cost"] for day in days) == 25 * 2_000
 
     async def test_history_before_the_window_averages_into_its_first_day(
         self,
