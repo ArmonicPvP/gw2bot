@@ -36,6 +36,7 @@ from gw2bot.events.views import (
     EventSignUpButton,
 )
 from gw2bot.gold.commands import GoldCommands
+from gw2bot.help import create_help_command
 from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2.api import Gw2ApiClient
 from gw2bot.notifications.poll_status import PollStatusTracker
@@ -210,6 +211,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         self.tree.add_command(self._create_pending_command())
+        self.tree.add_command(create_help_command(self))
         # Rebuild raffle audit pager buttons from their custom_ids so old
         # audit messages keep paging after view timeouts and restarts.
         self.add_dynamic_items(RaffleAuditRangesButton)

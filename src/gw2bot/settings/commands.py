@@ -12,6 +12,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.config import ConfigurationError, same_guild_id
 from gw2bot.gw2.api import Gw2ApiClient
+from gw2bot.core.command_access import (
+    AnyOf,
+    RoleSetting,
+    ServerAdministrator,
+    access_extras,
+)
 from gw2bot.core.discord_utils import (
     forum_tags_for_ids,
     log_discord_failure,
@@ -105,6 +111,15 @@ class SettingsCommands(app_commands.Group):
             name="settings",
             description="View and change the bot's configuration",
             guild_only=True,
+            # What authorize() below checks, for /help.
+            extras=access_extras(
+                AnyOf(
+                    (
+                        RoleSetting("raffle_officer_role_id"),
+                        ServerAdministrator(),
+                    )
+                )
+            ),
         )
         self._bot = bot
         self._groups: dict[str, app_commands.Group] = {

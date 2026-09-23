@@ -8,6 +8,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import user_has_role
 from gw2bot.trials.reports import format_track_audit
 
@@ -21,6 +22,7 @@ def create_check_command(bot: Gw2Bot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(
         name="check",
         description="Privately post the Trial member report on demand",
+        extras=access_extras(RoleSetting("raffle_officer_role_id")),
     )
     @app_commands.guild_only()
     async def check(interaction: discord.Interaction) -> None:
@@ -76,6 +78,7 @@ def create_track_command(bot: Gw2Bot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(
         name="track",
         description="Toggle a Trial member's 7-day warning tracking",
+        extras=access_extras(RoleSetting("raffle_officer_role_id")),
     )
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",

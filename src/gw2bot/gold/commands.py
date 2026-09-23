@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.gold.import_log import format_import_result, import_gold_history
 
@@ -30,6 +31,8 @@ class GoldCommands(app_commands.Group):
             name="gold",
             description="Guild bank gold history",
             guild_only=True,
+            # What authorize() below checks, for /help.
+            extras=access_extras(RoleSetting("raffle_officer_role_id")),
         )
         self._bot = bot
         self.add_command(self._build_import_command())
