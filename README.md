@@ -53,6 +53,14 @@ is built for you when you run it: a command gated by a role appears only if you
 hold that role as `/settings` has it configured right now, so changing a role
 setting changes what `/help` shows on the next call.
 
+Commands are grouped by their top-level command, groups in alphabetical order
+and the subcommands in each group alphabetical too, followed by the commands
+that belong to no group. Each is written the way this README writes them, and
+every page opens with the key: `option:<value>` is required, and
+`[option:<value>]` is optional and can be left out. The value names what to
+enter (`text`, `number`) or, for an option with fixed choices, lists them, as
+in `/raffle leaderboard [sortby:<purchased|free|total>]`.
+
 The reply is one private embed. When the list is too long for one page — the
 `/settings` subcommands alone nearly fill one — arrow buttons under it turn
 the pages in place. The arrows keep working for as long as the reply is on

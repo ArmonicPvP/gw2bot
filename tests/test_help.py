@@ -25,6 +25,8 @@ from gw2bot.help.commands import handle_help_command
 from gw2bot.help.pages import (
     HELP_DESCRIPTION_LIMIT,
     NO_COMMANDS_MESSAGE,
+    OTHER_COMMANDS_HEADING,
+    USAGE_KEY,
     registered_commands,
 )
 from gw2bot.help.views import HelpPageButton, HelpPagerView
@@ -168,11 +170,11 @@ class TestVisibleCommands:
 
         for shown in (
             "`/help`",
-            "`/raffle tickets [username]`",
+            "`/raffle tickets [username:<text>]`",
             "`/raffle list`",
-            "`/raffle leaderboard [sortby]`",
-            "`/raffle audit <run_id>`",
-            "`/profit view [days]`",
+            "`/raffle leaderboard [sortby:<purchased|free|total>]`",
+            "`/raffle audit run_id:<number>`",
+            "`/profit view [days:<number>]`",
         ):
             assert shown in text
         for hidden in (
@@ -196,9 +198,9 @@ class TestVisibleCommands:
     ) -> None:
         text = _help_text(bot, _caller(config.raffle_addticket_role_id))
 
-        assert "`/raffle addticket <username>` — " in text
+        assert "`/raffle addticket username:<text>` — " in text
         assert "amount" not in text
-        assert "`/raffle addtickets [username1…username10]`" in text
+        assert "`/raffle addtickets [username1:<text> … username10:<text>]`" in text
         assert "`/raffle bulkaddtickets`" in text
         assert "/raffle draw" not in text
 
@@ -215,7 +217,7 @@ class TestVisibleCommands:
             ),
         )
 
-        assert "`/raffle addticket <username> [amount]`" in text
+        assert "`/raffle addticket username:<text> [amount:<number>]`" in text
         assert "└ `amount` — Purchased tickets to add; Officers only" in text
 
     def test_an_officer_without_the_addticket_role_must_supply_the_amount(
@@ -227,9 +229,9 @@ class TestVisibleCommands:
         # an amount, so it is not optional for them.
         text = _help_text(bot, _caller(config.raffle_officer_role_id))
 
-        assert "`/raffle addticket <username> <amount>`" in text
+        assert "`/raffle addticket username:<text> amount:<number>`" in text
         assert "`/raffle addtickets" not in text
-        for shown in ("`/check`", "`/pending`", "`/track <username>`"):
+        for shown in ("`/check`", "`/pending`", "`/track username:<text>`"):
             assert shown in text
         assert "`/gold import`" in text
         assert "`/roster import`" in text
@@ -243,7 +245,7 @@ class TestVisibleCommands:
         text = _help_text(bot, _caller(config.raffle_draw_role_id))
 
         assert "`/raffle draw`" in text
-        assert "`/raffle removetickets <username> [amount]`" in text
+        assert "`/raffle removetickets username:<text> [amount:<number>]`" in text
         assert "/raffle addticket" not in text
 
     def test_the_event_role_sees_every_event_subcommand(
@@ -306,6 +308,81 @@ class TestVisibleCommands:
         )
 
         assert "mystery" not in text
+
+
+class TestLayout:
+    def test_subcommands_are_listed_alphabetically(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        text = _help_text(
+            bot,
+            _caller(
+                config.raffle_draw_role_id,
+                config.raffle_addticket_role_id,
+                config.raffle_officer_role_id,
+            ),
+        )
+        raffle = [
+            line.split()[1].rstrip("`")
+            for line in text.splitlines()
+            if line.startswith("`/raffle ")
+        ]
+
+        assert raffle == sorted(raffle)
+        assert raffle.index("list") < raffle.index("tickets")
+
+    def test_nested_groups_sort_among_their_siblings(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        text = _help_text(bot, _caller(config.raffle_officer_role_id))
+        settings = [
+            line.split("`")[1].split(" [")[0]
+            for line in text.splitlines()
+            if line.startswith("`/settings ")
+        ]
+
+        assert settings == sorted(settings)
+        assert settings.index("/settings channels event_ping") < settings.index(
+            "/settings list"
+        )
+        assert settings.index("/settings list") < settings.index(
+            "/settings roles raffle_draw"
+        )
+
+    def test_the_other_commands_are_listed_alphabetically(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        text = _help_text(bot, _caller(config.raffle_officer_role_id))
+        other = text.split(OTHER_COMMANDS_HEADING, 1)[1]
+        names = [
+            line.split("`")[1].split()[0]
+            for line in other.splitlines()
+            if line.startswith("`/")
+        ]
+
+        assert names == sorted(names)
+
+    def test_every_page_opens_with_the_usage_key(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        pages = build_help_messages(
+            bot.tree.get_commands(),
+            _caller(config.raffle_officer_role_id),
+            _guild(),
+            config,
+        )
+
+        assert len(pages) > 1
+        assert all(page.startswith(f"{USAGE_KEY}\n\n") for page in pages)
+        assert all(len(page) <= HELP_DESCRIPTION_LIMIT for page in pages)
 
 
 class TestPacking:

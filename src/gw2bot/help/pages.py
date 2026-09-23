@@ -30,6 +30,25 @@ LOGGER = logging.getLogger(__name__)
 HELP_DESCRIPTION_LIMIT = 4000
 OTHER_COMMANDS_HEADING = "**Other commands**"
 NO_COMMANDS_MESSAGE = "There are no commands you can use here."
+# Written the way README.md writes command usage, which is also how Discord
+# shows an option once it is picked: its name, a colon, then the value.
+USAGE_KEY = (
+    "*`option:<value>` is required. `[option:<value>]` is optional and can "
+    "be left out.*"
+)
+
+# What a value is when the option offers no choices to list instead.
+_VALUE_HINTS: dict[discord.AppCommandOptionType, str] = {
+    discord.AppCommandOptionType.string: "text",
+    discord.AppCommandOptionType.integer: "number",
+    discord.AppCommandOptionType.number: "number",
+    discord.AppCommandOptionType.boolean: "true|false",
+    discord.AppCommandOptionType.user: "member",
+    discord.AppCommandOptionType.channel: "channel",
+    discord.AppCommandOptionType.role: "role",
+    discord.AppCommandOptionType.mentionable: "member or role",
+    discord.AppCommandOptionType.attachment: "file",
+}
 
 _NUMBERED_OPTION = re.compile(r"^(?P<stem>.*?)(?P<number>\d+)$")
 
@@ -66,9 +85,11 @@ def build_help_messages(
 ) -> list[str]:
     """The pages of `/help` for ``user``, in order, one embed description each.
 
-    Each command group is one section headed by the group; the top-level
-    commands that belong to no group share a closing section. Context menu
-    commands are never typed, so they are not listed.
+    Each command group is one section headed by the group, with its
+    subcommands in alphabetical order; the top-level commands that belong to
+    no group share a closing section. Every page opens with the key to how
+    options are written. Context menu commands are never typed, so they are
+    not listed.
     """
     groups: list[app_commands.Group] = []
     standalone: list[app_commands.Command[Any, ..., Any]] = []
@@ -81,11 +102,19 @@ def build_help_messages(
     sections: list[str] = []
     shown = 0
     hidden = 0
-    for group in sorted(groups, key=lambda group: group.name):
+    for group in sorted(groups, key=lambda group: group.name.casefold()):
         lines: list[str] = []
-        for command in group.walk_commands():
-            if not isinstance(command, app_commands.Command):
-                continue
+        # By full name, so a nested group's subcommands (`/settings roles
+        # ...`) sort among their siblings rather than after them.
+        subcommands = sorted(
+            (
+                command
+                for command in group.walk_commands()
+                if isinstance(command, app_commands.Command)
+            ),
+            key=lambda command: command.qualified_name.casefold(),
+        )
+        for command in subcommands:
             line = _command_line(command, user, guild, settings)
             if line is None:
                 hidden += 1
@@ -97,7 +126,7 @@ def build_help_messages(
             sections.append("\n".join([heading, *lines]))
 
     other: list[str] = []
-    for command in sorted(standalone, key=lambda command: command.name):
+    for command in sorted(standalone, key=lambda command: command.name.casefold()):
         line = _command_line(command, user, guild, settings)
         if line is None:
             hidden += 1
@@ -110,7 +139,12 @@ def build_help_messages(
     # Never an empty list: the reply and the pager both show a page, and
     # /help itself should always be listed, so an empty result means the
     # commands were read from the wrong place and ought to say so.
-    messages = _pack_sections(sections, HELP_DESCRIPTION_LIMIT) or [
+    # The key opens every page, so the room it takes comes off each one.
+    packed = _pack_sections(
+        sections,
+        HELP_DESCRIPTION_LIMIT - len(USAGE_KEY) - len("\n\n"),
+    )
+    messages = [f"{USAGE_KEY}\n\n{page}" for page in packed] or [
         NO_COMMANDS_MESSAGE
     ]
     LOGGER.debug(
@@ -182,7 +216,7 @@ def _option_placeholders(
     parameters: Sequence[app_commands.Parameter],
     required: set[str],
 ) -> list[str]:
-    """``<name>`` for each required option and ``[name]`` for the rest.
+    """``name:<value>`` for each required option and ``[name:<value>]`` for the rest.
 
     A run of numbered options such as ``username1`` .. ``username10`` reads
     as one placeholder, which is what it is to the person typing it.
@@ -207,12 +241,24 @@ def _option_placeholders(
                     break
                 end += 1
         if end - index > 1:
-            name = f"{parameter.display_name}…{parameters[end - 1].display_name}"
+            option = (
+                f"{_option_usage(parameter)} … "
+                f"{_option_usage(parameters[end - 1])}"
+            )
         else:
-            name = parameter.display_name
-        placeholders.append(f"<{name}>" if is_required else f"[{name}]")
+            option = _option_usage(parameter)
+        placeholders.append(option if is_required else f"[{option}]")
         index = end
     return placeholders
+
+
+def _option_usage(parameter: app_commands.Parameter) -> str:
+    """``name:<value>``, with the choices as the value when there are any."""
+    if parameter.choices:
+        value = "|".join(choice.name for choice in parameter.choices)
+    else:
+        value = _VALUE_HINTS.get(parameter.type, "value")
+    return f"{parameter.display_name}:<{value}>"
 
 
 def _pack_sections(sections: Sequence[str], limit: int) -> list[str]:
