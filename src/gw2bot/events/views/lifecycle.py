@@ -208,6 +208,7 @@ async def apply_event_edit(
             repeat_days=edited.repeat_days,
             delete_previous_on_repeat=edited.delete_previous_on_repeat,
             ping_role_ids=edited.ping_role_ids,
+            requirements=edited.requirements,
         )
     except SQLAlchemyError as exc:
         # The save did not happen, so clear the guard to allow a fresh retry.

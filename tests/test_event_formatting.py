@@ -622,6 +622,43 @@ class TestEventEmbed:
         assert left == "└ <@1>\n└ <@2>"
         assert right == "└ <@3>"
 
+    def test_story_embed_is_a_five_seat_headcount(self) -> None:
+        event = make_event(EventCategory.STORY)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert embed.title == "📖 Kitty Cleanup"
+        names = [field.name or "" for field in embed.fields]
+        assert "👥 Participants (3/5)" in names
+        assert not any("Healer" in name for name in names)
+        assert not any("DPS" in name for name in names)
+        assert not any(name.startswith("Boons") for name in names)
+        participants = next(
+            field for field in embed.fields
+            if field.name == "👥 Participants (3/5)"
+        )
+        # Five seats read down a single column.
+        assert participants.value == "└ <@1>\n└ <@2>\n└ <@3>"
+
+    def test_requirements_are_shown_when_set(self) -> None:
+        event = replace(make_event(), requirements="Level 80, exotic gear")
+
+        embed = event_embed(event, [], EventStatus.OPEN)
+
+        field = next(
+            field for field in embed.fields
+            if field.name == "📌 Requirements"
+        )
+        assert field.value == "Level 80, exotic gear"
+        assert field.inline is False
+
+    def test_no_requirements_section_without_requirements(self) -> None:
+        embed = event_embed(make_event(), [], EventStatus.OPEN)
+
+        names = [field.name or "" for field in embed.fields]
+        assert not any("Requirements" in name for name in names)
+
     def test_general_embed_lists_participants_without_a_cap(self) -> None:
         event = make_event(EventCategory.GENERAL)
         signups = [make_signup(user_id) for user_id in range(1, 4)]

@@ -384,17 +384,20 @@ page to keep current. Their `eventID: N` stays readable either way.
 
 1. **Details** — category, title, description, destination channel or forum
    post, and the roles to ping (see [Event Role Pings](#event-role-pings)).
-2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, and whether
-   the event repeats. Typed times are read in the timezone set with
-   `/settings timezone` and must be in the future.
+2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, whether
+   the event repeats, and optional requirements. Typed times are read in the
+   timezone set with `/settings timezone` and must be in the future.
+   Requirements are free text of up to 1,024 characters; left blank, the event
+   has none, and its post shows no Requirements section.
 3. **Repeat** — only when the event repeats: frequency, which days, and whether
    posting the next occurrence should delete the previous one.
 
 A private preview of the finished post follows each step. **Change something**
 reopens any single field — category, title, description, channel, date & time,
-duration, repeat settings, leader, or roles to ping — without walking the flow
-again, and **Post event** sends it. Nothing is written to the database until the
-event is posted, so abandoning the flow leaves nothing behind.
+duration, requirements, repeat settings, leader, or roles to ping — without
+walking the flow again, and **Post event** sends it. Nothing is written to the
+database until the event is posted, so abandoning the flow leaves nothing
+behind.
 
 `/event edit` opens the same preview for an existing event, with **Save changes**
 in place of **Post event**. Changing the channel re-posts the event at the new
@@ -413,6 +416,7 @@ The category fixes the squad, and the bot enforces it:
 | Strike | 10 | 2 | 8 | 2 | 2 |
 | Fractal | 5 | 1 | 4 | 1 | 1 |
 | Dungeon | 5 | 0 | 5 | 1 | 1 |
+| Story | 5 | — | — | — | — |
 | World vs. World | 50 | — | — | — | — |
 | Open World | 50 | — | — | — | — |
 | General | No limit | — | — | — | — |
@@ -421,9 +425,9 @@ Raid, Strike, Fractal, and Dungeon events are role-based: members pick one of
 Just DPS, Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and
 the healer, DPS, quickness, and alacrity caps are all honoured at once. Dungeon
 groups have no healer slot: they require one Quickness DPS, one Alacrity DPS,
-and three Just DPS, and their embeds omit the empty healer section. World vs.
-World, Open World, and General events are a plain headcount with no roles to
-pick.
+and three Just DPS, and their embeds omit the empty healer section. Story,
+World vs. World, Open World, and General events are a plain headcount with no
+roles to pick.
 General has no squad size at all: everyone who signs up is seated, so it never
 fills and never waitlists anyone, and its embed shows the participant count on
 its own rather than as a share of a total.
@@ -444,8 +448,8 @@ or as a waitlist-only pick, before it is chosen. A member is seated in their
 main role when it still fits; otherwise a flex role is used, and the bot fills
 the scarcer seats first, so a flexer lands on an open heal or boon seat before a
 plain DPS one. When no acceptable seat is free the member joins the waitlist,
-marked ⌛️ in the embed. A World vs. World, Open World, or General event has no
-roles to pick, so one click seats the member or waitlists them — and on a
+marked ⌛️ in the embed. A Story, World vs. World, Open World, or General event
+has no roles to pick, so one click seats the member or waitlists them — and on a
 General event it always seats them.
 
 Seats are re-shuffled on every roster change: signing out promotes waitlisted
@@ -651,9 +655,9 @@ A forum post only notifies the members already following it, so mentioning a
 role inside one reaches almost nobody it was meant for. Set
 `/settings channels event_ping` to a text channel and an event posted into a
 forum post announces itself there instead: the mentions go to that channel with
-the event's title, its start as a relative timestamp, and a link straight to the
-event's message in the post. The post itself then carries no mentions, so nobody
-is pinged twice for one event.
+the event's title, its start as a relative timestamp, its requirements when it
+has any, and a link straight to the event's message in the post. The post
+itself then carries no mentions, so nobody is pinged twice for one event.
 
 The setting is global — one channel for every event — and answers only for an
 event posted into a forum post. An event posted to a channel keeps pinging its
@@ -667,16 +671,16 @@ The bot needs `Send Messages` and `Mention @everyone, @here and All Roles` in
 the ping channel; an announcement Discord refuses is logged and costs that
 occurrence its ping alone — the event stays posted and its buttons keep working.
 
-The announcement repeats the event's title and its start, so an edit to either
-corrects it in place: it is refreshed on the same trigger as the thread name,
-which carries the date and time for the same reason. Its mentions are left
-exactly as they were sent. Editing a message notifies nobody, so re-rendering
-them from a changed role pick would claim roles that were never alerted — the
-announcement keeps naming who actually heard about the event, and changing the
-roles only takes effect on the next occurrence posted. One somebody deleted by
-hand is forgotten rather than retried, and an edit Discord refuses is logged
-without holding back the event — the post is the record, and the announcement
-is a notice that has already been delivered.
+The announcement repeats the event's title, its start and its requirements,
+so an edit to any of them corrects it in place: it is refreshed on the same
+trigger as the thread name, which carries the date and time for the same
+reason. Its mentions are left exactly as they were sent. Editing a message
+notifies nobody, so re-rendering them from a changed role pick would claim roles
+that were never alerted — the announcement keeps naming who actually heard about
+the event, and changing the roles only takes effect on the next occurrence
+posted. One somebody deleted by hand is forgotten rather than retried, and an
+edit Discord refuses is logged without holding back the event — the post is
+the record, and the announcement is a notice that has already been delivered.
 
 An announcement is only ever a pointer at the event's message, so it is stored
 with the occurrence and removed by the same cleanup: deleting the event,
@@ -1398,10 +1402,11 @@ parameters to `--user 99:100`.
 
 An optional website shows the guild event calendar in day, week, and month
 views. Events appear as one-line entries on their day, and hovering over an
-entry shows the full details: category, description, times, duration, leader,
-status, and roster counts. Clicking an event pins those details until the next
-click; clicking a different event switches the pinned details to it. Day
-headings in week view and every date in month view open that date's day view.
+entry shows the full details: category, description, requirements, times,
+duration, leader, status, and roster counts. Clicking an event pins those
+details until the next click; clicking a different event switches the pinned
+details to it. Day headings in week view and every date in month view open that
+date's day view.
 When a month cell cannot fit all of its events, it shows a clickable `+N`
 beside the date instead of a scrollbar. Future occurrences of repeating events
 that the scheduler has not posted yet appear with dashed borders as

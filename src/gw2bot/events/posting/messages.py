@@ -347,10 +347,12 @@ async def refresh_occurrence_message(
             occurrence,
             status,
         )
-        # The announcement repeats the title and the start, so it goes stale on
-        # exactly the edits the thread name does. A failure here is logged and
-        # does not hold back the status: the event's own message is the record,
-        # and the announcement is a notice that has already been delivered.
+        # The announcement repeats the title, the start and the requirements,
+        # so it goes stale on an edit, which is what forces the thread rename
+        # (an edit always passes force_thread_rename). A failure here is logged
+        # and does not hold back the status: the event's own message is the
+        # record, and the announcement is a notice that has already been
+        # delivered.
         await refresh_occurrence_announcement(bot, event, occurrence)
         if thread_renamed and status_changed:
             if status is EventStatus.OVER:

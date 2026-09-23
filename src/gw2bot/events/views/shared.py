@@ -56,6 +56,13 @@ EVENT_TITLE_MAX_LENGTH = 256
 EVENT_DESCRIPTION_MAX_LENGTH = 4000
 
 
+# Requirements are shown as an embed field, whose value Discord caps at 1,024
+# characters.
+EVENT_REQUIREMENTS_MAX_LENGTH = 1024
+EVENT_REQUIREMENTS_PROMPT = "Requirements"
+EVENT_REQUIREMENTS_HINT = "Event Requirements (Leave blank for none)"
+
+
 FLOW_TIMEOUT_SECONDS = 600
 
 
@@ -180,6 +187,8 @@ class EventDraft:
     delete_previous_on_repeat: bool = False
     # Roles the event post pings, in the order they were picked.
     ping_role_ids: tuple[int, ...] = field(default_factory=tuple)
+    # Optional, so an empty string is a finished answer rather than a gap.
+    requirements: str = ""
     posted: bool = False
     # Set when the draft edits an existing event rather than creating one. The
     # whole "Change something" flow reuses this draft, so a single flag steers
@@ -233,6 +242,7 @@ class EventDraft:
             repeat_days=self.repeat_days,
             delete_previous_on_repeat=self.delete_previous_on_repeat,
             ping_role_ids=self.ping_role_ids,
+            requirements=self.requirements,
         )
 
 
@@ -272,6 +282,7 @@ def draft_from_event(
         ),
         delete_previous_on_repeat=event.delete_previous_on_repeat,
         ping_role_ids=event.ping_role_ids,
+        requirements=event.requirements,
         editing_event_id=event.event_id,
         roster_only=roster_only,
         editing_occurrence_id=editing_occurrence_id,
@@ -733,6 +744,7 @@ def _restore_event_channel(
             repeat_days=event.repeat_days,
             delete_previous_on_repeat=event.delete_previous_on_repeat,
             ping_role_ids=event.ping_role_ids,
+            requirements=event.requirements,
         )
     except SQLAlchemyError as exc:
         LOGGER.error(
@@ -812,6 +824,7 @@ _CHANGE_FIELDS = (
     ("channel", "Channel"),
     ("start", "Date & time"),
     ("duration", "Duration"),
+    ("requirements", "Requirements"),
     ("repeat", "Repeat settings"),
     ("leader", "Leader"),
     ("ping_roles", "Roles to ping"),

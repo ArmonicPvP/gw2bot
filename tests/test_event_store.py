@@ -105,6 +105,44 @@ def test_migration_adds_ping_role_ids_to_existing_db(
         store.close()
 
 
+def test_migration_adds_requirements_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before events
+    # carried requirements by dropping the column and inserting a legacy row.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_events DROP COLUMN requirements")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat, ping_role_ids) VALUES "
+                "('Fractal', 't', 'd', 1, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0, '')"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "requirements" in added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_event(1)
+        assert legacy is not None
+        # An event created before the feature existed has no requirements.
+        assert legacy.requirements == ""
+    finally:
+        store.close()
+
+
 def test_migration_adds_edit_token_columns_to_existing_db(
     tmp_path: Path,
 ) -> None:
@@ -528,6 +566,53 @@ class TestEventStoreEvents:
         )
 
         assert updated.ping_role_ids == ()
+
+    def test_create_event_round_trips_the_requirements(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(store, requirements="Level 80")
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        assert loaded.requirements == "Level 80"
+
+    def test_an_event_has_no_requirements_by_default(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(store)
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        assert loaded.requirements == ""
+
+    def test_update_event_replaces_the_requirements(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, requirements="Level 80")
+
+        updated = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            requirements="Exotic gear",
+        )
+
+        assert updated.requirements == "Exotic gear"
+        reloaded = store.get_event(event.event_id)
+        assert reloaded is not None
+        assert reloaded.requirements == "Exotic gear"
 
     def test_update_event_unknown_id_raises(self, store: EventStore) -> None:
         with pytest.raises(ValueError, match="Unknown event"):

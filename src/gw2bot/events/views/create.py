@@ -41,6 +41,9 @@ from gw2bot.events.views.shared import (
     EVENT_CHANNEL_PROMPT,
     EVENT_CHANNEL_TYPES,
     EVENT_DESCRIPTION_MAX_LENGTH,
+    EVENT_REQUIREMENTS_HINT,
+    EVENT_REQUIREMENTS_MAX_LENGTH,
+    EVENT_REQUIREMENTS_PROMPT,
     EVENT_TITLE_MAX_LENGTH,
     EventDraft,
     FLOW_TIMEOUT_SECONDS,
@@ -261,10 +264,26 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
                 component=self.repeat,
             )
         )
+        # Asked here rather than with the details: that modal already holds
+        # the five components Discord allows once ping roles are offered.
+        self.requirements_input = discord.ui.TextInput["EventScheduleModal"](
+            style=discord.TextStyle.paragraph,
+            default=draft.requirements or None,
+            max_length=EVENT_REQUIREMENTS_MAX_LENGTH,
+            required=False,
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=EVENT_REQUIREMENTS_PROMPT,
+                description=EVENT_REQUIREMENTS_HINT,
+                component=self.requirements_input,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         self._draft.start_text = self.start_input.value.strip()
         self._draft.duration_text = self.duration_input.value.strip()
+        self._draft.requirements = self.requirements_input.value.strip()
         repeats = self.repeat.values[0] == "yes"
         try:
             start_time = parse_event_datetime(
@@ -285,10 +304,11 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
         self._draft.duration_minutes = duration_minutes
         LOGGER.debug(
             "Event schedule step submitted; user_id=%s repeats=%s "
-            "duration_minutes=%s",
+            "duration_minutes=%s requirements_characters=%s",
             interaction.user.id,
             repeats,
             duration_minutes,
+            len(self._draft.requirements),
         )
         if not repeats:
             self._draft.repeat_frequency = RepeatFrequency.NONE
@@ -500,6 +520,7 @@ class EventConfirmView(_PreviewConfirmView):
                     draft_event.delete_previous_on_repeat
                 ),
                 ping_role_ids=draft_event.ping_role_ids,
+                requirements=draft_event.requirements,
             )
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,

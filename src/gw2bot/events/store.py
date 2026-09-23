@@ -137,6 +137,7 @@ def _event_from_record(record: EventRecord) -> Event:
         cancelled=record.cancelled,
         delete_previous_on_repeat=record.delete_previous_on_repeat,
         ping_role_ids=_parse_ids(record.ping_role_ids),
+        requirements=record.requirements,
     )
 
 
@@ -205,6 +206,7 @@ class EventStore:
         repeat_days: tuple[int, ...],
         delete_previous_on_repeat: bool = False,
         ping_role_ids: tuple[int, ...] = (),
+        requirements: str = "",
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -223,6 +225,7 @@ class EventStore:
                 cancelled=False,
                 delete_previous_on_repeat=delete_previous_on_repeat,
                 ping_role_ids=_serialize_ids(ping_role_ids),
+                requirements=requirements,
             )
             session.add(record)
             session.commit()
@@ -252,6 +255,7 @@ class EventStore:
         repeat_days: tuple[int, ...],
         delete_previous_on_repeat: bool = False,
         ping_role_ids: tuple[int, ...] = (),
+        requirements: str = "",
     ) -> Event:
         with self._sessions() as session:
             record = session.get(EventRecord, event_id)
@@ -268,6 +272,7 @@ class EventStore:
             record.repeat_days = _serialize_days(repeat_days)
             record.delete_previous_on_repeat = delete_previous_on_repeat
             record.ping_role_ids = _serialize_ids(ping_role_ids)
+            record.requirements = requirements
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "

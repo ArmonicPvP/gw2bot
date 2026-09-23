@@ -177,6 +177,26 @@ class TestMaterializedEntries:
         # printing a cap the event does not have.
         assert entry.capacity_total is None
 
+    def test_entries_carry_the_requirements(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, requirements="Level 80")
+        store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert [entry.requirements for entry in entries] == ["Level 80"]
+
     def test_past_occurrence_is_reported_over(
         self,
         store: EventStore,
