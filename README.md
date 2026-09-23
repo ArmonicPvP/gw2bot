@@ -46,6 +46,31 @@ precedence over `.env`, so an Unraid container can inject the same variables at
 runtime without using or mounting a `.env` file. The `.env` file is excluded
 from Git and the Docker build context.
 
+## Help
+
+`/help` privately lists every command you can run and what it does. The list
+is built for you when you run it: a command gated by a role appears only if you
+hold that role as `/settings` has it configured right now, so changing a role
+setting changes what `/help` shows on the next call.
+
+The reply is one private embed. When the list is too long for one page — the
+`/settings` subcommands alone nearly fill one — arrow buttons under it turn
+the pages in place. The arrows keep working for as long as the reply is on
+screen, including across a bot restart, and each turn rebuilds the list, so a
+role granted or removed since the command was run is already reflected.
+
+An option with a stricter gate than its command is shown only to those who may
+use it. `/raffle addticket` appears for the `raffle_addticket` role, but its
+`amount` option, which records a gold purchase, appears only for the
+`raffle_officer` role. An officer without the `raffle_addticket` role sees
+`amount` as required, since that is the only way the command accepts them.
+
+The settings commands appear for the server owner and administrators as well
+as the officer role, matching who may run them.
+
+A new command has to declare who may run it (see `src/gw2bot/core/command_access.py`):
+`/help` leaves out any command that does not, and a test fails until it does.
+
 ## Settings
 
 `/settings` is how the bot is configured. Running a subcommand with no value

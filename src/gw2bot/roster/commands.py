@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import (
     log_discord_failure,
     send_interaction_notice,
@@ -35,6 +36,8 @@ class RosterCommands(app_commands.Group):
             name="roster",
             description="Guild roster history",
             guild_only=True,
+            # What authorize() below checks, for /help.
+            extras=access_extras(RoleSetting("raffle_officer_role_id")),
         )
         self._bot = bot
         self.add_command(self._build_import_command())

@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.command_access import Everyone, RoleSetting, access_extras
 from gw2bot.core.discord_utils import user_has_role
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
@@ -38,6 +39,11 @@ from gw2bot.raffle.views import (
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
 LOGGER = logging.getLogger(__name__)
+
+# What each subcommand's authorization check below enforces, for /help.
+_DRAW_ACCESS = RoleSetting("raffle_draw_role_id")
+_ADDTICKET_ACCESS = RoleSetting("raffle_addticket_role_id")
+_OFFICER_ACCESS = RoleSetting("raffle_officer_role_id")
 
 
 class RaffleCommands(app_commands.Group):
@@ -246,7 +252,11 @@ class RaffleCommands(app_commands.Group):
             ephemeral=True,
         )
 
-    @app_commands.command(name="draw", description="Draw a weighted raffle winner")
+    @app_commands.command(
+        name="draw",
+        description="Draw a weighted raffle winner",
+        extras=access_extras(_DRAW_ACCESS),
+    )
     async def draw(self, interaction: discord.Interaction) -> None:
         LOGGER.debug(
             "Raffle draw command invoked by Discord user %s",
@@ -291,6 +301,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="audit",
         description="Show everything needed to verify a past raffle draw",
+        extras=access_extras(Everyone()),
     )
     @app_commands.describe(run_id="Raffle run id to audit")
     @app_commands.autocomplete(run_id=raffle_run_autocomplete)
@@ -336,6 +347,12 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="addticket",
         description="Add a raffle ticket or record an Officer ticket purchase",
+        extras=access_extras(
+            _ADDTICKET_ACCESS,
+            # An Officer recording a gold purchase is checked against
+            # this role instead of the one above.
+            {"amount": _OFFICER_ACCESS},
+        ),
     )
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",
@@ -439,6 +456,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="addtickets",
         description="Add one raffle ticket to up to ten guild members",
+        extras=access_extras(_ADDTICKET_ACCESS),
     )
     @app_commands.describe(
         username1="First Guild Wars 2 account name",
@@ -517,6 +535,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="bulkaddtickets",
         description="Paste squad attendance to add raffle tickets",
+        extras=access_extras(_ADDTICKET_ACCESS),
     )
     async def bulkaddtickets(self, interaction: discord.Interaction) -> None:
         LOGGER.debug("Bulk attendance raffle ticket command invoked")
@@ -530,6 +549,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="removetickets",
         description="Remove purchased raffle tickets from a guild member",
+        extras=access_extras(_DRAW_ACCESS),
     )
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",
@@ -605,6 +625,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="tickets",
         description="View your or another player's tickets",
+        extras=access_extras(Everyone()),
     )
     @app_commands.describe(
         username="Guild Wars 2 account name, including the four digits",
@@ -673,6 +694,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="list",
         description="List all users' tickets",
+        extras=access_extras(Everyone()),
     )
     async def list_tickets(self, interaction: discord.Interaction) -> None:
         totals = self._bot.get_raffle_totals()
@@ -701,6 +723,7 @@ class RaffleCommands(app_commands.Group):
     @app_commands.command(
         name="leaderboard",
         description="List every user's lifetime earned and purchased tickets",
+        extras=access_extras(Everyone()),
     )
     @app_commands.describe(
         sortby="Ticket type to sort the leaderboard by; defaults to total",

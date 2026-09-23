@@ -11,6 +11,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import (
     log_discord_failure,
     send_interaction_notice,
@@ -28,6 +29,7 @@ def create_pending_command(bot: Gw2Bot) -> app_commands.Command[Any, ..., None]:
         name="pending",
         description="Privately post the accounts invited in-game that have "
         "not accepted yet",
+        extras=access_extras(RoleSetting("raffle_officer_role_id")),
     )
     @app_commands.guild_only()
     async def pending(interaction: discord.Interaction) -> None:

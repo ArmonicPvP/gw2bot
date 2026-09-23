@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import user_has_role
 from gw2bot.events.formatting import format_event_datetime
 from gw2bot.events.models import (
@@ -93,6 +94,8 @@ class EventCommands(app_commands.Group):
             name="event",
             description="Manage guild events",
             guild_only=True,
+            # Every subcommand checks this role before doing anything.
+            extras=access_extras(RoleSetting("event_create_role_id")),
         )
         self._bot = bot
 
