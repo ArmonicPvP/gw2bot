@@ -70,7 +70,7 @@ Source lives under `src/gw2bot`:
 | `core/` | The shared layer with no feature knowledge: `database`, `logging_setup`, `discord_utils`, `command_access`, `anchored_series`, `dashboard_ranges`. Nothing in it may import anything else under `gw2bot` - see `docs/core.md`. |
 | `gw2/` | The GW2 API client (`api.py`) and the pollers that turn its responses into decisions: `guild_log`, `guild_storage`, `guild_stash`, `feast_stock`, `guild_members`, `member_count`. |
 | `notifications/` | `delivery.py` for the notification channel, `diagnostics.py` for the `diag` previews, `poll_status.py` for poll failure and recovery. |
-| `help/` | `/help`: walks the command tree and lists what the caller may run, judged by the access each command declares in its `extras` through `core/command_access`. |
+| `help/` | `/help`: `pages.py` walks the command tree and lists what the caller may run, judged by the access each command declares in its `extras` through `core/command_access`; `views.py` pages the private reply with persistent arrow buttons. |
 | `invites/` | The accounts invited in-game that have not accepted: the report behind `/pending` and the roster page's section. |
 | `raffle/` | Ticket ledger, draws, reports, and `/raffle` commands. |
 | `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import`. |

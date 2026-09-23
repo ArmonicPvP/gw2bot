@@ -36,7 +36,7 @@ from gw2bot.events.views import (
     EventSignUpButton,
 )
 from gw2bot.gold.commands import GoldCommands
-from gw2bot.help import create_help_command
+from gw2bot.help import HelpPageButton, create_help_command
 from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2.api import Gw2ApiClient
 from gw2bot.notifications.poll_status import PollStatusTracker
@@ -230,6 +230,9 @@ class Gw2Bot(discord.Client):
             EventSignOutButton,
             EventSettingsButton,
         )
+        # The /help page arrows rebuild the clicker's pages on each press, so
+        # they too keep working for as long as the reply is on screen.
+        self.add_dynamic_items(HelpPageButton)
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")

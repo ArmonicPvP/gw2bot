@@ -1,7 +1,7 @@
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import discord
@@ -21,7 +21,9 @@ from gw2bot.core.command_access import (
     iter_role_settings,
 )
 from gw2bot.help import build_help_messages
-from gw2bot.help.commands import HELP_DESCRIPTION_LIMIT, handle_help_command
+from gw2bot.help.commands import handle_help_command
+from gw2bot.help.pages import HELP_DESCRIPTION_LIMIT
+from gw2bot.help.views import HelpPageButton, HelpPagerView
 
 UNRELATED_ROLE_ID = 42
 
@@ -341,8 +343,26 @@ class TestPacking:
         )
 
 
+def _officer_interaction(config: Config) -> Any:
+    """A caller whose help runs past one page: /settings alone nearly fills one."""
+    interaction = settings_interaction(
+        role_ids=(
+            config.raffle_officer_role_id,
+            config.raffle_addticket_role_id,
+            config.raffle_draw_role_id,
+            config.event_create_role_id,
+        )
+    )
+    interaction.response.edit_message = AsyncMock()
+    return interaction
+
+
+def _page_buttons(view: HelpPagerView) -> list[HelpPageButton]:
+    return [item for item in view.children if isinstance(item, HelpPageButton)]
+
+
 class TestHelpCommand:
-    async def test_replies_privately_with_the_first_message(
+    async def test_a_single_page_is_one_private_embed_without_arrows(
         self,
         bot: Gw2Bot,
     ) -> None:
@@ -353,34 +373,41 @@ class TestHelpCommand:
         interaction.response.send_message.assert_awaited_once()
         call = interaction.response.send_message.await_args
         assert call.kwargs["ephemeral"] is True
+        assert "view" not in call.kwargs
         embed = call.kwargs["embed"]
         assert embed.title == "Commands you can use"
         assert "`/help`" in embed.description
+        assert embed.footer.text is None
         interaction.followup.send.assert_not_awaited()
 
-    async def test_sends_the_rest_as_private_followups(
+    async def test_several_pages_are_one_private_embed_with_arrows(
         self,
         bot: Gw2Bot,
         config: Config,
     ) -> None:
-        interaction = settings_interaction(
-            role_ids=(
-                config.raffle_officer_role_id,
-                config.raffle_addticket_role_id,
-                config.raffle_draw_role_id,
-                config.event_create_role_id,
-            )
-        )
+        interaction = _officer_interaction(config)
 
         await handle_help_command(bot, interaction)
 
         interaction.response.send_message.assert_awaited_once()
-        assert interaction.followup.send.await_count >= 1
-        for call in interaction.followup.send.await_args_list:
-            assert call.kwargs["ephemeral"] is True
-            assert call.kwargs["embed"].title == "Commands you can use (continued)"
+        interaction.followup.send.assert_not_awaited()
+        call = interaction.response.send_message.await_args
+        assert call.kwargs["ephemeral"] is True
+        page_count = len(
+            build_help_messages(
+                bot.tree.get_commands(),
+                interaction.user,
+                interaction.guild,
+                config,
+            )
+        )
+        assert page_count > 1
+        assert call.kwargs["embed"].footer.text == f"Page 1 of {page_count}"
+        previous, following = _page_buttons(call.kwargs["view"])
+        assert previous.item.disabled is True
+        assert following.item.disabled is False
 
-    async def test_a_failed_delivery_stops_without_raising(
+    async def test_a_failed_delivery_is_logged_without_raising(
         self,
         bot: Gw2Bot,
         config: Config,
@@ -395,3 +422,82 @@ class TestHelpCommand:
         await handle_help_command(bot, interaction)
 
         interaction.followup.send.assert_not_awaited()
+
+
+class TestHelpPager:
+    async def test_the_next_arrow_edits_the_reply_to_the_next_page(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        interaction = _officer_interaction(config)
+        interaction.client = bot
+        pages = build_help_messages(
+            bot.tree.get_commands(),
+            interaction.user,
+            interaction.guild,
+            config,
+        )
+
+        await HelpPageButton(0, 1).callback(interaction)
+
+        interaction.response.edit_message.assert_awaited_once()
+        call = interaction.response.edit_message.await_args
+        embed = call.kwargs["embed"]
+        assert embed.description == pages[1]
+        assert embed.footer.text == f"Page 2 of {len(pages)}"
+        previous, following = _page_buttons(call.kwargs["view"])
+        assert previous.item.disabled is False
+        assert following.item.disabled is (len(pages) == 2)
+        interaction.response.send_message.assert_not_awaited()
+
+    async def test_a_page_that_no_longer_exists_clamps_and_drops_the_arrows(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        # The officer role was taken away after /help was run: their pages
+        # now fit on one, so the arrow that pointed past it lands on it and
+        # the arrows go away.
+        interaction = settings_interaction(role_ids=(UNRELATED_ROLE_ID,))
+        interaction.response.edit_message = AsyncMock()
+        interaction.client = bot
+
+        await HelpPageButton(1, 1).callback(interaction)
+
+        interaction.response.edit_message.assert_awaited_once()
+        call = interaction.response.edit_message.await_args
+        assert call is not None
+        assert call.kwargs["embed"].footer.text is None
+        assert "`/help`" in call.kwargs["embed"].description
+        assert call.kwargs["view"] is None
+
+    async def test_the_page_rides_in_the_custom_id(self) -> None:
+        button = HelpPageButton(3, -1)
+
+        assert button.item.custom_id == "gw2bot:help:3:-1"
+        match = HelpPageButton.__discord_ui_compiled_template__.fullmatch(
+            "gw2bot:help:3:-1"
+        )
+        assert match is not None
+        rebuilt = await HelpPageButton.from_custom_id(
+            cast(Any, None),
+            button.item,
+            match,
+        )
+        assert (rebuilt.page, rebuilt.direction) == (3, -1)
+
+    async def test_a_failed_page_turn_is_logged_without_raising(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        interaction = _officer_interaction(config)
+        interaction.client = bot
+        interaction.response.edit_message = AsyncMock(
+            side_effect=forbidden_error(50013)
+        )
+
+        await HelpPageButton(0, 1).callback(interaction)
+
+        interaction.response.edit_message.assert_awaited_once()

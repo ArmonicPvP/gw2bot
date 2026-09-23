@@ -53,6 +53,12 @@ is built for you when you run it: a command gated by a role appears only if you
 hold that role as `/settings` has it configured right now, so changing a role
 setting changes what `/help` shows on the next call.
 
+The reply is one private embed. When the list is too long for one page — the
+`/settings` subcommands alone nearly fill one — arrow buttons under it turn
+the pages in place. The arrows keep working for as long as the reply is on
+screen, including across a bot restart, and each turn rebuilds the list, so a
+role granted or removed since the command was run is already reflected.
+
 An option with a stricter gate than its command is shown only to those who may
 use it. `/raffle addticket` appears for the `raffle_addticket` role, but its
 `amount` option, which records a gold purchase, appears only for the

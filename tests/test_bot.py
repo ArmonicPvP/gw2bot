@@ -19,6 +19,7 @@ from factories import (
 )
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
+from gw2bot.help import HelpPageButton
 from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.main import main as run_main
 from gw2bot.raffle import TrialForumPost
@@ -315,6 +316,7 @@ class TestBotIntent:
             EventSignOutButton,
             EventSettingsButton,
         )
+        add_dynamic_items.assert_any_call(HelpPageButton)
 
 
 class TestBotWebServer:
