@@ -25,7 +25,7 @@ from gw2bot.core.discord_utils import (
     send_direct_message,
     user_has_role,
 )
-from gw2bot.events.formatting import calendar_footer_link, event_embed
+from gw2bot.events.formatting import calendar_link, event_embed
 from gw2bot.events.models import (
     Event,
     EventOccurrence,
@@ -266,7 +266,7 @@ def _roster_preview_embed(
         signups,
         _preview_status(edited, signups, draft.roster_only),
         event_id_text=str(event_id),
-        calendar_url=calendar_footer_link(bot._config),
+        calendar_url=calendar_link(bot._config),
     )
 
 

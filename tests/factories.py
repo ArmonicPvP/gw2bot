@@ -196,8 +196,8 @@ def default_config(**overrides: Any) -> Config:
 def web_enabled_config(**overrides: Any) -> Config:
     """Config whose web site is both switched on and fully configured.
 
-    A page is only linked to - from `/profit`, or from the footer of an event
-    post - when the calendar is actually being served, which takes all four of
+    A page is only linked to - from `/profit`, or from the calendar field of an
+    event post - when the calendar is actually being served, which takes all four of
     its settings rather than the base URL alone.
     """
     overrides.setdefault("web_enabled", True)

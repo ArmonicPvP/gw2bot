@@ -28,7 +28,7 @@ from gw2bot.config import (
 from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.events import scheduler as event_scheduler
 from gw2bot.events.commands import EventCommands
-from gw2bot.events.formatting import calendar_footer_link
+from gw2bot.events.formatting import calendar_link
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     EventSettingsButton,
@@ -182,10 +182,10 @@ class Gw2Bot(discord.Client):
         self._event_store = EventStore(config.raffle_db_path)
         # WEB_ENABLED is bootstrap-only, so turning the calendar on or off is
         # a restart rather than a settings change: the events already posted
-        # are reconciled here as well as on a live change, or their footers
-        # would name a calendar that has moved until each one's status does.
+        # are reconciled here as well as on a live change, or their calendar
+        # links would name one that has moved until each one's status does.
         self._event_store.reconcile_posted_footers(
-            calendar_footer_link(config)
+            calendar_link(config)
         )
         self._profit_store = ProfitStore(
             config.raffle_db_path,
@@ -487,16 +487,16 @@ class Gw2Bot(discord.Client):
         if "discord_feast_notification_user_id" in changed:
             self._feast_notification_user = None
 
-        # A footer naming a calendar that is no longer served - or not naming
+        # A post linking a calendar that is no longer served - or not linking
         # one that now is - is only corrected when the message is re-rendered,
         # and the maintenance pass will not do that on its own for an event
         # whose status has not moved. The store compares the address the posts
         # were rendered with, so this covers exactly the changes that move it.
         marked = self._event_store.reconcile_posted_footers(
-            calendar_footer_link(self._config)
+            calendar_link(self._config)
         )
         if marked:
-            restarted.append(f"the footer of {marked} posted event(s)")
+            restarted.append(f"the calendar link of {marked} posted event(s)")
 
         if "event_timezone" in changed:
             self._event_timezone = ZoneInfo(self._config.event_timezone)

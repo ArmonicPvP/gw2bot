@@ -1253,7 +1253,7 @@ class TestSettingsHotApply:
         flagged = bot.event_store.get_occurrence(occurrence.occurrence_id)
         assert flagged is not None
         assert flagged.needs_refresh
-        assert "the footer of 1 posted event(s)" in restarted
+        assert "the calendar link of 1 posted event(s)" in restarted
 
         await self._close(bot)
 

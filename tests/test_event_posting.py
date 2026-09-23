@@ -553,7 +553,7 @@ class TestSolveRoster:
 
 
 class TestPostOccurrence:
-    async def test_footer_names_the_calendar_when_it_is_served(
+    async def test_links_the_calendar_when_it_is_served(
         self,
         bot: Any,
         store: EventStore,
@@ -566,8 +566,10 @@ class TestPostOccurrence:
         event, _ = await post_new_event(bot, store)
 
         embed = channel.sent[0]["embed"]
-        assert embed.footer.text == (
-            f"gw2bot.example.com/calendar | eventID: {event.event_id}"
+        assert embed.footer.text == f"eventID: {event.event_id}"
+        assert embed.fields[-1].value == (
+            "[gw2bot.example.com/calendar]"
+            "(https://gw2bot.example.com/calendar)"
         )
 
     async def test_posts_message_with_thread_and_stores_ids(
