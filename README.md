@@ -678,8 +678,8 @@ notifies nobody, so re-rendering them from a changed role pick would claim roles
 that were never alerted — the announcement keeps naming who actually heard about
 the event, and changing the roles only takes effect on the next occurrence
 posted. One somebody deleted by hand is forgotten rather than retried, and an
-edit Discord refuses is logged without holding back the event — the post is the record, and the announcement
-is a notice that has already been delivered.
+edit Discord refuses is logged without holding back the event — the post is
+the record, and the announcement is a notice that has already been delivered.
 
 An announcement is only ever a pointer at the event's message, so it is stored
 with the occurrence and removed by the same cleanup: deleting the event,
