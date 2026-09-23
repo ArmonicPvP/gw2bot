@@ -14,6 +14,7 @@ EMOJI_STRIKE = "<:strike:1525431254340866171>"
 EMOJI_WVW = "<:wvw:1525431137982353428>"
 EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
 EMOJI_DUNGEON = "🏰"
+EMOJI_STORY = "📖"
 EMOJI_OPEN_WORLD = "🌍"
 EMOJI_GENERAL = "📋"
 
@@ -23,6 +24,7 @@ class EventCategory(StrEnum):
     STRIKE = "Strike"
     FRACTAL = "Fractal"
     DUNGEON = "Dungeon"
+    STORY = "Story"
     WVW = "World vs. World"
     OPEN_WORLD = "Open World"
     GENERAL = "General"
@@ -33,6 +35,7 @@ CATEGORY_EMOJI: dict[EventCategory, str] = {
     EventCategory.STRIKE: EMOJI_STRIKE,
     EventCategory.FRACTAL: EMOJI_FRACTAL,
     EventCategory.DUNGEON: EMOJI_DUNGEON,
+    EventCategory.STORY: EMOJI_STORY,
     EventCategory.WVW: EMOJI_WVW,
     EventCategory.OPEN_WORLD: EMOJI_OPEN_WORLD,
     EventCategory.GENERAL: EMOJI_GENERAL,
@@ -182,6 +185,9 @@ CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
         required_boon_healers=0,
         required_boon_dps=2,
     ),
+    # Story runs are a five-member party like a dungeon, but with no roles or
+    # boons to cover: a plain headcount, the WvW shape at a party's size.
+    EventCategory.STORY: CategoryCapacity(5, None, None, None, None),
     EventCategory.WVW: CategoryCapacity(50, None, None, None, None),
     # Open world squads are the same shape as WvW: a plain 50-seat headcount
     # with no role or boon requirements.
@@ -213,6 +219,9 @@ class Event:
     # the run to whoever opted into that role. Reminders never use them: those
     # are addressed to the members actually on the roster.
     ping_role_ids: tuple[int, ...] = ()
+    # What a member needs before signing up, shown as its own section of the
+    # post. Optional: an empty string means the event has none.
+    requirements: str = ""
 
     @property
     def capacity(self) -> CategoryCapacity:
@@ -668,10 +677,10 @@ def rebalance_signups(
     A signup's assigned_role and waitlisted flag only mean anything relative to
     the capacity it was seated against, so changing an event's category
     invalidates every stored assignment. The worst case is a role-less category
-    (WvW, Open World, General), whose signups carry no assigned_role at all: a
-    role-based capacity reads that roster as zero healers and zero DPS and keeps
-    admitting on top of it, so the roster overfills and the embed shows seats
-    nobody holds.
+    (Story, WvW, Open World, General), whose signups carry no assigned_role at
+    all: a role-based capacity reads that roster as zero healers and zero DPS
+    and keeps admitting on top of it, so the roster overfills and the embed
+    shows seats nobody holds.
 
     Signups are re-seated in sign-up order, so seats stay first come, first
     served. Each is offered its own role and flex roles, widened with a plain

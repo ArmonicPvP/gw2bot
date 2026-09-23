@@ -1022,6 +1022,12 @@ button:focus-visible, .chip:focus-visible {
       appendMarkdown(desc, entry.description);
       tooltip.appendChild(desc);
     }
+    if (entry.requirements) {
+      var reqs = el("div", "desc");
+      reqs.appendChild(el("div", "md-h3", "Requirements"));
+      appendMarkdown(reqs, entry.requirements);
+      tooltip.appendChild(reqs);
+    }
     tooltip.appendChild(el("div", "sep"));
     tooltip.appendChild(el("div", "row",
       "Leader: " + entry.leader_name));

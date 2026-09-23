@@ -671,6 +671,14 @@ class EventRecord(Base):
         nullable=False,
         default="",
     )
+    # Free text a member needs before signing up; empty when there are none.
+    # The server default lets a row written without it read as having none.
+    requirements: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="",
+        server_default="",
+    )
 
 
 class EventOccurrenceRecord(Base):
@@ -1072,6 +1080,20 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("ping_role_ids")
+
+        if "requirements" not in event_columns:
+            # Events created before requirements existed have none, which is
+            # exactly what the empty default records.
+            operations.add_column(
+                EventRecord.__tablename__,
+                Column(
+                    "requirements",
+                    String,
+                    nullable=False,
+                    server_default="",
+                ),
+            )
+            added_columns.add("requirements")
 
         signup_columns = {
             column["name"]

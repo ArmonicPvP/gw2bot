@@ -591,6 +591,14 @@ def event_embed(
         value=f"<@{event.leader_discord_id}>",
         inline=True,
     )
+    # Only an event with requirements shows the section: "none" is the
+    # default, and an empty field would say nothing a missing one does not.
+    if event.requirements:
+        embed.add_field(
+            name="📌 Requirements",
+            value=event.requirements,
+            inline=False,
+        )
 
     if capacity.has_roles:
         counts = count_roster(signups)

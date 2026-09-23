@@ -23,6 +23,9 @@ from gw2bot.events.views.shared import (
     EVENT_CHANNEL_PROMPT,
     EVENT_CHANNEL_TYPES,
     EVENT_DESCRIPTION_MAX_LENGTH,
+    EVENT_REQUIREMENTS_HINT,
+    EVENT_REQUIREMENTS_MAX_LENGTH,
+    EVENT_REQUIREMENTS_PROMPT,
     EVENT_TITLE_MAX_LENGTH,
     EventDraft,
     FLOW_TIMEOUT_SECONDS,
@@ -83,7 +86,13 @@ class ChangeFieldView(discord.ui.View):
             interaction.user.id,
             choice,
         )
-        if choice in ("title", "description", "start", "duration"):
+        if choice in (
+            "title",
+            "description",
+            "start",
+            "duration",
+            "requirements",
+        ):
             await interaction.response.send_modal(
                 EventFieldEditModal(self._bot, self._draft, choice)
             )
@@ -143,6 +152,7 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
         self._bot = bot
         self._draft = draft
         self._field_name = field_name
+        description: str | None = None
         if field_name == "title":
             label = "Enter the event title"
             self.field_input = discord.ui.TextInput["EventFieldEditModal"](
@@ -155,6 +165,15 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
                 style=discord.TextStyle.paragraph,
                 default=draft.description or None,
                 max_length=EVENT_DESCRIPTION_MAX_LENGTH,
+            )
+        elif field_name == "requirements":
+            label = EVENT_REQUIREMENTS_PROMPT
+            description = EVENT_REQUIREMENTS_HINT
+            self.field_input = discord.ui.TextInput["EventFieldEditModal"](
+                style=discord.TextStyle.paragraph,
+                default=draft.requirements or None,
+                max_length=EVENT_REQUIREMENTS_MAX_LENGTH,
+                required=False,
             )
         elif field_name == "start":
             label = f"When will your event be? ({EVENT_DATETIME_PLACEHOLDER})"
@@ -171,7 +190,11 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
                 max_length=6,
             )
         self.add_item(
-            discord.ui.Label(text=label, component=self.field_input)
+            discord.ui.Label(
+                text=label,
+                description=description,
+                component=self.field_input,
+            )
         )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -185,6 +208,9 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
                 if not value:
                     raise ValueError("The event description cannot be empty.")
                 self._draft.description = value
+            elif self._field_name == "requirements":
+                # Blank is a real answer: it clears the requirements.
+                self._draft.requirements = value
             elif self._field_name == "start":
                 self._draft.start_text = value
                 start_time = parse_event_datetime(

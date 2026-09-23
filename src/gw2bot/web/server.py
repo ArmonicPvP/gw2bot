@@ -1887,6 +1887,7 @@ class WebServer:
             "title": entry.title,
             "category": entry.category,
             "description": entry.description,
+            "requirements": entry.requirements,
             "start_epoch": entry.start_epoch,
             "duration_minutes": entry.duration_minutes,
             "leader_name": names.get(entry.leader_discord_id, UNKNOWN_NAME),

@@ -39,6 +39,7 @@ class CalendarEntry:
     title: str
     category: str
     description: str
+    requirements: str
     start_epoch: int
     duration_minutes: int
     leader_discord_id: int
@@ -64,6 +65,7 @@ def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
         title=event.title,
         category=event.category.value,
         description=event.description,
+        requirements=event.requirements,
         start_epoch=int(start_time.timestamp()),
         duration_minutes=event.duration_minutes,
         leader_discord_id=event.leader_discord_id,
@@ -113,6 +115,7 @@ def calendar_entries(
             title=event.title,
             category=event.category.value,
             description=event.description,
+            requirements=event.requirements,
             start_epoch=int(occurrence.start_time.timestamp()),
             duration_minutes=event.duration_minutes,
             leader_discord_id=event.leader_discord_id,

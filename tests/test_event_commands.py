@@ -1000,6 +1000,58 @@ class TestEventScheduleModal:
         assert draft.duration_minutes is None
         interaction.response.send_message.assert_awaited_once()
 
+    def test_requirements_are_optional_and_described(self) -> None:
+        modal = EventScheduleModal(make_bot(), self.make_draft())
+        labels = [
+            item
+            for item in modal.children
+            if isinstance(item, discord.ui.Label)
+        ]
+
+        requirements = labels[-1]
+        assert requirements.text == "Requirements"
+        assert (
+            requirements.description
+            == "Event Requirements (Leave blank for none)"
+        )
+        assert requirements.component is modal.requirements_input
+        assert modal.requirements_input.required is False
+
+    async def test_submit_stores_the_requirements(self) -> None:
+        draft = self.make_draft()
+        modal = EventScheduleModal(make_bot(), draft)
+        modal.start_input._value = FUTURE_START_TEXT
+        modal.duration_input._value = "01:30"
+        modal.repeat._values = ["no"]
+        modal.requirements_input._value = "  Level 80, exotic gear  "
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.requirements == "Level 80, exotic gear"
+        assert draft.to_event().requirements == "Level 80, exotic gear"
+
+    async def test_submit_with_blank_requirements_leaves_none(self) -> None:
+        draft = self.make_draft()
+        modal = EventScheduleModal(make_bot(), draft)
+        modal.start_input._value = FUTURE_START_TEXT
+        modal.duration_input._value = "01:30"
+        modal.repeat._values = ["no"]
+        modal.requirements_input._value = "   "
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.requirements == ""
+
+    def test_reopening_prefills_the_requirements(self) -> None:
+        draft = self.make_draft()
+        draft.requirements = "Bring food."
+
+        modal = EventScheduleModal(make_bot(), draft)
+
+        assert modal.requirements_input.default == "Bring food."
+
 
 class TestModalComponentLimits:
     """Discord rejects an over-long label with a 400 at send_modal time.
@@ -1034,7 +1086,13 @@ class TestModalComponentLimits:
             EventRepeatModal(bot, self.make_draft()),
             *(
                 EventFieldEditModal(bot, self.make_draft(), field_name)
-                for field_name in ("title", "description", "start", "duration")
+                for field_name in (
+                    "title",
+                    "description",
+                    "start",
+                    "duration",
+                    "requirements",
+                )
             ),
         ]
 
@@ -3545,6 +3603,7 @@ def make_edit_event(
     *,
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     ping_role_ids: tuple[int, ...] = (),
+    requirements: str = "",
 ) -> Any:
     return store.create_event(
         category=EventCategory.FRACTAL,
@@ -3557,6 +3616,7 @@ def make_edit_event(
         repeat_frequency=repeat_frequency,
         repeat_days=(),
         ping_role_ids=ping_role_ids,
+        requirements=requirements,
     )
 
 
@@ -3566,12 +3626,14 @@ def make_posted_edit_event(
     *,
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     ping_role_ids: tuple[int, ...] = (),
+    requirements: str = "",
 ) -> Any:
     event = make_edit_event(
         store,
         channel_id,
         repeat_frequency=repeat_frequency,
         ping_role_ids=ping_role_ids,
+        requirements=requirements,
     )
     occurrence = store.create_occurrence(event.event_id, event.start_time)
     store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
@@ -4402,6 +4464,84 @@ class TestPingRolesEndToEnd:
         edit = channel.partial_message.edit.await_args
         assert edit is not None
         assert "content" not in edit.kwargs
+
+
+class TestRequirementsEndToEnd:
+    async def test_posting_stores_the_requirements_and_shows_them(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = replace(make_complete_draft(), requirements="Level 80")
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        stored = store.get_event(1)
+        assert stored is not None
+        assert stored.requirements == "Level 80"
+        embed = channel.sent[0]["embed"]
+        assert any(
+            field.name == "📌 Requirements" and field.value == "Level 80"
+            for field in embed.fields
+        )
+
+    async def test_editing_can_clear_the_requirements(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, _ = make_posted_edit_event(store, requirements="Level 80")
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        # The edit session starts from the event's current requirements.
+        assert draft.requirements == "Level 80"
+        modal = EventFieldEditModal(fake_bot, draft, "requirements")
+        assert modal.field_input.default == "Level 80"
+        assert modal.field_input.required is False
+        modal.field_input._value = ""
+        await modal.on_submit(make_interaction(message=ephemeral_message()))
+        assert draft.requirements == ""
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.requirements == ""
+
+    def test_the_full_change_list_offers_the_requirements(self) -> None:
+        assert "requirements" in [
+            option.value for option in ChangeFieldSelect().options
+        ]
+
+    async def test_choosing_it_opens_the_requirements_modal(self) -> None:
+        draft = replace(make_complete_draft(), requirements="Level 80")
+        view = ChangeFieldView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.handle_choice(interaction, "requirements")
+
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, EventFieldEditModal)
+        label = next(
+            item
+            for item in modal.children
+            if isinstance(item, discord.ui.Label)
+        )
+        assert label.text == "Requirements"
+        assert label.description == "Event Requirements (Leave blank for none)"
 
 
 class TestEventEditConfirmView:
