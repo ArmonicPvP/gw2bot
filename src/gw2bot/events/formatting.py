@@ -44,6 +44,8 @@ EMPTY_FIELD_TEXT = "—"
 # Stands in for a value the commander has not reached yet in the creation flow,
 # so the step-one preview keeps the shape of the finished event.
 DRAFT_PENDING_TEXT = "Not set yet"
+# What an event whose commander left the requirements blank shows for them.
+NO_REQUIREMENTS_TEXT = "None"
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
 WAITLIST_EMOJI = "⌛️"
@@ -616,14 +618,13 @@ def event_embed(
         value=f"<@{event.leader_discord_id}>",
         inline=True,
     )
-    # Only an event with requirements shows the section: "none" is the
-    # default, and an empty field would say nothing a missing one does not.
-    if event.requirements:
-        embed.add_field(
-            name="📌 Requirements",
-            value=event.requirements,
-            inline=False,
-        )
+    # Always shown, so a member never has to wonder whether an event without
+    # requirements simply predates them.
+    embed.add_field(
+        name="📌 Requirements",
+        value=requirements_text(event.requirements),
+        inline=False,
+    )
 
     if capacity.has_roles:
         counts = count_roster(signups)
@@ -856,6 +857,11 @@ def message_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
 
+def requirements_text(requirements: str) -> str:
+    """What an event's requirements read as, wherever they are shown."""
+    return requirements or NO_REQUIREMENTS_TEXT
+
+
 def ping_announcement_content(
     title: str,
     start_time: datetime,
@@ -873,7 +879,8 @@ def ping_announcement_content(
     The start is a relative timestamp for the same reason the reminders use
     one - every member reads it in their own locale. The requirements come
     along so a pinged member can tell whether the run is for them before
-    opening it; an event without any leaves the line out.
+    opening it; an event without any says "None" rather than leaving the
+    member to guess.
 
     Nothing here can outgrow a Discord message: an event carries at most three
     roles, and its title and requirements are capped at the lengths the
@@ -882,9 +889,8 @@ def ping_announcement_content(
     lines = [
         f"{PING_ANNOUNCEMENT_HEADER} {title} starts "
         f"<t:{int(start_time.timestamp())}:R>",
+        f"{PING_REQUIREMENTS_HEADER} {requirements_text(requirements)}",
     ]
-    if requirements:
-        lines.append(f"{PING_REQUIREMENTS_HEADER} {requirements}")
     # Last, so Discord's preview of the post renders below everything else.
     lines.append(link)
     if role_ids:

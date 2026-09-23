@@ -387,8 +387,9 @@ page to keep current. Their `eventID: N` stays readable either way.
 2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, whether
    the event repeats, and optional requirements. Typed times are read in the
    timezone set with `/settings timezone` and must be in the future.
-   Requirements are free text of up to 1,024 characters; left blank, the event
-   has none, and its post shows no Requirements section.
+   Requirements are free text of up to 1,024 characters; left blank, the post
+   shows them as "None". Posts already up when requirements were added are
+   re-rendered once on the upgrade, so they show the section too.
 3. **Repeat** — only when the event repeats: frequency, which days, and whether
    posting the next occurrence should delete the previous one.
 
@@ -655,9 +656,9 @@ A forum post only notifies the members already following it, so mentioning a
 role inside one reaches almost nobody it was meant for. Set
 `/settings channels event_ping` to a text channel and an event posted into a
 forum post announces itself there instead: the mentions go to that channel with
-the event's title, its start as a relative timestamp, its requirements when it
-has any, and a link straight to the event's message in the post. The post
-itself then carries no mentions, so nobody is pinged twice for one event.
+the event's title, its start as a relative timestamp, its requirements ("None"
+when it has none), and a link straight to the event's message in the post. The
+post itself then carries no mentions, so nobody is pinged twice for one event.
 
 The setting is global — one channel for every event — and answers only for an
 event posted into a forum post. An event posted to a channel keeps pinging its

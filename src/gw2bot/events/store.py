@@ -45,6 +45,13 @@ POSTED_FOOTER_CALENDAR_KEY = "event_footer_calendar_link"
 # Stands in for "advertising no calendar" in that row, because the column is
 # not nullable and an empty string is a value the link itself can never take.
 NO_POSTED_FOOTER_CALENDAR = ""
+# Which layout the posted event messages were last rendered with, in the same
+# `metadata` table. Bumped when a release changes what every post shows - the
+# Requirements section is the first - so the posts already up are re-rendered
+# once on the upgrade rather than only when each one's status next moves. A
+# database with no row has never been re-rendered for any of them.
+POSTED_RENDER_REVISION_KEY = "event_post_render_revision"
+POSTED_RENDER_REVISION = "1"
 
 
 def _serialize_time(value: datetime) -> str:
@@ -579,6 +586,37 @@ class EventStore:
             "Posted event footers now name a different calendar; "
             "advertised=%s occurrences=%s",
             bool(calendar_url),
+            marked,
+        )
+        return marked
+
+    def reconcile_posted_render_revision(self) -> int:
+        """Flag the posted events rendered before the current layout.
+
+        Called at startup. Only a release that bumps POSTED_RENDER_REVISION
+        flags anything, so an ordinary restart re-edits nothing. Returns how
+        many occurrences were flagged.
+        """
+        with self._sessions() as session:
+            record = session.get(SettingRecord, POSTED_RENDER_REVISION_KEY)
+            rendered = record.value if record is not None else None
+        if rendered == POSTED_RENDER_REVISION:
+            LOGGER.debug("Posted events already use the current layout")
+            return 0
+        # Flagged before the row is written, so a crash between the two leaves
+        # work a later pass repeats rather than work nobody does.
+        marked = self.mark_posted_occurrences_for_refresh()
+        with self._sessions.begin() as session:
+            session.merge(
+                SettingRecord(
+                    key=POSTED_RENDER_REVISION_KEY,
+                    value=POSTED_RENDER_REVISION,
+                )
+            )
+        LOGGER.info(
+            "Posted events are re-rendered for a new layout; revision=%s "
+            "occurrences=%s",
+            POSTED_RENDER_REVISION,
             marked,
         )
         return marked

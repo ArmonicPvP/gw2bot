@@ -187,6 +187,10 @@ class Gw2Bot(discord.Client):
         self._event_store.reconcile_posted_footers(
             calendar_link(config)
         )
+        # A release that changes what every post shows re-renders the ones
+        # already up once, rather than leaving each on the old layout until
+        # its status next moves.
+        self._event_store.reconcile_posted_render_revision()
         self._profit_store = ProfitStore(
             config.raffle_db_path,
             self._settings_store.cipher,
