@@ -18,6 +18,7 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+import discord
 from discord import app_commands
 
 from gw2bot.core.command_access import declared_access, declared_option_access
@@ -28,6 +29,7 @@ LOGGER = logging.getLogger(__name__)
 # joined section from landing exactly on the edge.
 HELP_DESCRIPTION_LIMIT = 4000
 OTHER_COMMANDS_HEADING = "**Other commands**"
+NO_COMMANDS_MESSAGE = "There are no commands you can use here."
 
 _NUMBERED_OPTION = re.compile(r"^(?P<stem>.*?)(?P<number>\d+)$")
 
@@ -36,6 +38,24 @@ type _TreeCommand = (
     | app_commands.Group
     | app_commands.ContextMenu
 )
+
+
+def registered_commands(
+    tree: app_commands.CommandTree[Any],
+    guild: discord.abc.Snowflake | None,
+) -> list[_TreeCommand]:
+    """The commands Discord offers in ``guild``: its own, then any global ones.
+
+    The bot registers its commands to the command guild: startup copies the
+    global commands onto it and then clears the global list, so reading the
+    global list alone finds nothing once the bot is running. A guild command
+    shadows a global one of the same name, as it does in Discord's picker.
+    """
+    scoped = list(tree.get_commands(guild=guild)) if guild is not None else []
+    names = {command.name for command in scoped}
+    return scoped + [
+        command for command in tree.get_commands() if command.name not in names
+    ]
 
 
 def build_help_messages(
@@ -87,7 +107,12 @@ def build_help_messages(
     if other:
         sections.append("\n".join([OTHER_COMMANDS_HEADING, *other]))
 
-    messages = _pack_sections(sections, HELP_DESCRIPTION_LIMIT)
+    # Never an empty list: the reply and the pager both show a page, and
+    # /help itself should always be listed, so an empty result means the
+    # commands were read from the wrong place and ought to say so.
+    messages = _pack_sections(sections, HELP_DESCRIPTION_LIMIT) or [
+        NO_COMMANDS_MESSAGE
+    ]
     LOGGER.debug(
         "Built help; commands_shown=%s commands_hidden=%s sections=%s "
         "messages=%s",

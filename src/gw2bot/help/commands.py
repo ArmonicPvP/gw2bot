@@ -20,7 +20,7 @@ from discord import app_commands
 
 from gw2bot.core.command_access import Everyone, access_extras
 from gw2bot.core.discord_utils import log_discord_failure
-from gw2bot.help.pages import build_help_messages
+from gw2bot.help.pages import build_help_messages, registered_commands
 from gw2bot.help.views import help_embed, help_pager_view
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ async def handle_help_command(
     user_id = getattr(getattr(interaction, "user", None), "id", "unknown")
     LOGGER.debug("Help command invoked by Discord user %s", user_id)
     pages = build_help_messages(
-        bot.tree.get_commands(),
+        registered_commands(bot.tree, interaction.guild),
         interaction.user,
         interaction.guild,
         bot._config,

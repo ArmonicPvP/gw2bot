@@ -22,7 +22,11 @@ from gw2bot.core.command_access import (
 )
 from gw2bot.help import build_help_messages
 from gw2bot.help.commands import handle_help_command
-from gw2bot.help.pages import HELP_DESCRIPTION_LIMIT
+from gw2bot.help.pages import (
+    HELP_DESCRIPTION_LIMIT,
+    NO_COMMANDS_MESSAGE,
+    registered_commands,
+)
 from gw2bot.help.views import HelpPageButton, HelpPagerView
 
 UNRELATED_ROLE_ID = 42
@@ -361,7 +365,77 @@ def _page_buttons(view: HelpPagerView) -> list[HelpPageButton]:
     return [item for item in view.children if isinstance(item, HelpPageButton)]
 
 
+def _synced(bot: Gw2Bot) -> Gw2Bot:
+    """``bot`` with its commands where startup leaves them.
+
+    ``_sync_commands`` copies the global commands onto the command guild and
+    then clears the global list, so a running bot has no global commands.
+    """
+    guild = discord.Object(id=bot._config.discord_command_guild_id)
+    bot.tree.copy_global_to(guild=guild)
+    bot.tree.clear_commands(guild=None)
+    return bot
+
+
+class TestRegisteredCommands:
+    def test_reads_the_command_guild_once_the_globals_are_cleared(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        _synced(bot)
+        guild = discord.Object(id=config.discord_command_guild_id)
+
+        names = {command.name for command in registered_commands(bot.tree, guild)}
+
+        assert {"help", "raffle", "settings"} <= names
+
+    def test_a_guild_command_shadows_a_global_one_of_the_same_name(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        # Before any sync every command is global only; copying them to the
+        # guild must not list each one twice.
+        guild = discord.Object(id=config.discord_command_guild_id)
+        bot.tree.copy_global_to(guild=guild)
+
+        names = [command.name for command in registered_commands(bot.tree, guild)]
+
+        assert len(names) == len(set(names))
+        assert "help" in names
+
+    def test_without_a_guild_only_the_globals_are_read(self, bot: Gw2Bot) -> None:
+        names = {command.name for command in registered_commands(bot.tree, None)}
+
+        assert "help" in names
+
+    def test_nothing_to_list_is_still_one_page(self, config: Config) -> None:
+        assert build_help_messages([], _caller(), _guild(), config) == [
+            NO_COMMANDS_MESSAGE
+        ]
+
+
 class TestHelpCommand:
+    async def test_lists_commands_on_a_bot_whose_commands_are_synced(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        # The regression: after startup the global list is empty, and /help
+        # read only that, found no pages and raised IndexError.
+        _synced(bot)
+        interaction = settings_interaction(role_ids=(config.raffle_draw_role_id,))
+        assert interaction.guild.id == config.discord_command_guild_id
+
+        await handle_help_command(bot, interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        call = interaction.response.send_message.await_args
+        description = call.kwargs["embed"].description
+        assert "`/help`" in description
+        assert "`/raffle draw`" in description
+
     async def test_a_single_page_is_one_private_embed_without_arrows(
         self,
         bot: Gw2Bot,
@@ -425,6 +499,21 @@ class TestHelpCommand:
 
 
 class TestHelpPager:
+    async def test_turns_pages_on_a_bot_whose_commands_are_synced(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        _synced(bot)
+        interaction = _officer_interaction(config)
+        interaction.client = bot
+
+        await HelpPageButton(0, 1).callback(interaction)
+
+        call = interaction.response.edit_message.await_args
+        assert call is not None
+        assert call.kwargs["embed"].footer.text.startswith("Page 2 of ")
+
     async def test_the_next_arrow_edits_the_reply_to_the_next_page(
         self,
         bot: Gw2Bot,
