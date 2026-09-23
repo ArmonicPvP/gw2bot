@@ -1231,7 +1231,8 @@ class TestPingingAForumPostEventFromAnotherChannel:
 
         await self.post_event_in_post(bot, store, post)
 
-        assert "Requirements" not in ping_channel.sent[0]["content"]
+        lines = ping_channel.sent[0]["content"].split("\n")
+        assert "📌 **Requirements:** None" in lines
 
     async def test_an_event_with_no_roles_left_announces_nothing(
         self,

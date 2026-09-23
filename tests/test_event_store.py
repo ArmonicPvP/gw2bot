@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -857,6 +857,56 @@ class TestEventStoreOccurrences:
             untouched = store.get_occurrence(untouched_id)
             assert untouched is not None
             assert not untouched.needs_refresh
+
+    def test_posts_from_before_the_current_layout_are_rerendered_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The upgrade case: posts already up when the Requirements section
+        # was added only show it once something re-renders them, so the first
+        # start on the new layout flags them, and later restarts do not.
+        db_path = str(tmp_path / "gw2bot.db")
+        store = EventStore(db_path)
+        try:
+            event = create_event(store)
+            posted = store.create_occurrence(event.event_id, START)
+            store.set_occurrence_message(posted.occurrence_id, 1234, 555, 777)
+
+            assert store.reconcile_posted_render_revision() == 1
+            flagged = store.get_occurrence(posted.occurrence_id)
+            assert flagged is not None
+            assert flagged.needs_refresh
+            store.set_occurrence_needs_refresh(posted.occurrence_id, False)
+        finally:
+            store.close()
+
+        restarted = EventStore(db_path)
+        try:
+            assert restarted.reconcile_posted_render_revision() == 0
+            unflagged = restarted.get_occurrence(posted.occurrence_id)
+            assert unflagged is not None
+            assert not unflagged.needs_refresh
+        finally:
+            restarted.close()
+
+    def test_the_render_revision_leaves_unposted_and_finished_runs(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        unposted = store.create_occurrence(event.event_id, START)
+        finished = store.create_occurrence(
+            event.event_id,
+            START + timedelta(days=1),
+        )
+        store.set_occurrence_message(finished.occurrence_id, 1234, 556, 778)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+
+        assert store.reconcile_posted_render_revision() == 0
+        for occurrence in (unposted, finished):
+            current = store.get_occurrence(occurrence.occurrence_id)
+            assert current is not None
+            assert not current.needs_refresh
 
     def test_reconciling_the_same_calendar_twice_reflags_nothing(
         self,

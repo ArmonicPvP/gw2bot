@@ -98,12 +98,12 @@ def make_signup(
 def _roster_fields(embed: discord.Embed) -> list[tuple[str, str, bool]]:
     """The (name, value, inline) of every field below the event's header.
 
-    Date & Time, Duration and Leader always lead the embed, so everything after
-    them is the roster.
+    Date & Time, Duration, Leader and Requirements always lead the embed, so
+    everything after them is the roster.
     """
     return [
         (field.name or "", field.value or "", bool(field.inline))
-        for field in embed.fields[3:]
+        for field in embed.fields[4:]
     ]
 
 
@@ -483,6 +483,7 @@ class TestEventEmbed:
             "📅 Date & Time",
             "⏳ Duration",
             "👑 Leader",
+            "📌 Requirements",
             "👥 Participants (2/5)",
             "💚 Healer (1/1)",
             "⚔️ DPS (1/4)",
@@ -653,11 +654,14 @@ class TestEventEmbed:
         assert field.value == "Level 80, exotic gear"
         assert field.inline is False
 
-    def test_no_requirements_section_without_requirements(self) -> None:
+    def test_blank_requirements_read_as_none(self) -> None:
         embed = event_embed(make_event(), [], EventStatus.OPEN)
 
-        names = [field.name or "" for field in embed.fields]
-        assert not any("Requirements" in name for name in names)
+        field = next(
+            field for field in embed.fields
+            if field.name == "📌 Requirements"
+        )
+        assert field.value == "None"
 
     def test_general_embed_lists_participants_without_a_cap(self) -> None:
         event = make_event(EventCategory.GENERAL)
