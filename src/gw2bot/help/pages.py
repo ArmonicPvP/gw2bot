@@ -37,6 +37,12 @@ USAGE_KEY = (
     "be left out.*"
 )
 
+# The longest choice list written out in full. Discord allows 25 choices of
+# 100 characters on each of 25 options, so listing every one could make a
+# single usage line longer than a page; past this the type is shown instead,
+# which keeps every line well inside one.
+MAX_CHOICES_LENGTH = 60
+
 # What a value is when the option offers no choices to list instead.
 _VALUE_HINTS: dict[discord.AppCommandOptionType, str] = {
     discord.AppCommandOptionType.string: "text",
@@ -253,9 +259,10 @@ def _option_placeholders(
 
 
 def _option_usage(parameter: app_commands.Parameter) -> str:
-    """``name:<value>``, with the choices as the value when there are any."""
-    if parameter.choices:
-        value = "|".join(choice.name for choice in parameter.choices)
+    """``name:<value>``, with the choices as the value when they are short."""
+    choices = "|".join(choice.name for choice in parameter.choices)
+    if choices and len(choices) <= MAX_CHOICES_LENGTH:
+        value = choices
     else:
         value = _VALUE_HINTS.get(parameter.type, "value")
     return f"{parameter.display_name}:<{value}>"

@@ -58,8 +58,8 @@ and the subcommands in each group alphabetical too, followed by the commands
 that belong to no group. Each is written the way this README writes them, and
 every page opens with the key: `option:<value>` is required, and
 `[option:<value>]` is optional and can be left out. The value names what to
-enter (`text`, `number`) or, for an option with fixed choices, lists them, as
-in `/raffle leaderboard [sortby:<purchased|free|total>]`.
+enter (`text`, `number`) or, for an option with a short list of fixed
+choices, lists them, as in `/raffle leaderboard [sortby:<purchased|free|total>]`.
 
 The reply is one private embed. When the list is too long for one page — the
 `/settings` subcommands alone nearly fill one — arrow buttons under it turn

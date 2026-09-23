@@ -385,6 +385,49 @@ class TestLayout:
         assert all(len(page) <= HELP_DESCRIPTION_LIMIT for page in pages)
 
 
+    def test_long_choice_lists_fall_back_to_the_type(
+        self,
+        config: Config,
+    ) -> None:
+        # Discord allows 25 choices of 100 characters on each of 25 options,
+        # so listing every choice could make one usage line longer than a
+        # page, and the overflow would be cut. Short lists stay listed.
+        async def callback(
+            interaction: discord.Interaction,
+            first: str,
+            second: str,
+            short: str,
+        ) -> None:
+            return None
+
+        command = app_commands.Command(
+            name="pick",
+            description="Pick things",
+            callback=callback,
+            extras=access_extras(Everyone()),
+        )
+        long_choices = [
+            app_commands.Choice(name=f"{index:02d}" + "x" * 98, value=str(index))
+            for index in range(25)
+        ]
+        app_commands.choices(
+            first=long_choices,
+            second=long_choices,
+            short=[
+                app_commands.Choice(name="yes", value="yes"),
+                app_commands.Choice(name="no", value="no"),
+            ],
+        )(command)
+
+        pages = build_help_messages([command], _caller(), _guild(), config)
+
+        assert len(pages) == 1
+        assert (
+            "`/pick first:<text> second:<text> short:<yes|no>` — Pick things"
+            in pages[0]
+        )
+
+
 class TestPacking:
     def test_long_help_is_split_across_messages_within_the_limit(
         self,
