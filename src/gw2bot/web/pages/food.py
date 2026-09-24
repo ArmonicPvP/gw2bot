@@ -364,7 +364,7 @@ button:focus-visible {
     <div class="chart-heading">
       <h2>Total food cost</h2>
     </div>
-    <p class="chart-note">What every feast used in the window had cost,
+    <p class="chart-note">What every drawn feast used in the window had cost,
       added up. Each point is the running total to the end of that day.</p>
     <div id="chart-total-cost" class="chart-box"></div>
     <div id="status-total-cost" class="chart-status" role="status"
