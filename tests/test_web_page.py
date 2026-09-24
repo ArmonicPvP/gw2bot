@@ -1663,14 +1663,13 @@ class TestFoodDailyCharts:
             'formatCoins(running) + " (+" + formatCoins(value) + ")"' in body
         )
 
-    def test_the_days_cost_names_how_many_were_used_and_at_what(self) -> None:
-        # The day's cost alone does not say whether it was many cheap feasts
-        # or a few dear ones, so the hover gives both halves.
+    def test_the_days_cost_hover_names_only_the_cost(self) -> None:
+        # The hover reads as the day's cost alone, not how it was worked out.
         spec = FOOD_PAGE.split('id: "cost-by-day",', 1)[1]
         spec = spec.split('id: "total-cost",', 1)[0]
         assert "return day.cost;" in spec
-        assert "if (!day.used) { return formatCoins(value); }" in spec
-        assert "formatCoins(value / day.used)" in spec
+        assert "text:" not in spec
+        assert "×" not in FOOD_PAGE
 
     def test_a_days_grid_covers_the_quiet_days_too(self) -> None:
         # A running total that skips a day reads as though the window were

@@ -341,9 +341,7 @@ button:focus-visible {
       <h2>Food cost &ndash; 7-day rolling average</h2>
     </div>
     <p class="chart-note">What the feasts used each day had cost, averaged
-      over the seven days ending on each date. Each feast is priced at the
-      restock it came from, oldest stock first, so a new deposit is not a
-      spike: it only raises the cost once the older stock is used up.</p>
+      over the seven days ending on each date.</p>
     <div id="chart-cost-avg" class="chart-box"></div>
     <div id="legend-cost-avg" class="legend" role="list"
       aria-label="Feast colours"></div>
@@ -354,10 +352,8 @@ button:focus-visible {
     <div class="chart-heading">
       <h2>Food cost by day</h2>
     </div>
-    <p class="chart-note">What the feasts used that day had cost, priced the
-      same way, with no averaging: two feasts used from a restock of thirty
-      bought for thirty gold is two gold. The hover names how many were used
-      and what each cost.</p>
+    <p class="chart-note">What the feasts used each day had cost, with no
+      averaging.</p>
     <div id="chart-cost-by-day" class="chart-box"></div>
     <div id="legend-cost-by-day" class="legend" role="list"
       aria-label="Feast colours"></div>
@@ -368,9 +364,8 @@ button:focus-visible {
     <div class="chart-heading">
       <h2>Total food cost</h2>
     </div>
-    <p class="chart-note">What every drawn feast used in the window had cost,
-      added up. Each point is the running total to the end of that day, and
-      the hover also names what the day alone cost.</p>
+    <p class="chart-note">What every feast used in the window had cost,
+      added up. Each point is the running total to the end of that day.</p>
     <div id="chart-total-cost" class="chart-box"></div>
     <div id="status-total-cost" class="chart-status" role="status"
       aria-live="polite"></div>
@@ -1120,14 +1115,7 @@ button:focus-visible {
       label: "Cost of the feasts used each day, one line per feast",
       empty: "No feasts were used in this period.",
       money: true,
-      value: function (day) { return day.cost; },
-      // The day's cost alone does not say whether it was many cheap feasts
-      // or a few dear ones, so the hover names both halves of it.
-      text: function (day, value) {
-        if (!day.used) { return formatCoins(value); }
-        return formatCoins(value) + " (" + day.used + " \u00d7 " +
-          formatCoins(value / day.used) + ")";
-      }
+      value: function (day) { return day.cost; }
     },
     {
       id: "total-cost",
@@ -1246,9 +1234,7 @@ button:focus-visible {
         points.push({
           t: day.t,
           v: value,
-          text: spec.text
-            ? spec.text(day, value)
-            : formatDailyValue(spec, value)
+          text: formatDailyValue(spec, value)
         });
       });
       series.push({
