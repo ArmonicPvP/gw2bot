@@ -547,8 +547,10 @@ and automatic sign-up questions:
 **Yes** takes the slot, or joins the mentee waitlist when somebody already
 holds it. **No** declines for now, and **No, never ask again for this event**
 stops the question for that event only — undone from the ⚙️ button. The
-leader is never asked. A member already on the roster — seated by automatic
-sign-up, say, or one who answered No — is asked by pressing **Sign up** again.
+leader is never asked, and a member made the leader gives up any claim on the
+slot, which passes to the next in line. A member already on the roster —
+seated by automatic sign-up, say, or one who answered No — is asked by pressing
+**Sign up** again.
 
 There is one slot per occurrence, and it is held by a member with a seat: a
 member on the event's waitlist who says Yes waits on the mentee waitlist until
@@ -565,7 +567,8 @@ only the slot (or their place on its waitlist) and keeps their seat. Nobody is
 ever made a mentee automatically: automatic sign-up seats a member on the next
 occurrence but never carries the slot over, so each run's mentee is asked
 afresh. Turning the slot off hides it and stops the question without clearing
-anybody's claim, so turning it back on restores the same mentee.
+anybody's claim, so turning it back on restores the same mentee; a member who
+does not want that can still give the claim up from **Sign out**.
 
 ### Editing A Roster
 

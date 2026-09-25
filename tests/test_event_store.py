@@ -2157,6 +2157,49 @@ class TestEventStoreMenteeSlot:
         assert self.status(store, occurrence_id, 1) is MenteeStatus.WAITLISTED
         assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
 
+    def test_handing_the_lead_to_the_mentee_passes_the_slot_on(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1, 2))
+        self.ask(store, occurrence_id, 1, 0)
+        self.ask(store, occurrence_id, 2, 5)
+        occurrence = store.get_occurrence(occurrence_id)
+        assert occurrence is not None
+        event = store.get_event(occurrence.event_id)
+        assert event is not None
+
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=1,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            mentee_enabled=True,
+        )
+
+        # The leader cannot be their own mentee: the claim goes, and so does
+        # the slot, to the next in line.
+        leader = store.get_signup(occurrence_id, 1)
+        assert leader is not None
+        assert leader.mentee is MenteeStatus.NONE
+        assert leader.mentee_requested_at is None
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
+
+    def test_the_leader_cannot_claim_the_slot(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The fixture event is led by member 42.
+        occurrence_id = self.make_roster(store, seated=(42,))
+
+        assert self.ask(store, occurrence_id, 42, 0) is MenteeStatus.NONE
+
     def test_a_claim_needs_a_signup(self, store: EventStore) -> None:
         occurrence_id = self.make_roster(store)
 

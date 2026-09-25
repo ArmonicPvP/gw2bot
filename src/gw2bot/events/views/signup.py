@@ -149,10 +149,12 @@ class EventSignOutButton(
                 ephemeral=True,
             )
             return
-        if event.mentee_enabled and signup.mentee is not MenteeStatus.NONE:
+        if signup.mentee is not MenteeStatus.NONE:
             # Somebody with a claim on the mentee slot may only want to give
             # that up, so the choice is theirs to make rather than a sign-out
-            # that takes the slot and the seat together.
+            # that takes the slot and the seat together. Offered while the
+            # slot is switched off too: the claim is kept for when it comes
+            # back, and this is the one way to let it go without leaving.
             LOGGER.debug(
                 "Offered a choice between signing out and giving up the "
                 "mentee slot; occurrence_id=%s user_id=%s mentee=%s",
@@ -161,7 +163,7 @@ class EventSignOutButton(
                 signup.mentee.value,
             )
             await interaction.response.send_message(
-                _sign_out_choice_prompt(signup),
+                _sign_out_choice_prompt(event, signup),
                 view=SignOutChoiceView(bot, event, occurrence),
                 ephemeral=True,
             )
@@ -972,15 +974,21 @@ class SignOutConfirmView(discord.ui.View):
         )
 
 
-def _sign_out_choice_prompt(signup: EventSignup) -> str:
+def _sign_out_choice_prompt(event: Event, signup: EventSignup) -> str:
     standing = (
         "leave the mentee waitlist"
         if signup.mentee is MenteeStatus.WAITLISTED
         else "sign out of being the mentee"
     )
-    return (
+    prompt = (
         f"Would you like to sign out of the event, or {standing}? Signing "
         "out of the event gives up your mentee spot as well."
+    )
+    if event.mentee_enabled:
+        return prompt
+    return (
+        "This event is not looking for a mentee right now, but you keep "
+        f"your mentee spot in case it does again. {prompt}"
     )
 
 

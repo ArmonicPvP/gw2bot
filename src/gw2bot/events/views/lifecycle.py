@@ -104,6 +104,8 @@ async def apply_event_edit(
 ) -> None:
     from gw2bot.events.posting import (
         check_roster_membership,
+        mentee_movement,
+        mentee_snapshot,
         merge_roster_updates,
         notify_roster_update,
         occurrence_finished,
@@ -194,6 +196,23 @@ async def apply_event_edit(
         origin_start = previous.start_time + (
             edited.start_time - primary.start_time
         )
+    # A new leader cannot be the mentee, so the save drops a claim of theirs
+    # and hands the slot to the next in line. What each run's roster looked
+    # like just before it is kept, so that move can be announced with the
+    # rest of the edit's.
+    mentee_rosters = (
+        {
+            occurrence.occurrence_id: mentee_snapshot(
+                bot,
+                edited,
+                occurrence.occurrence_id,
+            )
+            for occurrence in occurrences
+        }
+        if previous is not None
+        and previous.leader_discord_id != edited.leader_discord_id
+        else {}
+    )
     try:
         updated = bot.event_store.update_event(
             event_id=editing_event_id,
@@ -233,7 +252,12 @@ async def apply_event_edit(
     refreshed = 0
     for occurrence in occurrences:
         current = occurrence
-        roster_update = RosterUpdate()
+        roster_update = mentee_movement(
+            bot,
+            updated,
+            occurrence.occurrence_id,
+            mentee_rosters.get(occurrence.occurrence_id),
+        )
         if (
             primary is not None
             and occurrence.occurrence_id == primary.occurrence_id
@@ -317,7 +341,11 @@ async def apply_event_edit(
                     current.occurrence_id,
                     type(exc).__name__,
                 )
-                await notify_roster_update(bot, current, checked)
+                await notify_roster_update(
+                    bot,
+                    current,
+                    merge_roster_updates([roster_update, checked]),
+                )
                 if current.message_id is not None:
                     attempted += 1
                     _mark_occurrence_stale(bot, current)
@@ -334,7 +362,11 @@ async def apply_event_edit(
                     reread is not None,
                     resaved is not None,
                 )
-                await notify_roster_update(bot, current, checked)
+                await notify_roster_update(
+                    bot,
+                    current,
+                    merge_roster_updates([roster_update, checked]),
+                )
                 continue
             current = reread
             updated = resaved
@@ -351,7 +383,9 @@ async def apply_event_edit(
                 # can have moved the same member: folded, they read as one
                 # move, and anybody it took off is dropped rather than given a
                 # seat in the new squad.
-                roster_update = merge_roster_updates([checked, rebalanced])
+                roster_update = merge_roster_updates(
+                    [roster_update, checked, rebalanced]
+                )
             except (SQLAlchemyError, ValueError) as exc:
                 # A stale roster must not block the rest of the edit.
                 LOGGER.error(
@@ -362,15 +396,15 @@ async def apply_event_edit(
                 )
                 # The check's own movements are committed whatever the
                 # re-seat did, so they are still what gets announced.
-                roster_update = checked
-            if not moving:
-                # For an in-place refresh the thread is stable, so announce
-                # what moved the roster now - the re-seat and the check
-                # folded, or just the check when the re-seat failed. A channel
-                # move deletes this thread and opens a new one, so its ping is
-                # deferred to after the repost below and re-targeted at the
-                # new thread.
-                await notify_roster_update(bot, current, roster_update)
+                roster_update = merge_roster_updates([roster_update, checked])
+        if not moving:
+            # For an in-place refresh the thread is stable, so announce what
+            # moved the roster now - the re-seat and the check folded, or just
+            # the check when the re-seat failed, with the mentee slot a new
+            # leader handed on. A channel move deletes this thread and opens a
+            # new one, so its ping is deferred to after the repost below and
+            # re-targeted at the new thread.
+            await notify_roster_update(bot, current, roster_update)
         if current.message_id is None:
             # Unposted (e.g. a recurring series' next occurrence): the
             # reschedule above is persisted and the scheduler will post it with

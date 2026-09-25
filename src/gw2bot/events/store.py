@@ -206,12 +206,42 @@ def _settle_mentee(session: Session, occurrence_id: int) -> None:
     here, before the caller commits, means no reader ever sees a roster whose
     slot sits empty while a seated member is waiting for it - whichever
     roster path made the change.
+
+    The event's leader cannot be its mentee, so a claim of theirs is dropped
+    here too: leadership can be handed to a member who holds the slot, and a
+    claim can race a leader change. Either way the slot goes to the next in
+    line rather than staying with the member leading the run.
     """
     records = session.scalars(
         select(EventSignupRecord)
         .where(EventSignupRecord.occurrence_id == occurrence_id)
         .where(EventSignupRecord.mentee != MenteeStatus.NONE.value)
     ).all()
+    if not records:
+        return
+    leader_id = session.scalar(
+        select(EventRecord.leader_discord_id)
+        .join(
+            EventOccurrenceRecord,
+            EventOccurrenceRecord.event_id == EventRecord.event_id,
+        )
+        .where(EventOccurrenceRecord.occurrence_id == occurrence_id)
+    )
+    claims: list[EventSignupRecord] = []
+    for record in records:
+        if record.discord_user_id != leader_id:
+            claims.append(record)
+            continue
+        LOGGER.debug(
+            "Dropped the leader's claim on the mentee slot; "
+            "occurrence_id=%s user_id=%s previous=%s",
+            occurrence_id,
+            record.discord_user_id,
+            record.mentee,
+        )
+        record.mentee = MenteeStatus.NONE.value
+        record.mentee_requested_at = None
+    records = claims
     if not records:
         return
     settled = settle_mentee(
@@ -317,6 +347,7 @@ class EventStore:
             record = session.get(EventRecord, event_id)
             if record is None:
                 raise ValueError(f"Unknown event {event_id}")
+            leader_changed = record.leader_discord_id != leader_discord_id
             record.category = category.value
             record.title = title
             record.description = description
@@ -330,6 +361,18 @@ class EventStore:
             record.ping_role_ids = _serialize_ids(ping_role_ids)
             record.requirements = requirements
             record.mentee_enabled = mentee_enabled
+            if leader_changed:
+                # The new leader may hold, or be waiting for, the mentee slot
+                # on a run still to come. The slot is settled again on each of
+                # them, which drops that claim and hands the slot on.
+                for occurrence_id in session.scalars(
+                    select(EventOccurrenceRecord.occurrence_id)
+                    .where(EventOccurrenceRecord.event_id == event_id)
+                    .where(
+                        EventOccurrenceRecord.status != EventStatus.OVER.value
+                    )
+                ).all():
+                    _settle_mentee(session, occurrence_id)
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "

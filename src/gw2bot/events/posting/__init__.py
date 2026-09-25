@@ -39,6 +39,8 @@ from gw2bot.events.posting.roster import (
     complete_signup as complete_signup,
     departed_roster_members as departed_roster_members,
     disable_auto_signup as disable_auto_signup,
+    mentee_movement as mentee_movement,
+    mentee_snapshot as mentee_snapshot,
     merge_roster_updates as merge_roster_updates,
     notify_roster_update as notify_roster_update,
     prune_departed_signups as prune_departed_signups,

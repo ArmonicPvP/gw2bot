@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.discord_utils import GuildMembership
 from gw2bot.events import posting
+from gw2bot.events.posting import messages as posting_messages
 from gw2bot.events.posting import roster as posting_roster
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
@@ -9458,6 +9459,61 @@ class TestSetMenteeRequest:
         untouched = store.get_signup(occurrence.occurrence_id, 12)
         assert untouched is not None
         assert untouched.mentee is MenteeStatus.NONE
+
+    async def test_a_member_made_leader_meanwhile_is_refused(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The question was asked of a member; by the time they answered, the
+        # commander had handed them the lead.
+        event, occurrence = await self.make_run(bot, store)
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=11,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            mentee_enabled=True,
+        )
+
+        with pytest.raises(ValueError, match="leading this event"):
+            await set_mentee_request(
+                bot, event, occurrence, 11, requested=True
+            )
+
+        signup = store.get_signup(occurrence.occurrence_id, 11)
+        assert signup is not None
+        assert signup.mentee is MenteeStatus.NONE
+
+    async def test_a_refused_refresh_leaves_the_post_flagged_for_a_retry(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+        monkeypatch.setattr(
+            posting_messages,
+            "refresh_occurrence_message",
+            AsyncMock(side_effect=SQLAlchemyError("database is locked")),
+        )
+
+        signup = await set_mentee_request(
+            bot, event, occurrence, 11, requested=True
+        )
+
+        # The claim stands, and the maintenance pass will re-render the post
+        # that still shows the slot as it was.
+        assert signup.mentee is MenteeStatus.MENTEE
+        flagged = store.get_occurrence(occurrence.occurrence_id)
+        assert flagged is not None
+        assert flagged.needs_refresh
 
     async def test_a_member_off_the_roster_is_told_so(
         self,

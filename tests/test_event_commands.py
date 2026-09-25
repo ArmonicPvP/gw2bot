@@ -5167,6 +5167,27 @@ class TestMenteeSignup:
         assert "leave the mentee waitlist" in sent.args[0]
         assert isinstance(sent.kwargs["view"], SignOutChoiceView)
 
+    async def test_a_claim_hidden_by_a_switched_off_slot_can_still_go(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, mentee_enabled=False)
+        self.seat(store, occurrence, 42, mentee=True)
+
+        sent = await self.press_sign_out(fake_bot, occurrence)
+
+        assert "not looking for a mentee right now" in sent.args[0]
+        view = sent.kwargs["view"]
+        assert isinstance(view, SignOutChoiceView)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+
+        await view.sign_out_mentee.callback(interaction)
+
+        # Only the claim went, so turning the slot back on will not restore it.
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
+
     async def test_sign_out_without_a_claim_confirms_as_before(
         self,
         fake_bot: Any,
@@ -5258,6 +5279,36 @@ class TestMenteeSignup:
             awaited_kwargs(interaction.edit_original_response)["content"]
         )
         assert self.mentee_of(store, occurrence, 42) is MenteeStatus.MENTEE
+
+    async def test_handing_the_lead_to_the_mentee_announces_the_next(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 11, mentee=True)
+        self.seat(store, occurrence, 12, mentee=True)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.leader_discord_id = 11
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await EventEditConfirmView(fake_bot, draft).save_changes.callback(
+            interaction
+        )
+
+        assert self.mentee_of(store, occurrence, 11) is MenteeStatus.NONE
+        assert self.mentee_of(store, occurrence, 12) is MenteeStatus.MENTEE
+        announcement = channel.thread.send.await_args
+        assert announcement is not None
+        assert announcement.args[0] == (
+            "🔀 **Roster update**\n└ <@12> moved up from the mentee waitlist "
+            "and is now the 🎓 mentee"
+        )
 
     def settings_labels(self, view: SignupSettingsView) -> list[str]:
         return [
