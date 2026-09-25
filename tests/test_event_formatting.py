@@ -738,6 +738,40 @@ class TestEventEmbed:
         )
         assert mentee.value == f"Open\n└ {WAITLIST_EMOJI} <@11>"
 
+    def test_a_long_mentee_waitlist_cannot_push_out_the_roster(
+        self,
+    ) -> None:
+        # Every one of an uncapped roster asked for the slot. Named in full,
+        # the waitlist would fill the embed ahead of the roster, which is
+        # what the embed limit trims first.
+        event = replace(make_event(EventCategory.GENERAL), mentee_enabled=True)
+        asked = datetime(2027, 1, 2, tzinfo=UTC)
+        signups = [
+            replace(
+                make_signup(10**17 + user_id),
+                mentee=(
+                    MenteeStatus.MENTEE
+                    if user_id == 0
+                    else MenteeStatus.WAITLISTED
+                ),
+                mentee_requested_at=asked.replace(minute=user_id % 60),
+            )
+            for user_id in range(250)
+        ]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        mentee = next(
+            field for field in embed.fields if field.name == "🎓 Mentee"
+        )
+        assert (mentee.value or "").splitlines()[-1] == (
+            f"└ {WAITLIST_EMOJI} …and 244 more"
+        )
+        assert len((mentee.value or "").splitlines()) == 7
+        names = [field.name or "" for field in embed.fields]
+        assert "📌 Requirements" in names
+        assert "👥 Participants (250)" in names
+
     def test_general_embed_lists_participants_without_a_cap(self) -> None:
         event = make_event(EventCategory.GENERAL)
         signups = [make_signup(user_id) for user_id in range(1, 4)]

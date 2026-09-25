@@ -535,7 +535,8 @@ become a commander to co-lead it and train. It is asked in the schedule step
 (**Offer a mentee slot for Commander training?**, defaulting to No) and can be
 turned on or off later through **Change something**. The post then shows a
 **🎓 Mentee** field under the leader: the mentee's name, or "Open" while the
-slot is free, followed by anyone waiting for it, marked ⌛️.
+slot is free, followed by the first five members waiting for it, marked ⌛️,
+and a count of any more.
 
 The slot is not a role. A member still signs up the usual way, with a role on
 a role-based event, and the mentee question comes last, after any role memory

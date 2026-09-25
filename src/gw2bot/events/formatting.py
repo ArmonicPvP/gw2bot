@@ -52,6 +52,11 @@ MENTEE_FIELD_NAME = "🎓 Mentee"
 # What the mentee slot shows while nobody with a seat holds it, which is also
 # the post advertising that the leader is still looking for one.
 MENTEE_OPEN_TEXT = "Open"
+# How many members waiting for the mentee slot the post names. The field sits
+# under the leader, ahead of the roster, and an over-long embed is trimmed from
+# its last fields first - so an unbounded list here could push the roster
+# itself out of an uncapped event's post. Everyone past this is counted.
+MENTEE_WAITLIST_SHOWN = 5
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
 WAITLIST_EMOJI = "⌛️"
@@ -493,10 +498,16 @@ def _mentee_lines(signups: list[EventSignup]) -> list[str]:
         if holder is not None
         else MENTEE_OPEN_TEXT
     ]
+    waiting = mentee_waitlist(signups)
     lines.extend(
         f"└ {WAITLIST_EMOJI} <@{signup.discord_user_id}>"
-        for signup in mentee_waitlist(signups)
+        for signup in waiting[:MENTEE_WAITLIST_SHOWN]
     )
+    if len(waiting) > MENTEE_WAITLIST_SHOWN:
+        lines.append(
+            f"└ {WAITLIST_EMOJI} …and {len(waiting) - MENTEE_WAITLIST_SHOWN} "
+            "more"
+        )
     return lines
 
 
