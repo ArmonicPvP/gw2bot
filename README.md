@@ -556,7 +556,8 @@ they have one. The mentee waitlist is first come, first served by when each
 member said Yes, and a mentee keeps the slot for as long as they keep their
 seat. When the mentee gives it up, signs out, is removed, or drops to the
 event's waitlist, the slot passes to the next member on the mentee waitlist
-who has a seat.
+who has a seat, and the signup thread announces it, pinging them, in the same
+roster update that announces moves up from the event's waitlist.
 
 **Sign out** asks a member with a claim on the slot what they are signing out
 of: **Event** signs them out entirely, slot included, and **Mentee** gives up

@@ -9524,3 +9524,263 @@ class TestSetMenteeRequest:
         # the member's own answer to the question.
         assert seeded.mentee is MenteeStatus.NONE
         assert seeded.mentee_requested_at is None
+
+
+MENTEE_LINE = "moved up from the mentee waitlist and is now the 🎓 mentee"
+
+
+class TestMenteePromotionAnnouncements:
+    def make_event(
+        self,
+        store: EventStore,
+        category: EventCategory = EventCategory.WVW,
+        *,
+        mentee_enabled: bool = True,
+    ) -> Any:
+        return store.create_event(
+            category=category,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+            mentee_enabled=mentee_enabled,
+        )
+
+    async def post(self, bot: Any, store: EventStore, event: Any) -> Any:
+        occurrence = store.create_occurrence(event.event_id, START)
+        return await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+    def seat(
+        self,
+        store: EventStore,
+        occurrence: Any,
+        user_id: int,
+        *,
+        role: EventRole | None = None,
+        waitlisted: bool = False,
+        minutes: int = 0,
+    ) -> None:
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=user_id,
+            role=role,
+            assigned_role=None if waitlisted else role,
+            flex_roles=(),
+            waitlisted=waitlisted,
+            now=BEFORE_START - timedelta(days=1, minutes=-minutes),
+        )
+
+    def claim(self, store: EventStore, occurrence: Any, *user_ids: int):
+        for offset, user_id in enumerate(user_ids):
+            store.set_signup_mentee(
+                occurrence.occurrence_id,
+                user_id,
+                True,
+                BEFORE_START - timedelta(hours=10, minutes=-offset),
+            )
+
+    def announced(self, channel: FakeChannel) -> str:
+        return "\n".join(
+            call.args[0] for call in channel.thread.send.await_args_list
+        )
+
+    async def test_giving_up_the_slot_announces_the_next_mentee(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = self.make_event(store)
+        occurrence = await self.post(bot, store, event)
+        self.seat(store, occurrence, 11)
+        self.seat(store, occurrence, 12)
+        self.claim(store, occurrence, 11, 12)
+
+        await set_mentee_request(bot, event, occurrence, 11, requested=False)
+
+        channel.thread.send.assert_awaited_once()
+        assert self.announced(channel) == (
+            f"🔀 **Roster update**\n└ <@12> {MENTEE_LINE}"
+        )
+
+    async def test_taking_an_open_slot_is_not_announced(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The member just answered the question, so they know already.
+        event = self.make_event(store)
+        occurrence = await self.post(bot, store, event)
+        self.seat(store, occurrence, 11)
+
+        await set_mentee_request(bot, event, occurrence, 11, requested=True)
+
+        channel.thread.send.assert_not_awaited()
+
+    async def test_signing_out_announces_the_next_mentee(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = self.make_event(store)
+        occurrence = await self.post(bot, store, event)
+        self.seat(store, occurrence, 11)
+        self.seat(store, occurrence, 12)
+        self.claim(store, occurrence, 11, 12)
+
+        _, update = await remove_signup(bot, event, occurrence, 11)
+
+        assert [
+            signup.discord_user_id for signup in update.mentee_promoted
+        ] == [12]
+        assert f"<@12> {MENTEE_LINE}" in self.announced(channel)
+
+    async def test_a_freed_seat_can_hand_on_the_slot_too(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Member 16 asked while waiting for a seat, so the slot sat open.
+        # Freeing a seat seats them, and the slot is theirs: one announcement
+        # says both.
+        event = self.make_event(store, EventCategory.STORY)
+        occurrence = await self.post(bot, store, event)
+        for minutes, user_id in enumerate(range(11, 16)):
+            self.seat(store, occurrence, user_id, minutes=minutes)
+        self.seat(store, occurrence, 16, waitlisted=True, minutes=10)
+        self.claim(store, occurrence, 16)
+
+        await remove_signup(bot, event, occurrence, 11)
+
+        channel.thread.send.assert_awaited_once()
+        announced = self.announced(channel)
+        assert "<@16> moved up from the waitlist" in announced
+        assert f"<@16> {MENTEE_LINE}" in announced
+
+    async def test_an_edit_that_unseats_the_mentee_announces_the_next(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = self.make_event(store, EventCategory.FRACTAL)
+        occurrence = await self.post(bot, store, event)
+        self.seat(store, occurrence, 11, role=EventRole.DPS)
+        self.seat(
+            store,
+            occurrence,
+            12,
+            role=EventRole.QUICKNESS_HEAL,
+            minutes=1,
+        )
+        self.claim(store, occurrence, 11, 12)
+
+        # The only healer seat is taken, so the new pick costs member 11
+        # their seat - and with it the slot.
+        result = await apply_signup_edit(
+            bot,
+            event,
+            occurrence,
+            11,
+            EventRole.ALACRITY_HEAL,
+            (),
+            allow_waitlist=True,
+        )
+
+        assert result.signup is not None
+        assert result.signup.waitlisted
+        assert f"<@12> {MENTEE_LINE}" in self.announced(channel)
+
+    async def test_a_category_change_that_unseats_the_mentee_reports_it(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = self.make_event(store)
+        occurrence = await self.post(bot, store, event)
+        for minutes, user_id in enumerate(range(11, 17)):
+            self.seat(store, occurrence, user_id, minutes=minutes)
+        # The last to sign up holds the slot; a Story squad has no seat
+        # for them.
+        self.claim(store, occurrence, 16, 12)
+        story = replace(event, category=EventCategory.STORY)
+
+        _, update = rebalance_occurrence_roster(bot, story, occurrence)
+
+        assert [
+            signup.discord_user_id for signup in update.mentee_promoted
+        ] == [12]
+
+    async def test_a_slot_that_is_turned_off_moves_silently(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Claims left from before the slot was turned off still move, but
+        # the post no longer shows the slot, so nothing names it.
+        event = self.make_event(store, mentee_enabled=False)
+        occurrence = await self.post(bot, store, event)
+        self.seat(store, occurrence, 11)
+        self.seat(store, occurrence, 12)
+        self.claim(store, occurrence, 11, 12)
+
+        _, update = await remove_signup(bot, event, occurrence, 11)
+
+        assert update.mentee_promoted == ()
+        channel.thread.send.assert_not_awaited()
+        moved = store.get_signup(occurrence.occurrence_id, 12)
+        assert moved is not None
+        assert moved.mentee is MenteeStatus.MENTEE
+
+    def test_the_message_names_the_new_mentee(self) -> None:
+        signup = EventSignup(
+            occurrence_id=1,
+            discord_user_id=12,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            signed_up_at=START,
+            waitlisted=False,
+            mentee=MenteeStatus.MENTEE,
+        )
+
+        assert roster_update_messages(
+            RosterUpdate(mentee_promoted=(signup,))
+        ) == [f"🔀 **Roster update**\n└ <@12> {MENTEE_LINE}"]
+
+    def test_a_batch_names_each_new_mentee_once_and_not_the_removed(
+        self,
+    ) -> None:
+        def mentee(user_id: int) -> EventSignup:
+            return EventSignup(
+                occurrence_id=1,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                signed_up_at=START,
+                waitlisted=False,
+                mentee=MenteeStatus.MENTEE,
+            )
+
+        merged = merge_roster_updates(
+            [
+                RosterUpdate(mentee_promoted=(mentee(12),)),
+                RosterUpdate(mentee_promoted=(mentee(12),)),
+                RosterUpdate(mentee_promoted=(mentee(13),)),
+            ],
+            [13],
+        )
+
+        assert [
+            signup.discord_user_id for signup in merged.mentee_promoted
+        ] == [12]
+        assert merged.has_changes

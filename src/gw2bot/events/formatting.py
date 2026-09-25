@@ -287,14 +287,15 @@ PING_REQUIREMENTS_HEADER = "📌 **Requirements:**"
 def roster_update_messages(update: RosterUpdate) -> list[str]:
     """Announce a roster mutation, split to stay inside Discord's limit.
 
-    One batched thread message per roster mutation: every reassigned member
-    and waitlist promotion is listed once, so a single signup or departure
-    never produces more than one ping. That is almost always a single message
-    - a mutation moves a handful of members - but an uncapped category
-    (General) has no bound on its roster, and switching a capped event to one
-    promotes the whole waitlist at once, which can outgrow a single message.
-    The lines are therefore split over as many messages as they need, each
-    repeating the header so every part reads as a roster update on its own.
+    One batched thread message per roster mutation: every reassigned member,
+    waitlist promotion and move up into the mentee slot is listed once, so a
+    single signup or departure never produces more than one ping. That is
+    almost always a single message - a mutation moves a handful of members -
+    but an uncapped category (General) has no bound on its roster, and
+    switching a capped event to one promotes the whole waitlist at once, which
+    can outgrow a single message. The lines are therefore split over as many
+    messages as they need, each repeating the header so every part reads as a
+    roster update on its own.
     Returns an empty list when there is nothing to announce.
     """
     if not update.has_changes:
@@ -316,6 +317,11 @@ def roster_update_messages(update: RosterUpdate) -> list[str]:
             seat = ""
         lines.append(
             f"└ <@{signup.discord_user_id}> moved up from the waitlist{seat}"
+        )
+    for signup in update.mentee_promoted:
+        lines.append(
+            f"└ <@{signup.discord_user_id}> moved up from the mentee waitlist "
+            "and is now the 🎓 mentee"
         )
     return _chunk_message_lines(ROSTER_UPDATE_HEADER, lines)
 

@@ -5204,6 +5204,13 @@ class TestMenteeSignup:
         )
         assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
         assert self.mentee_of(store, occurrence, 11) is MenteeStatus.MENTEE
+        # The next in line is told in the thread.
+        announcement = channel.thread.send.await_args
+        assert announcement is not None
+        assert announcement.args[0] == (
+            "🔀 **Roster update**\n└ <@11> moved up from the mentee waitlist "
+            "and is now the 🎓 mentee"
+        )
         # The post shows who holds the slot now.
         embed = channel.partial_message.edit.await_args.kwargs["embed"]
         assert any(

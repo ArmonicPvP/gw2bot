@@ -557,10 +557,14 @@ class RoleChange:
 class RosterUpdate:
     reassigned: tuple[RoleChange, ...] = ()
     promoted: tuple[EventSignup, ...] = ()
+    # Members who moved up from the mentee waitlist into the mentee slot. The
+    # store hands the slot on inside the same write that frees it, so this is
+    # read off the roster before and after a change rather than decided here.
+    mentee_promoted: tuple[EventSignup, ...] = ()
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.reassigned or self.promoted)
+        return bool(self.reassigned or self.promoted or self.mentee_promoted)
 
 
 def roster_feasible(
