@@ -47,6 +47,8 @@ from gw2bot.events.views.shared import (
     EVENT_TITLE_MAX_LENGTH,
     EventDraft,
     FLOW_TIMEOUT_SECONDS,
+    MENTEE_SLOT_HINT,
+    MENTEE_SLOT_PROMPT,
     PING_ROLE_HINT,
     PING_ROLE_PROMPT,
     RepeatAttempt,
@@ -279,11 +281,24 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
                 component=self.requirements_input,
             )
         )
+        # The fifth and last component Discord allows a modal. Pre-selected
+        # from the draft, so a commander who wants no mentee can pass it by.
+        self.mentee = discord.ui.Select["EventScheduleModal"](
+            options=_yes_no_options(draft.mentee_enabled),
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=MENTEE_SLOT_PROMPT,
+                description=MENTEE_SLOT_HINT,
+                component=self.mentee,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         self._draft.start_text = self.start_input.value.strip()
         self._draft.duration_text = self.duration_input.value.strip()
         self._draft.requirements = self.requirements_input.value.strip()
+        self._draft.mentee_enabled = self.mentee.values[0] == "yes"
         repeats = self.repeat.values[0] == "yes"
         try:
             start_time = parse_event_datetime(
@@ -304,11 +319,13 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
         self._draft.duration_minutes = duration_minutes
         LOGGER.debug(
             "Event schedule step submitted; user_id=%s repeats=%s "
-            "duration_minutes=%s requirements_characters=%s",
+            "duration_minutes=%s requirements_characters=%s "
+            "mentee_enabled=%s",
             interaction.user.id,
             repeats,
             duration_minutes,
             len(self._draft.requirements),
+            self._draft.mentee_enabled,
         )
         if not repeats:
             self._draft.repeat_frequency = RepeatFrequency.NONE
@@ -521,6 +538,7 @@ class EventConfirmView(_PreviewConfirmView):
                 ),
                 ping_role_ids=draft_event.ping_role_ids,
                 requirements=draft_event.requirements,
+                mentee_enabled=draft_event.mentee_enabled,
             )
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,

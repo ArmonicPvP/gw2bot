@@ -127,6 +127,15 @@ class AutoSignupChoice(StrEnum):
     NEVER_ASK = "never_ask"
 
 
+class MenteeStatus(StrEnum):
+    # Where a signup stands with the event's one mentee slot. It is not a role:
+    # a mentee still holds (or waits for) a seat in whatever role they picked,
+    # and this only says whether they co-lead the run on top of it.
+    NONE = "none"
+    MENTEE = "mentee"
+    WAITLISTED = "waitlisted"
+
+
 @dataclass(frozen=True, slots=True)
 class CategoryCapacity:
     # None means the roster never fills: a General event takes everyone, so
@@ -222,6 +231,10 @@ class Event:
     # What a member needs before signing up, shown as its own section of the
     # post. Optional: an empty string means the event has none.
     requirements: str = ""
+    # Whether the leader is looking for a mentee: a member training to command
+    # who co-leads the run. Only then are members asked about it after signing
+    # up, and only then does the post show the slot.
+    mentee_enabled: bool = False
 
     @property
     def capacity(self) -> CategoryCapacity:
@@ -287,6 +300,93 @@ class EventSignup:
     waitlisted: bool
     edit_tokens: float = SIGNUP_EDIT_TOKEN_CAPACITY
     edit_tokens_updated_at: datetime | None = None
+    # The member's claim on the mentee slot, and when they made it. The time
+    # orders the mentee waitlist, which is first come, first served on its
+    # own terms rather than by sign-up time. Only ever set by the member
+    # answering the question themselves: an automatic sign-up seeds a fresh
+    # row, so it can never carry one over.
+    mentee: MenteeStatus = MenteeStatus.NONE
+    mentee_requested_at: datetime | None = None
+
+
+def _mentee_queue_key(signup: EventSignup) -> tuple[datetime, int]:
+    # A claim always records when it was made; the sign-up time only stands in
+    # for a row written some other way, so the order stays total either way.
+    requested_at = (
+        signup.mentee_requested_at
+        if signup.mentee_requested_at is not None
+        else signup.signed_up_at
+    )
+    return requested_at, signup.discord_user_id
+
+
+def settle_mentee(signups: Sequence[EventSignup]) -> dict[int, MenteeStatus]:
+    """The mentee status every member who asked for the slot should hold.
+
+    There is one slot, and it is held by a member with a seat on the roster:
+    somebody on the waitlist is not coming unless a seat frees, so they cannot
+    co-lead. A seated mentee keeps the slot for as long as they keep their
+    seat, even when somebody who asked before them is promoted off the
+    waitlist later - the same as a seated member is never unseated to make
+    room. When nobody seated holds it, it goes to the seated member who asked
+    first, and everyone else who asked waits in the order they asked.
+
+    Returns an entry for each member who asked, and none for anybody else.
+    """
+    requesters = sorted(
+        (
+            signup
+            for signup in signups
+            if signup.mentee is not MenteeStatus.NONE
+        ),
+        key=_mentee_queue_key,
+    )
+    holder = next(
+        (
+            signup
+            for signup in requesters
+            if signup.mentee is MenteeStatus.MENTEE and not signup.waitlisted
+        ),
+        None,
+    )
+    if holder is None:
+        holder = next(
+            (signup for signup in requesters if not signup.waitlisted),
+            None,
+        )
+    holder_id = holder.discord_user_id if holder is not None else None
+    return {
+        signup.discord_user_id: (
+            MenteeStatus.MENTEE
+            if signup.discord_user_id == holder_id
+            else MenteeStatus.WAITLISTED
+        )
+        for signup in requesters
+    }
+
+
+def mentee_holder(signups: Sequence[EventSignup]) -> EventSignup | None:
+    """The member holding the mentee slot, if anybody does."""
+    return next(
+        (
+            signup
+            for signup in sorted(signups, key=_mentee_queue_key)
+            if signup.mentee is MenteeStatus.MENTEE
+        ),
+        None,
+    )
+
+
+def mentee_waitlist(signups: Sequence[EventSignup]) -> list[EventSignup]:
+    """The members waiting for the mentee slot, in the order they asked."""
+    return sorted(
+        (
+            signup
+            for signup in signups
+            if signup.mentee is MenteeStatus.WAITLISTED
+        ),
+        key=_mentee_queue_key,
+    )
 
 
 def available_edit_tokens(signup: EventSignup, now: datetime) -> float:

@@ -30,6 +30,8 @@ from gw2bot.events.models import (
     RosterUpdate,
     count_roster,
     is_roster_full,
+    mentee_holder,
+    mentee_waitlist,
 )
 from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 
@@ -46,6 +48,10 @@ EMPTY_FIELD_TEXT = "—"
 DRAFT_PENDING_TEXT = "Not set yet"
 # What an event whose commander left the requirements blank shows for them.
 NO_REQUIREMENTS_TEXT = "None"
+MENTEE_FIELD_NAME = "🎓 Mentee"
+# What the mentee slot shows while nobody with a seat holds it, which is also
+# the post advertising that the leader is still looking for one.
+MENTEE_OPEN_TEXT = "Open"
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
 WAITLIST_EMOJI = "⌛️"
@@ -472,6 +478,22 @@ def _waitlisted_member_line(signup: EventSignup) -> str:
     return f"└ {WAITLIST_EMOJI} {emoji}<@{signup.discord_user_id}>"
 
 
+def _mentee_lines(signups: list[EventSignup]) -> list[str]:
+    # The holder first, then whoever is waiting for the slot in the order they
+    # asked, marked the way the roster marks its own waitlist.
+    holder = mentee_holder(signups)
+    lines = [
+        f"<@{holder.discord_user_id}>"
+        if holder is not None
+        else MENTEE_OPEN_TEXT
+    ]
+    lines.extend(
+        f"└ {WAITLIST_EMOJI} <@{signup.discord_user_id}>"
+        for signup in mentee_waitlist(signups)
+    )
+    return lines
+
+
 def _role_group_lines(signups: list[EventSignup]) -> list[str]:
     lines: list[str] = []
     for signup in signups:
@@ -618,6 +640,10 @@ def event_embed(
         value=f"<@{event.leader_discord_id}>",
         inline=True,
     )
+    if event.mentee_enabled:
+        # Straight under the leader, whom the mentee co-leads with. Only an
+        # event offering the slot shows it: most never will.
+        _add_chunked_field(embed, MENTEE_FIELD_NAME, _mentee_lines(signups))
     # Always shown, so a member never has to wonder whether an event without
     # requirements simply predates them.
     embed.add_field(

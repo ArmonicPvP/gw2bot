@@ -1,7 +1,8 @@
 """Who is seated on an occurrence, and every way that changes.
 
 Seating and removing a sign-up, rebalancing roles around it, re-checking that
-seated members are still in the guild, and applying a commander's edits.
+seated members are still in the guild, applying a commander's edits, and a
+member's claim on the mentee slot.
 """
 
 from __future__ import annotations
@@ -488,6 +489,114 @@ async def remove_signup(
         await notify_roster_update(bot, occurrence, update)
     await refresh_occurrence_message(bot, event, occurrence)
     return removed, update
+
+
+MENTEE_ENDED_MESSAGE = (
+    "This event has already ended, so its roster can no longer be changed."
+)
+
+
+async def set_mentee_request(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+    *,
+    requested: bool,
+) -> EventSignup:
+    """Put a member's claim on the mentee slot, or take it back.
+
+    Only ever called for the member themselves answering: nothing seeds a
+    claim, so an automatic sign-up can never make somebody a mentee. Whether
+    the claim holds the slot or joins its waitlist is the store's to settle,
+    and the row it returns says which.
+
+    The question and the sign-out choice can both sit open until they time
+    out, so the run is read back before anything is written: a run that has
+    ended keeps the roster it had, and an event that has stopped offering the
+    slot takes no new claims - though a member can always give one up.
+    Raises ValueError with the text to show the member when nothing changed.
+    """
+    # As in seat_signup above.
+    from gw2bot.events.posting.messages import (
+        refresh_occurrence_message,
+    )
+
+    try:
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        edited = bot.event_store.get_event(event.event_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the run back for a mentee claim; "
+            "occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        raise ValueError(
+            "The roster could not be read just now. Try again in a moment."
+        ) from exc
+    if current is None or edited is None or edited.cancelled:
+        raise ValueError("This event is no longer available.")
+    if occurrence_finished(edited, current):
+        LOGGER.debug(
+            "Refused a mentee claim on a finished run; occurrence_id=%s "
+            "user_id=%s requested=%s",
+            current.occurrence_id,
+            discord_user_id,
+            requested,
+        )
+        raise ValueError(MENTEE_ENDED_MESSAGE)
+    if requested and not edited.mentee_enabled:
+        LOGGER.debug(
+            "Refused a mentee claim on an event without the slot; "
+            "event_id=%s user_id=%s",
+            edited.event_id,
+            discord_user_id,
+        )
+        raise ValueError(
+            "This event is no longer looking for a mentee, so nothing was "
+            "changed."
+        )
+    try:
+        signup = bot.event_store.set_signup_mentee(
+            current.occurrence_id,
+            discord_user_id,
+            requested,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not store a mentee claim; occurrence_id=%s user_id=%s "
+            "error_type=%s",
+            current.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        raise ValueError(
+            "The roster could not be updated just now. Try again in a "
+            "moment."
+        ) from exc
+    LOGGER.debug(
+        "Applied a mentee claim; occurrence_id=%s user_id=%s requested=%s "
+        "status=%s waitlisted=%s",
+        current.occurrence_id,
+        discord_user_id,
+        requested,
+        signup.mentee.value,
+        signup.waitlisted,
+    )
+    # The claim is committed, so a store refusing the refresh costs the post
+    # its update rather than the member their answer.
+    try:
+        await refresh_occurrence_message(bot, edited, current)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not refresh the event after a mentee claim; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+    return signup
 
 
 def departed_roster_members(

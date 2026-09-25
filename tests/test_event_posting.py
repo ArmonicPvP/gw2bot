@@ -22,6 +22,7 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    MenteeStatus,
     RepeatFrequency,
     RoleChange,
     RosterCandidate,
@@ -56,6 +57,7 @@ from gw2bot.events.posting import (
     remove_signup,
     repost_occurrence,
     seat_signup,
+    set_mentee_request,
     split_event_history,
     sweep_stale_announcement,
 )
@@ -9325,3 +9327,200 @@ class TestSeatSignup:
         seated = store.get_signup(occurrence.occurrence_id, 12)
         assert seated is not None
         channel.partial_message.edit.assert_awaited()
+
+
+class TestSetMenteeRequest:
+    async def make_run(
+        self,
+        bot: Any,
+        store: EventStore,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+    ) -> Any:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=START,
+            duration_minutes=90,
+            repeat_frequency=repeat_frequency,
+            repeat_days=(),
+            mentee_enabled=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        for user_id in (11, 12):
+            store.add_signup(
+                occurrence_id=posted.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        return event, posted
+
+    async def test_a_claim_is_settled_and_shown_on_the_post(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+
+        first = await set_mentee_request(
+            bot, event, occurrence, 11, requested=True
+        )
+        second = await set_mentee_request(
+            bot, event, occurrence, 12, requested=True
+        )
+
+        assert first.mentee is MenteeStatus.MENTEE
+        assert second.mentee is MenteeStatus.WAITLISTED
+        edit = channel.partial_message.edit.await_args
+        assert edit is not None
+        mentee = next(
+            field
+            for field in edit.kwargs["embed"].fields
+            if field.name == "🎓 Mentee"
+        )
+        assert mentee.value == "<@11>\n└ ⌛️ <@12>"
+
+    async def test_withdrawing_hands_the_slot_on(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+        await set_mentee_request(bot, event, occurrence, 11, requested=True)
+        await set_mentee_request(bot, event, occurrence, 12, requested=True)
+
+        withdrawn = await set_mentee_request(
+            bot, event, occurrence, 11, requested=False
+        )
+
+        assert withdrawn.mentee is MenteeStatus.NONE
+        # Still on the roster, only off the slot.
+        assert store.get_signup(occurrence.occurrence_id, 11) is not None
+        next_up = store.get_signup(occurrence.occurrence_id, 12)
+        assert next_up is not None
+        assert next_up.mentee is MenteeStatus.MENTEE
+
+    async def test_a_finished_run_keeps_its_roster(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+        store.set_occurrence_status(occurrence.occurrence_id, EventStatus.OVER)
+
+        with pytest.raises(ValueError, match="already ended"):
+            await set_mentee_request(
+                bot, event, occurrence, 11, requested=True
+            )
+
+        signup = store.get_signup(occurrence.occurrence_id, 11)
+        assert signup is not None
+        assert signup.mentee is MenteeStatus.NONE
+
+    async def test_a_slot_turned_off_takes_no_new_claims_but_lets_one_go(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+        await set_mentee_request(bot, event, occurrence, 11, requested=True)
+        # The commander turned the slot off while the question sat open.
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            mentee_enabled=False,
+        )
+
+        with pytest.raises(ValueError, match="no longer looking"):
+            await set_mentee_request(
+                bot, event, occurrence, 12, requested=True
+            )
+        withdrawn = await set_mentee_request(
+            bot, event, occurrence, 11, requested=False
+        )
+
+        assert withdrawn.mentee is MenteeStatus.NONE
+        untouched = store.get_signup(occurrence.occurrence_id, 12)
+        assert untouched is not None
+        assert untouched.mentee is MenteeStatus.NONE
+
+    async def test_a_member_off_the_roster_is_told_so(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+
+        with pytest.raises(ValueError, match="not signed up"):
+            await set_mentee_request(
+                bot, event, occurrence, 99, requested=True
+            )
+
+    async def test_a_refused_write_is_reported_as_a_retry(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = await self.make_run(bot, store)
+        store.set_signup_mentee = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("SECRET STORE DETAIL")
+        )
+
+        with caplog.at_level("DEBUG"):
+            with pytest.raises(ValueError, match="Try again"):
+                await set_mentee_request(
+                    bot, event, occurrence, 11, requested=True
+                )
+
+        assert "SQLAlchemyError" in caplog.text
+        assert "SECRET STORE DETAIL" not in caplog.text
+
+    async def test_an_automatic_sign_up_never_carries_the_claim(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await self.make_run(
+            bot,
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        await set_mentee_request(bot, event, occurrence, 11, requested=True)
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        successor = posting.ensure_next_recurring_occurrence(
+            bot,
+            event,
+            occurrence,
+            START + timedelta(hours=2),
+        )
+
+        assert successor is not None
+        seeded = store.get_signup(successor.occurrence_id, 11)
+        assert seeded is not None
+        # Seated on the next run, but never as its mentee: that is only ever
+        # the member's own answer to the question.
+        assert seeded.mentee is MenteeStatus.NONE
+        assert seeded.mentee_requested_at is None

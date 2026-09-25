@@ -29,6 +29,8 @@ from gw2bot.events.views.shared import (
     EVENT_TITLE_MAX_LENGTH,
     EventDraft,
     FLOW_TIMEOUT_SECONDS,
+    MENTEE_SLOT_HINT,
+    MENTEE_SLOT_PROMPT,
     PING_ROLE_HINT,
     PING_ROLE_NONE_AVAILABLE,
     PING_ROLE_PROMPT,
@@ -113,6 +115,12 @@ class ChangeFieldView(discord.ui.View):
             await interaction.response.edit_message(
                 content="Who should lead this event?",
                 view=LeaderPickView(self._bot, self._draft),
+            )
+            return
+        if choice == "mentee":
+            await interaction.response.edit_message(
+                content=f"{MENTEE_SLOT_PROMPT} {MENTEE_SLOT_HINT}",
+                view=MenteeSlotPickView(self._bot, self._draft),
             )
             return
         if choice == "ping_roles":
@@ -345,6 +353,46 @@ class PingRolesPickView(discord.ui.View):
             len(role_ids),
         )
         await send_event_preview(self._bot, interaction, self._draft)
+
+
+class MenteeSlotPickView(discord.ui.View):
+    def __init__(self, bot: Gw2Bot, draft: EventDraft):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._draft = draft
+
+    async def _pick(
+        self,
+        interaction: discord.Interaction,
+        enabled: bool,
+    ) -> None:
+        # Turning the slot off leaves any claims on it where they are, unseen:
+        # the post stops showing the slot and nobody is asked about it, and
+        # turning it back on brings the same mentee back rather than making
+        # them ask again.
+        self._draft.mentee_enabled = enabled
+        LOGGER.debug(
+            "Event mentee slot picked; user_id=%s mentee_enabled=%s",
+            interaction.user.id,
+            enabled,
+        )
+        await send_event_preview(self._bot, interaction, self._draft)
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
+    async def mentee_yes(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[MenteeSlotPickView],
+    ) -> None:
+        await self._pick(interaction, True)
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
+    async def mentee_no(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[MenteeSlotPickView],
+    ) -> None:
+        await self._pick(interaction, False)
 
 
 class LeaderPickSelect(discord.ui.UserSelect["LeaderPickView"]):

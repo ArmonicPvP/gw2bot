@@ -42,6 +42,7 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    MenteeStatus,
     RepeatFrequency,
     RoleChange,
     RosterUpdate,
@@ -662,6 +663,80 @@ class TestEventEmbed:
             if field.name == "📌 Requirements"
         )
         assert field.value == "None"
+
+    def test_an_event_without_a_mentee_slot_does_not_show_one(self) -> None:
+        embed = event_embed(make_event(), [], EventStatus.OPEN)
+
+        assert not any(
+            (field.name or "").startswith("🎓") for field in embed.fields
+        )
+
+    def test_an_open_mentee_slot_sits_under_the_leader(self) -> None:
+        event = replace(make_event(), mentee_enabled=True)
+
+        embed = event_embed(event, [], EventStatus.OPEN)
+
+        names = [field.name for field in embed.fields]
+        assert names[:5] == [
+            "📅 Date & Time",
+            "⏳ Duration",
+            "👑 Leader",
+            "🎓 Mentee",
+            "📌 Requirements",
+        ]
+        assert embed.fields[3].value == "Open"
+        assert embed.fields[3].inline is False
+
+    def test_the_mentee_slot_names_its_holder_and_waitlist(self) -> None:
+        event = replace(make_event(EventCategory.WVW), mentee_enabled=True)
+        asked = datetime(2027, 1, 2, tzinfo=UTC)
+        signups = [
+            replace(
+                make_signup(11),
+                mentee=MenteeStatus.WAITLISTED,
+                mentee_requested_at=asked.replace(hour=3),
+            ),
+            replace(
+                make_signup(12),
+                mentee=MenteeStatus.MENTEE,
+                mentee_requested_at=asked.replace(hour=2),
+            ),
+            replace(
+                make_signup(13, waitlisted=True),
+                mentee=MenteeStatus.WAITLISTED,
+                mentee_requested_at=asked.replace(hour=1),
+            ),
+            make_signup(14),
+        ]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        mentee = next(
+            field for field in embed.fields if field.name == "🎓 Mentee"
+        )
+        # The holder, then everyone waiting in the order they asked.
+        assert mentee.value == (
+            f"<@12>\n└ {WAITLIST_EMOJI} <@13>\n└ {WAITLIST_EMOJI} <@11>"
+        )
+
+    def test_a_mentee_waitlist_without_a_holder_still_reads_open(
+        self,
+    ) -> None:
+        event = replace(make_event(EventCategory.WVW), mentee_enabled=True)
+        signups = [
+            replace(
+                make_signup(11, waitlisted=True),
+                mentee=MenteeStatus.WAITLISTED,
+                mentee_requested_at=datetime(2027, 1, 2, tzinfo=UTC),
+            ),
+        ]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        mentee = next(
+            field for field in embed.fields if field.name == "🎓 Mentee"
+        )
+        assert mentee.value == f"Open\n└ {WAITLIST_EMOJI} <@11>"
 
     def test_general_embed_lists_participants_without_a_cap(self) -> None:
         event = make_event(EventCategory.GENERAL)
