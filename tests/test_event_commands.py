@@ -5310,6 +5310,93 @@ class TestMenteeSignup:
             "and is now the 🎓 mentee"
         )
 
+    async def edit_lead_and_category(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        claims: tuple[int, ...],
+    ) -> Any:
+        """Hand the lead to member 11 and shrink the squad in one edit.
+
+        Members 11, 13 and three others fill a Story squad's five seats in
+        sign-up order, so member 12 - the last to sign up - loses their seat
+        when the category changes. Claims are made in the order given.
+        """
+        event, occurrence = self.make_event(store)
+        joined = FAR_FUTURE - timedelta(days=2)
+        for minutes, user_id in enumerate((11, 13, 21, 22, 23, 12)):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+                now=joined + timedelta(minutes=minutes),
+            )
+        for minutes, user_id in enumerate(claims):
+            store.set_signup_mentee(
+                occurrence.occurrence_id,
+                user_id,
+                True,
+                joined + timedelta(hours=1, minutes=minutes),
+            )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.leader_discord_id = 11
+        draft.category = EventCategory.STORY
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        await EventEditConfirmView(fake_bot, draft).save_changes.callback(
+            interaction
+        )
+        return occurrence
+
+    def mentee_announcements(self, channel: FakeChannel) -> list[str]:
+        return [
+            line
+            for call in channel.thread.send.await_args_list
+            for line in call.args[0].splitlines()
+            if "mentee" in line
+        ]
+
+    async def test_an_edit_names_only_whoever_ends_up_with_the_slot(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The new lead hands the slot to member 12, who asked next; the
+        # smaller squad then unseats 12, handing it on to member 13.
+        occurrence = await self.edit_lead_and_category(
+            fake_bot, store, (11, 12, 13)
+        )
+
+        assert self.mentee_of(store, occurrence, 13) is MenteeStatus.MENTEE
+        assert self.mentee_announcements(channel) == [
+            "└ <@13> moved up from the mentee waitlist and is now the 🎓 "
+            "mentee"
+        ]
+
+    async def test_an_edit_that_hands_the_slot_on_and_back_names_nobody(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Member 12 is handed the slot by the new lead and loses their seat
+        # to the smaller squad in the same edit, with nobody seated waiting.
+        occurrence = await self.edit_lead_and_category(
+            fake_bot, store, (11, 12)
+        )
+
+        assert (
+            self.mentee_of(store, occurrence, 12) is MenteeStatus.WAITLISTED
+        )
+        assert self.mentee_announcements(channel) == []
+
     def settings_labels(self, view: SignupSettingsView) -> list[str]:
         return [
             item.label or ""

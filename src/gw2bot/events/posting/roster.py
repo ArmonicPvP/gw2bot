@@ -1676,16 +1676,17 @@ def merge_roster_updates(
     promotion followed by later reassignments folds into one promotion line
     at the final seat, and users removed later in the same batch are dropped
     entirely - they are off the roster, so reporting a move or promotion for
-    them would be wrong. A move up into the mentee slot is reported once
-    however many updates carried it.
+    them would be wrong. Only the last move up into the mentee slot is
+    reported: there is one slot, so anybody an earlier update handed it to
+    has lost it again by the end of the batch.
     """
     removed = set(removed_user_ids)
     chains: dict[int, RoleChange] = {}
     promoted: dict[int, EventSignup] = {}
-    mentees: dict[int, EventSignup] = {}
+    mentee: EventSignup | None = None
     for update in updates:
         for signup in update.mentee_promoted:
-            mentees[signup.discord_user_id] = signup
+            mentee = signup
         for signup in update.promoted:
             promoted[signup.discord_user_id] = signup
         for change in update.reassigned:
@@ -1718,10 +1719,10 @@ def merge_roster_updates(
             for user_id, signup in promoted.items()
             if user_id not in removed
         ),
-        mentee_promoted=tuple(
-            signup
-            for user_id, signup in mentees.items()
-            if user_id not in removed
+        mentee_promoted=(
+            (mentee,)
+            if mentee is not None and mentee.discord_user_id not in removed
+            else ()
         ),
     )
 

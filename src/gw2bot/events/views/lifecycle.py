@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -397,6 +398,21 @@ async def apply_event_edit(
                 # The check's own movements are committed whatever the
                 # re-seat did, so they are still what gets announced.
                 roster_update = merge_roster_updates([roster_update, checked])
+        edit_before = mentee_rosters.get(occurrence.occurrence_id)
+        if edit_before is not None:
+            # A new leader handed the slot on, and a re-seat can then have
+            # unseated whoever it went to. Read across the whole edit, the
+            # slot is announced for whoever holds it now, and nobody is told
+            # they moved up into a slot they have already lost again.
+            roster_update = replace(
+                roster_update,
+                mentee_promoted=mentee_movement(
+                    bot,
+                    updated,
+                    current.occurrence_id,
+                    edit_before,
+                ).mentee_promoted,
+            )
         if not moving:
             # For an in-place refresh the thread is stable, so announce what
             # moved the roster now - the re-seat and the check folded, or just

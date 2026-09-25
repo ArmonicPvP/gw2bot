@@ -9812,9 +9812,7 @@ class TestMenteePromotionAnnouncements:
             RosterUpdate(mentee_promoted=(signup,))
         ) == [f"🔀 **Roster update**\n└ <@12> {MENTEE_LINE}"]
 
-    def test_a_batch_names_each_new_mentee_once_and_not_the_removed(
-        self,
-    ) -> None:
+    def test_a_batch_names_only_the_final_mentee(self) -> None:
         def mentee(user_id: int) -> EventSignup:
             return EventSignup(
                 occurrence_id=1,
@@ -9827,16 +9825,24 @@ class TestMenteePromotionAnnouncements:
                 mentee=MenteeStatus.MENTEE,
             )
 
-        merged = merge_roster_updates(
-            [
-                RosterUpdate(mentee_promoted=(mentee(12),)),
-                RosterUpdate(mentee_promoted=(mentee(12),)),
-                RosterUpdate(mentee_promoted=(mentee(13),)),
-            ],
-            [13],
-        )
+        def merged(*user_ids: int, removed: tuple[int, ...] = ()) -> list[int]:
+            return [
+                signup.discord_user_id
+                for signup in merge_roster_updates(
+                    [
+                        RosterUpdate(mentee_promoted=(mentee(user_id),))
+                        for user_id in user_ids
+                    ],
+                    removed,
+                ).mentee_promoted
+            ]
 
-        assert [
-            signup.discord_user_id for signup in merged.mentee_promoted
-        ] == [12]
-        assert merged.has_changes
+        # One slot: a later promotion means the earlier one was undone.
+        assert merged(12, 13) == [13]
+        assert merged(12, 12) == [12]
+        # The last holder left in the same batch, so nobody named here holds
+        # it; whoever that removal handed it to comes in a later update.
+        assert merged(12, 13, removed=(13,)) == []
+        assert merge_roster_updates(
+            [RosterUpdate(mentee_promoted=(mentee(12),))]
+        ).has_changes
