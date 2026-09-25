@@ -32,6 +32,7 @@ from gw2bot.events.models import (
     EventCategory,
     EventRole,
     EventStatus,
+    MenteeStatus,
     PreferenceMode,
     RepeatFrequency,
 )
@@ -70,6 +71,8 @@ from gw2bot.events.views import (
     EventSignOutButton,
     EventSignUpButton,
     FlexRolesSelect,
+    MenteeChoiceView,
+    MenteeSlotPickView,
     ADD_SELECT_MAX_MEMBERS,
     AddSignupsRoleSelect,
     AddSignupsRoleView,
@@ -83,6 +86,7 @@ from gw2bot.events.views import (
     RepeatChoiceView,
     RolePickSelect,
     RolePickView,
+    SignOutChoiceView,
     SignOutConfirmView,
     SignupFlow,
     SignupSettingsView,
@@ -950,6 +954,7 @@ class TestEventScheduleModal:
         modal.start_input._value = FUTURE_START_TEXT
         modal.duration_input._value = "01:30"
         modal.repeat._values = ["no"]
+        modal.mentee._values = ["no"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
@@ -968,6 +973,7 @@ class TestEventScheduleModal:
         modal.start_input._value = FUTURE_START_TEXT
         modal.duration_input._value = "01:30"
         modal.repeat._values = ["yes"]
+        modal.mentee._values = ["no"]
         interaction = make_interaction(message=ephemeral_message())
 
         await modal.on_submit(interaction)
@@ -983,6 +989,7 @@ class TestEventScheduleModal:
         modal.start_input._value = "01.30.2007 20:00"
         modal.duration_input._value = "01:30"
         modal.repeat._values = ["no"]
+        modal.mentee._values = ["no"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
@@ -1000,6 +1007,7 @@ class TestEventScheduleModal:
         modal.start_input._value = FUTURE_START_TEXT
         modal.duration_input._value = "ninety"
         modal.repeat._values = ["no"]
+        modal.mentee._values = ["no"]
         interaction = make_interaction()
 
         await modal.on_submit(interaction)
@@ -1015,7 +1023,11 @@ class TestEventScheduleModal:
             if isinstance(item, discord.ui.Label)
         ]
 
-        requirements = labels[-1]
+        (requirements,) = (
+            label
+            for label in labels
+            if label.component is modal.requirements_input
+        )
         assert requirements.text == "Requirements"
         assert (
             requirements.description
@@ -1030,6 +1042,7 @@ class TestEventScheduleModal:
         modal.start_input._value = FUTURE_START_TEXT
         modal.duration_input._value = "01:30"
         modal.repeat._values = ["no"]
+        modal.mentee._values = ["no"]
         modal.requirements_input._value = "  Level 80, exotic gear  "
         interaction = make_interaction()
 
@@ -1044,6 +1057,7 @@ class TestEventScheduleModal:
         modal.start_input._value = FUTURE_START_TEXT
         modal.duration_input._value = "01:30"
         modal.repeat._values = ["no"]
+        modal.mentee._values = ["no"]
         modal.requirements_input._value = "   "
         interaction = make_interaction()
 
@@ -1291,6 +1305,7 @@ class TestUnansweredRepeatSettings:
         modal.start_input._value = FUTURE_START_TEXT
         modal.duration_input._value = "01:30"
         modal.repeat._values = ["yes"]
+        modal.mentee._values = ["no"]
         interaction = make_interaction(message=ephemeral_message())
 
         await modal.on_submit(interaction)
@@ -1325,6 +1340,7 @@ class TestUnansweredRepeatSettings:
         schedule.start_input._value = FUTURE_START_TEXT
         schedule.duration_input._value = "01:30"
         schedule.repeat._values = ["yes"]
+        schedule.mentee._values = ["no"]
         await schedule.on_submit(make_interaction(message=ephemeral_message()))
 
         embeds, view = build_event_preview(make_bot(), draft)
@@ -3611,6 +3627,7 @@ def make_edit_event(
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     ping_role_ids: tuple[int, ...] = (),
     requirements: str = "",
+    mentee_enabled: bool = False,
 ) -> Any:
     return store.create_event(
         category=EventCategory.FRACTAL,
@@ -3624,6 +3641,7 @@ def make_edit_event(
         repeat_days=(),
         ping_role_ids=ping_role_ids,
         requirements=requirements,
+        mentee_enabled=mentee_enabled,
     )
 
 
@@ -3634,6 +3652,7 @@ def make_posted_edit_event(
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     ping_role_ids: tuple[int, ...] = (),
     requirements: str = "",
+    mentee_enabled: bool = False,
 ) -> Any:
     event = make_edit_event(
         store,
@@ -3641,6 +3660,7 @@ def make_posted_edit_event(
         repeat_frequency=repeat_frequency,
         ping_role_ids=ping_role_ids,
         requirements=requirements,
+        mentee_enabled=mentee_enabled,
     )
     occurrence = store.create_occurrence(event.event_id, event.start_time)
     store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
@@ -4525,6 +4545,7 @@ class TestRequirementsEndToEnd:
         schedule.start_input._value = FUTURE_START_TEXT
         schedule.duration_input._value = "01:30"
         schedule.repeat._values = ["no"]
+        schedule.mentee._values = ["no"]
         schedule.requirements_input._value = "Level 80, exotic gear"
         await schedule.on_submit(make_interaction())
         view = EventConfirmView(bot, draft)
@@ -4621,6 +4642,816 @@ class TestRequirementsEndToEnd:
         )
         assert label.text == "Requirements"
         assert label.description == "Event Requirements (Leave blank for none)"
+
+
+class TestMenteeSlotOption:
+    def test_the_schedule_step_asks_for_it(self) -> None:
+        modal = EventScheduleModal(make_bot(), make_complete_draft())
+        labels = [
+            item
+            for item in modal.children
+            if isinstance(item, discord.ui.Label)
+        ]
+
+        # The fifth and last component Discord allows a modal.
+        assert len(labels) == 5
+        (mentee,) = (
+            label for label in labels if label.component is modal.mentee
+        )
+        assert mentee.text == "Offer a mentee slot for Commander training?"
+        # Pre-selected, so a commander who wants none can pass it by.
+        assert [
+            option.value for option in modal.mentee.options if option.default
+        ] == ["no"]
+
+    async def test_the_schedule_step_stores_the_answer(self) -> None:
+        draft = make_complete_draft()
+        modal = EventScheduleModal(make_bot(), draft)
+        modal.start_input._value = FUTURE_START_TEXT
+        modal.duration_input._value = "01:30"
+        modal.repeat._values = ["no"]
+        modal.mentee._values = ["yes"]
+
+        await modal.on_submit(make_interaction())
+
+        assert draft.mentee_enabled is True
+        assert draft.to_event().mentee_enabled is True
+        # Reopened, the modal shows what was answered.
+        reopened = EventScheduleModal(make_bot(), draft)
+        assert [
+            option.value
+            for option in reopened.mentee.options
+            if option.default
+        ] == ["yes"]
+
+    async def test_change_something_turns_it_on_and_off(self) -> None:
+        assert "mentee" in [
+            option.value for option in ChangeFieldSelect().options
+        ]
+        draft = make_complete_draft()
+        view = ChangeFieldView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.handle_choice(interaction, "mentee")
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        picker = kwargs["view"]
+        assert isinstance(picker, MenteeSlotPickView)
+        assert "mentee" in kwargs["content"]
+
+        await picker.mentee_yes.callback(
+            make_interaction(message=ephemeral_message())
+        )
+        assert draft.mentee_enabled is True
+        preview = make_interaction(message=ephemeral_message())
+        await picker.mentee_no.callback(preview)
+        assert draft.mentee_enabled is False
+        # Back to the preview either way.
+        previewed = awaited_kwargs(preview.response.edit_message)
+        assert len(previewed["embeds"]) == 2
+
+    async def test_posting_stores_it_and_advertises_the_open_slot(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = replace(make_complete_draft(), mentee_enabled=True)
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        stored = store.get_event(1)
+        assert stored is not None
+        assert stored.mentee_enabled is True
+        assert any(
+            field.name == "🎓 Mentee" and field.value == "Open"
+            for field in channel.sent[0]["embed"].fields
+        )
+
+    async def test_editing_can_turn_it_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store, mentee_enabled=True)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        assert draft.mentee_enabled is True
+        await MenteeSlotPickView(fake_bot, draft).mentee_no.callback(
+            make_interaction(message=ephemeral_message())
+        )
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.mentee_enabled is False
+
+
+def awaited_kwargs(mock: Any) -> dict[str, Any]:
+    """The keyword arguments a mock was last awaited with."""
+    await_args = mock.await_args
+    assert await_args is not None
+    return await_args.kwargs
+
+
+MENTEE_QUESTION = (
+    "<@7> is looking for a mentee for this event for Commander training. "
+    "Would you like to sign up?"
+)
+
+
+class TestMenteeSignup:
+    def make_event(
+        self,
+        store: EventStore,
+        *,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+        leader_discord_id: int = 7,
+        mentee_enabled: bool = True,
+    ) -> Any:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=leader_discord_id,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=repeat_frequency,
+            repeat_days=(),
+            mentee_enabled=mentee_enabled,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        return event, stored
+
+    def seat(
+        self,
+        store: EventStore,
+        occurrence: Any,
+        user_id: int,
+        *,
+        mentee: bool = False,
+    ) -> None:
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=user_id,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        if mentee:
+            store.set_signup_mentee(occurrence.occurrence_id, user_id, True)
+
+    def mentee_of(self, store: EventStore, occurrence: Any, user_id: int):
+        signup = store.get_signup(occurrence.occurrence_id, user_id)
+        assert signup is not None
+        return signup.mentee
+
+    def flow_interaction(self) -> Any:
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def finalize(self, fake_bot: Any, event: Any, occurrence: Any):
+        interaction = self.flow_interaction()
+        await SignupFlow(fake_bot, event, occurrence, 42).finalize(
+            interaction
+        )
+        return awaited_kwargs(interaction.edit_original_response)
+
+    async def test_a_sign_up_ends_with_the_mentee_question(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+
+        kwargs = await self.finalize(fake_bot, event, occurrence)
+
+        assert kwargs["content"] == (
+            f"You signed up for the event.\n\n{MENTEE_QUESTION}"
+        )
+        view = kwargs["view"]
+        assert isinstance(view, MenteeChoiceView)
+        assert [
+            item.label
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ] == ["Yes", "No", "No, never ask again for this event"]
+        # Signing up is not asking: the member has no claim until they answer.
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
+
+    @pytest.mark.parametrize(
+        ("leader", "mentee_enabled", "declined"),
+        [
+            # The leader cannot be their own mentee.
+            (42, True, False),
+            # Nothing to ask about on an event that offers no slot.
+            (7, False, False),
+            # "Never ask again" holds for this event.
+            (7, True, True),
+        ],
+    )
+    async def test_the_question_is_not_asked_when_it_does_not_apply(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        leader: int,
+        mentee_enabled: bool,
+        declined: bool,
+    ) -> None:
+        event, occurrence = self.make_event(
+            store,
+            leader_discord_id=leader,
+            mentee_enabled=mentee_enabled,
+        )
+        if declined:
+            store.set_mentee_question_declined(event.event_id, 42, True)
+
+        kwargs = await self.finalize(fake_bot, event, occurrence)
+
+        assert kwargs["content"] == "You signed up for the event."
+        assert kwargs["view"] is None
+
+    async def test_never_asking_on_one_event_still_asks_on_another(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        declined_event, _ = self.make_event(store)
+        store.set_mentee_question_declined(declined_event.event_id, 42, True)
+        event, occurrence = self.make_event(store)
+
+        kwargs = await self.finalize(fake_bot, event, occurrence)
+
+        assert isinstance(kwargs["view"], MenteeChoiceView)
+
+    async def test_a_repeating_event_asks_it_after_automatic_sign_up(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+
+        kwargs = await self.finalize(fake_bot, event, occurrence)
+        auto = kwargs["view"]
+        assert isinstance(auto, AutoSignupChoiceView)
+        assert MENTEE_QUESTION not in kwargs["content"]
+        answer = make_interaction(message=ephemeral_message())
+        await auto.auto_yes.callback(answer)
+
+        answered = answer.response.edit_message.await_args.kwargs
+        assert answered["content"] == (
+            "You will be signed up automatically for future occurrences of "
+            f"this event.\n\n{MENTEE_QUESTION}"
+        )
+        assert isinstance(answered["view"], MenteeChoiceView)
+
+    async def test_no_mentee_question_after_signing_out_meanwhile(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        kwargs = await self.finalize(fake_bot, event, occurrence)
+        store.remove_signup(occurrence.occurrence_id, 42)
+        answer = make_interaction(message=ephemeral_message())
+
+        await kwargs["view"].auto_no.callback(answer)
+
+        answered = answer.response.edit_message.await_args.kwargs
+        assert MENTEE_QUESTION not in answered["content"]
+        assert answered["view"] is None
+
+    async def answer_yes(self, fake_bot: Any, event: Any, occurrence: Any):
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+        view = MenteeChoiceView(fake_bot, event, occurrence, 42)
+        await view.mentee_yes.callback(interaction)
+        return awaited_kwargs(interaction.edit_original_response)["content"]
+
+    async def test_yes_takes_the_open_slot(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42)
+
+        content = await self.answer_yes(fake_bot, event, occurrence)
+
+        assert content == "You signed up as the **mentee** for this event."
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.MENTEE
+
+    async def test_yes_joins_the_mentee_waitlist_when_it_is_taken(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 11, mentee=True)
+        self.seat(store, occurrence, 42)
+
+        content = await self.answer_yes(fake_bot, event, occurrence)
+
+        assert "already taken" in content
+        assert "mentee **waitlist**" in content
+        assert (
+            self.mentee_of(store, occurrence, 42) is MenteeStatus.WAITLISTED
+        )
+
+    async def test_yes_from_the_event_waitlist_waits_for_a_seat(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+
+        content = await self.answer_yes(fake_bot, event, occurrence)
+
+        assert "once you have a seat" in content
+        assert (
+            self.mentee_of(store, occurrence, 42) is MenteeStatus.WAITLISTED
+        )
+
+    async def test_yes_after_the_slot_was_turned_off_changes_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42)
+        stale = event
+        event = replace(event, mentee_enabled=False)
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            mentee_enabled=False,
+        )
+
+        content = await self.answer_yes(fake_bot, stale, occurrence)
+
+        assert "no longer looking for a mentee" in content
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
+
+    async def test_no_stores_nothing_and_never_is_remembered(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42)
+        view = MenteeChoiceView(fake_bot, event, occurrence, 42)
+        declined = make_interaction(message=ephemeral_message())
+
+        await view.mentee_no.callback(declined)
+
+        assert (
+            declined.response.edit_message.await_args.kwargs["content"]
+            == "You were not signed up as the mentee."
+        )
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
+        assert not store.mentee_question_declined(event.event_id, 42)
+
+        never = make_interaction(message=ephemeral_message())
+        await view.mentee_never.callback(never)
+
+        assert store.mentee_question_declined(event.event_id, 42)
+        assert "will not be asked" in (
+            never.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_never_is_not_stored_for_an_event_with_no_runs_left(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        store.retire_event(event.event_id, [])
+        interaction = make_interaction(message=ephemeral_message())
+
+        await MenteeChoiceView(
+            fake_bot, event, occurrence, 42
+        ).mentee_never.callback(interaction)
+
+        assert not store.mentee_question_declined(event.event_id, 42)
+        assert "no runs left" in (
+            interaction.response.edit_message.await_args.kwargs["content"]
+        )
+
+    async def test_pressing_sign_up_again_asks_a_member_on_the_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # An automatic sign-up never asks, so this is how a member it seated
+        # gets to volunteer.
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42)
+        interaction = make_interaction()
+
+        await start_signup_flow(
+            fake_bot,
+            interaction,
+            occurrence.occurrence_id,
+        )
+
+        kwargs = interaction.response.send_message.await_args
+        assert kwargs.args[0] == (
+            "You are already signed up for this event.\n\n"
+            f"{MENTEE_QUESTION}"
+        )
+        assert isinstance(kwargs.kwargs["view"], MenteeChoiceView)
+
+    async def test_pressing_sign_up_again_says_where_the_claim_stands(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 11, mentee=True)
+        self.seat(store, occurrence, 42, mentee=True)
+        interaction = make_interaction()
+
+        await start_signup_flow(
+            fake_bot,
+            interaction,
+            occurrence.occurrence_id,
+        )
+
+        kwargs = interaction.response.send_message.await_args
+        assert kwargs.args[0] == (
+            "You are already signed up for this event. You are also on the "
+            "mentee **waitlist**."
+        )
+        assert "view" not in kwargs.kwargs
+
+    async def press_sign_out(self, fake_bot: Any, occurrence: Any) -> Any:
+        interaction = make_interaction()
+        interaction.client = fake_bot
+        button = EventSignOutButton(occurrence.occurrence_id)
+        await button.callback(interaction)
+        return interaction.response.send_message.await_args
+
+    async def test_sign_out_asks_whether_it_is_the_event_or_the_slot(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42, mentee=True)
+
+        sent = await self.press_sign_out(fake_bot, occurrence)
+
+        assert "sign out of the event, or sign out of being the mentee" in (
+            sent.args[0]
+        )
+        view = sent.kwargs["view"]
+        assert isinstance(view, SignOutChoiceView)
+        assert [
+            item.label
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ] == ["Event", "Mentee"]
+
+    async def test_sign_out_from_the_mentee_waitlist_names_it(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 11, mentee=True)
+        self.seat(store, occurrence, 42, mentee=True)
+
+        sent = await self.press_sign_out(fake_bot, occurrence)
+
+        assert "leave the mentee waitlist" in sent.args[0]
+        assert isinstance(sent.kwargs["view"], SignOutChoiceView)
+
+    async def test_a_claim_hidden_by_a_switched_off_slot_can_still_go(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, mentee_enabled=False)
+        self.seat(store, occurrence, 42, mentee=True)
+
+        sent = await self.press_sign_out(fake_bot, occurrence)
+
+        assert "not looking for a mentee right now" in sent.args[0]
+        view = sent.kwargs["view"]
+        assert isinstance(view, SignOutChoiceView)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+
+        await view.sign_out_mentee.callback(interaction)
+
+        # Only the claim went, so turning the slot back on will not restore it.
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
+
+    async def test_sign_out_without_a_claim_confirms_as_before(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42)
+
+        sent = await self.press_sign_out(fake_bot, occurrence)
+
+        assert sent.args[0] == "Would you like to be removed from this event?"
+        assert isinstance(sent.kwargs["view"], SignOutConfirmView)
+
+    async def test_mentee_gives_up_the_slot_and_keeps_the_seat(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42, mentee=True)
+        self.seat(store, occurrence, 11, mentee=True)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+
+        await SignOutChoiceView(
+            fake_bot, event, occurrence
+        ).sign_out_mentee.callback(interaction)
+
+        assert awaited_kwargs(interaction.edit_original_response)[
+            "content"
+        ] == (
+            "You are no longer signed up as the mentee. You are still signed "
+            "up for the event."
+        )
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.NONE
+        assert self.mentee_of(store, occurrence, 11) is MenteeStatus.MENTEE
+        # The next in line is told in the thread.
+        announcement = channel.thread.send.await_args
+        assert announcement is not None
+        assert announcement.args[0] == (
+            "🔀 **Roster update**\n└ <@11> moved up from the mentee waitlist "
+            "and is now the 🎓 mentee"
+        )
+        # The post shows who holds the slot now.
+        embed = channel.partial_message.edit.await_args.kwargs["embed"]
+        assert any(
+            field.name == "🎓 Mentee" and field.value == "<@11>"
+            for field in embed.fields
+        )
+
+    async def test_event_signs_out_and_hands_the_slot_on(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42, mentee=True)
+        self.seat(store, occurrence, 11, mentee=True)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+
+        await SignOutChoiceView(
+            fake_bot, event, occurrence
+        ).sign_out_event.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+        assert self.mentee_of(store, occurrence, 11) is MenteeStatus.MENTEE
+        assert awaited_kwargs(interaction.edit_original_response)[
+            "content"
+        ] == "You were removed from the event."
+
+    async def test_mentee_after_the_event_ended_changes_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 42, mentee=True)
+        store.set_occurrence_status(occurrence.occurrence_id, EventStatus.OVER)
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.edit_original_response = AsyncMock()
+
+        await SignOutChoiceView(
+            fake_bot, event, occurrence
+        ).sign_out_mentee.callback(interaction)
+
+        assert "already ended" in (
+            awaited_kwargs(interaction.edit_original_response)["content"]
+        )
+        assert self.mentee_of(store, occurrence, 42) is MenteeStatus.MENTEE
+
+    async def test_handing_the_lead_to_the_mentee_announces_the_next(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        self.seat(store, occurrence, 11, mentee=True)
+        self.seat(store, occurrence, 12, mentee=True)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.leader_discord_id = 11
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await EventEditConfirmView(fake_bot, draft).save_changes.callback(
+            interaction
+        )
+
+        assert self.mentee_of(store, occurrence, 11) is MenteeStatus.NONE
+        assert self.mentee_of(store, occurrence, 12) is MenteeStatus.MENTEE
+        announcement = channel.thread.send.await_args
+        assert announcement is not None
+        assert announcement.args[0] == (
+            "🔀 **Roster update**\n└ <@12> moved up from the mentee waitlist "
+            "and is now the 🎓 mentee"
+        )
+
+    async def edit_lead_and_category(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        claims: tuple[int, ...],
+    ) -> Any:
+        """Hand the lead to member 11 and shrink the squad in one edit.
+
+        Members 11, 13 and three others fill a Story squad's five seats in
+        sign-up order, so member 12 - the last to sign up - loses their seat
+        when the category changes. Claims are made in the order given.
+        """
+        event, occurrence = self.make_event(store)
+        joined = FAR_FUTURE - timedelta(days=2)
+        for minutes, user_id in enumerate((11, 13, 21, 22, 23, 12)):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+                now=joined + timedelta(minutes=minutes),
+            )
+        for minutes, user_id in enumerate(claims):
+            store.set_signup_mentee(
+                occurrence.occurrence_id,
+                user_id,
+                True,
+                joined + timedelta(hours=1, minutes=minutes),
+            )
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.leader_discord_id = 11
+        draft.category = EventCategory.STORY
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        await EventEditConfirmView(fake_bot, draft).save_changes.callback(
+            interaction
+        )
+        return occurrence
+
+    def mentee_announcements(self, channel: FakeChannel) -> list[str]:
+        return [
+            line
+            for call in channel.thread.send.await_args_list
+            for line in call.args[0].splitlines()
+            if "mentee" in line
+        ]
+
+    async def test_an_edit_names_only_whoever_ends_up_with_the_slot(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The new lead hands the slot to member 12, who asked next; the
+        # smaller squad then unseats 12, handing it on to member 13.
+        occurrence = await self.edit_lead_and_category(
+            fake_bot, store, (11, 12, 13)
+        )
+
+        assert self.mentee_of(store, occurrence, 13) is MenteeStatus.MENTEE
+        assert self.mentee_announcements(channel) == [
+            "└ <@13> moved up from the mentee waitlist and is now the 🎓 "
+            "mentee"
+        ]
+
+    async def test_an_edit_that_hands_the_slot_on_and_back_names_nobody(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Member 12 is handed the slot by the new lead and loses their seat
+        # to the smaller squad in the same edit, with nobody seated waiting.
+        occurrence = await self.edit_lead_and_category(
+            fake_bot, store, (11, 12)
+        )
+
+        assert (
+            self.mentee_of(store, occurrence, 12) is MenteeStatus.WAITLISTED
+        )
+        assert self.mentee_announcements(channel) == []
+
+    def settings_labels(self, view: SignupSettingsView) -> list[str]:
+        return [
+            item.label or ""
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+        ]
+
+    async def test_settings_show_and_undo_never_ask_again(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store)
+        store.set_mentee_question_declined(event.event_id, 42, True)
+
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+
+        assert "Ask me about the mentee slot again" in self.settings_labels(
+            view
+        )
+        assert "Mentee question for this event: **never ask**" in (
+            _describe_signup_settings(fake_bot, event, 42)
+        )
+        button = next(
+            item
+            for item in view.children
+            if isinstance(item, discord.ui.Button)
+            and item.label == "Ask me about the mentee slot again"
+        )
+        interaction = make_interaction(message=ephemeral_message())
+
+        await button.callback(interaction)
+
+        assert not store.mentee_question_declined(event.event_id, 42)
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "never ask" not in kwargs["content"]
+        assert "Press **Sign up**" in kwargs["content"]
+        assert "Ask me about the mentee slot again" not in (
+            self.settings_labels(kwargs["view"])
+        )
+
+    def test_settings_say_nothing_about_a_slot_the_event_lacks(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_event(store, mentee_enabled=False)
+        store.set_mentee_question_declined(event.event_id, 42, True)
+
+        view = SignupSettingsView(fake_bot, event, occurrence, 42)
+
+        assert "Ask me about the mentee slot again" not in (
+            self.settings_labels(view)
+        )
+        assert "Mentee" not in _describe_signup_settings(fake_bot, event, 42)
 
 
 class TestEventEditConfirmView:

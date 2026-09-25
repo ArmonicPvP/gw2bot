@@ -1,7 +1,8 @@
 """Who is seated on an occurrence, and every way that changes.
 
 Seating and removing a sign-up, rebalancing roles around it, re-checking that
-seated members are still in the guild, and applying a commander's edits.
+seated members are still in the guild, applying a commander's edits, and a
+member's claim on the mentee slot.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    MenteeStatus,
     RoleChange,
     RosterAssignment,
     RosterCandidate,
@@ -390,6 +392,10 @@ async def remove_signup(
         return None, checked
     occurrence = current
     event = edited
+    # Read in the same synchronous stretch as the removal and the resettle,
+    # so what it is compared against afterwards is only their doing: either
+    # can hand the mentee slot to the next member in line.
+    mentee_before = mentee_snapshot(bot, event, occurrence.occurrence_id)
     # The write itself is guarded like the reads above it, and answered the
     # same way: nothing of this call is committed, so RosterUnreadable is
     # exactly what happened, and the callers that already handle it - a
@@ -474,10 +480,19 @@ async def remove_signup(
                 discord_user_id,
                 type(exc).__name__,
             )
+    mentee = mentee_movement(
+        bot,
+        event,
+        occurrence.occurrence_id,
+        mentee_before,
+    )
     # The check moved the roster first and this removal moved it after, so
     # they fold into one line per member with this member dropped: whatever
     # seat the check gave them, they are off the roster now.
-    update = merge_roster_updates([checked, update], [discord_user_id])
+    update = merge_roster_updates(
+        [checked, update, mentee],
+        [discord_user_id],
+    )
     await update_thread_membership(
         bot,
         occurrence,
@@ -488,6 +503,154 @@ async def remove_signup(
         await notify_roster_update(bot, occurrence, update)
     await refresh_occurrence_message(bot, event, occurrence)
     return removed, update
+
+
+MENTEE_ENDED_MESSAGE = (
+    "This event has already ended, so its roster can no longer be changed."
+)
+
+
+async def set_mentee_request(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+    *,
+    requested: bool,
+) -> EventSignup:
+    """Put a member's claim on the mentee slot, or take it back.
+
+    Only ever called for the member themselves answering: nothing seeds a
+    claim, so an automatic sign-up can never make somebody a mentee. Whether
+    the claim holds the slot or joins its waitlist is the store's to settle,
+    and the row it returns says which.
+
+    The question and the sign-out choice can both sit open until they time
+    out, so the run is read back before anything is written: a run that has
+    ended keeps the roster it had, and an event that has stopped offering the
+    slot takes no new claims - though a member can always give one up.
+    Raises ValueError with the text to show the member when nothing changed.
+    """
+    # As in seat_signup above.
+    from gw2bot.events.posting.messages import (
+        refresh_occurrence_message,
+    )
+
+    try:
+        current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+        edited = bot.event_store.get_event(event.event_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the run back for a mentee claim; "
+            "occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        raise ValueError(
+            "The roster could not be read just now. Try again in a moment."
+        ) from exc
+    if current is None or edited is None or edited.cancelled:
+        raise ValueError("This event is no longer available.")
+    if occurrence_finished(edited, current):
+        LOGGER.debug(
+            "Refused a mentee claim on a finished run; occurrence_id=%s "
+            "user_id=%s requested=%s",
+            current.occurrence_id,
+            discord_user_id,
+            requested,
+        )
+        raise ValueError(MENTEE_ENDED_MESSAGE)
+    if requested and discord_user_id == edited.leader_discord_id:
+        # Asked before they were made the leader, answered after.
+        LOGGER.debug(
+            "Refused a mentee claim from the event's leader; event_id=%s "
+            "user_id=%s",
+            edited.event_id,
+            discord_user_id,
+        )
+        raise ValueError(
+            "You are leading this event now, so you cannot also be its "
+            "mentee."
+        )
+    if requested and not edited.mentee_enabled:
+        LOGGER.debug(
+            "Refused a mentee claim on an event without the slot; "
+            "event_id=%s user_id=%s",
+            edited.event_id,
+            discord_user_id,
+        )
+        raise ValueError(
+            "This event is no longer looking for a mentee, so nothing was "
+            "changed."
+        )
+    # Giving up the slot hands it to the next member in line, who is told in
+    # the thread the way a promotion off the event's waitlist is.
+    mentee_before = mentee_snapshot(bot, edited, current.occurrence_id)
+    try:
+        signup = bot.event_store.set_signup_mentee(
+            current.occurrence_id,
+            discord_user_id,
+            requested,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not store a mentee claim; occurrence_id=%s user_id=%s "
+            "error_type=%s",
+            current.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        raise ValueError(
+            "The roster could not be updated just now. Try again in a "
+            "moment."
+        ) from exc
+    LOGGER.debug(
+        "Applied a mentee claim; occurrence_id=%s user_id=%s requested=%s "
+        "status=%s waitlisted=%s",
+        current.occurrence_id,
+        discord_user_id,
+        requested,
+        signup.mentee.value,
+        signup.waitlisted,
+    )
+    await notify_roster_update(
+        bot,
+        current,
+        mentee_movement(
+            bot,
+            edited,
+            current.occurrence_id,
+            mentee_before,
+        ),
+    )
+    # The claim is committed, so a store refusing the refresh costs the post
+    # its update rather than the member their answer. The run is flagged so
+    # the maintenance pass re-renders it: nothing else would until the next
+    # roster or status change, and the post would go on naming the old
+    # mentee.
+    try:
+        await refresh_occurrence_message(bot, edited, current)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not refresh the event after a mentee claim; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+        try:
+            bot.event_store.set_occurrence_needs_refresh(
+                current.occurrence_id,
+                True,
+            )
+        except SQLAlchemyError as flag_error:
+            LOGGER.error(
+                "Could not flag the event for a refresh after a mentee "
+                "claim; occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(flag_error).__name__,
+            )
+    return signup
 
 
 def departed_roster_members(
@@ -509,10 +672,80 @@ def departed_roster_members(
     ]
 
 
+def _mentee_promotions(
+    before: Sequence[EventSignup],
+    after: Sequence[EventSignup],
+) -> tuple[EventSignup, ...]:
+    """Who moved up from the mentee waitlist into the slot between readings.
+
+    A member who took an open slot by answering the question themselves was
+    never waiting, so they are not reported: they have their answer already.
+    """
+    was = {signup.discord_user_id: signup.mentee for signup in before}
+    return tuple(
+        signup
+        for signup in after
+        if signup.mentee is MenteeStatus.MENTEE
+        and was.get(signup.discord_user_id) is MenteeStatus.WAITLISTED
+    )
+
+
+def mentee_snapshot(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence_id: int,
+) -> list[EventSignup] | None:
+    """The roster to compare the mentee slot against, if it is worth reading.
+
+    None when the event does not show the slot - claims left from before it
+    was turned off still move, but nobody can see them, so announcing one
+    would name a slot the post does not have - or when the store will not
+    say. The change being read around goes ahead either way: this only costs
+    the announcement.
+    """
+    if not event.mentee_enabled:
+        return None
+    try:
+        return bot.event_store.get_signups(occurrence_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster for the mentee slot; "
+            "occurrence_id=%s error_type=%s",
+            occurrence_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+def mentee_movement(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence_id: int,
+    before: Sequence[EventSignup] | None,
+) -> RosterUpdate:
+    """The mentee promotion a change made, read against its earlier roster."""
+    if before is None:
+        return RosterUpdate()
+    after = mentee_snapshot(bot, event, occurrence_id)
+    if after is None:
+        return RosterUpdate()
+    promoted = _mentee_promotions(before, after)
+    if promoted:
+        LOGGER.debug(
+            "The mentee slot moved to the next in line; occurrence_id=%s "
+            "promoted=%s",
+            occurrence_id,
+            len(promoted),
+        )
+    return RosterUpdate(mentee_promoted=promoted)
+
+
 def _roster_movement(
     before: Sequence[EventSignup],
     after: Sequence[EventSignup],
     removed_user_id: int,
+    *,
+    mentee_enabled: bool = False,
 ) -> RosterUpdate:
     """What changed between two readings of one roster, minus who left.
 
@@ -547,6 +780,9 @@ def _roster_movement(
     return RosterUpdate(
         reassigned=tuple(reassigned),
         promoted=tuple(promoted),
+        mentee_promoted=(
+            _mentee_promotions(before, after) if mentee_enabled else ()
+        ),
     )
 
 
@@ -725,13 +961,15 @@ async def prune_departed_signups(
                 # above reports only what it moved itself, and it moves
                 # nothing when the first one had already landed.
                 try:
+                    after = bot.event_store.get_signups(
+                        current.occurrence_id
+                    )
                     updates.append(
                         _roster_movement(
                             before,
-                            bot.event_store.get_signups(
-                                current.occurrence_id
-                            ),
+                            after,
                             user_id,
+                            mentee_enabled=event.mentee_enabled,
                         )
                     )
                 except SQLAlchemyError:
@@ -1172,6 +1410,14 @@ def rebalance_occurrence_roster(
         occurrence.occurrence_id,
         assignments,
     )
+    # A new category re-seats everyone, which can unseat the mentee or seat
+    # somebody waiting for the slot.
+    mentee = mentee_movement(
+        bot,
+        event,
+        occurrence.occurrence_id,
+        signups if event.mentee_enabled else None,
+    )
     LOGGER.debug(
         "Rebalanced event roster for a new category; occurrence_id=%s "
         "category=%s signups=%s changed=%s",
@@ -1183,6 +1429,7 @@ def rebalance_occurrence_roster(
     return len(assignments), RosterUpdate(
         reassigned=tuple(reassigned),
         promoted=tuple(promoted),
+        mentee_promoted=mentee.mentee_promoted,
     )
 
 
@@ -1362,10 +1609,11 @@ async def notify_roster_update(
     if occurrence.thread_id is None:
         LOGGER.debug(
             "Skipped roster update notification without a thread; "
-            "occurrence_id=%s reassigned=%s promoted=%s",
+            "occurrence_id=%s reassigned=%s promoted=%s mentee_promoted=%s",
             occurrence.occurrence_id,
             len(update.reassigned),
             len(update.promoted),
+            len(update.mentee_promoted),
         )
         return
     # An event posted into a dormant forum post has to reopen it before the
@@ -1406,12 +1654,13 @@ async def notify_roster_update(
             sent += 1
     LOGGER.debug(
         "Sent roster update notification; occurrence_id=%s sent=%s parts=%s "
-        "reassigned=%s promoted=%s",
+        "reassigned=%s promoted=%s mentee_promoted=%s",
         occurrence.occurrence_id,
         sent,
         len(contents),
         len(update.reassigned),
         len(update.promoted),
+        len(update.mentee_promoted),
     )
 
 
@@ -1427,12 +1676,17 @@ def merge_roster_updates(
     promotion followed by later reassignments folds into one promotion line
     at the final seat, and users removed later in the same batch are dropped
     entirely - they are off the roster, so reporting a move or promotion for
-    them would be wrong.
+    them would be wrong. Only the last move up into the mentee slot is
+    reported: there is one slot, so anybody an earlier update handed it to
+    has lost it again by the end of the batch.
     """
     removed = set(removed_user_ids)
     chains: dict[int, RoleChange] = {}
     promoted: dict[int, EventSignup] = {}
+    mentee: EventSignup | None = None
     for update in updates:
+        for signup in update.mentee_promoted:
+            mentee = signup
         for signup in update.promoted:
             promoted[signup.discord_user_id] = signup
         for change in update.reassigned:
@@ -1465,6 +1719,11 @@ def merge_roster_updates(
             for user_id, signup in promoted.items()
             if user_id not in removed
         ),
+        mentee_promoted=(
+            (mentee,)
+            if mentee is not None and mentee.discord_user_id not in removed
+            else ()
+        ),
     )
 
 
@@ -1493,6 +1752,10 @@ def _without_member(update: RosterUpdate, discord_user_id: int) -> RosterUpdate:
             for signup in update.promoted
             if signup.discord_user_id != discord_user_id
         ),
+        # Kept whoever it names, the editor included: an edit that seats a
+        # member waiting for the mentee slot hands it to them, and the
+        # summary the editor sees is about their roles, not the slot.
+        mentee_promoted=update.mentee_promoted,
     )
 
 
@@ -1733,6 +1996,21 @@ async def apply_signup_edit(
             discord_user_id,
             type(exc).__name__,
         )
+    # The roster the edit was judged against is the one it changed: nothing
+    # awaited between that read and the writes above. An edit can cost a
+    # mentee their seat, or seat somebody waiting for the slot, and either
+    # hands it on.
+    update = merge_roster_updates(
+        [
+            update,
+            mentee_movement(
+                bot,
+                event,
+                occurrence.occurrence_id,
+                signups if event.mentee_enabled else None,
+            ),
+        ]
+    )
     # The edit is committed by here, so this read is outside the guard above:
     # answering a refusal with "try again" would spend a second edit token on
     # a change that is already on the roster, and lose the announcement and

@@ -30,6 +30,8 @@ from gw2bot.events.models import (
     RosterUpdate,
     count_roster,
     is_roster_full,
+    mentee_holder,
+    mentee_waitlist,
 )
 from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 
@@ -46,6 +48,15 @@ EMPTY_FIELD_TEXT = "—"
 DRAFT_PENDING_TEXT = "Not set yet"
 # What an event whose commander left the requirements blank shows for them.
 NO_REQUIREMENTS_TEXT = "None"
+MENTEE_FIELD_NAME = "🎓 Mentee"
+# What the mentee slot shows while nobody with a seat holds it, which is also
+# the post advertising that the leader is still looking for one.
+MENTEE_OPEN_TEXT = "Open"
+# How many members waiting for the mentee slot the post names. The field sits
+# under the leader, ahead of the roster, and an over-long embed is trimmed from
+# its last fields first - so an unbounded list here could push the roster
+# itself out of an uncapped event's post. Everyone past this is counted.
+MENTEE_WAITLIST_SHOWN = 5
 # Marks a waitlisted member, both as the Waitlist section header and as the
 # prefix on a waitlisted entry listed under its Healer/DPS section.
 WAITLIST_EMOJI = "⌛️"
@@ -281,14 +292,15 @@ PING_REQUIREMENTS_HEADER = "📌 **Requirements:**"
 def roster_update_messages(update: RosterUpdate) -> list[str]:
     """Announce a roster mutation, split to stay inside Discord's limit.
 
-    One batched thread message per roster mutation: every reassigned member
-    and waitlist promotion is listed once, so a single signup or departure
-    never produces more than one ping. That is almost always a single message
-    - a mutation moves a handful of members - but an uncapped category
-    (General) has no bound on its roster, and switching a capped event to one
-    promotes the whole waitlist at once, which can outgrow a single message.
-    The lines are therefore split over as many messages as they need, each
-    repeating the header so every part reads as a roster update on its own.
+    One batched thread message per roster mutation: every reassigned member,
+    waitlist promotion and move up into the mentee slot is listed once, so a
+    single signup or departure never produces more than one ping. That is
+    almost always a single message - a mutation moves a handful of members -
+    but an uncapped category (General) has no bound on its roster, and
+    switching a capped event to one promotes the whole waitlist at once, which
+    can outgrow a single message. The lines are therefore split over as many
+    messages as they need, each repeating the header so every part reads as a
+    roster update on its own.
     Returns an empty list when there is nothing to announce.
     """
     if not update.has_changes:
@@ -310,6 +322,11 @@ def roster_update_messages(update: RosterUpdate) -> list[str]:
             seat = ""
         lines.append(
             f"└ <@{signup.discord_user_id}> moved up from the waitlist{seat}"
+        )
+    for signup in update.mentee_promoted:
+        lines.append(
+            f"└ <@{signup.discord_user_id}> moved up from the mentee waitlist "
+            "and is now the 🎓 mentee"
         )
     return _chunk_message_lines(ROSTER_UPDATE_HEADER, lines)
 
@@ -472,6 +489,28 @@ def _waitlisted_member_line(signup: EventSignup) -> str:
     return f"└ {WAITLIST_EMOJI} {emoji}<@{signup.discord_user_id}>"
 
 
+def _mentee_lines(signups: list[EventSignup]) -> list[str]:
+    # The holder first, then whoever is waiting for the slot in the order they
+    # asked, marked the way the roster marks its own waitlist.
+    holder = mentee_holder(signups)
+    lines = [
+        f"<@{holder.discord_user_id}>"
+        if holder is not None
+        else MENTEE_OPEN_TEXT
+    ]
+    waiting = mentee_waitlist(signups)
+    lines.extend(
+        f"└ {WAITLIST_EMOJI} <@{signup.discord_user_id}>"
+        for signup in waiting[:MENTEE_WAITLIST_SHOWN]
+    )
+    if len(waiting) > MENTEE_WAITLIST_SHOWN:
+        lines.append(
+            f"└ {WAITLIST_EMOJI} …and {len(waiting) - MENTEE_WAITLIST_SHOWN} "
+            "more"
+        )
+    return lines
+
+
 def _role_group_lines(signups: list[EventSignup]) -> list[str]:
     lines: list[str] = []
     for signup in signups:
@@ -618,6 +657,10 @@ def event_embed(
         value=f"<@{event.leader_discord_id}>",
         inline=True,
     )
+    if event.mentee_enabled:
+        # Straight under the leader, whom the mentee co-leads with. Only an
+        # event offering the slot shows it: most never will.
+        _add_chunked_field(embed, MENTEE_FIELD_NAME, _mentee_lines(signups))
     # Always shown, so a member never has to wonder whether an event without
     # requirements simply predates them.
     embed.add_field(

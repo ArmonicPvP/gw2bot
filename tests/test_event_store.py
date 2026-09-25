@@ -10,6 +10,7 @@ from gw2bot.events.models import (
     EventCategory,
     EventRole,
     EventStatus,
+    MenteeStatus,
     PreferenceMode,
     RepeatFrequency,
     RosterAssignment,
@@ -382,6 +383,62 @@ def test_migration_scopes_legacy_signup_preferences_to_events(
         # A legacy row for someone with no signups at all has no event to
         # belong to and is dropped.
         assert store.get_signup_preference(1, 7) is None
+    finally:
+        store.close()
+
+
+def test_migration_adds_the_mentee_columns_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before events
+    # offered a mentee slot by dropping its columns and inserting legacy rows.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_events DROP COLUMN mentee_enabled")
+        )
+        for column in ("mentee", "mentee_requested_at"):
+            connection.execute(
+                text(f"ALTER TABLE gw2_event_signups DROP COLUMN {column}")
+            )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat, ping_role_ids, requirements) "
+                "VALUES ('Fractal', 't', 'd', 1, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0, '', '')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_event_signups (occurrence_id, "
+                "discord_user_id, role, assigned_role, flex_roles, "
+                "signed_up_at, waitlisted, edit_tokens) VALUES "
+                "(1, 2, 'Just DPS', 'Just DPS', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 3.0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert {"mentee_enabled", "mentee", "mentee_requested_at"} <= added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_event(1)
+        assert legacy is not None
+        # An event created before the slot existed never offered one, and no
+        # signup made before it could have asked for it.
+        assert legacy.mentee_enabled is False
+        signup = store.get_signup(1, 2)
+        assert signup is not None
+        assert signup.mentee is MenteeStatus.NONE
+        assert signup.mentee_requested_at is None
     finally:
         store.close()
 
@@ -1884,3 +1941,318 @@ class TestEventStoreLoggingSafety:
 
         assert title not in caplog.text
         assert description not in caplog.text
+
+
+class TestEventStoreMenteeSlot:
+    def make_roster(
+        self,
+        store: EventStore,
+        seated: tuple[int, ...] = (),
+        waitlisted: tuple[int, ...] = (),
+    ) -> int:
+        event = create_event(
+            store,
+            category=EventCategory.WVW,
+            mentee_enabled=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, START)
+        for user_id in (*seated, *waitlisted):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=user_id in waitlisted,
+            )
+        return occurrence.occurrence_id
+
+    def status(
+        self,
+        store: EventStore,
+        occurrence_id: int,
+        user_id: int,
+    ) -> MenteeStatus:
+        signup = store.get_signup(occurrence_id, user_id)
+        assert signup is not None
+        return signup.mentee
+
+    def ask(
+        self,
+        store: EventStore,
+        occurrence_id: int,
+        user_id: int,
+        minutes: int,
+    ) -> MenteeStatus:
+        return store.set_signup_mentee(
+            occurrence_id,
+            user_id,
+            True,
+            START - timedelta(days=1) + timedelta(minutes=minutes),
+        ).mentee
+
+    def test_the_setting_round_trips_through_create_and_update(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(store, mentee_enabled=True)
+        loaded = store.get_event(created.event_id)
+        assert loaded is not None
+        assert loaded.mentee_enabled is True
+
+        updated = store.update_event(
+            event_id=created.event_id,
+            category=created.category,
+            title=created.title,
+            description=created.description,
+            channel_id=created.channel_id,
+            leader_discord_id=created.leader_discord_id,
+            start_time=created.start_time,
+            duration_minutes=created.duration_minutes,
+            repeat_frequency=created.repeat_frequency,
+            repeat_days=created.repeat_days,
+        )
+
+        assert updated.mentee_enabled is False
+        # An event nobody turned it on for does not offer one.
+        assert create_event(store).mentee_enabled is False
+
+    def test_the_first_seated_member_to_ask_holds_it_and_the_rest_wait(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1, 2, 3))
+
+        assert self.ask(store, occurrence_id, 2, 0) is MenteeStatus.MENTEE
+        assert self.ask(store, occurrence_id, 3, 5) is MenteeStatus.WAITLISTED
+        assert self.ask(store, occurrence_id, 1, 10) is MenteeStatus.WAITLISTED
+
+        signup = store.get_signup(occurrence_id, 3)
+        assert signup is not None
+        # The ask is timed when it was made, which orders the waitlist.
+        assert signup.mentee_requested_at == (
+            START - timedelta(days=1) + timedelta(minutes=5)
+        )
+        # A member without a claim is untouched by any of it.
+        store.add_signup(
+            occurrence_id=occurrence_id,
+            discord_user_id=4,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        assert self.status(store, occurrence_id, 4) is MenteeStatus.NONE
+
+    def test_asking_again_keeps_the_place_in_the_queue(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1, 2, 3))
+        self.ask(store, occurrence_id, 1, 0)
+        self.ask(store, occurrence_id, 2, 5)
+        self.ask(store, occurrence_id, 3, 10)
+
+        # Asking again later must not move the member behind anybody.
+        self.ask(store, occurrence_id, 2, 60)
+        store.set_signup_mentee(occurrence_id, 1, False)
+
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
+        assert self.status(store, occurrence_id, 3) is MenteeStatus.WAITLISTED
+
+    def test_a_member_without_a_seat_waits_even_for_a_free_slot(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1,), waitlisted=(2,))
+
+        assert self.ask(store, occurrence_id, 2, 0) is MenteeStatus.WAITLISTED
+
+        # A promotion into a seat is what hands them the slot.
+        store.apply_roster_assignments(
+            occurrence_id,
+            [RosterAssignment(2, None, None, False)],
+        )
+
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
+
+    def test_a_seated_mentee_is_not_displaced_by_an_earlier_ask(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1,), waitlisted=(2,))
+        self.ask(store, occurrence_id, 2, 0)
+        self.ask(store, occurrence_id, 1, 5)
+        assert self.status(store, occurrence_id, 1) is MenteeStatus.MENTEE
+
+        store.apply_roster_assignments(
+            occurrence_id,
+            [RosterAssignment(2, None, None, False)],
+        )
+
+        # Member 2 asked first, but member 1 already holds the slot.
+        assert self.status(store, occurrence_id, 1) is MenteeStatus.MENTEE
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.WAITLISTED
+
+    def test_signing_out_hands_the_slot_to_the_next_seated_member(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(
+            store,
+            seated=(1, 3),
+            waitlisted=(2,),
+        )
+        self.ask(store, occurrence_id, 1, 0)
+        self.ask(store, occurrence_id, 2, 5)
+        self.ask(store, occurrence_id, 3, 10)
+
+        store.remove_signup(occurrence_id, 1)
+
+        # Member 2 asked before member 3 but has no seat to co-lead from.
+        assert self.status(store, occurrence_id, 3) is MenteeStatus.MENTEE
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.WAITLISTED
+
+    def test_withdrawing_clears_the_claim_and_hands_the_slot_on(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1, 2))
+        self.ask(store, occurrence_id, 1, 0)
+        self.ask(store, occurrence_id, 2, 5)
+
+        withdrawn = store.set_signup_mentee(occurrence_id, 1, False)
+
+        assert withdrawn.mentee is MenteeStatus.NONE
+        assert withdrawn.mentee_requested_at is None
+        # Still on the roster: only the claim went.
+        assert not withdrawn.waitlisted
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
+
+    def test_a_mentee_who_loses_their_seat_hands_the_slot_on(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1, 2))
+        store.update_signup_roles(
+            occurrence_id,
+            1,
+            role=EventRole.DPS,
+            flex_roles=(),
+            assigned_role=EventRole.DPS,
+            waitlisted=False,
+        )
+        self.ask(store, occurrence_id, 1, 0)
+        self.ask(store, occurrence_id, 2, 5)
+
+        store.update_signup_roles(
+            occurrence_id,
+            1,
+            role=EventRole.DPS,
+            flex_roles=(),
+            assigned_role=None,
+            waitlisted=True,
+        )
+
+        assert self.status(store, occurrence_id, 1) is MenteeStatus.WAITLISTED
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
+
+    def test_handing_the_lead_to_the_mentee_passes_the_slot_on(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence_id = self.make_roster(store, seated=(1, 2))
+        self.ask(store, occurrence_id, 1, 0)
+        self.ask(store, occurrence_id, 2, 5)
+        occurrence = store.get_occurrence(occurrence_id)
+        assert occurrence is not None
+        event = store.get_event(occurrence.event_id)
+        assert event is not None
+
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=1,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            mentee_enabled=True,
+        )
+
+        # The leader cannot be their own mentee: the claim goes, and so does
+        # the slot, to the next in line.
+        leader = store.get_signup(occurrence_id, 1)
+        assert leader is not None
+        assert leader.mentee is MenteeStatus.NONE
+        assert leader.mentee_requested_at is None
+        assert self.status(store, occurrence_id, 2) is MenteeStatus.MENTEE
+
+    def test_the_leader_cannot_claim_the_slot(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The fixture event is led by member 42.
+        occurrence_id = self.make_roster(store, seated=(42,))
+
+        assert self.ask(store, occurrence_id, 42, 0) is MenteeStatus.NONE
+
+    def test_a_claim_needs_a_signup(self, store: EventStore) -> None:
+        occurrence_id = self.make_roster(store)
+
+        with pytest.raises(ValueError, match="not signed up"):
+            store.set_signup_mentee(occurrence_id, 1, True)
+
+    def test_never_ask_again_is_stored_per_event_and_can_be_undone(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, mentee_enabled=True)
+        other = create_event(store, mentee_enabled=True)
+
+        store.set_mentee_question_declined(event.event_id, 7, True)
+
+        assert store.mentee_question_declined(event.event_id, 7)
+        assert not store.mentee_question_declined(other.event_id, 7)
+        assert not store.mentee_question_declined(event.event_id, 8)
+        # Declining twice is harmless.
+        store.set_mentee_question_declined(event.event_id, 7, True)
+
+        store.set_mentee_question_declined(event.event_id, 7, False)
+
+        assert not store.mentee_question_declined(event.event_id, 7)
+
+    def test_never_ask_again_is_not_stored_for_a_deleted_event(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, mentee_enabled=True)
+        store.delete_event(event.event_id)
+
+        store.set_mentee_question_declined(event.event_id, 7, True)
+
+        # SQLite hands the id to the next event created, which must not
+        # inherit an answer nobody gave it.
+        reused = create_event(store, mentee_enabled=True)
+        assert reused.event_id == event.event_id
+        assert not store.mentee_question_declined(reused.event_id, 7)
+
+    def test_deleting_or_retiring_an_event_drops_its_answers(
+        self,
+        store: EventStore,
+    ) -> None:
+        deleted = create_event(store, mentee_enabled=True)
+        retired = create_event(store, mentee_enabled=True)
+        kept = create_event(store, mentee_enabled=True)
+        for event in (deleted, retired, kept):
+            store.set_mentee_question_declined(event.event_id, 7, True)
+
+        store.delete_event(deleted.event_id)
+        store.retire_event(retired.event_id, [])
+
+        assert not store.mentee_question_declined(deleted.event_id, 7)
+        assert not store.mentee_question_declined(retired.event_id, 7)
+        assert store.mentee_question_declined(kept.event_id, 7)

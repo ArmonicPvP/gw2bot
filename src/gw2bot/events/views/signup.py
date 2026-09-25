@@ -1,7 +1,8 @@
 """What a member does with a posted event: signing up, out, and the settings.
 
-The buttons on the posted message, the sign-up flow behind them, and the
-remembered-role and auto-sign-up choices that flow offers.
+The buttons on the posted message, the sign-up flow behind them, the
+remembered-role and auto-sign-up choices that flow offers, and the mentee
+question it ends with.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    MenteeStatus,
     PreferenceMode,
     ROLE_EMOJI,
     RepeatFrequency,
@@ -147,6 +149,25 @@ class EventSignOutButton(
                 ephemeral=True,
             )
             return
+        if signup.mentee is not MenteeStatus.NONE:
+            # Somebody with a claim on the mentee slot may only want to give
+            # that up, so the choice is theirs to make rather than a sign-out
+            # that takes the slot and the seat together. Offered while the
+            # slot is switched off too: the claim is kept for when it comes
+            # back, and this is the one way to let it go without leaving.
+            LOGGER.debug(
+                "Offered a choice between signing out and giving up the "
+                "mentee slot; occurrence_id=%s user_id=%s mentee=%s",
+                occurrence.occurrence_id,
+                interaction.user.id,
+                signup.mentee.value,
+            )
+            await interaction.response.send_message(
+                _sign_out_choice_prompt(event, signup),
+                view=SignOutChoiceView(bot, event, occurrence),
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             "Would you like to be removed from this event?",
             view=SignOutConfirmView(bot, event, occurrence),
@@ -213,19 +234,51 @@ def _describe_signup_settings(
     discord_user_id: int,
 ) -> str:
     lines = ["**Your sign-up settings**"]
+    lines.extend(_series_setting_lines(bot, event, discord_user_id))
+    if _mentee_question_silenced(bot, event, discord_user_id):
+        lines.append("Mentee question for this event: **never ask**")
+    return "\n".join(lines)
+
+
+def _mentee_question_silenced(
+    bot: Gw2Bot,
+    event: Event,
+    discord_user_id: int,
+) -> bool:
+    """Whether the member told this event never to ask about its mentee.
+
+    Only worth showing, or undoing, while the event still offers the slot and
+    has a run left to offer it on.
+    """
+    return (
+        event.mentee_enabled
+        and bot.event_store.mentee_question_declined(
+            event.event_id,
+            discord_user_id,
+        )
+        and _series_has_runs_left(bot, event)
+    )
+
+
+def _series_setting_lines(
+    bot: Gw2Bot,
+    event: Event,
+    discord_user_id: int,
+) -> list[str]:
+    lines: list[str] = []
     if event.repeat_frequency is RepeatFrequency.NONE:
         lines.append(
             "This event does not repeat, so it has no automatic sign-up "
             "or role memory."
         )
-        return "\n".join(lines)
+        return lines
     if not _series_has_runs_left(bot, event):
         # The panel offers no controls in this state, so it has to say why.
         lines.append(
             "This event has no runs left, so its automatic sign-up and role "
             "memory no longer apply."
         )
-        return "\n".join(lines)
+        return lines
     auto = bot.event_store.get_auto_signup(
         event.event_id,
         discord_user_id,
@@ -250,7 +303,7 @@ def _describe_signup_settings(
         lines.append("Role memory for this event: **never ask**")
     else:
         lines.append("Role memory for this event: **ask every time**")
-    return "\n".join(lines)
+    return lines
 
 
 class _SignupSettingsButton(discord.ui.Button["SignupSettingsView"]):
@@ -268,6 +321,8 @@ class _SignupSettingsButton(discord.ui.Button["SignupSettingsView"]):
             await view._enable_auto(interaction)
         elif self._action == "disable_auto":
             await view._disable_auto(interaction)
+        elif self._action == "reset_mentee":
+            await view._reset_mentee_question(interaction)
         else:
             await view._reset_preference(interaction)
 
@@ -365,6 +420,16 @@ class SignupSettingsView(discord.ui.View):
                     "Reset role memory for this event",
                     discord.ButtonStyle.secondary,
                     "reset_preference",
+                )
+            )
+        # Offered on one-off events too: the mentee question is asked of
+        # every sign-up, not only the repeats.
+        if _mentee_question_silenced(bot, event, discord_user_id):
+            self.add_item(
+                _SignupSettingsButton(
+                    "Ask me about the mentee slot again",
+                    discord.ButtonStyle.secondary,
+                    "reset_mentee",
                 )
             )
 
@@ -521,6 +586,42 @@ class SignupSettingsView(discord.ui.View):
                 interaction.user.id,
             ),
             view=self,
+        )
+
+    async def _reset_mentee_question(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        # Clearing an answer is safe whatever happened to the event while the
+        # panel sat open, so there is nothing to re-check first.
+        self._bot.event_store.set_mentee_question_declined(
+            self._event.event_id,
+            interaction.user.id,
+            False,
+        )
+        LOGGER.debug(
+            "Reset the mentee question from settings; event_id=%s user_id=%s",
+            self._event.event_id,
+            interaction.user.id,
+        )
+        settings = _describe_signup_settings(
+            self._bot,
+            self._event,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content=(
+                f"{settings}\n\nYou will be asked about the mentee slot the "
+                "next time you sign up. Already signed up? Press **Sign up** "
+                "on the event to answer it now."
+            ),
+            # A fresh panel, so the button that has just done its work goes.
+            view=SignupSettingsView(
+                self._bot,
+                self._event,
+                self._occurrence,
+                interaction.user.id,
+            ),
         )
 
     async def _reset_preference(
@@ -698,6 +799,149 @@ class DisableAutoSignupView(discord.ui.View):
         )
 
 
+async def _sign_out_of_event(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    interaction: discord.Interaction,
+) -> None:
+    """Take the member off the event, answering on the prompt they clicked.
+
+    Shared by the plain sign-out confirmation and the choice offered to a
+    member with a claim on the mentee slot, whose "Event" answer is the same
+    sign-out: the claim lives on the signup row, so it goes with it and the
+    slot passes to whoever is next.
+    """
+    from gw2bot.events.posting import (
+        RosterUnreadable,
+        occurrence_finished,
+        remove_signup,
+    )
+
+    # The event may have ended while this confirmation was open; never
+    # mutate a historical roster (which could also promote a waitlisted
+    # user into a past event).
+    if occurrence_has_ended(event, occurrence, datetime.now(UTC)):
+        LOGGER.debug(
+            "Sign out confirmed after the event ended; occurrence_id=%s "
+            "user_id=%s",
+            occurrence.occurrence_id,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "This event has already ended, so its roster can no "
+                "longer be changed."
+            ),
+            view=None,
+        )
+        return
+    await interaction.response.edit_message(
+        content="Removing you from the event…",
+        view=None,
+    )
+    try:
+        removed, update = await remove_signup(
+            bot,
+            event,
+            occurrence,
+            interaction.user.id,
+        )
+    except RosterUnreadable:
+        # Not the same as not being on the roster, which is what the
+        # None below means: the store would not say, and this member's
+        # signup is very likely still there.
+        LOGGER.error(
+            "Could not read the run for a sign out; occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "The roster could not be read just now. Try again in a "
+                "moment."
+            ),
+            view=None,
+        )
+        return
+    if removed is None:
+        # The run can also end inside the removal itself, whose roster
+        # check is Discord I/O: a roster that is history is left alone,
+        # which is not the same as never having been on it. Read the row
+        # back and count its stored status, because that check can retire
+        # the occurrence outright - refreshing a message somebody deleted
+        # answers NotFound - well before its scheduled end.
+        # The event comes back with it, because a duration saved while
+        # the lookups were in flight is what made the removal refuse:
+        # judging by the one this view opened with would tell the member
+        # they were never signed up while their signup is still there.
+        try:
+            current = bot.event_store.get_occurrence(occurrence.occurrence_id)
+            edited = bot.event_store.get_event(event.event_id)
+        except SQLAlchemyError as exc:
+            # The removal can refuse because the store would not answer
+            # it either, and these reads then fail the same way. Telling
+            # the member nothing was wrong with their signup would be a
+            # guess, and the wrong one.
+            LOGGER.error(
+                "Could not read the run back after a sign out; "
+                "occurrence_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                type(exc).__name__,
+            )
+            content = (
+                "The roster could not be read just now. Try again in a "
+                "moment."
+            )
+        else:
+            content = (
+                "This event has already ended, so its roster can no "
+                "longer be changed."
+                if current is None
+                or edited is None
+                or occurrence_finished(edited, current)
+                else "You were not signed up for the event."
+            )
+    else:
+        content = "You were removed from the event."
+    LOGGER.debug(
+        "Sign out completed; occurrence_id=%s user_id=%s removed=%s "
+        "promoted=%s reassigned=%s",
+        occurrence.occurrence_id,
+        interaction.user.id,
+        removed is not None,
+        len(update.promoted),
+        len(update.reassigned),
+    )
+    # Signing out only clears this occurrence. Leaving automatic sign-up on
+    # would quietly re-seat the member on the next one, so offer to switch
+    # it off while they are still looking at the confirmation.
+    prompt: DisableAutoSignupView | None = None
+    if removed is not None and _auto_signup_enabled(
+        bot,
+        event,
+        interaction.user.id,
+    ):
+        prompt = DisableAutoSignupView(
+            bot,
+            event,
+            occurrence,
+            interaction.user.id,
+        )
+        content += (
+            "\n\nAutomatic sign-up is still on for this event, so you "
+            "will be signed up again for its next occurrence. Would you "
+            "like to turn it off?"
+        )
+        LOGGER.debug(
+            "Offered auto signup disable after sign out; event_id=%s "
+            "occurrence_id=%s user_id=%s",
+            event.event_id,
+            occurrence.occurrence_id,
+            interaction.user.id,
+        )
+    await interaction.edit_original_response(content=content, view=prompt)
+
+
 class SignOutConfirmView(discord.ui.View):
     def __init__(self, bot: Gw2Bot, event: Event, occurrence: EventOccurrence):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
@@ -711,140 +955,12 @@ class SignOutConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[SignOutConfirmView],
     ) -> None:
-        from gw2bot.events.posting import (
-            RosterUnreadable,
-            occurrence_finished,
-            remove_signup,
-        )
-
-        # The event may have ended while this confirmation was open; never
-        # mutate a historical roster (which could also promote a waitlisted
-        # user into a past event).
-        if occurrence_has_ended(
-            self._event, self._occurrence, datetime.now(UTC)
-        ):
-            LOGGER.debug(
-                "Sign out confirmed after the event ended; occurrence_id=%s "
-                "user_id=%s",
-                self._occurrence.occurrence_id,
-                interaction.user.id,
-            )
-            await interaction.response.edit_message(
-                content=(
-                    "This event has already ended, so its roster can no "
-                    "longer be changed."
-                ),
-                view=None,
-            )
-            return
-        await interaction.response.edit_message(
-            content="Removing you from the event…",
-            view=None,
-        )
-        try:
-            removed, update = await remove_signup(
-                self._bot,
-                self._event,
-                self._occurrence,
-                interaction.user.id,
-            )
-        except RosterUnreadable:
-            # Not the same as not being on the roster, which is what the
-            # None below means: the store would not say, and this member's
-            # signup is very likely still there.
-            LOGGER.error(
-                "Could not read the run for a sign out; occurrence_id=%s",
-                self._occurrence.occurrence_id,
-            )
-            await interaction.edit_original_response(
-                content=(
-                    "The roster could not be read just now. Try again in a "
-                    "moment."
-                ),
-                view=None,
-            )
-            return
-        if removed is None:
-            # The run can also end inside the removal itself, whose roster
-            # check is Discord I/O: a roster that is history is left alone,
-            # which is not the same as never having been on it. Read the row
-            # back and count its stored status, because that check can retire
-            # the occurrence outright - refreshing a message somebody deleted
-            # answers NotFound - well before its scheduled end.
-            # The event comes back with it, because a duration saved while
-            # the lookups were in flight is what made the removal refuse:
-            # judging by the one this view opened with would tell the member
-            # they were never signed up while their signup is still there.
-            try:
-                current = self._bot.event_store.get_occurrence(
-                    self._occurrence.occurrence_id
-                )
-                edited = self._bot.event_store.get_event(
-                    self._event.event_id
-                )
-            except SQLAlchemyError as exc:
-                # The removal can refuse because the store would not answer
-                # it either, and these reads then fail the same way. Telling
-                # the member nothing was wrong with their signup would be a
-                # guess, and the wrong one.
-                LOGGER.error(
-                    "Could not read the run back after a sign out; "
-                    "occurrence_id=%s error_type=%s",
-                    self._occurrence.occurrence_id,
-                    type(exc).__name__,
-                )
-                content = (
-                    "The roster could not be read just now. Try again in a "
-                    "moment."
-                )
-            else:
-                content = (
-                    "This event has already ended, so its roster can no "
-                    "longer be changed."
-                    if current is None
-                    or edited is None
-                    or occurrence_finished(edited, current)
-                    else "You were not signed up for the event."
-                )
-        else:
-            content = "You were removed from the event."
-        LOGGER.debug(
-            "Sign out completed; occurrence_id=%s user_id=%s removed=%s "
-            "promoted=%s reassigned=%s",
-            self._occurrence.occurrence_id,
-            interaction.user.id,
-            removed is not None,
-            len(update.promoted),
-            len(update.reassigned),
-        )
-        # Signing out only clears this occurrence. Leaving automatic sign-up on
-        # would quietly re-seat the member on the next one, so offer to switch
-        # it off while they are still looking at the confirmation.
-        prompt: DisableAutoSignupView | None = None
-        if removed is not None and _auto_signup_enabled(
+        await _sign_out_of_event(
             self._bot,
             self._event,
-            interaction.user.id,
-        ):
-            prompt = DisableAutoSignupView(
-                self._bot,
-                self._event,
-                self._occurrence,
-                interaction.user.id,
-            )
-            content += (
-                "\n\nAutomatic sign-up is still on for this event, so you "
-                "will be signed up again for its next occurrence. Would you "
-                "like to turn it off?"
-            )
-            LOGGER.debug(
-                "Offered auto signup disable after sign out; event_id=%s "
-                "occurrence_id=%s user_id=%s",
-                self._event.event_id,
-                self._occurrence.occurrence_id,
-                interaction.user.id,
-            )
-        await interaction.edit_original_response(content=content, view=prompt)
+            self._occurrence,
+            interaction,
+        )
 
     @discord.ui.button(label="Keep me signed up", style=discord.ButtonStyle.secondary)
     async def keep_me(
@@ -854,6 +970,90 @@ class SignOutConfirmView(discord.ui.View):
     ) -> None:
         await interaction.response.edit_message(
             content="You are still signed up for the event.",
+            view=None,
+        )
+
+
+def _sign_out_choice_prompt(event: Event, signup: EventSignup) -> str:
+    standing = (
+        "leave the mentee waitlist"
+        if signup.mentee is MenteeStatus.WAITLISTED
+        else "sign out of being the mentee"
+    )
+    prompt = (
+        f"Would you like to sign out of the event, or {standing}? Signing "
+        "out of the event gives up your mentee spot as well."
+    )
+    if event.mentee_enabled:
+        return prompt
+    return (
+        "This event is not looking for a mentee right now, but you keep "
+        f"your mentee spot in case it does again. {prompt}"
+    )
+
+
+class SignOutChoiceView(discord.ui.View):
+    """What a member with a claim on the mentee slot is signing out of.
+
+    Picking one is already a second, deliberate click after **Sign out**, so
+    neither answer asks again.
+    """
+
+    def __init__(self, bot: Gw2Bot, event: Event, occurrence: EventOccurrence):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event = event
+        self._occurrence = occurrence
+
+    @discord.ui.button(label="Event", style=discord.ButtonStyle.danger)
+    async def sign_out_event(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[SignOutChoiceView],
+    ) -> None:
+        await _sign_out_of_event(
+            self._bot,
+            self._event,
+            self._occurrence,
+            interaction,
+        )
+
+    @discord.ui.button(label="Mentee", style=discord.ButtonStyle.primary)
+    async def sign_out_mentee(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[SignOutChoiceView],
+    ) -> None:
+        from gw2bot.events.posting import set_mentee_request
+
+        await interaction.response.edit_message(
+            content="Taking you off the mentee slot…",
+            view=None,
+        )
+        try:
+            await set_mentee_request(
+                self._bot,
+                self._event,
+                self._occurrence,
+                interaction.user.id,
+                requested=False,
+            )
+        except ValueError as error:
+            await interaction.edit_original_response(
+                content=str(error),
+                view=None,
+            )
+            return
+        LOGGER.debug(
+            "Signed out of the mentee slot; occurrence_id=%s user_id=%s",
+            self._occurrence.occurrence_id,
+            interaction.user.id,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "You are no longer signed up as the mentee. You are still "
+                "signed up for the event."
+            ),
             view=None,
         )
 
@@ -875,11 +1075,35 @@ async def start_signup_flow(
             ephemeral=True,
         )
         return
-    if any(
-        signup.discord_user_id == interaction.user.id for signup in signups
-    ):
+    existing = next(
+        (
+            signup
+            for signup in signups
+            if signup.discord_user_id == interaction.user.id
+        ),
+        None,
+    )
+    if existing is not None:
+        # The one way back to the mentee question for a member who is on the
+        # roster already: seated by an automatic sign-up, which never asks
+        # it, signed up before the leader started looking for a mentee, or
+        # someone who said "No" and has changed their mind.
+        if _offers_mentee_question(bot, event, existing):
+            await interaction.response.send_message(
+                "You are already signed up for this event.\n\n"
+                f"{_mentee_question(event)}",
+                view=MenteeChoiceView(
+                    bot,
+                    event,
+                    occurrence,
+                    interaction.user.id,
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
-            "You are already signed up for this event.",
+            "You are already signed up for this event."
+            f"{_mentee_standing(event, existing)}",
             ephemeral=True,
         )
         return
@@ -1110,12 +1334,25 @@ class SignupFlow:
         if self.event.repeat_frequency is not RepeatFrequency.NONE and (
             auto is None or auto.choice is AutoSignupChoice.NO
         ):
+            # The mentee question, when it applies, follows this one's
+            # answer: it is always the last thing asked.
             await edit(
                 content=(
                     f"{content}\n\nWould you like to sign up for this "
                     "event automatically in the future?"
                 ),
                 view=AutoSignupChoiceView(self),
+            )
+            return
+        if _offers_mentee_question(self.bot, self.event, signup):
+            await edit(
+                content=f"{content}\n\n{_mentee_question(self.event)}",
+                view=MenteeChoiceView(
+                    self.bot,
+                    self.event,
+                    self.occurrence,
+                    self.discord_user_id,
+                ),
             )
             return
         await edit(content=content, view=None)
@@ -1666,9 +1903,22 @@ class AutoSignupChoiceView(discord.ui.View):
             self._flow.role,
             self._flow.flex_roles,
         )
+        # Whatever the answer, a claim on the mentee slot is never part of
+        # it: the question below is asked of this run alone, and an
+        # automatic sign-up never carries one into the next.
+        follow_up = _mentee_follow_up(
+            self._flow.bot,
+            self._flow.event,
+            self._flow.occurrence,
+            self._flow.discord_user_id,
+        )
+        if follow_up is not None:
+            confirmation = (
+                f"{confirmation}\n\n{_mentee_question(self._flow.event)}"
+            )
         await interaction.response.edit_message(
             content=confirmation,
-            view=None,
+            view=follow_up,
         )
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
@@ -1711,3 +1961,210 @@ class AutoSignupChoiceView(discord.ui.View):
             "You will not be asked about automatic sign-up for this "
             "event again.",
         )
+
+
+def _mentee_question(event: Event) -> str:
+    return (
+        f"<@{event.leader_discord_id}> is looking for a mentee for this event "
+        "for Commander training. Would you like to sign up?"
+    )
+
+
+def _offers_mentee_question(
+    bot: Gw2Bot,
+    event: Event,
+    signup: EventSignup | None,
+) -> bool:
+    """Whether a signed-up member should be asked about the mentee slot.
+
+    Only on an event that offers one, and never of the leader, who cannot be
+    their own mentee. A member who already has a claim has answered, and one
+    who said never to ask again for this event is not asked. The question is
+    the last one after a sign-up, which is already committed by then, so a
+    store that will not say is read as "do not ask" rather than taking the
+    member's answer down with it.
+    """
+    if (
+        signup is None
+        or not event.mentee_enabled
+        or signup.mentee is not MenteeStatus.NONE
+        or signup.discord_user_id == event.leader_discord_id
+    ):
+        return False
+    try:
+        declined = bot.event_store.mentee_question_declined(
+            event.event_id,
+            signup.discord_user_id,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the mentee question answer; event_id=%s "
+            "error_type=%s",
+            event.event_id,
+            type(exc).__name__,
+        )
+        return False
+    LOGGER.debug(
+        "Decided whether to ask about the mentee slot; event_id=%s "
+        "user_id=%s ask=%s",
+        event.event_id,
+        signup.discord_user_id,
+        not declined,
+    )
+    return not declined
+
+
+def _mentee_standing(event: Event, signup: EventSignup) -> str:
+    # Said alongside "already signed up", so a member pressing the button again
+    # can see where they stand with the slot without opening anything else.
+    if not event.mentee_enabled:
+        return ""
+    if signup.mentee is MenteeStatus.MENTEE:
+        return " You are also signed up as the **mentee**."
+    if signup.mentee is MenteeStatus.WAITLISTED:
+        return " You are also on the mentee **waitlist**."
+    return ""
+
+
+def _mentee_summary(signup: EventSignup) -> str:
+    if signup.mentee is MenteeStatus.MENTEE:
+        return "You signed up as the **mentee** for this event."
+    if signup.waitlisted:
+        return (
+            "You are on the waitlist for this event, so you were added to "
+            "the mentee **waitlist**. The mentee slot is yours once you have "
+            "a seat, if nobody with one holds it by then."
+        )
+    return (
+        "The mentee slot is already taken, so you were added to the mentee "
+        "**waitlist**."
+    )
+
+
+class MenteeChoiceView(discord.ui.View):
+    # The last question after a sign-up. Only "No, never ask again" is
+    # stored, per event like the questions before it; a plain "No" declines
+    # for now, so pressing Sign up again asks once more.
+
+    def __init__(
+        self,
+        bot: Gw2Bot,
+        event: Event,
+        occurrence: EventOccurrence,
+        discord_user_id: int,
+    ):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event = event
+        self._occurrence = occurrence
+        self._discord_user_id = discord_user_id
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
+    async def mentee_yes(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[MenteeChoiceView],
+    ) -> None:
+        from gw2bot.events.posting import set_mentee_request
+
+        await interaction.response.edit_message(
+            content="Signing you up as the mentee…",
+            view=None,
+        )
+        try:
+            signup = await set_mentee_request(
+                self._bot,
+                self._event,
+                self._occurrence,
+                self._discord_user_id,
+                requested=True,
+            )
+        except ValueError as error:
+            await interaction.edit_original_response(
+                content=str(error),
+                view=None,
+            )
+            return
+        await interaction.edit_original_response(
+            content=_mentee_summary(signup),
+            view=None,
+        )
+
+    @discord.ui.button(label="No", style=discord.ButtonStyle.secondary)
+    async def mentee_no(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[MenteeChoiceView],
+    ) -> None:
+        LOGGER.debug(
+            "Declined the mentee slot for now; occurrence_id=%s user_id=%s",
+            self._occurrence.occurrence_id,
+            self._discord_user_id,
+        )
+        await interaction.response.edit_message(
+            content="You were not signed up as the mentee.",
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="No, never ask again for this event",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def mentee_never(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[MenteeChoiceView],
+    ) -> None:
+        if not _series_has_runs_left(self._bot, self._event):
+            # As with the questions before this one: the event ended while
+            # the prompt sat open, and an answer stored now would outlive the
+            # deletion that cleared its others.
+            await interaction.response.edit_message(
+                content="This event has no runs left, so nothing was saved.",
+                view=None,
+            )
+            return
+        self._bot.event_store.set_mentee_question_declined(
+            self._event.event_id,
+            self._discord_user_id,
+            True,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "You will not be asked about the mentee slot for this event "
+                "again. You can change that with the ⚙️ button on the event "
+                "message."
+            ),
+            view=None,
+        )
+
+
+def _mentee_follow_up(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+) -> MenteeChoiceView | None:
+    """The mentee question to ask after an earlier prompt, if it applies.
+
+    That prompt can sit open for minutes, so the signup is read afresh: a
+    member who signed out meanwhile has nothing to be the mentee of.
+    """
+    if not event.mentee_enabled:
+        return None
+    try:
+        signup = bot.event_store.get_signup(
+            occurrence.occurrence_id,
+            discord_user_id,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the signup to ask about the mentee slot; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return None
+    if not _offers_mentee_question(bot, event, signup):
+        return None
+    return MenteeChoiceView(bot, event, occurrence, discord_user_id)

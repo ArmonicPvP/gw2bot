@@ -39,12 +39,15 @@ from gw2bot.events.posting.roster import (
     complete_signup as complete_signup,
     departed_roster_members as departed_roster_members,
     disable_auto_signup as disable_auto_signup,
+    mentee_movement as mentee_movement,
+    mentee_snapshot as mentee_snapshot,
     merge_roster_updates as merge_roster_updates,
     notify_roster_update as notify_roster_update,
     prune_departed_signups as prune_departed_signups,
     rebalance_occurrence_roster as rebalance_occurrence_roster,
     remove_signup as remove_signup,
     seat_signup as seat_signup,
+    set_mentee_request as set_mentee_request,
 )
 from gw2bot.events.posting.state import (
     leading_occurrence as leading_occurrence,

@@ -393,20 +393,22 @@ page to keep current. Their `eventID: N` stays readable either way.
 1. **Details** — category, title, description, destination channel or forum
    post, and the roles to ping (see [Event Role Pings](#event-role-pings)).
 2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, whether
-   the event repeats, and optional requirements. Typed times are read in the
+   the event repeats, optional requirements, and whether to offer a mentee
+   slot (see [Mentee Slot](#mentee-slot)). Typed times are read in the
    timezone set with `/settings timezone` and must be in the future.
    Requirements are free text of up to 1,024 characters; left blank, the post
    shows them as "None". Posts already up when requirements were added are
-   re-rendered once on the upgrade, so they show the section too.
+   re-rendered once on the upgrade, so they show the section too. The mentee
+   slot is off unless the commander turns it on.
 3. **Repeat** — only when the event repeats: frequency, which days, and whether
    posting the next occurrence should delete the previous one.
 
 A private preview of the finished post follows each step. **Change something**
 reopens any single field — category, title, description, channel, date & time,
-duration, requirements, repeat settings, leader, or roles to ping — without
-walking the flow again, and **Post event** sends it. Nothing is written to the
-database until the event is posted, so abandoning the flow leaves nothing
-behind.
+duration, requirements, mentee slot, repeat settings, leader, or roles to ping —
+without walking the flow again, and **Post event** sends it. Nothing is
+written to the database until the event is posted, so abandoning the flow
+leaves nothing behind.
 
 `/event edit` opens the same preview for an existing event, with **Save changes**
 in place of **Post event**. Changing the channel re-posts the event at the new
@@ -466,15 +468,19 @@ members and can move seated members between their acceptable roles to make room,
 and each mutation posts one batched note in the signup thread naming who moved.
 **Sign out** confirms first, and on a repeating event with automatic sign-up
 still on it offers to switch that off too, so signing out of one occurrence does
-not leave the member seated for the next.
+not leave the member seated for the next. A member who has signed up for the
+[mentee slot](#mentee-slot) is asked instead whether they are signing out of the
+**Event** or only of being the **Mentee**.
 
 The ⚙️ button shows the member's settings for that event and offers
 **Edit my signup** (role-based events only), **Enable**/**Disable auto sign-up**,
-and **Reset role memory for this event**. Editing a signup is rate limited to
-three edits back to back, refilling one every three hours, so a roster is not
-churned by one member re-picking repeatedly. Signing out and back in resets the
-allowance but costs the member their queue position. An edit that no longer fits
-the roster asks before dropping the member to the waitlist.
+and **Reset role memory for this event**, plus **Ask me about the mentee slot
+again** after "never ask again" was the answer to the mentee question. Editing
+a signup is rate limited to three edits back to back, refilling one every three
+hours, so a roster is not churned by one member re-picking repeatedly. Signing
+out and back in resets the allowance but costs the member their queue position.
+An edit that no longer fits the roster asks before dropping the member to the
+waitlist.
 
 ### Status
 
@@ -521,6 +527,49 @@ sit open until it times out, so one answered after the run behind it has been
 called off stores nothing and says so. The ⚙️ panel goes the same way once a
 series has no runs left: it offers neither setting and says why, because a
 deleted event's finished posts keep their button.
+
+### Mentee Slot
+
+A commander can offer a mentee slot on an event, for a member who wants to
+become a commander to co-lead it and train. It is asked in the schedule step
+(**Offer a mentee slot for Commander training?**, defaulting to No) and can be
+turned on or off later through **Change something**. The post then shows a
+**🎓 Mentee** field under the leader: the mentee's name, or "Open" while the
+slot is free, followed by the first five members waiting for it, marked ⌛️,
+and a count of any more.
+
+The slot is not a role. A member still signs up the usual way, with a role on
+a role-based event, and the mentee question comes last, after any role memory
+and automatic sign-up questions:
+
+> *@Leader* is looking for a mentee for this event for Commander training.
+> Would you like to sign up?
+
+**Yes** takes the slot, or joins the mentee waitlist when somebody already
+holds it. **No** declines for now, and **No, never ask again for this event**
+stops the question for that event only — undone from the ⚙️ button. The
+leader is never asked, and a member made the leader gives up any claim on the
+slot, which passes to the next in line. A member already on the roster —
+seated by automatic sign-up, say, or one who answered No — is asked by pressing
+**Sign up** again.
+
+There is one slot per occurrence, and it is held by a member with a seat: a
+member on the event's waitlist who says Yes waits on the mentee waitlist until
+they have one. The mentee waitlist is first come, first served by when each
+member said Yes, and a mentee keeps the slot for as long as they keep their
+seat. When the mentee gives it up, signs out, is removed, or drops to the
+event's waitlist, the slot passes to the next member on the mentee waitlist
+who has a seat, and the signup thread announces it, pinging them, in the same
+roster update that announces moves up from the event's waitlist.
+
+**Sign out** asks a member with a claim on the slot what they are signing out
+of: **Event** signs them out entirely, slot included, and **Mentee** gives up
+only the slot (or their place on its waitlist) and keeps their seat. Nobody is
+ever made a mentee automatically: automatic sign-up seats a member on the next
+occurrence but never carries the slot over, so each run's mentee is asked
+afresh. Turning the slot off hides it and stops the question without clearing
+anybody's claim, so turning it back on restores the same mentee; a member who
+does not want that can still give the claim up from **Sign out**.
 
 ### Editing A Roster
 

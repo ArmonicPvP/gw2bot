@@ -5,10 +5,11 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.core.database import (
     EventAutoSignupRecord,
+    EventMenteeOptOutRecord,
     EventOccurrenceRecord,
     EventRecord,
     EventReminderRecord,
@@ -27,10 +28,12 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    MenteeStatus,
     PreferenceMode,
     RepeatFrequency,
     RosterAssignment,
     SignupPreference,
+    settle_mentee,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -145,6 +148,7 @@ def _event_from_record(record: EventRecord) -> Event:
         delete_previous_on_repeat=record.delete_previous_on_repeat,
         ping_role_ids=_parse_ids(record.ping_role_ids),
         requirements=record.requirements,
+        mentee_enabled=record.mentee_enabled,
     )
 
 
@@ -184,7 +188,78 @@ def _signup_from_record(record: EventSignupRecord) -> EventSignup:
             if record.edit_tokens_updated_at is not None
             else None
         ),
+        mentee=MenteeStatus(record.mentee),
+        mentee_requested_at=(
+            _parse_time(record.mentee_requested_at)
+            if record.mentee_requested_at is not None
+            else None
+        ),
     )
+
+
+def _settle_mentee(session: Session, occurrence_id: int) -> None:
+    """Re-settle an occurrence's mentee slot inside the caller's transaction.
+
+    Called by every write that can move a seat or a claim on the slot: who
+    holds it depends on who is seated (see settle_mentee), so a removal, a
+    re-seat or a withdrawn claim can each hand it to somebody else. Settling
+    here, before the caller commits, means no reader ever sees a roster whose
+    slot sits empty while a seated member is waiting for it - whichever
+    roster path made the change.
+
+    The event's leader cannot be its mentee, so a claim of theirs is dropped
+    here too: leadership can be handed to a member who holds the slot, and a
+    claim can race a leader change. Either way the slot goes to the next in
+    line rather than staying with the member leading the run.
+    """
+    records = session.scalars(
+        select(EventSignupRecord)
+        .where(EventSignupRecord.occurrence_id == occurrence_id)
+        .where(EventSignupRecord.mentee != MenteeStatus.NONE.value)
+    ).all()
+    if not records:
+        return
+    leader_id = session.scalar(
+        select(EventRecord.leader_discord_id)
+        .join(
+            EventOccurrenceRecord,
+            EventOccurrenceRecord.event_id == EventRecord.event_id,
+        )
+        .where(EventOccurrenceRecord.occurrence_id == occurrence_id)
+    )
+    claims: list[EventSignupRecord] = []
+    for record in records:
+        if record.discord_user_id != leader_id:
+            claims.append(record)
+            continue
+        LOGGER.debug(
+            "Dropped the leader's claim on the mentee slot; "
+            "occurrence_id=%s user_id=%s previous=%s",
+            occurrence_id,
+            record.discord_user_id,
+            record.mentee,
+        )
+        record.mentee = MenteeStatus.NONE.value
+        record.mentee_requested_at = None
+    records = claims
+    if not records:
+        return
+    settled = settle_mentee(
+        [_signup_from_record(record) for record in records]
+    )
+    for record in records:
+        status = settled[record.discord_user_id]
+        if record.mentee == status.value:
+            continue
+        LOGGER.debug(
+            "Settled the mentee slot; occurrence_id=%s user_id=%s "
+            "previous=%s status=%s",
+            occurrence_id,
+            record.discord_user_id,
+            record.mentee,
+            status.value,
+        )
+        record.mentee = status.value
 
 
 class EventStore:
@@ -214,6 +289,7 @@ class EventStore:
         delete_previous_on_repeat: bool = False,
         ping_role_ids: tuple[int, ...] = (),
         requirements: str = "",
+        mentee_enabled: bool = False,
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -233,17 +309,19 @@ class EventStore:
                 delete_previous_on_repeat=delete_previous_on_repeat,
                 ping_role_ids=_serialize_ids(ping_role_ids),
                 requirements=requirements,
+                mentee_enabled=mentee_enabled,
             )
             session.add(record)
             session.commit()
             LOGGER.debug(
                 "Created event; event_id=%s category=%s repeat=%s "
-                "title_characters=%s ping_roles=%s",
+                "title_characters=%s ping_roles=%s mentee_enabled=%s",
                 record.event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
                 len(ping_role_ids),
+                mentee_enabled,
             )
             return _event_from_record(record)
 
@@ -263,11 +341,13 @@ class EventStore:
         delete_previous_on_repeat: bool = False,
         ping_role_ids: tuple[int, ...] = (),
         requirements: str = "",
+        mentee_enabled: bool = False,
     ) -> Event:
         with self._sessions() as session:
             record = session.get(EventRecord, event_id)
             if record is None:
                 raise ValueError(f"Unknown event {event_id}")
+            leader_changed = record.leader_discord_id != leader_discord_id
             record.category = category.value
             record.title = title
             record.description = description
@@ -280,15 +360,29 @@ class EventStore:
             record.delete_previous_on_repeat = delete_previous_on_repeat
             record.ping_role_ids = _serialize_ids(ping_role_ids)
             record.requirements = requirements
+            record.mentee_enabled = mentee_enabled
+            if leader_changed:
+                # The new leader may hold, or be waiting for, the mentee slot
+                # on a run still to come. The slot is settled again on each of
+                # them, which drops that claim and hands the slot on.
+                for occurrence_id in session.scalars(
+                    select(EventOccurrenceRecord.occurrence_id)
+                    .where(EventOccurrenceRecord.event_id == event_id)
+                    .where(
+                        EventOccurrenceRecord.status != EventStatus.OVER.value
+                    )
+                ).all():
+                    _settle_mentee(session, occurrence_id)
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "
-                "title_characters=%s ping_roles=%s",
+                "title_characters=%s ping_roles=%s mentee_enabled=%s",
                 event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
                 len(ping_role_ids),
+                mentee_enabled,
             )
             return _event_from_record(record)
 
@@ -905,10 +999,16 @@ class EventStore:
                 )
             )
             # Remembered roles are per event too, so they go with it rather
-            # than outliving the event they were remembered for.
+            # than outliving the event they were remembered for - and so is a
+            # member's answer to the mentee question.
             session.execute(
                 delete(EventSignupPreferenceRecord).where(
                     EventSignupPreferenceRecord.event_id == event_id
+                )
+            )
+            session.execute(
+                delete(EventMenteeOptOutRecord).where(
+                    EventMenteeOptOutRecord.event_id == event_id
                 )
             )
             session.execute(
@@ -946,7 +1046,8 @@ class EventStore:
         that kept failing, or downtime across the run's end - would seed the
         next occurrence of a series nobody can reach any more. The per-event
         auto-signups and remembered roles go with the removed runs, as they do
-        on a full deletion: they only ever feed a run still to come.
+        on a full deletion: they only ever feed a run still to come. So do the
+        members' answers to the mentee question.
         """
         with self._sessions() as session:
             if occurrence_ids:
@@ -975,6 +1076,11 @@ class EventStore:
             session.execute(
                 delete(EventSignupPreferenceRecord).where(
                     EventSignupPreferenceRecord.event_id == event_id
+                )
+            )
+            session.execute(
+                delete(EventMenteeOptOutRecord).where(
+                    EventMenteeOptOutRecord.event_id == event_id
                 )
             )
             # Everything the deletes above left behind is kept history, so
@@ -1116,6 +1222,10 @@ class EventStore:
                 return None
             removed = _signup_from_record(record)
             session.delete(record)
+            # The member may have held the mentee slot, or the seat they free
+            # may be about to go to somebody waiting for it; either way the
+            # slot is settled against the roster that is left.
+            _settle_mentee(session, occurrence_id)
             session.commit()
         LOGGER.debug(
             "Removed event signup; occurrence_id=%s user_id=%s waitlisted=%s",
@@ -1176,6 +1286,9 @@ class EventStore:
                 assigned_role.value if assigned_role is not None else None
             )
             record.waitlisted = waitlisted
+            # An edit can cost the member their seat, and a mentee without a
+            # seat hands the slot on.
+            _settle_mentee(session, occurrence_id)
             session.commit()
         LOGGER.debug(
             "Updated event signup roles; occurrence_id=%s user_id=%s "
@@ -1229,11 +1342,117 @@ class EventStore:
                     record.flex_roles = _serialize_roles(
                         assignment.flex_roles
                     )
+            # A promotion off the waitlist can seat somebody who is waiting
+            # for the mentee slot, and a rebalance can unseat its holder.
+            _settle_mentee(session, occurrence_id)
             session.commit()
         LOGGER.debug(
             "Applied roster assignments; occurrence_id=%s changed=%s",
             occurrence_id,
             len(assignments),
+        )
+
+    def set_signup_mentee(
+        self,
+        occurrence_id: int,
+        discord_user_id: int,
+        requested: bool,
+        now: datetime | None = None,
+    ) -> EventSignup:
+        """Put a member's claim on the mentee slot, or take it back.
+
+        Whether the claim holds the slot or waits for it is not the caller's
+        to say: the slot is settled against the whole roster in the same
+        transaction, so the row returned carries where the member stands. A
+        claim repeated keeps its original time and with it the member's place
+        in the queue. Withdrawing hands the slot to whoever is next.
+        """
+        requested_at = now if now is not None else datetime.now(UTC)
+        with self._sessions() as session:
+            record = session.get(
+                EventSignupRecord,
+                (occurrence_id, discord_user_id),
+            )
+            if record is None:
+                raise ValueError("You are not signed up for this event.")
+            previous = record.mentee
+            if not requested:
+                record.mentee = MenteeStatus.NONE.value
+                record.mentee_requested_at = None
+            elif record.mentee == MenteeStatus.NONE.value:
+                # Queued behind everyone until the settle below says
+                # otherwise; it is the one place the slot is handed out.
+                record.mentee = MenteeStatus.WAITLISTED.value
+                record.mentee_requested_at = _serialize_time(requested_at)
+            _settle_mentee(session, occurrence_id)
+            session.commit()
+            signup = _signup_from_record(record)
+        LOGGER.debug(
+            "Stored a mentee claim; occurrence_id=%s user_id=%s "
+            "requested=%s previous=%s status=%s",
+            occurrence_id,
+            discord_user_id,
+            requested,
+            previous,
+            signup.mentee.value,
+        )
+        return signup
+
+    def mentee_question_declined(
+        self,
+        event_id: int,
+        discord_user_id: int,
+    ) -> bool:
+        with self._sessions() as session:
+            return (
+                session.get(
+                    EventMenteeOptOutRecord,
+                    (event_id, discord_user_id),
+                )
+                is not None
+            )
+
+    def set_mentee_question_declined(
+        self,
+        event_id: int,
+        discord_user_id: int,
+        declined: bool,
+    ) -> None:
+        with self._sessions() as session:
+            record = session.get(
+                EventMenteeOptOutRecord,
+                (event_id, discord_user_id),
+            )
+            if not declined:
+                if record is not None:
+                    session.delete(record)
+                    session.commit()
+            elif record is None:
+                # The question can sit open until it times out, and the event
+                # can be deleted meanwhile. SQLite hands a deleted event's id
+                # to the next one created, so a row written for the event that
+                # has gone would silence the question on an unrelated one.
+                if session.get(EventRecord, event_id) is None:
+                    LOGGER.debug(
+                        "Skipped a mentee opt-out for a deleted event; "
+                        "event_id=%s user_id=%s",
+                        event_id,
+                        discord_user_id,
+                    )
+                    return
+                session.add(
+                    EventMenteeOptOutRecord(
+                        event_id=event_id,
+                        discord_user_id=discord_user_id,
+                    )
+                )
+                session.commit()
+        LOGGER.debug(
+            "Stored a mentee question answer; event_id=%s user_id=%s "
+            "declined=%s",
+            event_id,
+            discord_user_id,
+            declined,
         )
 
     def get_signup_preference(

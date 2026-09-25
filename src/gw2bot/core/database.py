@@ -679,6 +679,14 @@ class EventRecord(Base):
         default="",
         server_default="",
     )
+    # Whether the event offers a mentee slot. Off by default, which is also
+    # what every event created before the slot existed reads as.
+    mentee_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
 
 
 class EventOccurrenceRecord(Base):
@@ -769,6 +777,19 @@ class EventSignupRecord(Base):
         String,
         nullable=True,
     )
+    # "none", "mentee" or "waitlisted": the member's claim on the event's one
+    # mentee slot. mentee_requested_at is NULL whenever there is no claim, and
+    # otherwise orders the mentee waitlist.
+    mentee: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default="none",
+        server_default="none",
+    )
+    mentee_requested_at: Mapped[str | None] = mapped_column(
+        String,
+        nullable=True,
+    )
 
 
 class EventReminderRecord(Base):
@@ -815,6 +836,19 @@ class EventAutoSignupRecord(Base):
     choice: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str | None] = mapped_column(String, nullable=True)
     flex_roles: Mapped[str] = mapped_column(String, nullable=False, default="")
+
+
+class EventMenteeOptOutRecord(Base):
+    __tablename__ = "gw2_event_mentee_opt_outs"
+
+    # One row per member who answered the mentee question with "never ask
+    # again". Per event, like the other sign-up questions: turning down the
+    # slot on one event says nothing about the next leader who wants a mentee.
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_events.event_id"),
+        primary_key=True,
+    )
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
 
 class RaffleRunWinnerRecord(Base):
@@ -1095,6 +1129,20 @@ def initialize_database(engine: Engine) -> set[str]:
             )
             added_columns.add("requirements")
 
+        if "mentee_enabled" not in event_columns:
+            # Events created before the mentee slot existed never offered one,
+            # which is exactly what the default records.
+            operations.add_column(
+                EventRecord.__tablename__,
+                Column(
+                    "mentee_enabled",
+                    Boolean,
+                    nullable=False,
+                    server_default="0",
+                ),
+            )
+            added_columns.add("mentee_enabled")
+
         signup_columns = {
             column["name"]
             for column in inspect(connection).get_columns(
@@ -1118,6 +1166,25 @@ def initialize_database(engine: Engine) -> set[str]:
                 Column("edit_tokens_updated_at", String, nullable=True),
             )
             added_columns.add("edit_tokens_updated_at")
+        if "mentee" not in signup_columns:
+            # Nothing to backfill: no signup made before the slot existed
+            # could have asked for it.
+            operations.add_column(
+                EventSignupRecord.__tablename__,
+                Column(
+                    "mentee",
+                    String,
+                    nullable=False,
+                    server_default="none",
+                ),
+            )
+            added_columns.add("mentee")
+        if "mentee_requested_at" not in signup_columns:
+            operations.add_column(
+                EventSignupRecord.__tablename__,
+                Column("mentee_requested_at", String, nullable=True),
+            )
+            added_columns.add("mentee_requested_at")
 
         preference_columns = {
             column["name"]

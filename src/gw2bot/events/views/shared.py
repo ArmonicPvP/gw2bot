@@ -63,6 +63,15 @@ EVENT_REQUIREMENTS_PROMPT = "Requirements"
 EVENT_REQUIREMENTS_HINT = "Event Requirements (Leave blank for none)"
 
 
+# Discord caps a Label's text at 45 characters, so what the slot is rides along
+# in the Label description.
+MENTEE_SLOT_PROMPT = "Offer a mentee slot for Commander training?"
+MENTEE_SLOT_HINT = (
+    "A member training to command co-leads the event. Members are asked "
+    "after signing up."
+)
+
+
 FLOW_TIMEOUT_SECONDS = 600
 
 
@@ -189,6 +198,9 @@ class EventDraft:
     ping_role_ids: tuple[int, ...] = field(default_factory=tuple)
     # Optional, so an empty string is a finished answer rather than a gap.
     requirements: str = ""
+    # Off unless the commander turns it on, so a draft that never reaches the
+    # question is still a finished answer.
+    mentee_enabled: bool = False
     posted: bool = False
     # Set when the draft edits an existing event rather than creating one. The
     # whole "Change something" flow reuses this draft, so a single flag steers
@@ -243,6 +255,7 @@ class EventDraft:
             delete_previous_on_repeat=self.delete_previous_on_repeat,
             ping_role_ids=self.ping_role_ids,
             requirements=self.requirements,
+            mentee_enabled=self.mentee_enabled,
         )
 
 
@@ -283,6 +296,7 @@ def draft_from_event(
         delete_previous_on_repeat=event.delete_previous_on_repeat,
         ping_role_ids=event.ping_role_ids,
         requirements=event.requirements,
+        mentee_enabled=event.mentee_enabled,
         editing_event_id=event.event_id,
         roster_only=roster_only,
         editing_occurrence_id=editing_occurrence_id,
@@ -745,6 +759,7 @@ def _restore_event_channel(
             delete_previous_on_repeat=event.delete_previous_on_repeat,
             ping_role_ids=event.ping_role_ids,
             requirements=event.requirements,
+            mentee_enabled=event.mentee_enabled,
         )
     except SQLAlchemyError as exc:
         LOGGER.error(
@@ -825,6 +840,7 @@ _CHANGE_FIELDS = (
     ("start", "Date & time"),
     ("duration", "Duration"),
     ("requirements", "Requirements"),
+    ("mentee", "Mentee slot"),
     ("repeat", "Repeat settings"),
     ("leader", "Leader"),
     ("ping_roles", "Roles to ping"),
