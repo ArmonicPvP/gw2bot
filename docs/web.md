@@ -21,6 +21,13 @@ That redirect is in `PUBLIC_PATHS` because it carries nothing about a member -
 `auth._RETURN_TARGET_PATHS` is the closed set a `?next=` may name. A new page
 needs its path added there or sign-in will drop the reader on the calendar.
 
+The dashboards gated behind a `/settings roles` role live under `/admin`:
+`/admin/food`, `/admin/roster`, `/admin/gold` and `/admin/events`. The first
+three answered at `/food`, `/roster` and `/gold` before; `LEGACY_DASHBOARD_PATHS`
+in `server.py` keeps those as redirects, public for the same reason `/` is.
+Their JSON APIs stayed where they were. The events page's API is
+`/api/admin/events` because `/api/events` was already the calendar's.
+
 ## Documents are built once, at import time
 
 Every page is a fixed string assembled when its module is imported, so serving
@@ -51,6 +58,7 @@ hidden-item controls post the same way.
 | `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
 | `roster.py` | The guild roster history dashboard. |
 | `gold.py` | The guild bank gold history dashboard. |
+| `events.py` | The guild event statistics dashboard: four headline tiles, the cumulative runs line, and three paginated tables. |
 | `profit/` | The Trading Post profit dashboard, split further - see below. |
 
 `pages/__init__.py` re-exports every document, so `server.py` imports them all

@@ -2256,3 +2256,270 @@ class TestEventStoreMenteeSlot:
         assert not store.mentee_question_declined(deleted.event_id, 7)
         assert not store.mentee_question_declined(retired.event_id, 7)
         assert store.mentee_question_declined(kept.event_id, 7)
+
+
+class TestEventStoreRunHistory:
+    # A moment after the default event's 90-minute run has ended.
+    AFTER = START + timedelta(hours=2)
+
+    def seat(
+        self,
+        store: EventStore,
+        occurrence_id: int,
+        user_id: int,
+        *,
+        waitlisted: bool = False,
+    ) -> None:
+        store.add_signup(
+            occurrence_id=occurrence_id,
+            discord_user_id=user_id,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=waitlisted,
+        )
+
+    def test_ending_a_run_records_it_with_its_roster(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(
+            store,
+            category=EventCategory.WVW,
+            title="Tuesday Reset",
+            leader_discord_id=42,
+            requirements="Bring a siege golem.",
+            mentee_enabled=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, START)
+        self.seat(store, occurrence.occurrence_id, 7)
+        self.seat(store, occurrence.occurrence_id, 8)
+        self.seat(store, occurrence.occurrence_id, 9, waitlisted=True)
+        store.set_signup_mentee(occurrence.occurrence_id, 7, True, START)
+        store.set_signup_mentee(occurrence.occurrence_id, 8, True, START)
+
+        store.set_occurrence_status(
+            occurrence.occurrence_id, EventStatus.OVER, self.AFTER
+        )
+
+        [run] = store.get_event_runs(
+            START.timestamp(), self.AFTER.timestamp()
+        )
+        assert run.occurrence_id == occurrence.occurrence_id
+        assert run.event_id == event.event_id
+        assert run.title == "Tuesday Reset"
+        assert run.category == EventCategory.WVW.value
+        assert run.leader_discord_id == 42
+        assert run.requirements == "Bring a siege golem."
+        assert run.mentee_enabled is True
+        assert run.started_at == START.timestamp()
+        # A window counts a run by its scheduled end.
+        assert run.ended_at == (START + timedelta(minutes=90)).timestamp()
+        assert run.duration_minutes == 90
+        assert [
+            (entry.discord_user_id, entry.waitlisted, entry.mentee)
+            for entry in run.participants
+        ] == [
+            (7, False, MenteeStatus.MENTEE),
+            (8, False, MenteeStatus.WAITLISTED),
+            (9, True, MenteeStatus.NONE),
+        ]
+
+    def test_a_run_is_recorded_once_however_often_it_is_ended(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+
+        for _ in range(3):
+            store.set_occurrence_status(
+                occurrence.occurrence_id, EventStatus.OVER, self.AFTER
+            )
+
+        assert len(
+            store.get_event_runs(START.timestamp(), self.AFTER.timestamp())
+        ) == 1
+
+    def test_the_record_keeps_the_event_as_it_was_run(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, title="Before")
+        occurrence = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_status(
+            occurrence.occurrence_id, EventStatus.OVER, self.AFTER
+        )
+
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title="After",
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=99,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        [run] = store.get_event_runs(
+            START.timestamp(), self.AFTER.timestamp()
+        )
+        assert (run.title, run.leader_discord_id) == ("Before", 42)
+
+    def test_other_statuses_record_nothing(self, store: EventStore) -> None:
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+
+        for status in (
+            EventStatus.OPEN,
+            EventStatus.FULL,
+            EventStatus.ONGOING,
+        ):
+            store.set_occurrence_status(
+                occurrence.occurrence_id, status, self.AFTER
+            )
+
+        assert store.get_event_runs(0, self.AFTER.timestamp()) == []
+
+    def test_a_run_retired_before_it_started_is_not_recorded(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Its post was deleted ahead of the run, which retires it as OVER
+        # without anything saying it was ever played.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+
+        store.set_occurrence_status(
+            occurrence.occurrence_id,
+            EventStatus.OVER,
+            START - timedelta(minutes=1),
+        )
+
+        assert store.get_event_runs(0, self.AFTER.timestamp()) == []
+
+    def test_a_cancelled_run_leaves_no_history(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Cancelling deletes the occurrence rather than ending it, so it is
+        # never counted as a run.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+
+        store.delete_occurrence(occurrence.occurrence_id)
+
+        assert store.get_event_runs(0, self.AFTER.timestamp()) == []
+
+    def test_a_recorded_run_outlives_its_occurrence_and_event(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A run superseded under "delete previous on repeat" loses its row,
+        # and a deleted event loses everything; the run still happened.
+        event = create_event(store)
+        occurrence = store.create_occurrence(event.event_id, START)
+        self.seat(store, occurrence.occurrence_id, 7)
+        store.set_occurrence_status(
+            occurrence.occurrence_id, EventStatus.OVER, self.AFTER
+        )
+
+        store.delete_occurrence(occurrence.occurrence_id)
+        store.delete_event(event.event_id)
+
+        [run] = store.get_event_runs(0, self.AFTER.timestamp())
+        assert [entry.discord_user_id for entry in run.participants] == [7]
+
+    def test_a_reused_occurrence_id_records_its_own_run(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        first = store.create_occurrence(event.event_id, START)
+        store.set_occurrence_status(
+            first.occurrence_id, EventStatus.OVER, self.AFTER
+        )
+        store.delete_occurrence(first.occurrence_id)
+
+        # SQLite hands the deleted row's id to the next one created.
+        later = START + timedelta(days=7)
+        second = store.create_occurrence(event.event_id, later)
+        assert second.occurrence_id == first.occurrence_id
+        store.set_occurrence_status(
+            second.occurrence_id,
+            EventStatus.OVER,
+            later + timedelta(hours=2),
+        )
+
+        runs = store.get_event_runs(
+            0, (later + timedelta(hours=2)).timestamp()
+        )
+        assert [run.started_at for run in runs] == [
+            START.timestamp(),
+            later.timestamp(),
+        ]
+
+    def test_retiring_an_event_records_the_runs_it_ends(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A run that finished before the maintenance pass caught up with it
+        # is ended by the retirement instead, and counts the same.
+        start = datetime.now(UTC) - timedelta(hours=3)
+        event = create_event(store, start_time=start)
+        finished = store.create_occurrence(event.event_id, start)
+        upcoming = store.create_occurrence(
+            event.event_id, start + timedelta(days=1)
+        )
+
+        store.retire_event(event.event_id, [upcoming.occurrence_id])
+
+        [run] = store.get_event_runs(0, datetime.now(UTC).timestamp())
+        assert run.occurrence_id == finished.occurrence_id
+
+    def test_the_window_is_read_by_when_runs_ended(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        ends: list[float] = []
+        for day in range(3):
+            start = START + timedelta(days=day)
+            occurrence = store.create_occurrence(event.event_id, start)
+            store.set_occurrence_status(
+                occurrence.occurrence_id,
+                EventStatus.OVER,
+                start + timedelta(hours=2),
+            )
+            ends.append((start + timedelta(minutes=90)).timestamp())
+
+        runs = store.get_event_runs(ends[1], ends[2] - 1)
+
+        assert [run.ended_at for run in runs] == [ends[1]]
+
+    def test_mentee_completions_count_the_whole_history(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.WVW)
+        ends: list[float] = []
+        for day, holder in enumerate((7, 7, 8)):
+            start = START + timedelta(days=day)
+            occurrence = store.create_occurrence(event.event_id, start)
+            self.seat(store, occurrence.occurrence_id, holder)
+            store.set_signup_mentee(
+                occurrence.occurrence_id, holder, True, start
+            )
+            store.set_occurrence_status(
+                occurrence.occurrence_id,
+                EventStatus.OVER,
+                start + timedelta(hours=2),
+            )
+            ends.append((start + timedelta(minutes=90)).timestamp())
+
+        assert store.get_mentee_completions(ends[-1]) == {7: 2, 8: 1}
+        # Nothing ends after the moment asked about counts yet.
+        assert store.get_mentee_completions(ends[0]) == {7: 1}

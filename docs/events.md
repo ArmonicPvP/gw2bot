@@ -62,10 +62,26 @@ with the code that reads them. That is what turned the roster and message
 layers from mutually recursive into ordered - they only ever wanted the
 predicate, not the module it used to sit in.
 
+## Run history
+
+`store.py` copies a run into `gw2_event_runs` and its roster into
+`gw2_event_run_participants` inside the same transaction that marks the
+occurrence OVER - `set_occurrence_status` and `retire_event` both call
+`_record_run` - so every path that ends a run records it and none can forget
+to. The occurrence rows cannot serve as the history themselves: `/event cancel`
+and "delete previous on repeat" delete them. A cancelled run is never recorded
+for that reason, and a run retired before it started (its post deleted ahead of
+time) is judged against the `now` the status write is given, which is why the
+posting paths pass their own clock through.
+
+`stats.py` is the pure arithmetic the `/admin/events` page is drawn from, over
+the runs one window holds. Nothing in it reads the store or Discord.
+
 ## Tests
 
 `tests/test_event_commands.py` covers all of `views/`;
-`tests/test_event_posting.py` covers `posting/`. A test that intercepts a name
+`tests/test_event_posting.py` covers `posting/`;
+`tests/test_event_stats.py` covers `stats.py`. A test that intercepts a name
 patches it on the module that looks it up, not on the package: for example
 `gw2bot.events.views.roster.occurrence_has_ended`, because that is where
 `apply_roster_addition` resolves it.

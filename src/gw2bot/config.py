@@ -125,8 +125,8 @@ class Config:
     # whichever role draws the raffle, and composing the settings is what keeps
     # it following that role until someone sets it apart. The roster page
     # starts from that same role as a plain default rather than a follower,
-    # because it is a page with its own audience, and the gold page follows
-    # the roster page's lead for the same reason.
+    # because it is a page with its own audience, and the gold and events
+    # pages follow the roster page's lead for the same reason.
     # In-game account names barred from the raffle. Matched case-insensitively,
     # because the guild log and the roster do not agree on capitalisation.
     raffle_excluded_accounts: tuple[str, ...] = ()
@@ -140,6 +140,7 @@ class Config:
     food_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     roster_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     gold_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
+    events_page_role_id: int = DEFAULT_RAFFLE_DRAW_ROLE_ID
     raffle_contribution_channel_id: int = DEFAULT_RAFFLE_CONTRIBUTION_CHANNEL_ID
     # Where an event posted inside a forum post pings its roles. It has no
     # default because there is no channel every server would want announced

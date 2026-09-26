@@ -78,3 +78,10 @@ GOLD_OFFICER_ONLY_PAGE = simple_page(
     "The guild bank gold history is only available to raffle officers.",
     '<a class="button" href="/calendar">Back to the calendar</a>',
 )
+
+EVENTS_OFFICER_ONLY_PAGE = simple_page(
+    "Officers only",
+    "Officers only",
+    "The guild event statistics are only available to raffle officers.",
+    '<a class="button" href="/calendar">Back to the calendar</a>',
+)

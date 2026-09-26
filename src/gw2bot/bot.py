@@ -522,6 +522,7 @@ class Gw2Bot(discord.Client):
             "food_page_role_id",
             "roster_page_role_id",
             "gold_page_role_id",
+            "events_page_role_id",
             "raffle_draw_role_id",
         }
         web_outcome = await self._reconcile_web_server(bool(changed & web_fields))

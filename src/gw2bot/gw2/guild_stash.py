@@ -61,10 +61,10 @@ async def poll_guild_stash(bot: Gw2Bot) -> None:
 async def record_guild_stash_balance(bot: Gw2Bot) -> int:
     """Read the guild bank's coin balance and log it, returning what it is.
 
-    The reading is the anchor the /gold page measures every derived balance
-    from, so it is taken on its own schedule rather than inferred from the
-    movements the guild log reports - which is exactly what makes a movement
-    the log dropped shift the older history instead of the present.
+    The reading is the anchor the /admin/gold page measures every derived
+    balance from, so it is taken on its own schedule rather than inferred from
+    the movements the guild log reports - which is exactly what makes a
+    movement the log dropped shift the older history instead of the present.
     """
     guild_id = bot._config.gw2_guild_id
     if bot._api is None or guild_id is None:

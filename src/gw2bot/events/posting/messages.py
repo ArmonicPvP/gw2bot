@@ -160,7 +160,9 @@ async def post_occurrence(
         # and the just-sent message can be deleted, avoiding an orphaned post
         # (whose buttons would reference a missing occurrence) or a duplicate
         # message from the next scheduler pass.
-        bot.event_store.set_occurrence_status(occurrence.occurrence_id, status)
+        bot.event_store.set_occurrence_status(
+            occurrence.occurrence_id, status, now
+        )
         bot.event_store.set_occurrence_message(
             occurrence.occurrence_id,
             message_channel_id,
@@ -309,6 +311,7 @@ async def refresh_occurrence_message(
             bot.event_store.set_occurrence_status(
                 occurrence.occurrence_id,
                 EventStatus.OVER,
+                current_time,
             )
             if occurrence.needs_refresh:
                 bot.event_store.set_occurrence_needs_refresh(
@@ -373,6 +376,7 @@ async def refresh_occurrence_message(
             bot.event_store.set_occurrence_status(
                 occurrence.occurrence_id,
                 status,
+                now,
             )
             LOGGER.debug(
                 "Event occurrence status transitioned; occurrence_id=%s "

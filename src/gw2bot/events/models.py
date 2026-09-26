@@ -309,6 +309,40 @@ class EventSignup:
     mentee_requested_at: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EventRunParticipant:
+    """One member on a finished run's roster, as it stood when it ended."""
+
+    discord_user_id: int
+    waitlisted: bool
+    mentee: MenteeStatus
+
+
+@dataclass(frozen=True, slots=True)
+class EventRun:
+    """One finished run of an event, as the run history recorded it.
+
+    A copy taken when the run ended rather than a view of the event, so an
+    event edited, retired or deleted since still reads as it was run. The
+    category is kept as the text it was stored as, so a category a later
+    release renames cannot make the history unreadable. Times are epoch
+    seconds, and ``ended_at`` is the scheduled end.
+    """
+
+    run_id: int
+    occurrence_id: int
+    event_id: int
+    category: str
+    title: str
+    leader_discord_id: int
+    requirements: str
+    mentee_enabled: bool
+    started_at: float
+    ended_at: float
+    duration_minutes: int
+    participants: tuple[EventRunParticipant, ...] = ()
+
+
 def _mentee_queue_key(signup: EventSignup) -> tuple[datetime, int]:
     # A claim always records when it was made; the sign-up time only stands in
     # for a row written some other way, so the order stays total either way.

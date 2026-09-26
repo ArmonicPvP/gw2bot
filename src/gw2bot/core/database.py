@@ -543,8 +543,8 @@ class GuildMemberCountLogRecord(Base):
 class GuildStashCoinLogRecord(Base):
     """One movement of coins in or out of the guild stash.
 
-    The bank ledger the /gold page draws, and deliberately not the raffle's
-    deposit table: that one is filtered by the raffle's own rules - an
+    The bank ledger the /admin/gold page draws, and deliberately not the
+    raffle's deposit table: that one is filtered by the raffle's own rules - an
     oversized Officer deposit earns no tickets and is never written there - so
     a balance derived from it would drift away from the guild's real one. This
     table records every coin movement the guild log reports, whatever the
@@ -575,10 +575,10 @@ class GuildStashCoinLogRecord(Base):
 class GuildStashBalanceLogRecord(Base):
     """One observed guild stash coin balance, written only when it changes.
 
-    The /gold page derives its line from the coin movements above, but those
-    only say how the balance moved; this says where it actually stood. The
-    newest row is the anchor every derived balance is measured from, which is
-    what keeps a stretch of events the guild log dropped from shifting the
+    The /admin/gold page derives its line from the coin movements above, but
+    those only say how the balance moved; this says where it actually stood.
+    The newest row is the anchor every derived balance is measured from, which
+    is what keeps a stretch of events the guild log dropped from shifting the
     present rather than the past.
     """
 
@@ -849,6 +849,68 @@ class EventMenteeOptOutRecord(Base):
         primary_key=True,
     )
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
+class EventRunRecord(Base):
+    """One run of a guild event, written once, when it is over.
+
+    The occurrence rows cannot serve as this history: a cancelled run and a
+    run superseded under "delete previous on repeat" take their rows and their
+    rosters with them, and a deleted event takes everything. This is a copy of
+    what the run was as it finished - its title, its commander, its
+    requirements, whether it offered a mentee slot - so the events statistics
+    page reads what happened rather than what the event says today.
+
+    ``occurrence_id`` and ``event_id`` are plain columns rather than foreign
+    keys because the rows they name are allowed to go. SQLite hands a deleted
+    row's id to the next one created, so the occurrence id alone does not
+    identify a run for good; it is paired with ``started_at`` wherever a run
+    is looked up. Times are epoch seconds, and ``ended_at`` is the scheduled
+    end, which is what a window counts a run by.
+    """
+
+    __tablename__ = "gw2_event_runs"
+    __table_args__ = (
+        Index("idx_gw2_event_runs_ended_at", "ended_at"),
+        Index("idx_gw2_event_runs_occurrence", "occurrence_id"),
+    )
+
+    run_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    occurrence_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    leader_discord_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    requirements: Mapped[str] = mapped_column(String, nullable=False)
+    mentee_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    started_at: Mapped[float] = mapped_column(Float, nullable=False)
+    ended_at: Mapped[float] = mapped_column(Float, nullable=False)
+    duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class EventRunParticipantRecord(Base):
+    """One member on a finished run's roster, as it stood when it ended.
+
+    Waitlisted members are kept as well as seated ones, because asking for the
+    mentee slot is open to both and the statistics page counts every ask.
+    ``mentee`` is the claim the member held on the slot: "mentee" for the
+    member who held it, "waitlisted" for one still waiting, "none" otherwise.
+    """
+
+    __tablename__ = "gw2_event_run_participants"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_event_runs.run_id"),
+        primary_key=True,
+    )
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    waitlisted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    mentee: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class RaffleRunWinnerRecord(Base):

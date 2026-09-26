@@ -18,6 +18,7 @@ from gw2bot.config import Config
 from gw2bot.core.dashboard_ranges import (
     CUSTOM_RANGE,
     DEFAULT_RANGE,
+    EVENTS_DASHBOARD,
     FOOD_DASHBOARD,
     GOLD_DASHBOARD,
     ROSTER_DASHBOARD,
@@ -25,6 +26,12 @@ from gw2bot.core.dashboard_ranges import (
     is_servable,
 )
 from gw2bot.core.discord_utils import resolve_display_name, user_has_role
+from gw2bot.events.stats import (
+    EVENT_STATS_RANGES,
+    EventRunGroup,
+    EventStats,
+    build_event_stats,
+)
 from gw2bot.gw2.feast_stock import (
     FEAST_USAGE_RANGES,
     MAX_FEAST_COST_COPPER,
@@ -56,6 +63,8 @@ from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
 from gw2bot.web.pages import (
     CALENDAR_PAGE,
+    EVENTS_OFFICER_ONLY_PAGE,
+    EVENTS_PAGE,
     FOOD_PAGE,
     GOLD_OFFICER_ONLY_PAGE,
     GOLD_PAGE,
@@ -112,9 +121,19 @@ FEAST_HISTORY_ORIGIN = 0.0
 
 # The feast usage dashboard is gated behind the role /settings roles food_page
 # names, which follows /raffle removetickets' role until it is set apart, the
-# roster history behind /settings roles roster_page, and the guild bank's gold
-# history behind /settings roles gold_page; both of those start from the same
-# role.
+# roster history behind /settings roles roster_page, the guild bank's gold
+# history behind /settings roles gold_page, and the event statistics behind
+# /settings roles events_page; those three start from the same role.
+
+# Where the role-gated dashboards answered before they moved under /admin.
+# Each is only a redirect to its new address, kept for the bookmarks that
+# still point at it, and carries nothing about a member - the page it sends
+# the reader to asks for the sign-in and the role itself.
+LEGACY_DASHBOARD_PATHS: Mapping[str, str] = {
+    "/food": "/admin/food",
+    "/roster": "/admin/roster",
+    "/gold": "/admin/gold",
+}
 
 # Every response this server sends is scoped to one signed-in member, so none
 # of it may be kept by the reverse proxy the README asks operators to run, by a
@@ -123,10 +142,11 @@ NO_STORE = "no-store, private"
 
 # Paths reachable without a session; everything else is members-only. The
 # site root is public because it holds nothing: it only redirects to
-# /calendar, which asks for the sign-in itself.
+# /calendar, which asks for the sign-in itself. The old dashboard addresses
+# are public for the same reason.
 PUBLIC_PATHS = frozenset(
     {"/", "/login", "/oauth/callback", "/logout", "/favicon.ico"}
-)
+) | frozenset(LEGACY_DASHBOARD_PATHS)
 
 _Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -222,17 +242,21 @@ class WebServer:
                 web.post("/logout", self._logout),
                 web.get("/api/me", self._me),
                 web.get("/api/events", self._events),
-                web.get("/food", self._food),
+                web.get("/admin/food", self._food),
                 web.get("/api/food", self._food_data),
                 # POST, not GET: it writes what a restock cost, and the
                 # SameSite=Lax session cookie is withheld from a cross-site
                 # POST, so no third-party page can fire it.
                 web.post("/api/food/cost", self._food_cost),
-                web.get("/roster", self._roster),
+                web.get("/admin/roster", self._roster),
                 web.get("/api/roster", self._roster_data),
                 web.get("/api/pending", self._pending_data),
-                web.get("/gold", self._gold),
+                web.get("/admin/gold", self._gold),
                 web.get("/api/gold", self._gold_data),
+                web.get("/admin/events", self._event_stats),
+                # Under /api/admin rather than beside the others because
+                # /api/events is already the calendar's.
+                web.get("/api/admin/events", self._event_stats_data),
                 web.get("/profit", self._profit),
                 web.get("/api/profit", self._profit_data),
                 # Delivery and open orders are served apart from the realized
@@ -251,6 +275,10 @@ class WebServer:
                 web.post(
                     "/api/profit/item-exclusions",
                     self._profit_item_exclusion,
+                ),
+                *(
+                    web.get(path, self._legacy_dashboard)
+                    for path in LEGACY_DASHBOARD_PATHS
                 ),
             ]
         )
@@ -399,6 +427,21 @@ class WebServer:
 
     async def _calendar(self, request: web.Request) -> web.StreamResponse:
         return self._html(CALENDAR_PAGE)
+
+    async def _legacy_dashboard(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        # The role-gated dashboards answer under /admin now. The old address
+        # sends the reader on rather than failing, the way the site root does
+        # for the calendar.
+        location = LEGACY_DASHBOARD_PATHS[request.path]
+        LOGGER.debug(
+            "Redirecting a moved dashboard; path=%s location=%s",
+            request.path,
+            location,
+        )
+        return _redirect(location)
 
     async def _login(self, request: web.Request) -> web.StreamResponse:
         return_to = auth.sanitize_return_target(request.query.get("next"))
@@ -748,6 +791,17 @@ class WebServer:
             self._config.gold_page_role_id,
             GOLD_OFFICER_ONLY_PAGE,
             "gold",
+        )
+
+    async def _require_events_access(
+        self,
+        request: web.Request,
+    ) -> web.Response | None:
+        return await self._require_role_access(
+            request,
+            self._config.events_page_role_id,
+            EVENTS_OFFICER_ONLY_PAGE,
+            "events",
         )
 
     async def _logout(self, request: web.Request) -> web.StreamResponse:
@@ -1835,6 +1889,171 @@ class WebServer:
             "name": movement.username,
             "coins": movement.coins,
             "after": movement.coins_after,
+        }
+
+    async def _event_stats(self, request: web.Request) -> web.StreamResponse:
+        denied = await self._require_events_access(request)
+        if denied is not None:
+            return denied
+        return self._html(EVENTS_PAGE)
+
+    async def _event_stats_data(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        denied = await self._require_events_access(request)
+        if denied is not None:
+            return denied
+        window = await self._resolve_window(
+            request, EVENT_STATS_RANGES, "event statistics", EVENTS_DASHBOARD
+        )
+        if isinstance(window, web.Response):
+            return window
+
+        # Synchronous SQLite on the Discord client's event loop, so it goes to
+        # a worker thread like the calendar's query. Only the runs that ended
+        # inside the window are read: every figure the page draws is about
+        # that window, the cumulative line included.
+        runs = await asyncio.to_thread(
+            self._bot.event_store.get_event_runs,
+            window.since,
+            window.until,
+        )
+        stats = build_event_stats(runs)
+        completions = await self._mentee_completions(
+            datetime.now(UTC).timestamp()
+        )
+        names = await self._display_names(
+            {
+                *stats.top_commanders,
+                *(point.leader_discord_id for point in stats.points),
+                *(row.discord_user_id for row in stats.mentees),
+                *(
+                    group.leader_discord_id
+                    for group in (
+                        *stats.without_mentee,
+                        *stats.without_requirements,
+                    )
+                ),
+            }
+        )
+        payload = self._serialize_event_stats(stats, names, completions)
+        LOGGER.debug(
+            "Served event statistics; range=%s runs=%s minutes=%s "
+            "participants=%s commanders_tied=%s mentees=%s "
+            "without_mentee=%s without_requirements=%s all_time=%s",
+            window.key,
+            stats.runs,
+            stats.total_minutes,
+            stats.participants,
+            len(stats.top_commanders),
+            len(stats.mentees),
+            len(stats.without_mentee),
+            len(stats.without_requirements),
+            completions is not None,
+        )
+        return self._json(
+            {
+                "range": window.key,
+                # Whether this is the window the member last picked rather
+                # than the default, so the page can adopt it without asking
+                # for one it already had.
+                "remembered": window.remembered,
+                "since": window.since,
+                "now": window.until,
+                **payload,
+            }
+        )
+
+    async def _mentee_completions(self, until: float) -> dict[int, int] | None:
+        """Every member's mentee runs over the whole history, or None.
+
+        The one figure on the events page that reaches past its window, so a
+        read that fails leaves that column unknown rather than taking the
+        window's own figures with it.
+        """
+        try:
+            return await asyncio.to_thread(
+                self._bot.event_store.get_mentee_completions,
+                until,
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.warning(
+                "Could not read mentee completions; error_type=%s",
+                type(exc).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _serialize_event_stats(
+        stats: EventStats,
+        names: Mapping[int, str],
+        completions: Mapping[int, int] | None,
+    ) -> dict[str, object]:
+        def name(user_id: int) -> str:
+            return names.get(user_id, UNKNOWN_NAME)
+
+        def group(entry: EventRunGroup) -> dict[str, object]:
+            return {
+                "title": entry.title,
+                "category": entry.category,
+                "commander": name(entry.leader_discord_id),
+                "mentee_enabled": entry.mentee_enabled,
+                "runs": entry.runs,
+                "last": entry.last_ended_at,
+            }
+
+        # Resolved names order the ties, so a table with two members on the
+        # same counts reads alphabetically rather than by Discord id.
+        mentees = sorted(
+            stats.mentees,
+            key=lambda row: (
+                -row.completed,
+                -row.asked,
+                name(row.discord_user_id).casefold(),
+            ),
+        )
+        return {
+            "runs": stats.runs,
+            "minutes": stats.total_minutes,
+            "participants": stats.participants,
+            "top_commanders": sorted(
+                (name(user_id) for user_id in stats.top_commanders),
+                key=str.casefold,
+            ),
+            "top_commander_runs": stats.top_commander_runs,
+            # Oldest first, one per run, each carrying the running count the
+            # line reaches when that run ended.
+            "points": [
+                {
+                    "t": point.at,
+                    "count": point.runs,
+                    "title": point.title,
+                    "commander": name(point.leader_discord_id),
+                }
+                for point in stats.points
+            ],
+            "mentees": [
+                {
+                    "name": name(row.discord_user_id),
+                    "asked": row.asked,
+                    "completed": row.completed,
+                    # Null when the history could not be read, which the page
+                    # shows as unknown rather than as none.
+                    "completed_all_time": (
+                        None
+                        if completions is None
+                        else completions.get(
+                            row.discord_user_id, row.completed
+                        )
+                    ),
+                }
+                for row in mentees
+            ],
+            "without_mentee": [group(entry) for entry in stats.without_mentee],
+            "without_requirements": [
+                group(entry) for entry in stats.without_requirements
+            ],
         }
 
     async def _events(self, request: web.Request) -> web.StreamResponse:

@@ -25,6 +25,7 @@ DEFAULT_RANGE = "24h"
 FOOD_DASHBOARD = "food"
 ROSTER_DASHBOARD = "roster"
 GOLD_DASHBOARD = "gold"
+EVENTS_DASHBOARD = "events"
 
 
 @dataclass(frozen=True, slots=True)

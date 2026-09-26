@@ -539,6 +539,20 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         validates=ValidationTarget.ROLE,
     ),
     SettingDefinition(
+        name="events_page",
+        field="events_page_role_id",
+        group=ROLES_GROUP,
+        default=DEFAULT_RAFFLE_DRAW_ROLE_ID,
+        description=(
+            "Role allowed to open the guild event statistics page on the web "
+            "calendar. It defaults to the role that draws the raffle, like "
+            "the other admin pages, because the page names who ran and who "
+            "mentored; set it to a wider role to open it to event leaders."
+        ),
+        parse=_parse_discord_id("events_page"),
+        validates=ValidationTarget.ROLE,
+    ),
+    SettingDefinition(
         name="event_ping",
         field="event_ping_channel_id",
         group=CHANNELS_GROUP,
