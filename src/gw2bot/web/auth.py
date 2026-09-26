@@ -27,9 +27,18 @@ _MAX_SESSION_NAME_LENGTH = 64
 _MAX_RETURN_TARGET_LENGTH = 1024
 # The pages a sign-in may return to. The calendar is "/calendar" rather than
 # the site root: the site is served from a path on the main domain, and the
-# root is only the redirect that keeps the old bookmarks working.
+# root is only the redirect that keeps the old bookmarks working. The
+# role-gated dashboards live under "/admin"; their old addresses only redirect
+# there, so they are never a place to come back to.
 _RETURN_TARGET_PATHS = frozenset(
-    {"/calendar", "/food", "/gold", "/profit", "/roster"}
+    {
+        "/calendar",
+        "/profit",
+        "/admin/food",
+        "/admin/roster",
+        "/admin/gold",
+        "/admin/events",
+    }
 )
 CALENDAR_PATH = "/calendar"
 

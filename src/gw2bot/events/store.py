@@ -13,6 +13,8 @@ from gw2bot.core.database import (
     EventOccurrenceRecord,
     EventRecord,
     EventReminderRecord,
+    EventRunParticipantRecord,
+    EventRunRecord,
     EventSignupPreferenceRecord,
     EventSignupRecord,
     SettingRecord,
@@ -26,6 +28,8 @@ from gw2bot.events.models import (
     EventCategory,
     EventOccurrence,
     EventRole,
+    EventRun,
+    EventRunParticipant,
     EventSignup,
     EventStatus,
     MenteeStatus,
@@ -260,6 +264,130 @@ def _settle_mentee(session: Session, occurrence_id: int) -> None:
             status.value,
         )
         record.mentee = status.value
+
+
+def _record_run(
+    session: Session,
+    occurrence: EventOccurrenceRecord,
+    now: datetime,
+) -> bool:
+    """Copy a finished occurrence into the run history, once.
+
+    Called inside the transaction that marks the occurrence OVER, so every
+    path that ends a run records it and none can forget to. A cancelled run is
+    never recorded because cancelling deletes the occurrence instead of ending
+    it. Neither is one retired before it started - a post somebody deleted
+    ahead of the run - because nothing says it was ever played.
+
+    Returns whether a row was written. A run already recorded is left as it
+    was first written: OVER is where a run stops, so a second write can only
+    be a retry of the same ending.
+    """
+    event = session.get(EventRecord, occurrence.event_id)
+    if event is None or event.cancelled:
+        return False
+    start = _parse_time(occurrence.start_time)
+    if start > now:
+        LOGGER.debug(
+            "Left a run that never started out of the run history; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return False
+    started_at = start.timestamp()
+    # The occurrence id is paired with the start because SQLite hands a
+    # deleted row's id to the next one created, and a run recorded under the
+    # old row must not stand in for the new one.
+    already_recorded = session.scalar(
+        select(EventRunRecord.run_id)
+        .where(EventRunRecord.occurrence_id == occurrence.occurrence_id)
+        .where(EventRunRecord.started_at == started_at)
+        .limit(1)
+    )
+    if already_recorded is not None:
+        return False
+    run = EventRunRecord(
+        occurrence_id=occurrence.occurrence_id,
+        event_id=event.event_id,
+        event_created_at=event.created_at,
+        category=event.category,
+        title=event.title,
+        leader_discord_id=event.leader_discord_id,
+        requirements=event.requirements,
+        mentee_enabled=event.mentee_enabled,
+        started_at=started_at,
+        ended_at=started_at + event.duration_minutes * 60,
+        duration_minutes=event.duration_minutes,
+        recorded_at=now.timestamp(),
+    )
+    session.add(run)
+    # The participants are keyed by the run, so its id is needed first.
+    session.flush()
+    signups = session.scalars(
+        select(EventSignupRecord).where(
+            EventSignupRecord.occurrence_id == occurrence.occurrence_id
+        )
+    ).all()
+    for signup in signups:
+        session.add(
+            EventRunParticipantRecord(
+                run_id=run.run_id,
+                discord_user_id=signup.discord_user_id,
+                waitlisted=signup.waitlisted,
+                mentee=signup.mentee,
+            )
+        )
+    LOGGER.debug(
+        "Recorded a finished event run; occurrence_id=%s event_id=%s "
+        "run_id=%s signups=%s seated=%s has_mentee=%s",
+        occurrence.occurrence_id,
+        event.event_id,
+        run.run_id,
+        len(signups),
+        sum(1 for signup in signups if not signup.waitlisted),
+        any(
+            signup.mentee == MenteeStatus.MENTEE.value for signup in signups
+        ),
+    )
+    return True
+
+
+def _run_from_record(
+    record: EventRunRecord,
+    participants: Sequence[EventRunParticipantRecord],
+) -> EventRun:
+    return EventRun(
+        run_id=record.run_id,
+        occurrence_id=record.occurrence_id,
+        event_id=record.event_id,
+        event_created_at=record.event_created_at,
+        category=record.category,
+        title=record.title,
+        leader_discord_id=record.leader_discord_id,
+        requirements=record.requirements,
+        mentee_enabled=record.mentee_enabled,
+        started_at=record.started_at,
+        ended_at=record.ended_at,
+        duration_minutes=record.duration_minutes,
+        participants=tuple(
+            EventRunParticipant(
+                discord_user_id=participant.discord_user_id,
+                waitlisted=participant.waitlisted,
+                mentee=_parse_mentee(participant.mentee),
+            )
+            for participant in participants
+        ),
+    )
+
+
+def _parse_mentee(value: str) -> MenteeStatus:
+    # History outlives the release that wrote it, so a claim this release
+    # does not know reads as no claim rather than making the run unreadable.
+    try:
+        return MenteeStatus(value)
+    except ValueError:
+        LOGGER.warning("Skipping an unreadable stored mentee claim")
+        return MenteeStatus.NONE
 
 
 class EventStore:
@@ -575,17 +703,30 @@ class EventStore:
         self,
         occurrence_id: int,
         status: EventStatus,
+        now: datetime | None = None,
     ) -> None:
+        """Store an occurrence's status, recording the run when it ends.
+
+        ``now`` only matters for OVER: a run retired before it started is
+        left out of the run history, and this is the moment that is judged
+        against.
+        """
+        current_time = now if now is not None else datetime.now(UTC)
         with self._sessions() as session:
             record = session.get(EventOccurrenceRecord, occurrence_id)
             if record is None:
                 raise ValueError(f"Unknown event occurrence {occurrence_id}")
             record.status = status.value
+            recorded = status is EventStatus.OVER and _record_run(
+                session, record, current_time
+            )
             session.commit()
         LOGGER.debug(
-            "Updated occurrence status; occurrence_id=%s status=%s",
+            "Updated occurrence status; occurrence_id=%s status=%s "
+            "run_recorded=%s",
             occurrence_id,
             status.value,
+            recorded,
         )
 
     def set_occurrence_needs_refresh(
@@ -905,6 +1046,82 @@ class EventStore:
         )
         return starts
 
+    def get_event_runs(self, since: float, until: float) -> list[EventRun]:
+        """Every recorded run that ended inside a window, oldest first.
+
+        Each carries its roster as it stood at the end. The roster rows are
+        read with the same window rather than by run id, so the read passes
+        no per-run bound parameters however many runs the window holds.
+        """
+        in_window = (
+            EventRunRecord.ended_at >= since,
+            EventRunRecord.ended_at <= until,
+        )
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventRunRecord)
+                .where(*in_window)
+                .order_by(EventRunRecord.ended_at, EventRunRecord.run_id)
+            ).all()
+            participants: dict[int, list[EventRunParticipantRecord]] = {}
+            for participant in session.scalars(
+                select(EventRunParticipantRecord)
+                .join(
+                    EventRunRecord,
+                    EventRunRecord.run_id == EventRunParticipantRecord.run_id,
+                )
+                .where(*in_window)
+                .order_by(
+                    EventRunParticipantRecord.run_id,
+                    EventRunParticipantRecord.discord_user_id,
+                )
+            ).all():
+                participants.setdefault(participant.run_id, []).append(
+                    participant
+                )
+            runs = [
+                _run_from_record(record, participants.get(record.run_id, []))
+                for record in records
+            ]
+        LOGGER.debug(
+            "Fetched recorded event runs; runs=%s participants=%s",
+            len(runs),
+            sum(len(run.participants) for run in runs),
+        )
+        return runs
+
+    def get_mentee_completions(self, until: float) -> dict[int, int]:
+        """How many recorded runs each member has held the mentee slot on.
+
+        Counted over the whole history up to ``until`` rather than one
+        window, because how far a mentee has come is not a question about a
+        week. One grouped query, keyed by member.
+        """
+        with self._sessions() as session:
+            rows = session.execute(
+                select(
+                    EventRunParticipantRecord.discord_user_id,
+                    func.count(),
+                )
+                .join(
+                    EventRunRecord,
+                    EventRunRecord.run_id == EventRunParticipantRecord.run_id,
+                )
+                .where(
+                    EventRunParticipantRecord.mentee
+                    == MenteeStatus.MENTEE.value
+                )
+                .where(EventRunRecord.ended_at <= until)
+                .group_by(EventRunParticipantRecord.discord_user_id)
+            ).all()
+            completions = {user_id: count for user_id, count in rows}
+        LOGGER.debug(
+            "Fetched mentee completions; members=%s runs=%s",
+            len(completions),
+            sum(completions.values()),
+        )
+        return completions
+
     def get_handled_reminder_offsets(self, occurrence_id: int) -> set[int]:
         with self._sessions() as session:
             offsets = session.scalars(
@@ -1096,6 +1313,19 @@ class EventStore:
                 .where(EventOccurrenceRecord.event_id == event_id)
                 .where(still_open)
             )
+            # What is left is runs that have finished but whose end the
+            # maintenance pass had not caught up with, so they are ended here
+            # and recorded as run, the way the pass would have. Read by the
+            # same predicate, which binds no per-run ids.
+            recorded_at = datetime.now(UTC)
+            recorded = sum(
+                _record_run(session, record, recorded_at)
+                for record in session.scalars(
+                    select(EventOccurrenceRecord)
+                    .where(EventOccurrenceRecord.event_id == event_id)
+                    .where(still_open)
+                ).all()
+            )
             session.execute(
                 update(EventOccurrenceRecord)
                 .where(EventOccurrenceRecord.event_id == event_id)
@@ -1110,10 +1340,11 @@ class EventStore:
             session.commit()
         LOGGER.debug(
             "Retired event, keeping the runs it has finished; event_id=%s "
-            "occurrences_removed=%s occurrences_retired=%s",
+            "occurrences_removed=%s occurrences_retired=%s runs_recorded=%s",
             event_id,
             len(occurrence_ids),
             retired,
+            recorded,
         )
 
     def has_posted_occurrence(self, event_id: int) -> bool:
