@@ -178,6 +178,7 @@ that nothing answers to is how a guild silently loses a feature.
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
 | `/settings roles roster_page` | `1317638909735342201` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
 | `/settings roles gold_page` | `1317638909735342201` | The guild bank gold history page. Set it to a wider role to open the history to the whole guild. |
+| `/settings roles events_page` | `1317638909735342201` | The guild event statistics page. Set it to a wider role to open it to event leaders. |
 | `/settings channels event_ping` | unset | Where an event posted inside a forum post pings its roles. While it is unset those events ping inside the post. |
 | `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
 | `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
@@ -1521,9 +1522,15 @@ correctly see a repeating event land on an adjacent local weekday.
 | `/` | Redirects to `/calendar`. |
 | `/calendar` | The guild event calendar. |
 | `/profit` | The Trading Post profit dashboard. |
-| `/food` | The feast usage dashboard. |
-| `/roster` | The guild roster history dashboard. |
-| `/gold` | The guild bank gold history dashboard. |
+| `/admin/food` | The feast usage dashboard. |
+| `/admin/roster` | The guild roster history dashboard. |
+| `/admin/gold` | The guild bank gold history dashboard. |
+| `/admin/events` | The guild event statistics dashboard. |
+
+The dashboards gated behind a role live under `/admin`. They answered at
+`/food`, `/roster` and `/gold` before, and those addresses now redirect to
+their `/admin` pages, so an old bookmark still lands in the right place. Their
+JSON APIs did not move.
 
 The calendar answered on the site root before, which suited a host of its own
 such as `calendar.example.com`. It has its own path now, so the whole site
@@ -1817,7 +1824,7 @@ what it lost, with zero always on a line, and the top line is the first round
 step at or above the highest reading, so the padding above it is the rounding
 and nothing more. The gutter beside the labels is measured from the labels
 themselves, so a long reading widens it rather than being drawn off the edge
-and clipped. The same widening applies to the guild bank chart on `/gold`,
+and clipped. The same widening applies to the guild bank chart on `/admin/gold`,
 whose labels outgrow their margin once the bank passes six figures of gold.
 
 Hover anywhere in a chart's plot to snap to the nearest date and see its exact
@@ -1987,7 +1994,7 @@ described above.
 
 ### Feast Usage Dashboard
 
-The same site serves a **Feast Usage** page at `/food`, built from the per-feast
+The same site serves a **Feast Usage** page at `/admin/food`, built from the per-feast
 stock history described under
 [Feast Stock Count History](#feast-stock-count-history). It charts each tracked
 feast's on-hand count over the last 24 hours, 7 days, or 30 days, and lists the
@@ -2124,11 +2131,12 @@ member, the viewer must hold role `1317638909735342201`, the role that also
 gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
 officers-only page. Membership and the role are re-checked on the same schedule
 as calendar access, so a member who loses the role loses the page within
-minutes. The page is not linked from the calendar; browse to `/food` directly.
+minutes. The page is not linked from the calendar; browse to `/admin/food`
+directly.
 
 ### Guild Roster History Page
 
-The same site serves a **Guild Roster** page at `/roster`, built from the
+The same site serves a **Guild Roster** page at `/admin/roster`, built from the
 membership history described under
 [Guild Roster History](#guild-roster-history). It charts the guild's member
 count over the last 24 hours, 7 days, or 30 days, with one dot per change,
@@ -2193,7 +2201,7 @@ Access is gated by `/settings roles roster_page`, which starts as the role that
 draws the raffle, because the page names who was kicked and by whom. Point it
 at a wider role to open the history to the whole guild. Membership and the role
 are re-checked on the same schedule as calendar access. The page is not linked
-from the calendar; browse to `/roster` directly.
+from the calendar; browse to `/admin/roster` directly.
 
 Until the member count poll has written its first row there is no count to
 measure against, so the page says so and lists the changes without a line. That
@@ -2202,7 +2210,7 @@ settings in place.
 
 ### Guild Bank Gold History Page
 
-The same site serves a **Guild Bank** page at `/gold`, built from the ledger
+The same site serves a **Guild Bank** page at `/admin/gold`, built from the ledger
 described under [Guild Bank Gold History](#guild-bank-gold-history). It charts
 the bank's balance over the last 24 hours, 7 days, or 30 days. Movements in the
 same minute share one dot and one line segment at their cumulative ending
@@ -2240,12 +2248,58 @@ Access is gated by `/settings roles gold_page`, which starts as the role that
 draws the raffle, because the page names who took gold out. Point it at a wider
 role to open the history to the whole guild. Membership and the role are
 re-checked on the same schedule as calendar access. The page is not linked from
-the calendar; browse to `/gold` directly.
+the calendar; browse to `/admin/gold` directly.
 
 Until the stash poll has written its first balance there is no reading to
 measure against, so the page says so and lists the movements without a line.
 That resolves itself within one poll interval of the bot starting with the
 Guild Wars 2 settings in place.
+
+### Guild Event Statistics Page
+
+The same site serves an **Event Statistics** page at `/admin/events`, built
+from the guild's finished event runs. It uses the same **24h**, **7d**, **30d**
+and **Custom** range bar as the other dashboards, with the same whole-day
+custom window, limits and remembering, and every figure on it is about the
+chosen window alone:
+
+- **Event runs** — how many runs ended in the window.
+- **Time run** — their scheduled durations added up, in hours and minutes.
+- **Participants** — how many different people took part: every member seated
+  on a run's roster, plus the commander who led it whether or not they signed
+  up to it. Waitlisted members who never got a seat are not counted.
+- **Top commander** — whoever led the most runs, with how many. Commanders tied
+  for the most are all named.
+- **Cumulative event runs** — a line that starts at zero at the window's
+  opening edge and steps up by one as each run ends. Runs that ended in the
+  same minute share a dot; hovering it, or tapping it on a phone, names the
+  runs and their commanders and gives the running count.
+- **Mentees** — every member who asked for a run's mentee slot, with how many
+  runs they asked on, how many they finished holding the slot, and how many
+  they have finished holding it over the whole history (**All time**), which
+  is the one column not limited to the window.
+- **Events without a mentee** — the events whose runs ended with nobody in the
+  mentee slot, one row per event with how many such runs it had and whether
+  the event offers the slot at all.
+- **Events with no requirements** — the events whose runs had their
+  requirements left blank (shown as "None" on the post), or set to "None".
+
+A run counts as run when it is over: the moment the bot marks its post
+finished, it keeps a copy of the run — its title, category, commander,
+requirements, whether it offered a mentee slot, and its roster with everyone's
+claim on that slot. The copy is what the page reads, so editing, retiring or
+deleting an event later, or a repeating event deleting its previous post, does
+not change what the page says about runs already finished. A run cancelled
+with `/event cancel` was skipped and never counts, and neither does a run whose
+post was deleted before it started. Runs are placed in a window by their
+scheduled end. Only runs that finish after this page was added are recorded;
+there is no import of older runs.
+
+Access is gated by `/settings roles events_page`, which starts as the role that
+draws the raffle, because the page names who led and who mentored. Point it at
+a wider role to open it to event leaders. Membership and the role are
+re-checked on the same schedule as calendar access. The page is not linked from
+the calendar; browse to `/admin/events` directly.
 
 ## Run With Docker
 

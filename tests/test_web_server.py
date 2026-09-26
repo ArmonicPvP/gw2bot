@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ from factories import (
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.core.dashboard_ranges import StoredRange
-from gw2bot.events.models import EventCategory, RepeatFrequency
+from gw2bot.events.models import EventCategory, EventStatus, RepeatFrequency
 from gw2bot.events.store import EventStore
 from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
@@ -345,6 +346,37 @@ class TestSiteRoot:
         response = await client.get("/", allow_redirects=False)
 
         assert response.status == 302
+
+
+class TestMovedDashboards:
+    @pytest.mark.parametrize("page", ["food", "roster", "gold"])
+    async def test_the_old_address_redirects_under_admin(
+        self,
+        client: TestClient,
+        page: str,
+    ) -> None:
+        # The role-gated dashboards answer under /admin now, and the old
+        # bookmarks are sent on rather than turned away. The redirect holds
+        # nothing about a member, so it needs no session; the page it points
+        # at asks for the sign-in and the role itself.
+        response = await client.get(f"/{page}", allow_redirects=False)
+
+        assert response.status == 302
+        assert response.headers["Location"] == f"/admin/{page}"
+        assert response.headers["Cache-Control"] == "no-store, private"
+
+    @pytest.mark.parametrize("page", ["food", "roster", "gold", "events"])
+    async def test_a_sign_in_returns_to_the_admin_page(
+        self,
+        client: TestClient,
+        page: str,
+    ) -> None:
+        response = await client.get(f"/admin/{page}")
+
+        assert response.status == 401
+        assert (
+            f'href="/login?next=%2Fadmin%2F{page}"' in await response.text()
+        )
 
 
 class TestAuthGate:
@@ -1702,7 +1734,7 @@ class TestFoodPageGate:
         self,
         client: TestClient,
     ) -> None:
-        response = await client.get("/food")
+        response = await client.get("/admin/food")
 
         assert response.status == 401
         assert "Sign in with Discord" in await response.text()
@@ -1714,7 +1746,7 @@ class TestFoodPageGate:
         # The default session member is a plain guild member with no roles, so
         # the officer-gated dashboard must turn them away.
         response = await client.get(
-            "/food",
+            "/admin/food",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -1729,7 +1761,7 @@ class TestFoodPageGate:
         guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
 
         response = await client.get(
-            "/food",
+            "/admin/food",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -1748,10 +1780,10 @@ class TestFoodPageGate:
         guild.fetch_member = AsyncMock(return_value=member(officer=True))
         headers = {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
 
-        assert (await client.get("/food", headers=headers)).status == 200
+        assert (await client.get("/admin/food", headers=headers)).status == 200
         assert guild.fetch_member.await_count == 2
 
-        assert (await client.get("/food", headers=headers)).status == 200
+        assert (await client.get("/admin/food", headers=headers)).status == 200
         assert guild.fetch_member.await_count == 2
 
     async def test_unreachable_discord_returns_503(
@@ -1765,7 +1797,7 @@ class TestFoodPageGate:
         guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
 
         response = await client.get(
-            "/food",
+            "/admin/food",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -2180,7 +2212,7 @@ class TestRosterPageGate:
         self,
         client: TestClient,
     ) -> None:
-        response = await client.get("/roster")
+        response = await client.get("/admin/roster")
 
         assert response.status == 401
         assert "Sign in with Discord" in await response.text()
@@ -2190,7 +2222,7 @@ class TestRosterPageGate:
         client: TestClient,
     ) -> None:
         response = await client.get(
-            "/roster",
+            "/admin/roster",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -2205,7 +2237,7 @@ class TestRosterPageGate:
         guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
 
         response = await client.get(
-            "/roster",
+            "/admin/roster",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -2221,7 +2253,7 @@ class TestRosterPageGate:
         guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
 
         response = await client.get(
-            "/roster",
+            "/admin/roster",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -2878,7 +2910,7 @@ class TestGoldPageGate:
         self,
         client: TestClient,
     ) -> None:
-        response = await client.get("/gold")
+        response = await client.get("/admin/gold")
 
         assert response.status == 401
         assert "Sign in with Discord" in await response.text()
@@ -2888,7 +2920,7 @@ class TestGoldPageGate:
         client: TestClient,
     ) -> None:
         response = await client.get(
-            "/gold",
+            "/admin/gold",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -2903,7 +2935,7 @@ class TestGoldPageGate:
         guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
 
         response = await client.get(
-            "/gold",
+            "/admin/gold",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -2919,7 +2951,7 @@ class TestGoldPageGate:
         guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
 
         response = await client.get(
-            "/gold",
+            "/admin/gold",
             headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
         )
 
@@ -3169,6 +3201,387 @@ class TestGoldApi:
         assert await response.json() == {"error": "unavailable"}
 
 
+class TestEventStatsPageGate:
+    async def test_unauthenticated_page_shows_sign_in(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/admin/events")
+
+        assert response.status == 401
+        assert "Sign in with Discord" in await response.text()
+
+    async def test_member_without_role_gets_officers_only(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/admin/events",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert "guild event statistics" in await response.text()
+
+    async def test_officer_reaches_the_events_page(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+
+        response = await client.get(
+            "/admin/events",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 200
+        assert "Event Statistics" in await response.text()
+
+    async def test_the_page_follows_its_own_role(
+        self,
+        bot: FakeBot,
+        guild: FakeGuild,
+    ) -> None:
+        # /settings roles events_page sets the page apart from the raffle
+        # officers the other admin pages start from.
+        guild.members[SESSION_USER_ID] = SimpleNamespace(
+            display_name="Kitty", roles=[SimpleNamespace(id=777)]
+        )
+        server = WebServer(
+            cast(Gw2Bot, bot),
+            replace(make_config(), events_page_role_id=777),
+            cast(aiohttp.ClientSession, None),
+        )
+        test_client = TestClient(await quiet_test_server(server.app))
+        try:
+            headers = {
+                "Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"
+            }
+            events = await test_client.get("/admin/events", headers=headers)
+            gold = await test_client.get("/admin/gold", headers=headers)
+        finally:
+            await test_client.close()
+
+        assert events.status == 200
+        assert gold.status == 403
+
+    async def test_unreachable_discord_returns_503(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+        guild.fetch_member = AsyncMock(side_effect=forbidden_error(50001))
+
+        response = await client.get(
+            "/admin/events",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 503
+
+
+class TestEventStatsApi:
+    def _officer_headers(self, guild: FakeGuild) -> dict[str, str]:
+        guild.members[SESSION_USER_ID] = member("Kitty", officer=True)
+        return {"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"}
+
+    def _run(
+        self,
+        store: EventStore,
+        ended_ago: timedelta,
+        *,
+        title: str = "Kitty Cleanup",
+        leader: int = 42,
+        requirements: str = "Bring food.",
+        mentee_enabled: bool = False,
+        seated: tuple[int, ...] = (),
+        mentee: int | None = None,
+    ) -> None:
+        """Run one event to its end, the way the maintenance pass would."""
+        start = datetime.now(UTC) - ended_ago - timedelta(minutes=90)
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title=title,
+            description="d",
+            channel_id=1234,
+            leader_discord_id=leader,
+            start_time=start,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+            requirements=requirements,
+            mentee_enabled=mentee_enabled,
+        )
+        occurrence = store.create_occurrence(event.event_id, start)
+        for user_id in seated:
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+            )
+        if mentee is not None:
+            store.set_signup_mentee(
+                occurrence.occurrence_id, mentee, True, start
+            )
+        store.set_occurrence_status(
+            occurrence.occurrence_id, EventStatus.OVER
+        )
+
+    async def test_member_without_role_is_forbidden(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get(
+            "/api/admin/events",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert await response.json() == {"error": "forbidden"}
+
+    async def test_rejects_unknown_range(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "90d"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid range"}
+
+    async def test_an_empty_window_reads_as_nothing_run(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["range"] == "24h"
+        assert (
+            payload["runs"],
+            payload["minutes"],
+            payload["participants"],
+            payload["top_commanders"],
+            payload["top_commander_runs"],
+        ) == (0, 0, 0, [], 0)
+        assert payload["points"] == []
+        assert payload["mentees"] == []
+        assert payload["without_mentee"] == []
+        assert payload["without_requirements"] == []
+
+    async def test_returns_the_windows_figures_and_tables(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        guild.members[42] = member("Commander Kitty")
+        guild.members[43] = member("Commander Pup")
+        guild.members[7] = member("Mentee Kitty")
+        # Before the window: counted in the mentee's whole history only.
+        self._run(
+            store,
+            timedelta(days=3),
+            mentee_enabled=True,
+            seated=(7,),
+            mentee=7,
+        )
+        self._run(
+            store,
+            timedelta(hours=5),
+            title="Raid Night",
+            requirements="",
+            mentee_enabled=True,
+            seated=(7, 8),
+            mentee=7,
+        )
+        self._run(
+            store,
+            timedelta(hours=3),
+            title="Open World",
+            leader=43,
+            requirements="None",
+            seated=(8, 9),
+        )
+        self._run(store, timedelta(hours=1), title="Raid Night")
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["runs"] == 3
+        assert payload["minutes"] == 270
+        # 7, 8, 9 on the rosters, and both commanders.
+        assert payload["participants"] == 5
+        assert payload["top_commanders"] == ["Commander Kitty"]
+        assert payload["top_commander_runs"] == 2
+        assert [
+            (point["count"], point["title"], point["commander"])
+            for point in payload["points"]
+        ] == [
+            (1, "Raid Night", "Commander Kitty"),
+            (2, "Open World", "Commander Pup"),
+            (3, "Raid Night", "Commander Kitty"),
+        ]
+        assert payload["mentees"] == [
+            {
+                "name": "Mentee Kitty",
+                "asked": 1,
+                "completed": 1,
+                "completed_all_time": 2,
+            }
+        ]
+        # Each of the three runs is its own event here, newest first.
+        assert [
+            (row["title"], row["commander"], row["runs"])
+            for row in payload["without_mentee"]
+        ] == [
+            ("Raid Night", "Commander Kitty", 1),
+            ("Open World", "Commander Pup", 1),
+        ]
+        assert [
+            row["title"] for row in payload["without_requirements"]
+        ] == ["Open World", "Raid Night"]
+
+    async def test_tied_commanders_are_all_named(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        guild.members[42] = member("Zed")
+        guild.members[43] = member("Amy")
+        self._run(store, timedelta(hours=2), leader=42)
+        self._run(store, timedelta(hours=1), leader=43)
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        payload = await response.json()
+        assert payload["top_commanders"] == ["Amy", "Zed"]
+        assert payload["top_commander_runs"] == 1
+
+    async def test_an_unreadable_history_leaves_only_all_time_unknown(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        self._run(store, timedelta(hours=1), seated=(7,), mentee=7)
+
+        with patch.object(
+            store,
+            "get_mentee_completions",
+            side_effect=SQLAlchemyError("locked"),
+        ):
+            response = await client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=self._officer_headers(guild),
+            )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["runs"] == 1
+        assert payload["mentees"][0]["completed"] == 1
+        assert payload["mentees"][0]["completed_all_time"] is None
+
+    async def test_an_unresolvable_name_reads_as_unknown(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        self._run(store, timedelta(hours=1), leader=4242)
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        payload = await response.json()
+        assert payload["top_commanders"] == ["Unknown"]
+
+    async def test_titles_and_names_never_reach_the_log(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        guild.members[42] = member("Secret Commander Name")
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            self._run(
+                store,
+                timedelta(hours=1),
+                title="Secret Event Title",
+                requirements="Secret requirements text",
+                seated=(7,),
+                mentee=7,
+            )
+            response = await client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=self._officer_headers(guild),
+            )
+
+        assert response.status == 200
+        assert "Recorded a finished event run" in caplog.text
+        assert "Served event statistics" in caplog.text
+        assert "Secret Event Title" not in caplog.text
+        assert "Secret requirements text" not in caplog.text
+        assert "Secret Commander Name" not in caplog.text
+
+    async def test_the_response_carries_no_discord_ids(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        # The page names people; it has no use for their account ids.
+        self._run(
+            store,
+            timedelta(hours=1),
+            leader=987654321,
+            mentee_enabled=True,
+            seated=(123456789,),
+            mentee=123456789,
+        )
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        body = await response.text()
+        assert "987654321" not in body
+        assert "123456789" not in body
+
+
 class TestRememberedDashboardWindows:
     """The window a member picks on a dashboard is the one it reopens on.
 
@@ -3184,7 +3597,7 @@ class TestRememberedDashboardWindows:
     @pytest.mark.parametrize(
         ("path", "dashboard"),
         [("/api/food", "food"), ("/api/roster", "roster"),
-         ("/api/gold", "gold")],
+         ("/api/gold", "gold"), ("/api/admin/events", "events")],
     )
     async def test_a_picked_preset_is_stored_and_reopened(
         self,
@@ -3217,7 +3630,8 @@ class TestRememberedDashboardWindows:
         )
 
     @pytest.mark.parametrize(
-        "path", ["/api/food", "/api/roster", "/api/gold"]
+        "path",
+        ["/api/food", "/api/roster", "/api/gold", "/api/admin/events"],
     )
     async def test_a_picked_pair_of_dates_is_reopened_as_it_was_served(
         self,
@@ -3258,7 +3672,7 @@ class TestRememberedDashboardWindows:
     @pytest.mark.parametrize(
         ("path", "dashboard"),
         [("/api/food", "food"), ("/api/roster", "roster"),
-         ("/api/gold", "gold")],
+         ("/api/gold", "gold"), ("/api/admin/events", "events")],
     )
     async def test_a_pair_ending_today_is_remembered_by_the_day_it_names(
         self,
@@ -3296,7 +3710,8 @@ class TestRememberedDashboardWindows:
         ) == StoredRange("custom", since, end_of_today)
 
     @pytest.mark.parametrize(
-        "path", ["/api/food", "/api/roster", "/api/gold"]
+        "path",
+        ["/api/food", "/api/roster", "/api/gold", "/api/admin/events"],
     )
     async def test_a_first_visit_gets_the_default_and_says_so(
         self,
@@ -3317,7 +3732,7 @@ class TestRememberedDashboardWindows:
     @pytest.mark.parametrize(
         ("path", "dashboard"),
         [("/api/food", "food"), ("/api/roster", "roster"),
-         ("/api/gold", "gold")],
+         ("/api/gold", "gold"), ("/api/admin/events", "events")],
     )
     async def test_windows_are_kept_per_member_and_per_dashboard(
         self,
@@ -3340,7 +3755,7 @@ class TestRememberedDashboardWindows:
         assert raffle_store.get_dashboard_range(other_user_id, dashboard) is (
             None
         )
-        for other in ("food", "roster", "gold"):
+        for other in ("food", "roster", "gold", "events"):
             if other == dashboard:
                 continue
             assert raffle_store.get_dashboard_range(
@@ -3353,6 +3768,7 @@ class TestRememberedDashboardWindows:
             ("food", "/api/food", StoredRange("90d")),
             ("roster", "/api/roster", StoredRange("")),
             ("gold", "/api/gold", StoredRange("custom", 400, 200)),
+            ("events", "/api/admin/events", StoredRange("1y")),
         ],
     )
     async def test_a_stored_window_it_cannot_draw_falls_back_to_the_default(

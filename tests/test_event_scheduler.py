@@ -84,6 +84,24 @@ class TestRunEventMaintenance:
         assert updated.status is EventStatus.ONGOING
         channel.thread.edit.assert_awaited_once()
 
+    async def test_the_pass_that_ends_a_run_records_it(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_event(bot, store)
+
+        await run_event_maintenance(bot, START + timedelta(minutes=5))
+        assert store.get_event_runs(0, AFTER_END.timestamp()) == []
+
+        await run_event_maintenance(bot, AFTER_END)
+
+        # Judged on the pass's own clock: the run is in the future by the
+        # wall clock, so a status write that ignored it would leave it out.
+        [run] = store.get_event_runs(0, AFTER_END.timestamp())
+        assert run.occurrence_id == occurrence.occurrence_id
+        assert run.event_id == event.event_id
+
     async def test_unchanged_occurrences_are_left_alone(
         self,
         bot: Any,

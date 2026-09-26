@@ -2,6 +2,7 @@ import re
 
 from gw2bot.web.pages import (
     CALENDAR_PAGE,
+    EVENTS_PAGE,
     FOOD_PAGE,
     GOLD_PAGE,
     ROSTER_PAGE,
@@ -14,6 +15,10 @@ from gw2bot.web.pages.profit import (
     PROFIT_PAGE,
     _pagination_nav,
 )
+
+# The dashboards that draw a history over a picked window, and so share the
+# range picker.
+RANGE_DASHBOARDS = (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE, EVENTS_PAGE)
 
 
 def _call_arguments(source: str, name: str) -> list[list[str]]:
@@ -967,6 +972,7 @@ class TestDashboardHeaders:
             FOOD_PAGE,
             ROSTER_PAGE,
             GOLD_PAGE,
+            EVENTS_PAGE,
         ):
             assert page.count(
                 '<button type="submit" class="signout" '
@@ -985,6 +991,7 @@ class TestDashboardHeaders:
             FOOD_PAGE,
             ROSTER_PAGE,
             GOLD_PAGE,
+            EVENTS_PAGE,
         ):
             assert "padding: 0.6rem 1rem;" in page
             assert "padding: 0.35rem 0.7rem;" in page
@@ -1859,18 +1866,18 @@ class TestFoodAdditionsSection:
 
 
 class TestCustomRangePicker:
-    """All three dashboards offer the same picker, so all three are
+    """Every history dashboard offers the same picker, so they are all
     checked together."""
 
     def test_both_dashboards_offer_a_custom_range(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert 'data-range="custom"' in page
             assert 'id="custom-start"' in page
             assert 'id="custom-end"' in page
             assert 'id="custom-apply"' in page
 
     def test_the_picker_stays_hidden_until_the_button_reveals_it(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert ".custom {\n  display: none;" in page
             assert ".custom.open { display: flex; }" in page
             assert 'if (picked === "custom") {' in page
@@ -1884,7 +1891,7 @@ class TestCustomRangePicker:
         # day after is built from its own parts rather than added on in
         # seconds, because a local day is 23 or 25 hours long where clocks
         # change.
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert "var since = Math.floor(from.getTime() / 1000);" in page
             assert (
                 "var until = Math.floor(nextDay(to).getTime() / 1000) - 1;"
@@ -1895,7 +1902,7 @@ class TestCustomRangePicker:
             ) in page
 
     def test_a_range_that_cannot_be_drawn_is_named_not_fetched(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert 'error: "Pick a start and an end date."' in page
             assert 'error: "The end date is before the start date."' in page
             assert 'error: "The start date is in the future."' in page
@@ -1914,7 +1921,7 @@ class TestCustomRangePicker:
         # it. Applying an untouched 24h default reads a few hours wider than
         # the button it came from, which is the right way to miss: the
         # narrower pair would drop hours the reader can already see.
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert "var span = windowSpan() || 24 * 60 * 60;" in page
             assert (
                 "customStart.value = "
@@ -1926,7 +1933,7 @@ class TestCustomRangePicker:
         # A refusal ends the workflow in the browser, without a request, so
         # this trace is the only place a console can say the reader asked for
         # a window and did not get one.
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert "function traceRange(action, reason, days) {" in page
             traced = _call_arguments(page, "traceRange")
             assert traced == [
@@ -1967,7 +1974,7 @@ class TestCustomRangePicker:
             )$""",
             re.X,
         )
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             for call in _call_arguments(page, "traceRange"):
                 assert len(call) == 3, call
                 for arg in call:
@@ -1976,7 +1983,7 @@ class TestCustomRangePicker:
     def test_the_first_load_asks_for_the_remembered_window(self) -> None:
         # No range until the server answers: naming one would write the
         # default over the choice the member made last time.
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert "range: null, data: null" in page
             assert "if (state.range === null) { return \"\"; }" in page
             assert (
@@ -1986,7 +1993,7 @@ class TestCustomRangePicker:
     def test_a_remembered_window_is_adopted_once_and_only_once(self) -> None:
         # The answer to a request that named a window is not a window to
         # adopt, so the reader's own dates are never rewritten under them.
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE, PROFIT_PAGE):
+        for page in (*RANGE_DASHBOARDS, PROFIT_PAGE):
             assert "function adoptRange(key, since, until) {" in page
             adopt = page.split("function adoptRange(key, since, until) {", 1)
             adopt = adopt[1].split("\n  }", 1)[0]
@@ -2002,12 +2009,12 @@ class TestCustomRangePicker:
             assert "toggleCustomPanel(true);" in adopt
 
     def test_the_picker_mirrors_the_servers_own_ceiling(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert "var MAX_CUSTOM_DAYS = 366;" in page
         assert MAX_CUSTOM_WINDOW_SECONDS == 366 * 24 * 60 * 60
 
     def test_an_applied_pair_is_sent_as_epoch_seconds(self) -> None:
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert '"?range=custom&start=" +' in page
             assert (
                 'encodeURIComponent(String(customWindow.since))'
@@ -2015,11 +2022,12 @@ class TestCustomRangePicker:
         assert 'fetch("/api/food" + rangeQuery())' in FOOD_PAGE
         assert 'fetch("/api/roster" + rangeQuery())' in ROSTER_PAGE
         assert 'fetch("/api/gold" + rangeQuery())' in GOLD_PAGE
+        assert 'fetch("/api/admin/events" + rangeQuery())' in EVENTS_PAGE
 
     def test_axis_labels_follow_the_windows_width(self) -> None:
         # A custom window has no preset name to key the label format off, so
         # the span decides: about a day or less reads off the clock.
-        for page in (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE):
+        for page in RANGE_DASHBOARDS:
             assert "if (windowSpan() <= 48 * 60 * 60) {" in page
             assert 'if (state.range === "24h") {' not in page
 
@@ -2439,3 +2447,91 @@ class TestGoldPage:
             GOLD_PAGE
         )
         assert "left.t - right.t" not in GOLD_PAGE
+
+
+class TestEventsPage:
+    def test_the_page_fetches_its_own_api(self) -> None:
+        assert 'fetch("/api/admin/events" + rangeQuery())' in EVENTS_PAGE
+        # /api/events is the calendar's, and nothing about it is drawn here.
+        assert 'fetch("/api/events' not in EVENTS_PAGE
+
+    def test_every_asked_for_figure_has_its_place(self) -> None:
+        for element in (
+            'id="tile-runs"',
+            'id="tile-time"',
+            'id="tile-participants"',
+            'id="tile-commander"',
+            'id="chart"',
+            'id="mentees-table"',
+            'id="no-mentee-table"',
+            'id="no-requirements-table"',
+        ):
+            assert element in EVENTS_PAGE
+        for heading in (
+            "Cumulative event runs",
+            "Mentees",
+            "Events without a mentee",
+            "Events with no requirements",
+        ):
+            assert f"<h2>{heading}</h2>" in EVENTS_PAGE
+
+    def test_placeholders_are_dashes_rather_than_escape_text(self) -> None:
+        # Markup outside the script cannot read a JavaScript escape, so the
+        # tiles' empty state is written as an entity.
+        markup = EVENTS_PAGE.split("<script>", 1)[0]
+        assert "\\u2014" not in markup
+        assert markup.count(">&mdash;</div>") == 4
+
+    def test_the_line_is_a_staircase_from_zero_across_the_window(
+        self,
+    ) -> None:
+        chart = EVENTS_PAGE.split("function renderChart()", 1)[1].split(
+            "function isHoverPointer(event)", 1
+        )[0]
+        assert "vertex(state.data.since, 0);" in chart
+        assert "vertex(point.t, previous);" in chart
+        assert "vertex(point.t, point.count);" in chart
+        assert "vertex(state.data.now, previous);" in chart
+
+    def test_the_axis_counts_whole_runs_from_zero(self) -> None:
+        assert "return { low: 0, high: step * Math.ceil(high / step)" in (
+            EVENTS_PAGE
+        )
+        assert "if (!(raw > 1)) { return 1; }" in EVENTS_PAGE
+
+    def test_an_unknown_all_time_count_is_not_shown_as_none(self) -> None:
+        assert "row.completed_all_time === null" in EVENTS_PAGE
+        assert 'cell.classList.add("unknown");' in EVENTS_PAGE
+
+    def test_hover_and_tap_select_the_nearest_run(self) -> None:
+        assert 'overlay.addEventListener("pointermove"' in EVENTS_PAGE
+        assert 'overlay.addEventListener("pointerdown"' in EVENTS_PAGE
+        assert "function nearest(vbX, vbY) {" in EVENTS_PAGE
+        # A redraw drops the previous chart's page-level listeners.
+        assert "if (detachHover) { detachHover(); detachHover = null; }" in (
+            EVENTS_PAGE
+        )
+
+    def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
+        assert re.findall(r"console\.\w+", EVENTS_PAGE) == [
+            "console.debug",
+            "console.debug",
+            "console.error",
+        ]
+        assert _call_arguments(EVENTS_PAGE, "console.debug") == [
+            ['"events chart selection:"', "action", "reason", "count"],
+            ['"events chart range:"', "action", "reason", "days"],
+        ]
+
+    def test_dynamic_values_never_become_markup(self) -> None:
+        assert "innerHTML" not in EVENTS_PAGE
+        assert "insertAdjacentHTML" not in EVENTS_PAGE
+
+    def test_an_empty_window_does_not_claim_every_run_passed(self) -> None:
+        tables = EVENTS_PAGE.split("function renderTables()", 1)[1].split(
+            "function render()", 1
+        )[0]
+        assert "var noRuns = !data.runs;" in tables
+        assert (
+            'noRuns ? NO_RUNS_TEXT : "Every run in this period had a mentee."'
+        ) in tables

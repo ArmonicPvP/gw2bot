@@ -77,8 +77,8 @@ Source lives under `src/gw2bot`:
 | `gold/` | Guild bank gold history: the series the gold page draws, and the one-time `/gold import`. |
 | `profit/` | Trading Post profit reports: the member's API key, the price and delivery reads behind it, and `/profit`. |
 | `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
-| `events/` | Guild events: models, store, scheduler, reminders, `/event` commands, plus `posting/` and `views/` - see `docs/events.md`. |
-| `web/` | Optional aiohttp site: Discord OAuth, the server, and one module per served document under `pages/` - see `docs/web.md`. |
+| `events/` | Guild events: models, store, scheduler, reminders, `/event` commands, the run history and `stats.py` behind `/admin/events`, plus `posting/` and `views/` - see `docs/events.md`. |
+| `web/` | Optional aiohttp site: Discord OAuth, the server, and one module per served document under `pages/`, with the role-gated dashboards under `/admin` - see `docs/web.md`. |
 | `settings/` | `/settings`: definitions, store, encryption, composition onto `Config` - see `docs/settings.md`. |
 
 ### Tests

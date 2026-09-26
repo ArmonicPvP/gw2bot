@@ -333,7 +333,7 @@ The bot polls this endpoint on the Guild Storage interval and sums `coins`
 across every section into one balance. The guild log never says which section a
 coin movement reached, and the gold history tracks the bank rather than any one
 tab, so a single balance is what it records. That reading is the anchor every
-derived balance on the `/gold` page is measured back from.
+derived balance on the `/admin/gold` page is measured back from.
 
 ### `/v2/guild/:id/storage`
 

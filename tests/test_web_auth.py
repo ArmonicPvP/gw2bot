@@ -125,6 +125,11 @@ class TestStateToken:
             # The site root only redirects to the calendar, so a sign-in that
             # returned there would bounce the member through it.
             "/",
+            # So do the dashboards' old addresses, to their pages under
+            # /admin.
+            "/food",
+            "/roster",
+            "/gold",
         ],
     )
     def test_rejects_unsafe_return_targets(self, target: str) -> None:
@@ -132,6 +137,13 @@ class TestStateToken:
 
     def test_accepts_the_calendar_page(self) -> None:
         assert sanitize_return_target("/calendar") == "/calendar"
+
+    @pytest.mark.parametrize(
+        "target",
+        ["/admin/food", "/admin/roster", "/admin/gold", "/admin/events"],
+    )
+    def test_accepts_the_admin_dashboards(self, target: str) -> None:
+        assert sanitize_return_target(target) == target
 
     def test_invalid_state_cookie_has_no_return_target(self) -> None:
         assert state_return_target(SECRET, "garbage") == "/calendar"

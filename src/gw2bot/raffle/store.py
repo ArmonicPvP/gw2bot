@@ -963,7 +963,8 @@ class RaffleStore:
 
                 # Who restocked the feast shelves. The stock poller sees
                 # the counts move; only the log says whose deposit moved
-                # them, and the /food page's Additions table joins the two.
+                # them, and the /admin/food page's Additions table joins
+                # the two.
                 feast_deposit = parse_feast_deposit(event)
                 if (
                     feast_deposit is not None
