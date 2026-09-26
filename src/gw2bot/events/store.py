@@ -309,6 +309,7 @@ def _record_run(
     run = EventRunRecord(
         occurrence_id=occurrence.occurrence_id,
         event_id=event.event_id,
+        event_created_at=event.created_at,
         category=event.category,
         title=event.title,
         leader_discord_id=event.leader_discord_id,
@@ -359,6 +360,7 @@ def _run_from_record(
         run_id=record.run_id,
         occurrence_id=record.occurrence_id,
         event_id=record.event_id,
+        event_created_at=record.event_created_at,
         category=record.category,
         title=record.title,
         leader_discord_id=record.leader_discord_id,

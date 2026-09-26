@@ -13,6 +13,7 @@ def run(
     ended_at: float,
     *,
     event_id: int = 1,
+    event_created_at: str = "2026-01-01T00:00:00+00:00",
     title: str = "Kitty Cleanup",
     leader: int = 42,
     requirements: str = "Bring food.",
@@ -24,6 +25,7 @@ def run(
         run_id=run_id,
         occurrence_id=run_id,
         event_id=event_id,
+        event_created_at=event_created_at,
         category="Fractal",
         title=title,
         leader_discord_id=leader,
@@ -228,3 +230,34 @@ def test_requirements_read_as_none_the_way_the_post_shows_them() -> None:
     assert has_no_requirements("NONE")
     assert not has_no_requirements("None of your gear may be exotic.")
     assert not has_no_requirements("Ascended armor")
+
+
+def test_a_reused_event_id_is_not_merged_with_the_deleted_event() -> None:
+    # SQLite hands a deleted event's id to the next one created, and the run
+    # history outlives the deletion, so the id alone would fold two unrelated
+    # events into one row.
+    stats = build_event_stats(
+        [
+            run(
+                1,
+                HOUR,
+                title="Deleted Event",
+                requirements="",
+                event_created_at="2026-01-01T00:00:00+00:00",
+            ),
+            run(
+                2,
+                2 * HOUR,
+                title="New Event",
+                requirements="",
+                event_created_at="2026-02-01T00:00:00+00:00",
+            ),
+        ]
+    )
+
+    assert [
+        (group.title, group.runs) for group in stats.without_requirements
+    ] == [("New Event", 1), ("Deleted Event", 1)]
+    assert [
+        (group.title, group.runs) for group in stats.without_mentee
+    ] == [("New Event", 1), ("Deleted Event", 1)]

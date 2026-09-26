@@ -2462,6 +2462,32 @@ class TestEventStoreRunHistory:
             later.timestamp(),
         ]
 
+    def test_a_reused_event_id_is_told_apart_by_its_creation(
+        self,
+        store: EventStore,
+    ) -> None:
+        deleted = create_event(store, now=START - timedelta(days=30))
+        first = store.create_occurrence(deleted.event_id, START)
+        store.set_occurrence_status(
+            first.occurrence_id, EventStatus.OVER, self.AFTER
+        )
+        store.delete_occurrence(first.occurrence_id)
+        store.delete_event(deleted.event_id)
+
+        later = START + timedelta(days=7)
+        reused = create_event(store, now=START + timedelta(days=1))
+        assert reused.event_id == deleted.event_id
+        second = store.create_occurrence(reused.event_id, later)
+        store.set_occurrence_status(
+            second.occurrence_id, EventStatus.OVER, later + timedelta(hours=2)
+        )
+
+        runs = store.get_event_runs(
+            0, (later + timedelta(hours=2)).timestamp()
+        )
+        assert [run.event_id for run in runs] == [deleted.event_id] * 2
+        assert len({run.event_created_at for run in runs}) == 2
+
     def test_retiring_an_event_records_the_runs_it_ends(
         self,
         store: EventStore,

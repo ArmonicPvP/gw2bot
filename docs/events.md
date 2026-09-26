@@ -77,6 +77,11 @@ posting paths pass their own clock through.
 `stats.py` is the pure arithmetic the `/admin/events` page is drawn from, over
 the runs one window holds. Nothing in it reads the store or Discord.
 
+The history outlives the rows it copied, and SQLite hands a deleted row's id to
+the next one created, so no copied id identifies anything alone: a run is found
+by its occurrence id and start, and runs are grouped into events by the event
+id and the event's `created_at` together.
+
 ## Tests
 
 `tests/test_event_commands.py` covers all of `views/`;

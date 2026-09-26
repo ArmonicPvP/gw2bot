@@ -332,6 +332,9 @@ class EventRun:
     run_id: int
     occurrence_id: int
     event_id: int
+    # When the event row was created. SQLite hands a deleted event's id to
+    # the next one, so the id is only an event's identity paired with this.
+    event_created_at: str
     category: str
     title: str
     leader_discord_id: int

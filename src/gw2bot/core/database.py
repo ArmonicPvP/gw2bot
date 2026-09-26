@@ -863,10 +863,11 @@ class EventRunRecord(Base):
 
     ``occurrence_id`` and ``event_id`` are plain columns rather than foreign
     keys because the rows they name are allowed to go. SQLite hands a deleted
-    row's id to the next one created, so the occurrence id alone does not
-    identify a run for good; it is paired with ``started_at`` wherever a run
-    is looked up. Times are epoch seconds, and ``ended_at`` is the scheduled
-    end, which is what a window counts a run by.
+    row's id to the next one created, so neither id alone identifies anything
+    for good: the occurrence id is paired with ``started_at`` wherever a run
+    is looked up, and the event id with ``event_created_at`` wherever runs are
+    grouped by event. Times are epoch seconds, and ``ended_at`` is the
+    scheduled end, which is what a window counts a run by.
     """
 
     __tablename__ = "gw2_event_runs"
@@ -882,6 +883,8 @@ class EventRunRecord(Base):
     )
     occurrence_id: Mapped[int] = mapped_column(Integer, nullable=False)
     event_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The event row's own creation time, as it was stored there.
+    event_created_at: Mapped[str] = mapped_column(String, nullable=False)
     category: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     leader_discord_id: Mapped[int] = mapped_column(Integer, nullable=False)

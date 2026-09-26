@@ -56,7 +56,9 @@ class EventRunGroup:
     """The runs of one event that match a table's question.
 
     Grouped by event rather than listed per run, so a weekly raid reads as one
-    row with a count instead of four identical ones. The title, commander,
+    row with a count instead of four identical ones. An event is its id and
+    its creation time together: SQLite hands a deleted event's id to the next
+    one created, and the history outlives the deletion. The title, commander,
     category and mentee setting are the latest matching run's, which is what
     the event looked like most recently.
     """
@@ -106,10 +108,11 @@ def run_had_mentee(run: EventRun) -> bool:
 
 
 def _group_runs(runs: Sequence[EventRun]) -> tuple[EventRunGroup, ...]:
-    groups: dict[int, EventRunGroup] = {}
+    groups: dict[tuple[int, str], EventRunGroup] = {}
     for run in sorted(runs, key=lambda run: (run.ended_at, run.run_id)):
-        previous = groups.get(run.event_id)
-        groups[run.event_id] = EventRunGroup(
+        key = (run.event_id, run.event_created_at)
+        previous = groups.get(key)
+        groups[key] = EventRunGroup(
             event_id=run.event_id,
             title=run.title,
             category=run.category,
