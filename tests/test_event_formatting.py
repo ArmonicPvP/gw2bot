@@ -36,6 +36,7 @@ from gw2bot.events.models import (
     EMOJI_ALACRITY,
     EMOJI_DPS,
     EMOJI_QUICKNESS,
+    EMOJI_SUPPORT,
     CategoryCapacity,
     Event,
     EventCategory,
@@ -146,6 +147,19 @@ class TestEventCategories:
         assert capacity.alacrity == 1
         assert capacity.required_boon_healers == 0
         assert capacity.required_boon_dps == 2
+
+    def test_pvp_is_four_dps_and_one_support(self) -> None:
+        capacity = CATEGORY_CAPACITIES[EventCategory.PVP]
+
+        assert capacity.total == 5
+        assert capacity.healers == 1
+        assert capacity.supports == 1
+        assert capacity.dps == 4
+        assert capacity.quickness == 0
+        assert capacity.alacrity == 0
+        assert capacity.required_boon_healers == 0
+        assert capacity.required_boon_dps == 0
+        assert not capacity.has_boons
 
 
 class TestParseEventDatetime:
@@ -589,6 +603,49 @@ class TestEventEmbed:
         values = {field.name: field.value for field in embed.fields}
         assert values["Boons"] == (
             f"{EMOJI_ALACRITY} 0/1 | {EMOJI_QUICKNESS} 0/1"
+        )
+
+    def test_pvp_embed_lists_a_support_seat_and_no_boons(self) -> None:
+        event = make_event(EventCategory.PVP)
+        signups = [
+            make_signup(1, EventRole.SUPPORT, EventRole.SUPPORT),
+            make_signup(2, EventRole.DPS, EventRole.DPS),
+            make_signup(
+                3,
+                EventRole.DPS,
+                EventRole.DPS,
+                flex_roles=(EventRole.SUPPORT,),
+            ),
+            make_signup(4, EventRole.SUPPORT, None, waitlisted=True),
+        ]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert embed.title == (
+            f"{CATEGORY_EMOJI[EventCategory.PVP]} Kitty Cleanup"
+        )
+        names = [field.name or "" for field in embed.fields]
+        assert names == [
+            "📅 Date & Time",
+            "⏳ Duration",
+            "👑 Leader",
+            "📌 Requirements",
+            "👥 Participants (3/5)",
+            "💚 Support (1/1)",
+            "⚔️ DPS (2/4)",
+            "🔁 Flexroles",
+            "⌛️ Waitlist",
+        ]
+        values = {field.name: field.value for field in embed.fields}
+        assert values["💚 Support (1/1)"] == (
+            f"└ {EMOJI_SUPPORT} <@1>\n"
+            f"└ {WAITLIST_EMOJI} {EMOJI_SUPPORT} <@4>"
+        )
+        assert values["⚔️ DPS (2/4)"] == (
+            f"└ {EMOJI_DPS} <@2>\n└ {EMOJI_DPS} <@3>"
+        )
+        assert values["🔁 Flexroles"] == (
+            f"<@3>\n└ Heal ({EMOJI_SUPPORT}) | DPS ({EMOJI_DPS})"
         )
 
     def test_wvw_embed_lists_participants_without_roles(self) -> None:

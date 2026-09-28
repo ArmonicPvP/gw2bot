@@ -8,11 +8,13 @@ from enum import StrEnum
 EMOJI_QUICKNESS = "<:quickness:1525428594371985459>"
 EMOJI_ALACRITY = "<:alacrity:1525428627045351515>"
 EMOJI_DPS = "⚔️"
+EMOJI_SUPPORT = "🩹"
 
 EMOJI_RAID = "<:raid:1525431773498970172>"
 EMOJI_STRIKE = "<:strike:1525431254340866171>"
 EMOJI_WVW = "<:wvw:1525431137982353428>"
 EMOJI_FRACTAL = "<:fractal:1525431043950116864>"
+EMOJI_PVP = "🤺"
 EMOJI_DUNGEON = "🏰"
 EMOJI_STORY = "📖"
 EMOJI_OPEN_WORLD = "🌍"
@@ -26,6 +28,7 @@ class EventCategory(StrEnum):
     DUNGEON = "Dungeon"
     STORY = "Story"
     WVW = "World vs. World"
+    PVP = "Player vs. Player"
     OPEN_WORLD = "Open World"
     GENERAL = "General"
 
@@ -37,6 +40,7 @@ CATEGORY_EMOJI: dict[EventCategory, str] = {
     EventCategory.DUNGEON: EMOJI_DUNGEON,
     EventCategory.STORY: EMOJI_STORY,
     EventCategory.WVW: EMOJI_WVW,
+    EventCategory.PVP: EMOJI_PVP,
     EventCategory.OPEN_WORLD: EMOJI_OPEN_WORLD,
     EventCategory.GENERAL: EMOJI_GENERAL,
 }
@@ -48,9 +52,15 @@ class EventRole(StrEnum):
     ALACRITY_DPS = "Alacrity DPS"
     QUICKNESS_HEAL = "Quickness Heal"
     ALACRITY_HEAL = "Alacrity Heal"
+    # A heal that brings no boon. Only a category with support seats (PvP)
+    # offers it: everywhere else a heal seat is a boon seat.
+    SUPPORT = "Support"
 
 
-HEAL_ROLES = frozenset({EventRole.QUICKNESS_HEAL, EventRole.ALACRITY_HEAL})
+BOON_HEAL_ROLES = frozenset(
+    {EventRole.QUICKNESS_HEAL, EventRole.ALACRITY_HEAL}
+)
+HEAL_ROLES = BOON_HEAL_ROLES | {EventRole.SUPPORT}
 DPS_ROLES = frozenset(
     {EventRole.DPS, EventRole.QUICKNESS_DPS, EventRole.ALACRITY_DPS}
 )
@@ -58,8 +68,6 @@ QUICKNESS_ROLES = frozenset(
     {EventRole.QUICKNESS_DPS, EventRole.QUICKNESS_HEAL}
 )
 ALACRITY_ROLES = frozenset({EventRole.ALACRITY_DPS, EventRole.ALACRITY_HEAL})
-# Every heal role carries a boon, so HEAL_ROLES doubles as the boon-heal set;
-# the boon-DPS set is the DPS roles that bring one.
 BOON_DPS_ROLES = frozenset({EventRole.QUICKNESS_DPS, EventRole.ALACRITY_DPS})
 
 ROLE_EMOJI: dict[EventRole, str] = {
@@ -68,6 +76,7 @@ ROLE_EMOJI: dict[EventRole, str] = {
     EventRole.ALACRITY_DPS: EMOJI_ALACRITY,
     EventRole.QUICKNESS_HEAL: EMOJI_QUICKNESS,
     EventRole.ALACRITY_HEAL: EMOJI_ALACRITY,
+    EventRole.SUPPORT: EMOJI_SUPPORT,
 }
 
 
@@ -151,10 +160,18 @@ class CategoryCapacity:
     # plain DPS), and such a roster should keep advertising itself as open.
     required_boon_healers: int | None = None
     required_boon_dps: int | None = None
+    # How many of the heal seats a Support may take. A Support brings no boon,
+    # so only a category that asks nothing of its healer has any: everywhere
+    # else this stays zero and the Support role is never offered.
+    supports: int = 0
 
     @property
     def has_roles(self) -> bool:
         return self.healers is not None
+
+    @property
+    def has_boons(self) -> bool:
+        return bool(self.quickness or self.alacrity)
 
 
 CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
@@ -198,6 +215,18 @@ CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
     # boons to cover: a plain headcount, the WvW shape at a party's size.
     EventCategory.STORY: CategoryCapacity(5, None, None, None, None),
     EventCategory.WVW: CategoryCapacity(50, None, None, None, None),
+    # A PvP team is five: four DPS and one Support. There are no boons to
+    # cover, so the heal seat is a Support seat and the boon roles never fit.
+    EventCategory.PVP: CategoryCapacity(
+        total=5,
+        healers=1,
+        dps=4,
+        quickness=0,
+        alacrity=0,
+        required_boon_healers=0,
+        required_boon_dps=0,
+        supports=1,
+    ),
     # Open world squads are the same shape as WvW: a plain 50-seat headcount
     # with no role or boon requirements.
     EventCategory.OPEN_WORLD: CategoryCapacity(50, None, None, None, None),
@@ -491,6 +520,7 @@ class RosterCounts:
     alacrity: int
     boon_healers: int
     boon_dps: int
+    supports: int
 
 
 def count_roster(signups: list[EventSignup]) -> RosterCounts:
@@ -506,8 +536,9 @@ def count_roster(signups: list[EventSignup]) -> RosterCounts:
         dps=sum(1 for role in assigned if role in DPS_ROLES),
         quickness=sum(1 for role in assigned if role in QUICKNESS_ROLES),
         alacrity=sum(1 for role in assigned if role in ALACRITY_ROLES),
-        boon_healers=sum(1 for role in assigned if role in HEAL_ROLES),
+        boon_healers=sum(1 for role in assigned if role in BOON_HEAL_ROLES),
         boon_dps=sum(1 for role in assigned if role in BOON_DPS_ROLES),
+        supports=sum(1 for role in assigned if role is EventRole.SUPPORT),
     )
 
 
@@ -530,6 +561,8 @@ def role_fits(
         return False
     if role in ALACRITY_ROLES and counts.alacrity >= alacrity:
         return False
+    if role is EventRole.SUPPORT and counts.supports >= capacity.supports:
+        return False
     return True
 
 
@@ -542,6 +575,7 @@ def role_fits(
 _FLEX_TIER: dict[EventRole, int] = {
     EventRole.QUICKNESS_HEAL: 0,
     EventRole.ALACRITY_HEAL: 0,
+    EventRole.SUPPORT: 0,
     EventRole.QUICKNESS_DPS: 1,
     EventRole.ALACRITY_DPS: 1,
     EventRole.DPS: 2,
@@ -610,12 +644,12 @@ def roster_feasible(
 ) -> bool:
     """Whether every member can be seated in one of their acceptable roles.
 
-    The quickness and alacrity caps cross-cut the healer/DPS split (a
-    quickness seat can be QDPS or QHEAL), so this is a search rather than
+    The quickness, alacrity and support caps cross-cut the healer/DPS split
+    (a quickness seat can be QDPS or QHEAL), so this is a search rather than
     simple counting. Members are assigned depth-first in order; count states
     proven dead are memoised, which bounds the search by the tiny number of
-    distinct (index, healers, quickness, alacrity) states rather than the
-    number of role combinations.
+    distinct (index, healers, quickness, alacrity, supports) states rather
+    than the number of role combinations.
     """
     if not capacity.has_roles:
         return capacity.total is None or len(acceptable) <= capacity.total
@@ -623,7 +657,8 @@ def roster_feasible(
     dps_cap = capacity.dps or 0
     quickness_cap = capacity.quickness or 0
     alacrity_cap = capacity.alacrity or 0
-    dead: set[tuple[int, int, int, int]] = set()
+    support_cap = capacity.supports
+    dead: set[tuple[int, int, int, int, int]] = set()
 
     def search(
         index: int,
@@ -631,12 +666,13 @@ def roster_feasible(
         dps: int,
         quickness: int,
         alacrity: int,
+        supports: int,
     ) -> bool:
         if index == len(acceptable):
             return True
         # dps is implied by (index, healers): every role occupies exactly one
         # of the healer/DPS groups, so it stays out of the memo key.
-        key = (index, healers, quickness, alacrity)
+        key = (index, healers, quickness, alacrity, supports)
         if key in dead:
             return False
         for role in acceptable[index]:
@@ -644,24 +680,27 @@ def roster_feasible(
             next_dps = dps + (role in DPS_ROLES)
             next_quickness = quickness + (role in QUICKNESS_ROLES)
             next_alacrity = alacrity + (role in ALACRITY_ROLES)
+            next_supports = supports + (role is EventRole.SUPPORT)
             if (
                 next_healers <= healer_cap
                 and next_dps <= dps_cap
                 and next_quickness <= quickness_cap
                 and next_alacrity <= alacrity_cap
+                and next_supports <= support_cap
                 and search(
                     index + 1,
                     next_healers,
                     next_dps,
                     next_quickness,
                     next_alacrity,
+                    next_supports,
                 )
             ):
                 return True
         dead.add(key)
         return False
 
-    return search(0, 0, 0, 0, 0)
+    return search(0, 0, 0, 0, 0, 0)
 
 
 def solve_roster(

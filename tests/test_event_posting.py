@@ -28,12 +28,15 @@ from gw2bot.events.models import (
     RoleChange,
     RosterCandidate,
     RosterUpdate,
+    count_roster,
     fitting_roles,
     is_roster_full,
+    normalize_stored_roles,
     preferred_role_order,
     roster_feasible,
     seated_candidates,
     solve_roster,
+    supported_roles,
 )
 from gw2bot.events.posting import (
     RosterUnreadable,
@@ -356,6 +359,7 @@ async def post_new_event(
 
 FRACTAL_CAPACITY = CATEGORY_CAPACITIES[EventCategory.FRACTAL]
 RAID_CAPACITY = CATEGORY_CAPACITIES[EventCategory.RAID]
+PVP_CAPACITY = CATEGORY_CAPACITIES[EventCategory.PVP]
 
 
 def make_candidate(
@@ -2437,6 +2441,55 @@ class TestCompleteSignup:
             signups,
             BEFORE_START,
         ) is EventStatus.FULL
+
+    async def test_pvp_seats_four_dps_and_one_support(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.PVP,
+        )
+        for user_id in range(11, 15):
+            seated = await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+            assert seated.assigned_role is EventRole.DPS
+
+        # The DPS seats are gone, so a DPS willing to support takes the
+        # support seat, which asks for no boon.
+        flexed = await complete_signup(
+            bot,
+            event,
+            occurrence,
+            15,
+            EventRole.DPS,
+            (EventRole.SUPPORT,),
+        )
+        assert flexed.assigned_role is EventRole.SUPPORT
+
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert occurrence_status(
+            event,
+            updated,
+            signups,
+            BEFORE_START,
+        ) is EventStatus.FULL
+
+        waitlisted = await complete_signup(
+            bot,
+            event,
+            occurrence,
+            16,
+            EventRole.SUPPORT,
+            (),
+        )
+        assert waitlisted.waitlisted
+        assert waitlisted.assigned_role is None
 
 
 class TestRemoveSignup:
@@ -6465,6 +6518,74 @@ class TestRosterFullComposition:
             occurrence_status(event, updated, signups, BEFORE_START)
             is EventStatus.OPEN
         )
+
+
+class TestPvpComposition:
+    def test_pvp_offers_only_dps_and_support(self) -> None:
+        assert supported_roles(PVP_CAPACITY) == {
+            EventRole.DPS,
+            EventRole.SUPPORT,
+        }
+
+    def test_support_is_offered_nowhere_else(self) -> None:
+        # Every other role-based category's heal seats are boon seats, so a
+        # healer who brings no boon has no seat there.
+        for category in (
+            EventCategory.RAID,
+            EventCategory.STRIKE,
+            EventCategory.FRACTAL,
+            EventCategory.DUNGEON,
+        ):
+            capacity = CATEGORY_CAPACITIES[category]
+            assert EventRole.SUPPORT not in supported_roles(capacity)
+
+    def test_a_support_and_four_dps_is_full(self) -> None:
+        signups = [
+            make_signup(1, EventRole.SUPPORT, EventRole.SUPPORT),
+        ] + [
+            make_signup(user_id, EventRole.DPS, EventRole.DPS)
+            for user_id in range(2, 6)
+        ]
+
+        assert is_roster_full(PVP_CAPACITY, signups)
+        assert fitting_roles(PVP_CAPACITY, signups) == []
+
+    def test_five_dps_cannot_all_be_seated(self) -> None:
+        assert not roster_feasible(
+            PVP_CAPACITY,
+            [(EventRole.DPS,)] * 5,
+        )
+        assert roster_feasible(
+            PVP_CAPACITY,
+            [(EventRole.DPS,)] * 4 + [(EventRole.DPS, EventRole.SUPPORT)],
+        )
+
+    def test_a_support_counts_as_a_healer_without_a_boon(self) -> None:
+        counts = count_roster(
+            [make_signup(1, EventRole.SUPPORT, EventRole.SUPPORT)]
+        )
+
+        assert counts.healers == 1
+        assert counts.boon_healers == 0
+        assert counts.supports == 1
+        assert counts.quickness == 0
+        assert counts.alacrity == 0
+
+    def test_a_category_change_drops_a_role_the_other_side_lacks(
+        self,
+    ) -> None:
+        # A boon heal has no seat in PvP and a Support none in a raid, so
+        # either one falls back to plain DPS, as any unsupported role does.
+        assert normalize_stored_roles(
+            PVP_CAPACITY,
+            EventRole.QUICKNESS_HEAL,
+            (EventRole.ALACRITY_HEAL,),
+        ) == (EventRole.DPS, ())
+        assert normalize_stored_roles(
+            RAID_CAPACITY,
+            EventRole.SUPPORT,
+            (EventRole.DPS,),
+        ) == (EventRole.DPS, ())
 
 
 class TestFittingRolesReshuffle:

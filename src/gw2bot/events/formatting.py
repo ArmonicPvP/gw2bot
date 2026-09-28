@@ -546,6 +546,17 @@ def _uses_two_participant_columns(capacity: CategoryCapacity) -> bool:
     return capacity.total > SINGLE_COLUMN_SQUAD_SIZE
 
 
+def _healer_section_name(capacity: CategoryCapacity) -> str:
+    # A squad whose every heal seat is a Support seat (PvP) asks for no boon
+    # healer at all, so the section is named after the role it seats.
+    label = (
+        "Support"
+        if capacity.supports >= (capacity.healers or 0)
+        else "Healer"
+    )
+    return f"💚 {label}"
+
+
 def _participants_name(count: int, capacity: CategoryCapacity) -> str:
     # An uncapped category (General) has no denominator to show, so the header
     # is a plain headcount rather than "n/None".
@@ -703,7 +714,8 @@ def event_embed(
         if capacity.healers:
             _add_chunked_field(
                 embed,
-                f"💚 Healer ({len(healers)}/{capacity.healers})",
+                f"{_healer_section_name(capacity)} "
+                f"({len(healers)}/{capacity.healers})",
                 [_member_line(signup) for signup in healers]
                 + [
                     _waitlisted_member_line(signup)
@@ -716,14 +728,17 @@ def event_embed(
             [_member_line(signup) for signup in dps]
             + [_waitlisted_member_line(signup) for signup in waitlisted_dps],
         )
-        embed.add_field(
-            name="Boons",
-            value=(
-                f"{EMOJI_ALACRITY} {counts.alacrity}/{capacity.alacrity} | "
-                f"{EMOJI_QUICKNESS} {counts.quickness}/{capacity.quickness}"
-            ),
-            inline=False,
-        )
+        # PvP has no boons to cover, so a "0/0" tally would only be noise.
+        if capacity.has_boons:
+            embed.add_field(
+                name="Boons",
+                value=(
+                    f"{EMOJI_ALACRITY} {counts.alacrity}/{capacity.alacrity}"
+                    f" | {EMOJI_QUICKNESS} "
+                    f"{counts.quickness}/{capacity.quickness}"
+                ),
+                inline=False,
+            )
         # Flexroles and Waitlist are only shown when populated, so an empty
         # section never clutters the embed.
         flexers = [signup for signup in active if signup.flex_roles]
