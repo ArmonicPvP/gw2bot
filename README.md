@@ -1466,7 +1466,10 @@ parameters to `--user 99:100`.
 An optional website shows the guild event calendar in day, week, and month
 views. Events appear as one-line entries on their day, and hovering over an
 entry shows the full details: category, description, requirements, times,
-duration, leader, status, and roster counts. Clicking an event pins those
+duration, leader, status, and roster counts. The counts name only the seats
+the event's category has: a Dungeon shows no healers, a Player vs. Player event
+counts its Support and DPS without boons, and a headcount event such as World
+vs. World shows its participants alone. Clicking an event pins those
 details until the next click; clicking a different event switches the pinned
 details to it. Day headings in week view and every date in month view open that
 date's day view.

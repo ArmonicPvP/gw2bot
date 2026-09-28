@@ -15,6 +15,7 @@ from gw2bot.web.calendar import (
     PROJECTED_STATUS,
     PROJECTION_ENTRY_CAP,
     PROJECTION_STEP_CAP,
+    RoleTally,
     calendar_entries,
 )
 
@@ -118,12 +119,13 @@ class TestMaterializedEntries:
         entry = entries[0]
         assert entry.active_count == 2
         assert entry.waitlist_count == 1
-        assert entry.healers == 1
-        assert entry.dps == 1
-        assert entry.quickness == 1
-        assert entry.alacrity == 0
+        assert entry.roles == (
+            RoleTally("Healers", 1),
+            RoleTally("DPS", 1),
+            RoleTally("Quickness", 1),
+            RoleTally("Alacrity", 0),
+        )
         assert entry.capacity_total == 10
-        assert entry.has_roles
         assert entry.status == "open"
         assert not entry.projected
 
@@ -147,10 +149,8 @@ class TestMaterializedEntries:
 
         assert len(entries) == 1
         entry = entries[0]
-        assert not entry.has_roles
+        assert entry.roles == ()
         assert entry.capacity_total == 50
-        assert entry.healers == 0
-        assert entry.dps == 0
 
     def test_general_entry_reports_an_absent_capacity(
         self,
@@ -172,10 +172,132 @@ class TestMaterializedEntries:
 
         assert len(entries) == 1
         entry = entries[0]
-        assert not entry.has_roles
+        assert entry.roles == ()
         # None rather than a number: the page drops the denominator instead of
         # printing a cap the event does not have.
         assert entry.capacity_total is None
+
+    def test_dungeon_entry_lists_no_healer_seat(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.DUNGEON)
+        occurrence = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=1,
+            role=EventRole.ALACRITY_DPS,
+            assigned_role=EventRole.ALACRITY_DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        # A dungeon has no healer seat, so it is not counted as an empty one.
+        assert [entry.roles for entry in entries] == [
+            (
+                RoleTally("DPS", 1),
+                RoleTally("Quickness", 0),
+                RoleTally("Alacrity", 1),
+            )
+        ]
+
+    def test_pvp_entry_lists_a_support_and_no_boons(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.PVP)
+        occurrence = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+        for user_id, role in (
+            (1, EventRole.SUPPORT),
+            (2, EventRole.DPS),
+            (3, EventRole.DPS),
+        ):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=role,
+                flex_roles=(),
+                waitlisted=False,
+            )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert [entry.roles for entry in entries] == [
+            (RoleTally("Support", 1), RoleTally("DPS", 2))
+        ]
+
+    def test_fractal_entry_lists_every_seat_kind(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.FRACTAL)
+        store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert [entry.roles for entry in entries] == [
+            (
+                RoleTally("Healers", 0),
+                RoleTally("DPS", 0),
+                RoleTally("Quickness", 0),
+                RoleTally("Alacrity", 0),
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        "category",
+        [EventCategory.STORY, EventCategory.OPEN_WORLD],
+    )
+    def test_role_less_entries_list_no_seat_kinds(
+        self,
+        store: EventStore,
+        category: EventCategory,
+    ) -> None:
+        event = create_event(store, category=category)
+        store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert [entry.roles for entry in entries] == [()]
 
     def test_entries_carry_the_requirements(
         self,
@@ -318,6 +440,34 @@ class TestProjectedEntries:
         assert (
             projected.start_epoch - materialized.start_epoch
             == week_seconds - 3600
+        )
+
+    def test_projection_lists_its_category_seat_kinds_empty(
+        self,
+        store: EventStore,
+    ) -> None:
+        anchor = datetime(2027, 1, 6, 20, 0, tzinfo=UTC)
+        event = create_event(
+            store,
+            category=EventCategory.PVP,
+            start_time=anchor,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(2,),
+        )
+        store.create_occurrence(event.event_id, anchor)
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 10, 0, 0, tzinfo=UTC),
+            datetime(2027, 1, 17, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert [entry.projected for entry in entries] == [True]
+        assert entries[0].roles == (
+            RoleTally("Support", 0),
+            RoleTally("DPS", 0),
         )
 
     def test_monthly_projection_clamps_to_short_months(

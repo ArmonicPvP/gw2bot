@@ -2117,12 +2117,11 @@ class WebServer:
             "projected": entry.projected,
             "active_count": entry.active_count,
             "waitlist_count": entry.waitlist_count,
-            "healers": entry.healers,
-            "dps": entry.dps,
-            "quickness": entry.quickness,
-            "alacrity": entry.alacrity,
+            "roles": [
+                {"label": tally.label, "count": tally.count}
+                for tally in entry.roles
+            ],
             "capacity_total": entry.capacity_total,
-            "has_roles": entry.has_roles,
         }
 
     async def _display_names(self, user_ids: set[int]) -> dict[int, str]:

@@ -173,6 +173,12 @@ class CategoryCapacity:
     def has_boons(self) -> bool:
         return bool(self.quickness or self.alacrity)
 
+    @property
+    def heals_are_supports(self) -> bool:
+        # Every heal seat is a Support seat (PvP): the category asks for no
+        # boon healer at all, so its heal seats are named after the Support.
+        return bool(self.healers) and self.supports >= (self.healers or 0)
+
 
 CATEGORY_CAPACITIES: dict[EventCategory, CategoryCapacity] = {
     EventCategory.RAID: CategoryCapacity(

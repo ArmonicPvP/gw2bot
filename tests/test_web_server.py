@@ -930,6 +930,12 @@ class TestEventsApi:
         entry = payload["entries"][0]
         assert entry["title"] == "Weekly Raid"
         assert entry["leader_name"] == "Leader Kitty"
+        assert entry["roles"] == [
+            {"label": "Healers", "count": 0},
+            {"label": "DPS", "count": 0},
+            {"label": "Quickness", "count": 0},
+            {"label": "Alacrity", "count": 0},
+        ]
         # Snowflakes lose precision as JSON numbers, so raw Discord ids
         # must never be shipped.
         assert "leader_discord_id" not in entry

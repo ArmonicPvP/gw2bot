@@ -547,13 +547,7 @@ def _uses_two_participant_columns(capacity: CategoryCapacity) -> bool:
 
 
 def _healer_section_name(capacity: CategoryCapacity) -> str:
-    # A squad whose every heal seat is a Support seat (PvP) asks for no boon
-    # healer at all, so the section is named after the role it seats.
-    label = (
-        "Support"
-        if capacity.supports >= (capacity.healers or 0)
-        else "Healer"
-    )
+    label = "Support" if capacity.heals_are_supports else "Healer"
     return f"💚 {label}"
 
 
