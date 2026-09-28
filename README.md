@@ -2153,9 +2153,10 @@ so its right-hand edge reads the roster as it stood then rather than as it
 stands now; the count beside the heading says "at the end" instead of "now"
 to match.
 
-The y axis always tops out at the 500-member ceiling, so the chart shows how
-close the guild is to full. Its floor follows the lowest count the window
-reached rather than zero.
+The y axis covers the counts the window actually reached rather than the whole
+500-member ceiling, so a handful of departures is visible rather than a flat
+line near the top. It never reaches above 500 or below 0, the most and fewest
+members a guild can have.
 
 Below the changes, a **Pending invites** section lists the accounts that have
 been invited in-game and have not accepted yet — the `y` of the `x/500 (y

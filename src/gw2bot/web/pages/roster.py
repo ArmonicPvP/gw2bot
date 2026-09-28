@@ -351,7 +351,7 @@ button:focus-visible {
   // Smallest number of members the y axis ever spans, so a quiet week does not
   // turn a single departure into a cliff.
   var MIN_SPAN = 6;
-  // The guild's member limit, which is always the top of the y axis.
+  // The most members a guild can hold, so the y axis never reaches past it.
   var CEILING = 500;
 
   var mobileQuery = window.matchMedia("(max-width: 640px)");
@@ -421,9 +421,10 @@ button:focus-visible {
   }
   function kindOf(kind) { return KINDS[kind] || KINDS.leave; }
 
-  // The axis always tops out at the guild's 500-member ceiling. Its floor
-  // follows the lowest count reached in the window, padded out to MIN_SPAN
-  // and rounded to whole members, so the ticks split the span evenly.
+  // The axis covers the counts actually reached in the window, padded out to
+  // MIN_SPAN and rounded to whole members, so the line uses the full height
+  // instead of hugging the ceiling. It never reaches below an empty guild or
+  // above the CEILING a guild can hold.
   function computeScale() {
     var values = points().map(function (point) { return point.count; });
     if (!values.length) { return null; }
@@ -431,11 +432,26 @@ button:focus-visible {
     var high = Math.max.apply(null, values);
     var pad = Math.max(1, Math.round((high - low) * 0.15));
     low -= pad;
-    if (CEILING - low < MIN_SPAN) { low = CEILING - MIN_SPAN; }
-    if (low < 0) { low = 0; }
-    var step = Math.max(1, Math.ceil((CEILING - low) / 4));
-    low = Math.max(0, CEILING - step * 4);
-    return { low: low, high: CEILING, step: step };
+    high += pad;
+    if (high - low < MIN_SPAN) {
+      var grow = Math.ceil((MIN_SPAN - (high - low)) / 2);
+      low -= grow;
+      high += grow;
+    }
+    // Space that would fall outside the limits moves to the other side, so a
+    // full or empty guild keeps the same span as any other.
+    if (high > CEILING) { low -= high - CEILING; high = CEILING; }
+    if (low < 0) { high = Math.min(CEILING, high - low); low = 0; }
+    var step = Math.max(1, Math.ceil((high - low) / 4));
+    low = Math.floor(low / step) * step;
+    high = low + step * Math.ceil((high - low) / step);
+    if (high > CEILING) {
+      // Rounding overshot the ceiling: count the ticks down from it instead.
+      high = CEILING;
+      low = CEILING - step * Math.ceil((CEILING - low) / step);
+      if (low < 0) { low = 0; step = CEILING / 4; }
+    }
+    return { low: low, high: high, step: step };
   }
 
   function scaleX(t) {
