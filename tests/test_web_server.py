@@ -1162,6 +1162,9 @@ class TestProfitPage:
             # page fills its date fields from.
             "start": 1_782_172_800,
             "end": 1_787_337_000,
+            # A rolling window runs on to the present, so the trade list is
+            # asked for with no far bound, the way the report was read.
+            "closed": False,
         }
         assert payload["items"][0]["name"] == "Realized Item"
         assert payload["items"][0]["hold_seconds"] == 86_400
@@ -1789,25 +1792,32 @@ class TestProfitExclusionRoutes:
 class TestProfitTradesApi:
     """The matched trade list: one page at a time, in the order asked for."""
 
+    SINCE = datetime(2026, 8, 14, tzinfo=UTC)
+    UNTIL = datetime(2026, 8, 20, 23, 59, 59, tzinfo=UTC)
+
     @staticmethod
     def _headers(user_id: int = SESSION_USER_ID) -> dict[str, str]:
         return TestProfitPage._headers(user_id)
 
-    async def test_a_page_is_served_for_the_window_and_order_named(
+    async def test_a_page_is_served_between_the_bounds_named(
         self,
         client: TestClient,
         bot: FakeBot,
     ) -> None:
+        since = int(self.SINCE.timestamp())
+        until = int(self.UNTIL.timestamp())
+
         response = await client.get(
-            "/api/profit/trades?range=7d&page=2&size=25&sort=profit"
-            "&direction=ascending&search=%20Ecto%20",
+            f"/api/profit/trades?since={since}&until={until}&page=2&size=25"
+            "&sort=profit&direction=ascending&search=%20Ecto%20",
             headers=self._headers(),
         )
 
         assert response.status == 200
         bot.profit_service.load_trades.assert_awaited_once_with(
             SESSION_USER_ID,
-            ReportWindow(days=7),
+            self.SINCE,
+            self.UNTIL,
             page=2,
             size=25,
             sort="profit",
@@ -1815,8 +1825,8 @@ class TestProfitTradesApi:
             # Trimmed, the way the page trims it before asking.
             search="Ecto",
         )
-        # Naming the window here is paging through trades, not picking a
-        # window, so nothing is remembered.
+        # The bounds are the report's own, so nothing about a window is read
+        # or remembered here.
         bot.profit_service.resolve_report_window.assert_not_awaited()
         assert await response.json() == {
             "trades": [
@@ -1873,23 +1883,21 @@ class TestProfitTradesApi:
             ],
         }
 
-    async def test_an_unnamed_window_is_the_remembered_one_newest_first(
+    async def test_a_window_running_to_the_present_names_no_far_bound(
         self,
         client: TestClient,
         bot: FakeBot,
     ) -> None:
         response = await client.get(
-            "/api/profit/trades",
+            f"/api/profit/trades?since={int(self.SINCE.timestamp())}",
             headers=self._headers(),
         )
 
         assert response.status == 200
-        bot.profit_service.resolve_report_window.assert_awaited_once_with(
-            SESSION_USER_ID, None
-        )
         bot.profit_service.load_trades.assert_awaited_once_with(
             SESSION_USER_ID,
-            ReportWindow(days=30),
+            self.SINCE,
+            None,
             page=1,
             size=10,
             sort="sold",
@@ -1897,37 +1905,54 @@ class TestProfitTradesApi:
             search="",
         )
 
-    async def test_a_picked_pair_of_dates_is_read_as_the_report_reads_it(
+    async def test_the_report_names_the_bounds_its_trades_are_asked_by(
         self,
         client: TestClient,
         bot: FakeBot,
     ) -> None:
-        start = int(datetime(2026, 6, 1, tzinfo=UTC).timestamp())
-        end = int(datetime(2026, 6, 30, 23, 59, 59, tzinfo=UTC).timestamp())
+        bot.profit_service.load_report.return_value = replace(
+            profit_report(), window_closed=True
+        )
 
         response = await client.get(
-            f"/api/profit/trades?range=custom&start={start}&end={end}",
+            "/api/profit?range=30d",
             headers=self._headers(),
         )
 
-        assert response.status == 200
-        window = bot.profit_service.load_trades.await_args.args[1]
-        assert window == ReportWindow.between(start, end)
+        window = (await response.json())["window"]
+        assert window["closed"] is True
+        assert window["start"] == int(
+            profit_report().window_start.timestamp()
+        )
 
     @pytest.mark.parametrize(
         "query",
         [
-            "page=0",
-            "page=two",
-            "size=0",
-            "size=91",
-            "sort=name",
-            "direction=sideways",
-            "search=" + "x" * 101,
-            "range=90d",
-            "days=0",
+            "",
+            "since=yesterday",
+            "since=-1",
+            f"since={10**12}",
+            "since=100&until=100",
+            "since=100&until=99",
+            "since=100&until=soon",
+            f"since=100&until={10**12}",
+            "since=100&page=0",
+            "since=100&page=two",
+            "since=100&size=0",
+            "since=100&size=91",
+            "since=100&sort=name",
+            "since=100&direction=sideways",
+            "since=100&search=" + "x" * 101,
         ],
         ids=(
+            "no-bounds",
+            "since-text",
+            "since-before-the-epoch",
+            "since-past-any-date",
+            "empty-span",
+            "until-before-since",
+            "until-text",
+            "until-past-any-date",
             "page-zero",
             "page-text",
             "size-zero",
@@ -1935,8 +1960,6 @@ class TestProfitTradesApi:
             "unknown-sort",
             "unknown-direction",
             "search-too-long",
-            "unknown-range",
-            "days-out-of-range",
         ),
     )
     async def test_an_unusable_request_is_refused_before_any_read(
@@ -1971,7 +1994,7 @@ class TestProfitTradesApi:
         bot.profit_service.load_trades.side_effect = MissingProfitApiKey()
 
         response = await client.get(
-            "/api/profit/trades?range=30d",
+            "/api/profit/trades?since=100",
             headers=self._headers(),
         )
 
@@ -1989,7 +2012,7 @@ class TestProfitTradesApi:
 
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             response = await client.get(
-                "/api/profit/trades?range=30d",
+                "/api/profit/trades?since=100",
                 headers=self._headers(),
             )
         body = await response.text()

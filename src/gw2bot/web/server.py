@@ -1069,15 +1069,16 @@ class WebServer:
         self,
         request: web.Request,
     ) -> web.StreamResponse:
-        """One page of the matched trades sold in the window on screen.
+        """One page of the matched trades sold in the report on screen.
 
-        The window is named the way the report's is, and read without being
-        remembered: paging through trades is not picking a window. A request
-        naming none is served the member's remembered one.
+        The request names the instants that report was built between rather
+        than the window it was asked for: **24h** is measured back from the
+        moment it is read, so reading it again here would cut a different
+        sale off its far end than the report did.
         """
-        requested = self._requested_report_window(request)
-        if isinstance(requested, web.Response):
-            return requested
+        bounds = self._requested_trade_bounds(request)
+        if isinstance(bounds, web.Response):
+            return bounds
         query = self._requested_trade_query(request)
         if isinstance(query, web.Response):
             return query
@@ -1086,17 +1087,12 @@ class WebServer:
             LOGGER.error("Could not serve profit trades; service=unavailable")
             return self._json({"error": "unavailable"}, status=503)
         session = request[SESSION_KEY]
+        since, until = bounds
         try:
-            window = (
-                requested
-                if requested is not None
-                else (
-                    await service.resolve_report_window(session.user_id, None)
-                ).window
-            )
             report = await service.load_trades(
                 session.user_id,
-                window,
+                since,
+                until,
                 page=query.page,
                 size=query.size,
                 sort=query.sort,
@@ -1133,6 +1129,37 @@ class WebServer:
             len(report.hidden),
         )
         return self._json(serialize_trades(report))
+
+    def _requested_trade_bounds(
+        self,
+        request: web.Request,
+    ) -> tuple[datetime, datetime | None] | web.Response:
+        """The instants a trade list request names, as the report gave them.
+
+        ``since`` is the report's ``window.start`` and ``until`` its
+        ``window.end``, sent only when the report says the window is closed.
+        Both are whole epoch seconds and are refused rather than coerced; a
+        bound past tomorrow is refused too, since no report names one and
+        a big enough number is not a date at all.
+        """
+        try:
+            since = int(request.query["since"])
+            raw_until = request.query.get("until")
+            until = None if raw_until is None else int(raw_until)
+        except (KeyError, ValueError):
+            LOGGER.debug("Rejected profit trades; reason=bounds-malformed")
+            return self._json({"error": "invalid range"}, status=400)
+        latest = int(datetime.now(UTC).timestamp()) + 86400
+        if (
+            not 0 <= since <= latest
+            or (until is not None and not since < until <= latest)
+        ):
+            LOGGER.debug("Rejected profit trades; reason=bounds-range")
+            return self._json({"error": "invalid range"}, status=400)
+        return (
+            datetime.fromtimestamp(since, UTC),
+            None if until is None else datetime.fromtimestamp(until, UTC),
+        )
 
     def _requested_trade_query(
         self,

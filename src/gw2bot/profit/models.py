@@ -508,6 +508,11 @@ class ProfitReport:
     # Identifies the API key this report was built for, so a member's
     # remembered window does not survive that key being deleted.
     key_generation: str = ""
+    # Whether the window ends at ``window_end`` or runs on to the present.
+    # A window running to the present reads no far bound, so a trade stamped
+    # a moment ahead of the clock still lands in it; the trade list is asked
+    # for with the same pair of bounds, so it has to know which this is.
+    window_closed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

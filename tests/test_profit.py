@@ -145,6 +145,14 @@ def trade_keys(trades: Any) -> list[tuple[str, str]]:
     return [trade.key for trade in trades]
 
 
+def report_bounds(report: ProfitReport) -> tuple[datetime, datetime | None]:
+    """The bounds the page asks for a report's trades with."""
+    return (
+        report.window_start,
+        report.window_end if report.window_closed else None,
+    )
+
+
 @pytest.fixture
 def profit_store(tmp_path: Path):
     registry = SecretRegistry()
@@ -5432,7 +5440,9 @@ class TestMatchedTradeService:
         window = ReportWindow(days=7)
 
         report = await service.load_report(101, window, now=self.NOW)
-        listed = await service.load_trades(101, window, size=10, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), size=10, now=self.NOW
+        )
 
         # s2 empties what is left of b1 and starts on b2, so it is two.
         assert sorted(trade_keys(listed.page.trades)) == [
@@ -5465,7 +5475,9 @@ class TestMatchedTradeService:
         window = ReportWindow(days=7)
         before = await service.load_report(101, window, now=self.NOW)
         lots = store.get_open_lots(101)
-        listed = await service.load_trades(101, window, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(before), now=self.NOW
+        )
         target = next(
             trade for trade in listed.page.trades
             if trade.key == ("s2", "b1")
@@ -5493,7 +5505,9 @@ class TestMatchedTradeService:
         # and what is still held is what was held.
         assert store.get_open_lots(101) == lots
 
-        relisted = await service.load_trades(101, window, now=self.NOW)
+        relisted = await service.load_trades(
+            101, *report_bounds(hidden), now=self.NOW
+        )
         assert ("s2", "b1") not in trade_keys(relisted.page.trades)
         assert trade_keys(relisted.hidden) == [("s2", "b1")]
         assert relisted.page.profit == hidden.realized.total_profit
@@ -5560,7 +5574,9 @@ class TestMatchedTradeService:
 
         await service.set_trade_exclusion(101, "evening", "b1", True)
         hidden = await service.load_report(101, day, now=self.NOW)
-        listed = await service.load_trades(101, day, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(hidden), now=self.NOW
+        )
 
         assert hidden.realized.total_matched_quantity == 10
         assert trade_keys(listed.page.trades) == [("morning", "b1")]
@@ -5578,7 +5594,9 @@ class TestMatchedTradeService:
         await service.set_item_exclusion(101, 2, True)
 
         report = await service.load_report(101, window, now=self.NOW)
-        listed = await service.load_trades(101, window, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), now=self.NOW
+        )
 
         assert ("t1", "c1") not in trade_keys(listed.page.trades)
         assert listed.page.profit == report.realized.total_profit
@@ -5610,12 +5628,14 @@ class TestMatchedTradeService:
         report = await service.load_report(
             101, window, force=True, now=self.NOW
         )
-        listed = await service.load_trades(101, window, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), now=self.NOW
+        )
 
         assert trade_keys(listed.page.trades) == [("s2", "b1"), ("s1", "b1")]
         assert listed.page.quantity == report.realized.total_matched_quantity
 
-    async def test_trades_need_a_key_and_a_servable_window(
+    async def test_trades_need_a_key_and_bounds_in_order(
         self,
         profit_store: tuple[ProfitStore, SecretRegistry, Path],
     ) -> None:
@@ -5623,10 +5643,83 @@ class TestMatchedTradeService:
         service = self._service(store, [], [])
 
         with pytest.raises(MissingProfitApiKey):
-            await service.load_trades(101, ReportWindow(days=7))
+            await service.load_trades(101, self.NOW - timedelta(days=7))
         store.set_api_key(101, "member-secret")
         with pytest.raises(ValueError):
-            await service.load_trades(101, ReportWindow(days=3651))
+            await service.load_trades(
+                101, self.NOW, self.NOW - timedelta(days=1)
+            )
+
+    async def test_the_24h_list_keeps_the_cutoff_its_report_was_cut_at(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # 24h is measured back from the moment it is read. The list is asked
+        # for after its report has landed, so a second reading of the clock
+        # would open it later than the report and drop a sale the report
+        # counted. It is asked for with the report's own bounds instead.
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        # Read part way through a second: the window is named by the second,
+        # so it opens on it, and a sale stamped on it is in both.
+        read_at = datetime(2026, 8, 21, 18, 30, 0, 600_000, tzinfo=UTC)
+        cutoff = datetime(2026, 8, 20, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction("b1", price=100, quantity=20,
+                        occurred_at=datetime(2026, 8, 19, tzinfo=UTC)),
+        ]
+        sells = [
+            transaction("edge", price=200, quantity=10, occurred_at=cutoff),
+            transaction("later", price=200, quantity=10,
+                        occurred_at=cutoff + timedelta(seconds=5)),
+        ]
+        service = self._service(store, buys, sells)
+
+        report = await service.load_report(
+            101, ReportWindow(days=1), now=read_at
+        )
+        listed = await service.load_trades(
+            101,
+            *report_bounds(report),
+            # Read well after the report, past the sale on the cutoff and
+            # the one five seconds behind it.
+            now=read_at + timedelta(seconds=30),
+        )
+
+        assert report.window_start == cutoff
+        assert not report.window_closed
+        assert report.realized.total_matched_quantity == 20
+        assert sorted(trade_keys(listed.page.trades)) == [
+            ("edge", "b1"), ("later", "b1"),
+        ]
+        assert listed.page.profit == report.realized.total_profit
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert payload["window"]["start"] == int(cutoff.timestamp())
+        assert payload["window"]["closed"] is False
+
+    async def test_a_picked_pair_of_dates_is_listed_between_both_bounds(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys, sells = self._history()
+        service = self._service(store, buys, sells)
+        picked = ReportWindow.between(
+            int(datetime(2026, 8, 15, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 8, 16, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+
+        report = await service.load_report(101, picked, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), now=self.NOW
+        )
+
+        assert report.window_closed
+        assert sorted(trade_keys(listed.page.trades)) == [
+            ("s1", "b1"), ("t1", "c1"),
+        ]
+        assert listed.page.profit == report.realized.total_profit
 
 
 class TestProfitBackgroundSync:

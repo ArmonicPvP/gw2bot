@@ -219,7 +219,8 @@ class ProfitService:
     async def load_trades(
         self,
         discord_user_id: int,
-        window: ReportWindow,
+        since: datetime,
+        until: datetime | None = None,
         *,
         page: int = 1,
         size: int = 10,
@@ -228,28 +229,29 @@ class ProfitService:
         search: str = "",
         now: datetime | None = None,
     ) -> TradesReport:
-        """One page of the trades sold in a window, from the stored matches.
+        """One page of the trades sold between two instants.
+
+        The instants are the ones the realized report on screen was built
+        between, rather than a window read against the clock again: **24h**
+        is measured back from the moment it is read, so a second reading a
+        few seconds later would cut a different sale off its far end, and
+        the list would stop adding up to the report it sits under. ``until``
+        is None when that report's window runs on to the present.
 
         This reads what the realized report's own load just brought up to
         date, and brings nothing up to date itself: the page asks for it once
         the report has landed, and a second pass racing that one over the
-        same member's rollups would add the same sales twice. The window is
-        read the way the report reads it, so the list holds exactly the
-        trades its figures were summed from.
+        same member's rollups would add the same sales twice.
         """
-        if not MIN_REPORT_DAYS <= window.days <= MAX_REPORT_DAYS:
-            raise ValueError(
-                "Profit report days must be between "
-                f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
-            )
+        if until is not None and until < since:
+            raise ValueError("A trade list cannot end before it starts")
         loaded_at = datetime.now(UTC) if now is None else now
-        span = window.span(loaded_at)
         await self._require_api_key(discord_user_id)
         trade_page, hidden = await asyncio.to_thread(
             self._read_trades,
             discord_user_id,
-            span.start,
-            span.end if span.end < loaded_at else None,
+            since,
+            until,
             sort,
             descending,
             search,
@@ -262,10 +264,10 @@ class ProfitService:
             loaded_at,
         )
         LOGGER.debug(
-            "Loaded profit trades; user_id=%s range=%s total=%s page=%s "
+            "Loaded profit trades; user_id=%s closed=%s total=%s page=%s "
             "rows=%s hidden=%s",
             discord_user_id,
-            window.range_key,
+            until is not None,
             trade_page.total,
             trade_page.page,
             len(trade_page.trades),
@@ -434,7 +436,13 @@ class ProfitService:
                 "Profit report days must be between "
                 f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
             )
-        loaded_at = datetime.now(UTC) if now is None else now
+        # Whole seconds, because the page is handed the window's bounds in
+        # whole seconds to ask for its trades by. A **24h** window opening a
+        # fraction of a second after the second it is named by would leave
+        # out a sale stamped on that second which the trade list keeps.
+        loaded_at = (datetime.now(UTC) if now is None else now).replace(
+            microsecond=0
+        )
         span = window.span(loaded_at)
         days = span.days
         window_start = span.start
@@ -519,6 +527,7 @@ class ProfitService:
             trailing_days=trailing_days,
             history_start=history_start,
             key_generation=snapshot.origin,
+            window_closed=window_until is not None,
         )
         LOGGER.debug(
             "Loaded profit report; user_id=%s days=%s realized_items=%s "
@@ -1529,6 +1538,10 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
             "end_date": report.window_end.date().isoformat(),
             "start": int(report.window_start.timestamp()),
             "end": int(report.window_end.timestamp()),
+            # Whether ``end`` is a bound the report read or only the moment
+            # it was read at. The trade list is asked for with these same
+            # bounds, so it matches the report to the trade.
+            "closed": report.window_closed,
         },
         "summary": {
             "buy_transactions": report.buy_transaction_count,

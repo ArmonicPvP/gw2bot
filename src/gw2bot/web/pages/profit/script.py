@@ -1841,6 +1841,12 @@ PROFIT_SCRIPT = (
   // by years, so a trade's dates carry their year whenever it is not this
   // one's, as well as whenever the window itself crosses a year.
   var windowEndDate = null;
+  // The instants the report on screen was built between, which are what the
+  // trades are asked for. Naming the window again would have the server read
+  // the clock again, and 24h read a few seconds later cuts a different sale
+  // off its far end than the report did. ``until`` stays null while the
+  // window runs on to the present, the way the report reads it.
+  var tradesBounds = null;
   var TRADES_SEARCH_DELAY_MS = 250;
   var tradesSearchTimer = null;
 
@@ -1859,7 +1865,9 @@ PROFIT_SCRIPT = (
   function tradesUrl() {
     var pager = pagers.trades;
     var query = [
-      windowQuery().slice(1),
+      "since=" + encodeURIComponent(String(tradesBounds.since)),
+      tradesBounds.until === null
+        ? "" : "until=" + encodeURIComponent(String(tradesBounds.until)),
       "page=" + encodeURIComponent(String(pager.page)),
       "size=" + encodeURIComponent(String(pager.size)),
       "sort=" + encodeURIComponent(tradesView.sort),
@@ -1871,6 +1879,12 @@ PROFIT_SCRIPT = (
   }
 
   function loadTrades(quiet) {
+    // A page control moved before the first report landed has no report to
+    // list the trades of yet; the report asks for them when it does.
+    if (tradesBounds === null) {
+      trace("trades-before-report", 0);
+      return Promise.resolve(false);
+    }
     tradesView.request += 1;
     var request = tradesView.request;
     var keep = quiet && tradesView.loaded;
@@ -2161,6 +2175,10 @@ PROFIT_SCRIPT = (
     }
     historyStart = data.history_start_date;
     windowEndDate = data.window.end_date;
+    tradesBounds = {
+      since: data.window.start,
+      until: data.window.closed ? data.window.end : null
+    };
     showYear = spansYears(data.window.start_date, data.window.end_date);
     // "Held since" is a single date whose range runs to the window's end,
     // so it decides its year on its own rather than following the table.

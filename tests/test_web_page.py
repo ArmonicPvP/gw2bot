@@ -340,8 +340,16 @@ class TestProfitPage:
         assert 'id="trades-pages-top"' in PROFIT_PAGE
         assert 'id="trades-pages-bottom"' in PROFIT_PAGE
         assert 'return "/api/profit/trades?" + query;' in PROFIT_PAGE
-        # The window is the one the report on screen was drawn for.
-        assert "windowQuery().slice(1)," in PROFIT_PAGE
+        # They are asked for between the instants the report on screen was
+        # built between, not by naming its window for the clock to be read
+        # again: 24h read a few seconds later is a different 24 hours.
+        assert '"since=" + encodeURIComponent(String(tradesBounds.since)),' in (
+            PROFIT_PAGE
+        )
+        assert "until: data.window.closed ? data.window.end : null" in (
+            PROFIT_PAGE
+        )
+        assert "if (tradesBounds === null) {" in PROFIT_PAGE
         # A page overtaken by a later one is not drawn over it.
         assert "if (request !== tradesView.request) {" in PROFIT_PAGE
 
