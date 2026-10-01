@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import and_, delete, exists, func, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -15,11 +17,13 @@ from gw2bot.core.database import (
     ProfitItemRecord,
     ProfitLotCheckpointIndexRecord,
     ProfitLotCheckpointRecord,
+    ProfitMatchedTradeRecord,
     ProfitOpenLotRecord,
     ProfitOrderExclusionRecord,
     ProfitPreferenceRecord,
     ProfitRollupRecord,
     ProfitRollupStateRecord,
+    ProfitTradeExclusionRecord,
     ProfitTransactionRecord,
     SettingRecord,
     create_database_engine,
@@ -27,11 +31,14 @@ from gw2bot.core.database import (
 )
 from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.profit.models import (
+    DEFAULT_TRADE_SORT,
     UNCATEGORIZED,
     BuyLot,
     ItemDayProfit,
     ItemFacts,
+    MatchedTrade,
     ReportWindow,
+    TradePage,
     Transaction,
     parse_gw2_time,
 )
@@ -55,6 +62,18 @@ MAX_LOT_CHECKPOINTS = 24
 # written then does not hold the state the matching after it ran from, which
 # is what every report now reads it as.
 BOUNDARY_PRUNED_LOTS_KEY = "profit_boundary_pruned_lots_v1"
+
+# Marks a database whose stored results were matched while recording each
+# pairing of a sale with a purchase, and the purchase behind every held lot.
+# Results matched before then have no trades to list and lots that cannot
+# name the buy a later sale is paired with, so they are dropped once and
+# matched again from the stored trades.
+MATCHED_TRADES_KEY = "profit_matched_trades_v1"
+
+# Every rule the stored results have to have been matched under. A database
+# missing any of them has its results dropped once, together, so no member
+# pays for two full rematches when they arrive in the same release.
+RESULT_RULE_KEYS = (BOUNDARY_PRUNED_LOTS_KEY, MATCHED_TRADES_KEY)
 
 # An item's name is fixed for the life of the game build, so it is cached for
 # a month rather than for the five minutes a transaction snapshot lasts. This
@@ -128,7 +147,7 @@ class ProfitStore:
         LOGGER.debug("Profit store initialized")
 
     def _rebase_rollups_if_pending(self) -> None:
-        """Drop results matched under the old collapse rule, once ever.
+        """Drop results matched under an older rule, once per rule.
 
         Lots held past a year used to be collapsed at the end of a pass,
         against the clock, and are now collapsed at each month boundary
@@ -137,6 +156,10 @@ class ProfitStore:
         resuming at one can cost a sale differently from the stored day it
         falls in - which is the disagreement the new rule exists to make
         impossible.
+
+        Results matched before trades were recorded are dropped the same way:
+        they list no trades, and their lots cannot name the purchase a later
+        sale is paired with.
 
         Only *results* go: every rollup, checkpoint, open lot and watermark.
         The transactions they were matched from are the record and are left
@@ -150,7 +173,12 @@ class ProfitStore:
         """
         cleared = 0
         with self._sessions.begin() as session:
-            if session.get(SettingRecord, BOUNDARY_PRUNED_LOTS_KEY) is not None:
+            pending = [
+                key
+                for key in RESULT_RULE_KEYS
+                if session.get(SettingRecord, key) is None
+            ]
+            if not pending:
                 return
             for record_type in (
                 ProfitRollupRecord,
@@ -158,6 +186,7 @@ class ProfitStore:
                 ProfitLotCheckpointRecord,
                 ProfitOpenLotRecord,
                 ProfitRollupStateRecord,
+                ProfitMatchedTradeRecord,
             ):
                 # Counted before the delete rather than read back off it:
                 # what a delete reports is a driver detail, and this is the
@@ -167,15 +196,15 @@ class ProfitStore:
                 )
                 cleared += int(total or 0)
                 session.execute(delete(record_type))
-            session.add(
-                SettingRecord(key=BOUNDARY_PRUNED_LOTS_KEY, value="complete")
-            )
+            for key in pending:
+                session.add(SettingRecord(key=key, value="complete"))
         # A database that had nothing stored - a new one, most of them - says
         # so with a zero rather than staying silent about a pass that ran.
         LOGGER.info(
-            "Dropped Trading Post results matched under the old lot rule; "
-            "rows=%s",
+            "Dropped Trading Post results matched under an older rule; "
+            "rows=%s rules=%s",
             cleared,
+            ",".join(pending),
         )
 
     def close(self) -> None:
@@ -485,6 +514,220 @@ class ProfitStore:
             changed,
         )
         return changed
+
+    def set_trade_exclusion(
+        self,
+        discord_user_id: int,
+        sell_transaction_id: str,
+        buy_transaction_id: str,
+        excluded: bool,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Hide or restore one matched trade; return whether the row changed.
+
+        The pair is stored as given rather than checked against the stored
+        trades: those are rebuilt whenever history is rematched, and a choice
+        the member made has to survive that.
+        """
+        if not sell_transaction_id:
+            raise ValueError("Profit trade exclusions need a sale")
+        created_at = (datetime.now(UTC) if now is None else now).isoformat()
+        with self._sessions.begin() as session:
+            record = session.get(
+                ProfitTradeExclusionRecord,
+                (discord_user_id, sell_transaction_id, buy_transaction_id),
+            )
+            if excluded:
+                changed = record is None
+                if record is None:
+                    session.add(
+                        ProfitTradeExclusionRecord(
+                            discord_user_id=discord_user_id,
+                            sell_transaction_id=sell_transaction_id,
+                            buy_transaction_id=buy_transaction_id,
+                            created_at=created_at,
+                        )
+                    )
+            else:
+                changed = record is not None
+                if record is not None:
+                    session.delete(record)
+        # The ids are the member's own input, so the trace carries the
+        # outcome and nothing of what they sent.
+        LOGGER.debug(
+            "Stored profit trade exclusion; user_id=%s excluded=%s "
+            "changed=%s",
+            discord_user_id,
+            excluded,
+            changed,
+        )
+        return changed
+
+    def get_hidden_trades(
+        self,
+        discord_user_id: int,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[MatchedTrade]:
+        """The matched trades this member hid, newest sale first.
+
+        ``since`` and ``until`` bound the sale dates read, the way the
+        rollups they are withdrawn from are bounded: by whole UTC date. A
+        hidden pair the matcher no longer makes has no trade to read and is
+        left out; it costs nothing and comes back into force if the pair
+        does.
+        """
+        window = [ProfitMatchedTradeRecord.discord_user_id == discord_user_id]
+        if since is not None:
+            window.append(
+                ProfitMatchedTradeRecord.sold_day >= since.date().isoformat()
+            )
+        if until is not None:
+            window.append(
+                ProfitMatchedTradeRecord.sold_day <= until.date().isoformat()
+            )
+        query = (
+            select(ProfitMatchedTradeRecord)
+            .join(
+                ProfitTradeExclusionRecord,
+                and_(
+                    ProfitTradeExclusionRecord.discord_user_id
+                    == ProfitMatchedTradeRecord.discord_user_id,
+                    ProfitTradeExclusionRecord.sell_transaction_id
+                    == ProfitMatchedTradeRecord.sell_transaction_id,
+                    ProfitTradeExclusionRecord.buy_transaction_id
+                    == ProfitMatchedTradeRecord.buy_transaction_id,
+                ),
+            )
+            .where(*window)
+            .order_by(
+                ProfitMatchedTradeRecord.sold_at.desc(),
+                ProfitMatchedTradeRecord.sell_transaction_id.desc(),
+                ProfitMatchedTradeRecord.buy_transaction_id.desc(),
+            )
+        )
+        with self._sessions() as session:
+            records = list(session.scalars(query))
+        trades = _trades_from_records(records)
+        LOGGER.debug(
+            "Read hidden profit trades; user_id=%s trades=%s windowed=%s",
+            discord_user_id,
+            len(trades),
+            since is not None or until is not None,
+        )
+        return trades
+
+    def get_trade_page(
+        self,
+        discord_user_id: int,
+        *,
+        since: datetime,
+        until: datetime | None = None,
+        sort: str = DEFAULT_TRADE_SORT,
+        descending: bool = True,
+        search: str = "",
+        page: int = 1,
+        size: int = 10,
+    ) -> TradePage:
+        """One page of a window's sold trades, and what they all add up to.
+
+        A busy trader matches thousands of pairs a month, so the list is
+        sorted, searched and cut into pages here rather than sent whole. The
+        trades of a hidden item and the trades hidden one by one are left
+        out, as they are from every other figure on the dashboard, so the
+        totals of an unsearched window are its realized totals.
+        """
+        if size < 1:
+            raise ValueError("A trade page needs at least one row")
+        trade = ProfitMatchedTradeRecord
+        conditions = [
+            trade.discord_user_id == discord_user_id,
+            trade.sold_at >= since.isoformat(),
+            ~exists().where(
+                ProfitItemExclusionRecord.discord_user_id
+                == discord_user_id,
+                ProfitItemExclusionRecord.item_id == trade.item_id,
+            ),
+            ~exists().where(
+                ProfitTradeExclusionRecord.discord_user_id
+                == discord_user_id,
+                ProfitTradeExclusionRecord.sell_transaction_id
+                == trade.sell_transaction_id,
+                ProfitTradeExclusionRecord.buy_transaction_id
+                == trade.buy_transaction_id,
+            ),
+        ]
+        if until is not None:
+            conditions.append(trade.sold_at <= until.isoformat())
+        if search:
+            # An item the catalogue has not named yet has nothing to match.
+            conditions.append(
+                func.lower(ProfitItemRecord.name).contains(
+                    search.lower(), autoescape=True
+                )
+            )
+        named = trade.item_id == ProfitItemRecord.item_id
+        order = _trade_order(sort)
+        primary = order.desc() if descending else order.asc()
+        with self._sessions() as session:
+            totals = session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(trade.quantity), 0),
+                    func.coalesce(func.sum(trade.cost), 0),
+                    func.coalesce(func.sum(trade.net_revenue), 0),
+                    func.coalesce(func.sum(trade.profit), 0),
+                )
+                .select_from(trade)
+                .outerjoin(ProfitItemRecord, named)
+                .where(*conditions)
+            ).one()
+            total = int(totals[0])
+            pages = max(1, math.ceil(total / size))
+            shown_page = min(max(1, page), pages)
+            records = list(
+                session.scalars(
+                    select(trade)
+                    .outerjoin(ProfitItemRecord, named)
+                    .where(*conditions)
+                    # The sold time and the pair settle every tie the same
+                    # way on every request, so a row is never on two pages.
+                    .order_by(
+                        primary,
+                        trade.sold_at.desc(),
+                        trade.sell_transaction_id.desc(),
+                        trade.buy_transaction_id.desc(),
+                    )
+                    .offset((shown_page - 1) * size)
+                    .limit(size)
+                )
+            )
+        result = TradePage(
+            trades=tuple(_trades_from_records(records)),
+            total=total,
+            page=shown_page,
+            pages=pages,
+            size=size,
+            quantity=int(totals[1]),
+            cost=int(totals[2]),
+            net_revenue=int(totals[3]),
+            profit=int(totals[4]),
+        )
+        LOGGER.debug(
+            "Read a profit trade page; user_id=%s total=%s page=%s pages=%s "
+            "rows=%s sort=%s descending=%s searched=%s closed=%s",
+            discord_user_id,
+            total,
+            shown_page,
+            pages,
+            len(result.trades),
+            sort,
+            descending,
+            bool(search),
+            until is not None,
+        )
+        return result
 
     def is_cache_fresh(
         self,
@@ -974,6 +1217,7 @@ class ProfitStore:
                     "remaining": lot.remaining,
                     "unit_price": lot.unit_price,
                     "occurred_at": lot.occurred_at.isoformat(),
+                    "transaction_id": lot.transaction_id,
                 }
                 for item_id, item_lots in lots.items()
                 for index, lot in enumerate(item_lots)
@@ -1033,7 +1277,12 @@ class ProfitStore:
             except (TypeError, ValueError):
                 continue
             lots.setdefault(record.item_id, []).append(
-                BuyLot(record.remaining, record.unit_price, occurred_at)
+                BuyLot(
+                    record.remaining,
+                    record.unit_price,
+                    occurred_at,
+                    record.transaction_id or "",
+                )
             )
         LOGGER.debug(
             "Read a profit lot checkpoint; user_id=%s items=%s",
@@ -1056,6 +1305,16 @@ class ProfitStore:
                 delete(ProfitRollupRecord).where(
                     ProfitRollupRecord.discord_user_id == discord_user_id,
                     ProfitRollupRecord.sold_day >= boundary.date().isoformat(),
+                )
+            )
+            # The trades are the same matches one by one, so they go back to
+            # the same date and are matched again with the rows.
+            session.execute(
+                delete(ProfitMatchedTradeRecord).where(
+                    ProfitMatchedTradeRecord.discord_user_id
+                    == discord_user_id,
+                    ProfitMatchedTradeRecord.sold_day
+                    >= boundary.date().isoformat(),
                 )
             )
             for record_type in (
@@ -1102,25 +1361,33 @@ class ProfitStore:
         open_lots: dict[int, tuple[BuyLot, ...]],
         computed_through: datetime | None,
         *,
+        trades: Sequence[MatchedTrade] = (),
         now: datetime | None = None,
     ) -> None:
         """Replace this member's rollups with a freshly matched set.
 
         Written as one transaction: a half-replaced rollup would report
-        profit that never happened, which is worse than none at all.
+        profit that never happened, which is worse than none at all. The
+        trades the rollups were summed from are replaced in the same one, so
+        the list never describes a different matching from the totals.
         """
         computed_at = (datetime.now(UTC) if now is None else now).isoformat()
         with self._sessions.begin() as session:
-            session.execute(
-                delete(ProfitRollupRecord).where(
-                    ProfitRollupRecord.discord_user_id == discord_user_id
+            for record_type in (
+                ProfitRollupRecord,
+                ProfitOpenLotRecord,
+                ProfitMatchedTradeRecord,
+            ):
+                session.execute(
+                    delete(record_type).where(
+                        record_type.discord_user_id == discord_user_id
+                    )
                 )
-            )
-            session.execute(
-                delete(ProfitOpenLotRecord).where(
-                    ProfitOpenLotRecord.discord_user_id == discord_user_id
+            if trades:
+                session.execute(
+                    insert(ProfitMatchedTradeRecord),
+                    _trade_rows(discord_user_id, trades),
                 )
-            )
             if rollups:
                 session.execute(
                     insert(ProfitRollupRecord),
@@ -1146,6 +1413,7 @@ class ProfitStore:
                     "remaining": lot.remaining,
                     "unit_price": lot.unit_price,
                     "occurred_at": lot.occurred_at.isoformat(),
+                    "transaction_id": lot.transaction_id,
                 }
                 for item_id, lots in open_lots.items()
                 for index, lot in enumerate(lots)
@@ -1169,10 +1437,12 @@ class ProfitStore:
                 record.computed_through = through
                 record.computed_at = computed_at
         LOGGER.debug(
-            "Stored profit rollups; user_id=%s rows=%s open_lots=%s",
+            "Stored profit rollups; user_id=%s rows=%s open_lots=%s "
+            "trades=%s",
             discord_user_id,
             len(rollups),
             len(lot_rows),
+            len(trades),
         )
 
     def merge_rollups(
@@ -1182,6 +1452,7 @@ class ProfitStore:
         open_lots: dict[int, tuple[BuyLot, ...]],
         computed_through: datetime,
         *,
+        trades: Sequence[MatchedTrade] = (),
         now: datetime | None = None,
     ) -> None:
         """Add one pass's matches to what is already stored.
@@ -1190,9 +1461,30 @@ class ProfitStore:
         sale today does not change what a sale last week realized. Open lots
         are replaced outright: they are the state carried to the next pass,
         and this pass has just recomputed it.
+
+        A pass matches each sale once, so its trades are new rows. One that
+        is somehow already stored is overwritten rather than added to: a
+        trade is a single pairing, and writing the same one twice must leave
+        it as it was.
         """
         computed_at = (datetime.now(UTC) if now is None else now).isoformat()
         with self._sessions.begin() as session:
+            if trades:
+                trade_statement = sqlite_insert(ProfitMatchedTradeRecord)
+                session.execute(
+                    trade_statement.on_conflict_do_update(
+                        index_elements=(
+                            "discord_user_id",
+                            "sell_transaction_id",
+                            "buy_transaction_id",
+                        ),
+                        set_={
+                            column: trade_statement.excluded[column]
+                            for column in _TRADE_VALUE_COLUMNS
+                        },
+                    ),
+                    _trade_rows(discord_user_id, trades),
+                )
             if rollups:
                 statement = sqlite_insert(ProfitRollupRecord)
                 session.execute(
@@ -1252,6 +1544,7 @@ class ProfitStore:
                     "remaining": lot.remaining,
                     "unit_price": lot.unit_price,
                     "occurred_at": lot.occurred_at.isoformat(),
+                    "transaction_id": lot.transaction_id,
                 }
                 for item_id, lots in open_lots.items()
                 for index, lot in enumerate(lots)
@@ -1271,10 +1564,12 @@ class ProfitStore:
                 record.computed_through = computed_through.isoformat()
                 record.computed_at = computed_at
         LOGGER.debug(
-            "Merged profit rollups; user_id=%s rows=%s open_lots=%s",
+            "Merged profit rollups; user_id=%s rows=%s open_lots=%s "
+            "trades=%s",
             discord_user_id,
             len(rollups),
             len(lot_rows),
+            len(trades),
         )
 
     def get_rollups(
@@ -1350,7 +1645,12 @@ class ProfitStore:
             except (TypeError, ValueError):
                 continue
             lots.setdefault(record.item_id, []).append(
-                BuyLot(record.remaining, record.unit_price, occurred_at)
+                BuyLot(
+                    record.remaining,
+                    record.unit_price,
+                    occurred_at,
+                    record.transaction_id or "",
+                )
             )
         LOGGER.debug(
             "Read profit open lots; user_id=%s items=%s",
@@ -1471,6 +1771,100 @@ class ProfitStore:
 def _require_kind(transaction_kind: str) -> None:
     if transaction_kind not in TRANSACTION_KINDS:
         raise ValueError(f"Unknown profit transaction kind: {transaction_kind}")
+
+
+# Everything about a stored trade but the pair that names it.
+_TRADE_VALUE_COLUMNS = (
+    "item_id",
+    "sold_at",
+    "sold_day",
+    "bought_at",
+    "quantity",
+    "buy_price",
+    "sell_price",
+    "cost",
+    "net_revenue",
+    "profit",
+    "hold_seconds",
+)
+
+
+def _trade_rows(
+    discord_user_id: int,
+    trades: Sequence[MatchedTrade],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "discord_user_id": discord_user_id,
+            "sell_transaction_id": trade.sell_transaction_id,
+            "buy_transaction_id": trade.buy_transaction_id,
+            "item_id": trade.item_id,
+            "sold_at": trade.sold_at.isoformat(),
+            "sold_day": trade.sold_day,
+            "bought_at": trade.bought_at.isoformat(),
+            "quantity": trade.quantity,
+            "buy_price": trade.buy_price,
+            "sell_price": trade.sell_price,
+            "cost": trade.cost,
+            "net_revenue": trade.net_revenue,
+            "profit": trade.profit,
+            "hold_seconds": trade.hold_seconds,
+        }
+        for trade in trades
+    ]
+
+
+def _trades_from_records(
+    records: Sequence[ProfitMatchedTradeRecord],
+) -> list[MatchedTrade]:
+    trades: list[MatchedTrade] = []
+    for record in records:
+        try:
+            sold_at = parse_gw2_time(record.sold_at)
+            bought_at = parse_gw2_time(record.bought_at)
+        except (TypeError, ValueError):
+            continue
+        trades.append(
+            MatchedTrade(
+                item_id=record.item_id,
+                sell_transaction_id=record.sell_transaction_id,
+                buy_transaction_id=record.buy_transaction_id,
+                sold_at=sold_at,
+                bought_at=bought_at,
+                quantity=record.quantity,
+                buy_price=record.buy_price,
+                sell_price=record.sell_price,
+                cost=record.cost,
+                net_revenue=record.net_revenue,
+                profit=record.profit,
+                hold_seconds=record.hold_seconds,
+            )
+        )
+    return trades
+
+
+def _trade_order(sort: str):
+    """The column one trade sort key orders by."""
+    trade = ProfitMatchedTradeRecord
+    if sort == "item":
+        return func.lower(ProfitItemRecord.name)
+    if sort == "roi":
+        # A trade that cost nothing has no return to rank, and sorts as one.
+        return trade.profit * 1.0 / func.nullif(trade.cost, 0)
+    columns = {
+        "bought": trade.bought_at,
+        "buy-price": trade.buy_price,
+        "sold": trade.sold_at,
+        "sell-price": trade.sell_price,
+        "units": trade.quantity,
+        "cost": trade.cost,
+        "net-revenue": trade.net_revenue,
+        "profit": trade.profit,
+        "held": trade.hold_seconds,
+    }
+    if sort not in columns:
+        raise ValueError(f"Unknown profit trade sort: {sort}")
+    return columns[sort]
 
 
 def _touch_cache_record(
@@ -1625,6 +2019,7 @@ def _clear_member_rollups(session: Session, discord_user_id: int) -> None:
     ProfitLotCheckpointRecord,
         ProfitOpenLotRecord,
         ProfitRollupStateRecord,
+        ProfitMatchedTradeRecord,
     ):
         session.execute(
             delete(record_type).where(
@@ -1647,6 +2042,11 @@ def _clear_member_preferences(session: Session, discord_user_id: int) -> None:
     session.execute(
         delete(ProfitItemExclusionRecord).where(
             ProfitItemExclusionRecord.discord_user_id == discord_user_id
+        )
+    )
+    session.execute(
+        delete(ProfitTradeExclusionRecord).where(
+            ProfitTradeExclusionRecord.discord_user_id == discord_user_id
         )
     )
 

@@ -30,6 +30,26 @@ PRESET_REPORT_RANGES: dict[str, int] = {"24h": 1, "7d": 7, "30d": 30}
 HOURLY_PRESET_RANGE = "24h"
 
 
+# What the matched trade list can be sorted by, as the page and the API name
+# each column, and the column a list opens on: the newest sale first.
+TRADE_SORT_KEYS = frozenset(
+    {
+        "item",
+        "bought",
+        "buy-price",
+        "sold",
+        "sell-price",
+        "units",
+        "cost",
+        "net-revenue",
+        "profit",
+        "roi",
+        "held",
+    }
+)
+DEFAULT_TRADE_SORT = "sold"
+
+
 # The category names the item endpoint gives with no useful meaning of their
 # own. An upgrade component is a "Default" one when it is neither a rune nor a
 # sigil, which says nothing a reader could filter by, so those fall back to
@@ -97,6 +117,26 @@ class Transaction:
 
 
 @dataclass(frozen=True, slots=True)
+class TradePage:
+    """One page of a window's matched trades, and the totals of all of them.
+
+    The totals cover every trade the list holds - every page of it, within
+    whatever search narrowed it - so the footer reads the same whichever page
+    is on screen.
+    """
+
+    trades: tuple[MatchedTrade, ...]
+    total: int
+    page: int
+    pages: int
+    size: int
+    quantity: int
+    cost: int
+    net_revenue: int
+    profit: int
+
+
+@dataclass(frozen=True, slots=True)
 class ItemProfit:
     matched_quantity: int
     cost: int
@@ -139,6 +179,46 @@ class BuyLot:
     remaining: int
     unit_price: int
     occurred_at: datetime
+    # The purchase this lot is what is left of, so a sale matched against it
+    # can say which buy it was paired with. Empty for a lot that is no single
+    # purchase: the averaged lot long-held stock is collapsed into, and the
+    # purchases the delivery box is priced from.
+    transaction_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MatchedTrade:
+    """One sale paired with one purchase it was matched against, FIFO.
+
+    A sale that empties two purchases is two of these, and a purchase sold
+    off in three sales is three, so the trades of one window add up to its
+    realized figures exactly: every unit the matcher costs is in one of them.
+    The pair of transaction ids is what a member hides one by; the rest is
+    what the pairing came to.
+    """
+
+    item_id: int
+    sell_transaction_id: str
+    buy_transaction_id: str
+    sold_at: datetime
+    bought_at: datetime
+    quantity: int
+    # What one unit was bought and sold for, before the sale's fees.
+    buy_price: int
+    sell_price: int
+    cost: int
+    net_revenue: int
+    profit: int
+    # How long these units were held, from the purchase to the sale.
+    hold_seconds: float
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.sell_transaction_id, self.buy_transaction_id
+
+    @property
+    def sold_day(self) -> str:
+        return self.sold_at.date().isoformat()
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +235,9 @@ class RealizedProfit:
     item_days: dict[tuple[int, str], ItemDayProfit] = field(
         default_factory=dict
     )
+    # Every counted match as the pair of trades it was, for the trade list.
+    # Empty unless asked for, for the same reason.
+    trades: tuple[MatchedTrade, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +508,11 @@ class ProfitReport:
     # Identifies the API key this report was built for, so a member's
     # remembered window does not survive that key being deleted.
     key_generation: str = ""
+    # Whether the window ends at ``window_end`` or runs on to the present.
+    # A window running to the present reads no far bound, so a trade stamped
+    # a moment ahead of the clock still lands in it; the trade list is asked
+    # for with the same pair of bounds, so it has to know which this is.
+    window_closed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,6 +543,7 @@ class _Event:
     occurred_at: datetime
     unit_price: int
     quantity: int
+    transaction_id: str = ""
 
 
 @dataclass(slots=True)
@@ -462,6 +551,7 @@ class _MutableLot:
     remaining: int
     unit_price: int
     occurred_at: datetime
+    transaction_id: str = ""
 
 
 @dataclass(slots=True)
@@ -556,6 +646,7 @@ def calculate_realized_profit(
     sells: list[Transaction],
     *,
     with_item_days: bool = False,
+    with_trades: bool = False,
     opening_lots: dict[int, tuple[BuyLot, ...]] | None = None,
     counted_from: datetime | None = None,
     counted_through: datetime | None = None,
@@ -563,7 +654,9 @@ def calculate_realized_profit(
     """Match sales to earlier purchases FIFO, mirroring the original bot.
 
     ``with_item_days`` also returns every match at item-and-date grain, which
-    is what the stored rollups are built from.
+    is what the stored rollups are built from. ``with_trades`` returns each
+    counted match as the pair of trades it was, which is what the dashboard
+    lists and what a member hides a single trade by.
 
     ``opening_lots`` seeds each item's queue with purchases carried in from an
     earlier pass. That is what lets a day's new sales be matched against the
@@ -593,6 +686,7 @@ def calculate_realized_profit(
                 transaction.occurred_at,
                 transaction.price,
                 transaction.quantity,
+                transaction.transaction_id,
             )
         )
     for transaction in sells:
@@ -602,11 +696,13 @@ def calculate_realized_profit(
                 transaction.occurred_at,
                 transaction.price,
                 transaction.quantity,
+                transaction.transaction_id,
             )
         )
 
     item_totals: dict[int, ItemProfit] = {}
     item_day_totals: dict[tuple[int, str], ItemDayProfit] = {}
+    trades: dict[tuple[str, str], MatchedTrade] = {}
     day_totals: dict[str, _Totals] = defaultdict(_Totals)
     unmatched: dict[int, tuple[BuyLot, ...]] = {}
     total_cost = 0
@@ -623,7 +719,12 @@ def calculate_realized_profit(
             )
         )
         buy_lots: deque[_MutableLot] = deque(
-            _MutableLot(lot.remaining, lot.unit_price, lot.occurred_at)
+            _MutableLot(
+                lot.remaining,
+                lot.unit_price,
+                lot.occurred_at,
+                lot.transaction_id,
+            )
             for lot in sorted(
                 carried.get(item_id, ()),
                 key=lambda lot: lot.occurred_at,
@@ -640,6 +741,7 @@ def calculate_realized_profit(
                         event.quantity,
                         event.unit_price,
                         event.occurred_at,
+                        event.transaction_id,
                     )
                 )
                 continue
@@ -693,6 +795,24 @@ def calculate_realized_profit(
                     day.net_revenue += net_revenue
                     day.profit += profit
                     day.hold_seconds += holding_seconds * matched
+                    if with_trades:
+                        _record_trade(
+                            trades,
+                            MatchedTrade(
+                                item_id=item_id,
+                                sell_transaction_id=event.transaction_id,
+                                buy_transaction_id=buy_lot.transaction_id,
+                                sold_at=event.occurred_at,
+                                bought_at=buy_lot.occurred_at,
+                                quantity=matched,
+                                buy_price=buy_lot.unit_price,
+                                sell_price=event.unit_price,
+                                cost=cost,
+                                net_revenue=net_revenue,
+                                profit=profit,
+                                hold_seconds=holding_seconds,
+                            ),
+                        )
 
                 buy_lot.remaining -= matched
                 sell_remaining -= matched
@@ -701,7 +821,12 @@ def calculate_realized_profit(
                     buy_lots.popleft()
 
         remaining_lots = tuple(
-            BuyLot(lot.remaining, lot.unit_price, lot.occurred_at)
+            BuyLot(
+                lot.remaining,
+                lot.unit_price,
+                lot.occurred_at,
+                lot.transaction_id,
+            )
             for lot in buy_lots
             if lot.remaining > 0
         )
@@ -760,10 +885,12 @@ def calculate_realized_profit(
         total_profit=total_profit,
         total_matched_quantity=total_matched_quantity,
         item_days=item_day_totals,
+        trades=tuple(trades.values()),
     )
     LOGGER.debug(
         "Calculated realized Trading Post profit; buys=%s sells=%s "
-        "items=%s days=%s matched=%s unmatched_items=%s counted_window=%s",
+        "items=%s days=%s matched=%s unmatched_items=%s counted_window=%s "
+        "trades=%s",
         len(buys),
         len(sells),
         len(result.items),
@@ -771,8 +898,106 @@ def calculate_realized_profit(
         result.total_matched_quantity,
         unmatched_items,
         counted_from is not None or counted_through is not None,
+        len(result.trades),
     )
     return result
+
+
+def _record_trade(
+    trades: dict[tuple[str, str], MatchedTrade],
+    trade: MatchedTrade,
+) -> None:
+    """Keep one trade per sale and purchase, folding a repeat into it.
+
+    A sale takes each lot at most once, and only the averaged lot long-held
+    stock collapses into lacks a purchase of its own, so a pair should never
+    repeat. If one does, it is added to the pair already recorded rather than
+    written twice: the pair is what a trade is stored and hidden by, and two
+    rows under one key would refuse to store at all.
+    """
+    held = trades.get(trade.key)
+    if held is None:
+        trades[trade.key] = trade
+        return
+    quantity = held.quantity + trade.quantity
+    cost = held.cost + trade.cost
+    trades[trade.key] = MatchedTrade(
+        item_id=held.item_id,
+        sell_transaction_id=held.sell_transaction_id,
+        buy_transaction_id=held.buy_transaction_id,
+        sold_at=held.sold_at,
+        bought_at=min(held.bought_at, trade.bought_at),
+        quantity=quantity,
+        buy_price=round(cost / quantity),
+        sell_price=held.sell_price,
+        cost=cost,
+        net_revenue=held.net_revenue + trade.net_revenue,
+        profit=held.profit + trade.profit,
+        hold_seconds=(
+            held.hold_seconds * held.quantity
+            + trade.hold_seconds * trade.quantity
+        )
+        / quantity,
+    )
+    LOGGER.debug(
+        "Folded a repeated Trading Post trade pair; quantity=%s", quantity
+    )
+
+
+def withdraw_trades(
+    rollups: list[tuple[int, str, ItemDayProfit]],
+    trades: list[MatchedTrade],
+) -> list[tuple[int, str, ItemDayProfit]]:
+    """Take hidden trades back out of the rollup rows they were summed into.
+
+    A row is one item's sales on one date, and a trade is one of the matches
+    that row was added up from, so hiding it is a subtraction on the row it
+    landed in. A row left with no units has nothing left to report and is
+    dropped, the way a date with no matched sale is absent rather than zero.
+    The matching itself is untouched, which is what lets a hidden trade be
+    put back without rematching anything.
+    """
+    if not trades:
+        return rollups
+    hidden: dict[tuple[int, str], _Totals] = defaultdict(_Totals)
+    for trade in trades:
+        totals = hidden[(trade.item_id, trade.sold_day)]
+        totals.matched_quantity += trade.quantity
+        totals.cost += trade.cost
+        totals.net_revenue += trade.net_revenue
+        totals.profit += trade.profit
+        totals.hold_seconds += trade.hold_seconds * trade.quantity
+    kept: list[tuple[int, str, ItemDayProfit]] = []
+    emptied = 0
+    for item_id, sold_day, totals in rollups:
+        withdrawn = hidden.get((item_id, sold_day))
+        if withdrawn is None:
+            kept.append((item_id, sold_day, totals))
+            continue
+        quantity = totals.matched_quantity - withdrawn.matched_quantity
+        if quantity <= 0:
+            emptied += 1
+            continue
+        kept.append(
+            (
+                item_id,
+                sold_day,
+                ItemDayProfit(
+                    quantity,
+                    totals.cost - withdrawn.cost,
+                    totals.net_revenue - withdrawn.net_revenue,
+                    totals.profit - withdrawn.profit,
+                    max(0.0, totals.hold_seconds - withdrawn.hold_seconds),
+                ),
+            )
+        )
+    LOGGER.debug(
+        "Withdrew hidden Trading Post trades; trades=%s rows=%s emptied=%s",
+        len(trades),
+        len(rollups),
+        emptied,
+    )
+    return kept
 
 
 def calculate_unrealized_profit(

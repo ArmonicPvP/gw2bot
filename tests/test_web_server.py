@@ -38,16 +38,22 @@ from gw2bot.profit import (
     DeliveryReport,
     ItemProfit,
     MarketPrice,
+    MatchedTrade,
     OpenBuyOrder,
     OpenOrdersReport,
     ProfitReport,
     RealizedProfit,
     ReportWindow,
+    TradePage,
     UnrealizedItemProfit,
     UnrealizedProfit,
 )
 from gw2bot.profit.api import ProfitApiError
-from gw2bot.profit.service import MissingProfitApiKey, ResolvedWindow
+from gw2bot.profit.service import (
+    MissingProfitApiKey,
+    ResolvedWindow,
+    TradesReport,
+)
 from gw2bot.gw2.feast_stock import MAX_FEAST_COST_COPPER
 from gw2bot.gw2.guild_members import TrialMemberReportEntry
 from gw2bot.invites import PendingInvites
@@ -132,6 +138,55 @@ def orders_report() -> OpenOrdersReport:
     )
 
 
+def trades_report() -> TradesReport:
+    sold = MatchedTrade(
+        item_id=1,
+        sell_transaction_id="sell-1",
+        buy_transaction_id="buy-1",
+        sold_at=datetime(2026, 8, 20, 9, 15, tzinfo=UTC),
+        bought_at=datetime(2026, 8, 19, 9, 15, tzinfo=UTC),
+        quantity=2,
+        buy_price=100,
+        sell_price=200,
+        cost=200,
+        net_revenue=340,
+        profit=140,
+        hold_seconds=86_400.0,
+    )
+    hidden = MatchedTrade(
+        item_id=2,
+        sell_transaction_id="sell-2",
+        buy_transaction_id="",
+        sold_at=datetime(2026, 8, 18, 6, 0, tzinfo=UTC),
+        bought_at=datetime(2025, 7, 1, tzinfo=UTC),
+        quantity=1,
+        buy_price=50,
+        sell_price=100,
+        cost=50,
+        net_revenue=85,
+        profit=35,
+        hold_seconds=3_600.0,
+    )
+    return TradesReport(
+        page=TradePage(
+            trades=(sold,),
+            total=1,
+            page=1,
+            pages=1,
+            size=10,
+            quantity=2,
+            cost=200,
+            net_revenue=340,
+            profit=140,
+        ),
+        hidden=(hidden,),
+        item_names={1: "Realized Item", 2: "Hidden Item"},
+        sort="sold",
+        descending=True,
+        search="",
+    )
+
+
 def member(display_name: str = "Kitty", *, officer: bool = False) -> object:
     roles = [SimpleNamespace(id=FOOD_PAGE_ROLE_ID)] if officer else []
     return SimpleNamespace(display_name=display_name, roles=roles)
@@ -202,6 +257,8 @@ class FakeBot:
             ),
             set_order_exclusion=AsyncMock(return_value=True),
             set_item_exclusion=AsyncMock(return_value=True),
+            load_trades=AsyncMock(return_value=trades_report()),
+            set_trade_exclusion=AsyncMock(return_value=True),
         )
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
@@ -1105,6 +1162,9 @@ class TestProfitPage:
             # page fills its date fields from.
             "start": 1_782_172_800,
             "end": 1_787_337_000,
+            # A rolling window runs on to the present, so the trade list is
+            # asked for with no far bound, the way the report was read.
+            "closed": False,
         }
         assert payload["items"][0]["name"] == "Realized Item"
         assert payload["items"][0]["hold_seconds"] == 86_400
@@ -1720,6 +1780,406 @@ class TestProfitExclusionRoutes:
             response = await client.post(
                 path,
                 json={"item_id": 4, "excluded": False},
+                headers=self._headers(),
+            )
+        body = await response.text()
+
+        assert response.status == 500
+        assert secret not in caplog.text
+        assert secret not in body
+
+
+class TestProfitTradesApi:
+    """The matched trade list: one page at a time, in the order asked for."""
+
+    SINCE = datetime(2026, 8, 14, tzinfo=UTC)
+    UNTIL = datetime(2026, 8, 20, 23, 59, 59, tzinfo=UTC)
+
+    @staticmethod
+    def _headers(user_id: int = SESSION_USER_ID) -> dict[str, str]:
+        return TestProfitPage._headers(user_id)
+
+    async def test_a_page_is_served_between_the_bounds_named(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        since = int(self.SINCE.timestamp())
+        until = int(self.UNTIL.timestamp())
+
+        response = await client.get(
+            f"/api/profit/trades?since={since}&until={until}&page=2&size=25"
+            "&sort=profit&direction=ascending&search=%20Ecto%20",
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        bot.profit_service.load_trades.assert_awaited_once_with(
+            SESSION_USER_ID,
+            self.SINCE,
+            self.UNTIL,
+            page=2,
+            size=25,
+            sort="profit",
+            descending=False,
+            # Trimmed, the way the page trims it before asking.
+            search="Ecto",
+        )
+        # The bounds are the report's own, so nothing about a window is read
+        # or remembered here.
+        bot.profit_service.resolve_report_window.assert_not_awaited()
+        assert await response.json() == {
+            "trades": [
+                {
+                    "item_id": 1,
+                    "name": "Realized Item",
+                    "sell_transaction_id": "sell-1",
+                    "buy_transaction_id": "buy-1",
+                    "bought_at": "2026-08-19T09:15:00+00:00",
+                    "sold_at": "2026-08-20T09:15:00+00:00",
+                    "units": 2,
+                    "buy_price": 100,
+                    "sell_price": 200,
+                    "cost": 200,
+                    "net_revenue": 340,
+                    "profit": 140,
+                    "roi_percent": 70.0,
+                    "hold_seconds": 86_400.0,
+                }
+            ],
+            "page": 1,
+            "pages": 1,
+            "size": 10,
+            "total": 1,
+            "totals": {
+                "units": 2,
+                "cost": 200,
+                "net_revenue": 340,
+                "profit": 140,
+                "roi_percent": 70.0,
+            },
+            "sort": "sold",
+            "direction": "descending",
+            "search": "",
+            "hidden": [
+                {
+                    "item_id": 2,
+                    "name": "Hidden Item",
+                    "sell_transaction_id": "sell-2",
+                    # The averaged lot long-held stock collapses into is no
+                    # one purchase, and is hidden by the sale alone.
+                    "buy_transaction_id": "",
+                    "bought_at": "2025-07-01T00:00:00+00:00",
+                    "sold_at": "2026-08-18T06:00:00+00:00",
+                    "units": 1,
+                    "buy_price": 50,
+                    "sell_price": 100,
+                    "cost": 50,
+                    "net_revenue": 85,
+                    "profit": 35,
+                    "roi_percent": 70.0,
+                    "hold_seconds": 3_600.0,
+                }
+            ],
+        }
+
+    async def test_a_window_running_to_the_present_names_no_far_bound(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.get(
+            f"/api/profit/trades?since={int(self.SINCE.timestamp())}",
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        bot.profit_service.load_trades.assert_awaited_once_with(
+            SESSION_USER_ID,
+            self.SINCE,
+            None,
+            page=1,
+            size=10,
+            sort="sold",
+            descending=True,
+            search="",
+        )
+
+    async def test_the_report_names_the_bounds_its_trades_are_asked_by(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        bot.profit_service.load_report.return_value = replace(
+            profit_report(), window_closed=True
+        )
+
+        response = await client.get(
+            "/api/profit?range=30d",
+            headers=self._headers(),
+        )
+
+        window = (await response.json())["window"]
+        assert window["closed"] is True
+        assert window["start"] == int(
+            profit_report().window_start.timestamp()
+        )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "",
+            "since=yesterday",
+            "since=-1",
+            f"since={10**12}",
+            "since=100&until=100",
+            "since=100&until=99",
+            "since=100&until=soon",
+            f"since=100&until={10**12}",
+            "since=100&page=0",
+            "since=100&page=two",
+            "since=100&size=0",
+            "since=100&size=91",
+            "since=100&sort=name",
+            "since=100&direction=sideways",
+            "since=100&search=" + "x" * 101,
+        ],
+        ids=(
+            "no-bounds",
+            "since-text",
+            "since-before-the-epoch",
+            "since-past-any-date",
+            "empty-span",
+            "until-before-since",
+            "until-text",
+            "until-past-any-date",
+            "page-zero",
+            "page-text",
+            "size-zero",
+            "size-past-the-limit",
+            "unknown-sort",
+            "unknown-direction",
+            "search-too-long",
+        ),
+    )
+    async def test_an_unusable_request_is_refused_before_any_read(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        query: str,
+    ) -> None:
+        response = await client.get(
+            f"/api/profit/trades?{query}",
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        bot.profit_service.load_trades.assert_not_awaited()
+
+    async def test_trades_need_a_session(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.get("/api/profit/trades")
+
+        assert response.status == 401
+        bot.profit_service.load_trades.assert_not_awaited()
+
+    async def test_a_member_without_a_key_is_told_so(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        bot.profit_service.load_trades.side_effect = MissingProfitApiKey()
+
+        response = await client.get(
+            "/api/profit/trades?since=100",
+            headers=self._headers(),
+        )
+
+        assert response.status == 409
+        assert await response.json() == {"error": "api_key_missing"}
+
+    async def test_a_failure_reports_without_its_error_text(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "trades-failure-secret"
+        bot.profit_service.load_trades.side_effect = SQLAlchemyError(secret)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.get(
+                "/api/profit/trades?since=100",
+                headers=self._headers(),
+            )
+        body = await response.text()
+
+        assert response.status == 500
+        assert secret not in caplog.text
+        assert secret not in body
+
+
+class TestProfitTradeExclusionRoute:
+    """Hiding one matched trade, named by the sale and purchase it paired."""
+
+    @staticmethod
+    def _headers(user_id: int = SESSION_USER_ID) -> dict[str, str]:
+        return TestProfitPage._headers(user_id)
+
+    async def test_a_trade_is_hidden_for_the_signed_in_member_only(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        guild: FakeGuild,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        other_user_id = 202
+        guild.members[other_user_id] = member("Other Kitty")
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.post(
+                "/api/profit/trade-exclusions",
+                json={
+                    "sell_transaction_id": "sale-4417",
+                    "buy_transaction_id": "purchase-2093",
+                    "excluded": True,
+                },
+                headers=self._headers(other_user_id),
+            )
+
+        assert response.status == 200
+        assert await response.json() == {"excluded": True, "changed": True}
+        bot.profit_service.set_trade_exclusion.assert_awaited_once_with(
+            other_user_id, "sale-4417", "purchase-2093", True
+        )
+        # Hiding a trade is not hiding its item.
+        bot.profit_service.set_item_exclusion.assert_not_awaited()
+        # The ids are what the member sent, so the trace carries the outcome
+        # and nothing of them.
+        assert "Stored profit trade exclusion;" in caplog.text
+        assert "sale-4417" not in caplog.text
+        assert "purchase-2093" not in caplog.text
+
+    async def test_a_trade_from_the_averaged_lot_is_named_by_its_sale(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/trade-exclusions",
+            json={
+                "sell_transaction_id": "sale-4417",
+                "buy_transaction_id": "",
+                "excluded": False,
+            },
+            headers=self._headers(),
+        )
+
+        assert response.status == 200
+        bot.profit_service.set_trade_exclusion.assert_awaited_once_with(
+            SESSION_USER_ID, "sale-4417", "", False
+        )
+
+    async def test_hiding_a_trade_needs_a_session(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/trade-exclusions",
+            json={
+                "sell_transaction_id": "sale-4417",
+                "buy_transaction_id": "purchase-2093",
+                "excluded": True,
+            },
+        )
+
+        assert response.status == 401
+        bot.profit_service.set_trade_exclusion.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"buy_transaction_id": "b", "excluded": True},
+            {"sell_transaction_id": "", "buy_transaction_id": "b",
+             "excluded": True},
+            {"sell_transaction_id": "s", "excluded": True},
+            {"sell_transaction_id": 4417, "buy_transaction_id": "b",
+             "excluded": True},
+            {"sell_transaction_id": "s", "buy_transaction_id": None,
+             "excluded": True},
+            {"sell_transaction_id": "s" * 129, "buy_transaction_id": "b",
+             "excluded": True},
+            {"sell_transaction_id": "s", "buy_transaction_id": "b" * 129,
+             "excluded": True},
+            {"sell_transaction_id": "s", "buy_transaction_id": "b",
+             "excluded": "yes"},
+            [],
+        ],
+        ids=(
+            "no-sale",
+            "empty-sale",
+            "no-purchase",
+            "numeric-sale",
+            "null-purchase",
+            "sale-too-long",
+            "purchase-too-long",
+            "string-excluded",
+            "not-an-object",
+        ),
+    )
+    async def test_an_unusable_body_is_refused_without_storing(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        body: object,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/trade-exclusions",
+            json=body,
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        assert await response.json() == {"error": "invalid request"}
+        bot.profit_service.set_trade_exclusion.assert_not_awaited()
+
+    async def test_a_body_that_is_not_json_is_refused(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+    ) -> None:
+        response = await client.post(
+            "/api/profit/trade-exclusions",
+            data="sell_transaction_id=4417",
+            headers=self._headers(),
+        )
+
+        assert response.status == 400
+        bot.profit_service.set_trade_exclusion.assert_not_awaited()
+
+    async def test_a_failure_reports_without_its_error_text(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "trade-exclusion-failure-secret"
+        bot.profit_service.set_trade_exclusion.side_effect = SQLAlchemyError(
+            secret
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.post(
+                "/api/profit/trade-exclusions",
+                json={
+                    "sell_transaction_id": "sale-4417",
+                    "buy_transaction_id": "purchase-2093",
+                    "excluded": True,
+                },
                 headers=self._headers(),
             )
         body = await response.text()

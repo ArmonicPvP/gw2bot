@@ -40,6 +40,7 @@ from gw2bot.profit.models import (
     ItemProfit,
     DeliveryCost,
     MarketPrice,
+    MatchedTrade,
     OpenBuyOrder,
     OpenOrdersReport,
     ProfitReport,
@@ -53,6 +54,7 @@ from gw2bot.profit.models import (
     calculate_unrealized_profit,
     group_open_buy_orders,
     sale_fee_total,
+    withdraw_trades,
 )
 from gw2bot.profit.service import (
     MissingProfitApiKey,
@@ -61,9 +63,11 @@ from gw2bot.profit.service import (
     serialize_delivery,
     serialize_open_orders,
     serialize_profit_report,
+    serialize_trades,
 )
 from gw2bot.profit.store import (
     BOUNDARY_PRUNED_LOTS_KEY,
+    MATCHED_TRADES_KEY,
     ITEM_NAME_TTL_SECONDS,
     MAX_LOT_CHECKPOINTS,
     MAX_REPORT_DAYS,
@@ -104,6 +108,49 @@ def named(names: dict[int, str]) -> dict[int, ItemFacts]:
         item_id: ItemFacts(name, "Crafting Material")
         for item_id, name in names.items()
     }
+
+
+def matched(
+    sell: str,
+    buy: str = "buy",
+    *,
+    item_id: int = 1,
+    sold_at: datetime | None = None,
+    quantity: int = 1,
+    buy_price: int = 100,
+    sell_price: int = 200,
+    hold_seconds: float = 3_600.0,
+) -> MatchedTrade:
+    """One stored trade, costed the way the matcher costs a whole sale."""
+    sold = datetime(2026, 8, 20, 12, tzinfo=UTC) if sold_at is None else sold_at
+    cost = buy_price * quantity
+    net_revenue = allocated_net_revenue(sell_price, quantity, quantity)
+    return MatchedTrade(
+        item_id=item_id,
+        sell_transaction_id=sell,
+        buy_transaction_id=buy,
+        sold_at=sold,
+        bought_at=sold - timedelta(seconds=hold_seconds),
+        quantity=quantity,
+        buy_price=buy_price,
+        sell_price=sell_price,
+        cost=cost,
+        net_revenue=net_revenue,
+        profit=net_revenue - cost,
+        hold_seconds=hold_seconds,
+    )
+
+
+def trade_keys(trades: Any) -> list[tuple[str, str]]:
+    return [trade.key for trade in trades]
+
+
+def report_bounds(report: ProfitReport) -> tuple[datetime, datetime | None]:
+    """The bounds the page asks for a report's trades with."""
+    return (
+        report.window_start,
+        report.window_end if report.window_closed else None,
+    )
 
 
 @pytest.fixture
@@ -3911,7 +3958,7 @@ class TestProfitService:
 
 
 class TestRollupRebase:
-    """The one-time drop of results matched under the old lot rule."""
+    """The one-time drop of results matched under an older rule."""
 
     @staticmethod
     def _seed(store: ProfitStore) -> None:
@@ -4036,8 +4083,57 @@ class TestRollupRebase:
             reopened = ProfitStore(str(database), cipher, registry)
         reopened.close()
 
-        assert "matched under the old lot rule" in caplog.text
+        assert "matched under an older rule" in caplog.text
+        # Only the rule this database was missing is named.
+        assert f"rules={BOUNDARY_PRUNED_LOTS_KEY}\n" in caplog.text
         assert secret not in caplog.text
+
+    def test_results_matched_before_trades_were_recorded_are_dropped(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Those results list no trades, and their lots cannot name the buy a
+        # later sale is paired with, so they are matched again once - and
+        # the member's hidden trades, which are choices rather than results,
+        # survive it.
+        cipher = SettingsCipher(Fernet.generate_key())
+        registry = SecretRegistry()
+        database = tmp_path / "gw2bot.db"
+        store = ProfitStore(str(database), cipher, registry)
+        self._seed(store)
+        store.store_rollups(
+            101,
+            {(1, "2026-08-20"): ItemDayProfit(1, 100, 170, 70, 3_600.0)},
+            {},
+            datetime(2026, 8, 20, 12, tzinfo=UTC),
+            trades=[matched("sell", "buy")],
+        )
+        store.set_trade_exclusion(101, "sell", "buy", True)
+        store.close()
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "DELETE FROM metadata WHERE key = ?", (MATCHED_TRADES_KEY,)
+            )
+
+        with caplog.at_level(logging.INFO, logger="gw2bot"):
+            reopened = ProfitStore(str(database), cipher, registry)
+
+        try:
+            assert f"rules={MATCHED_TRADES_KEY}\n" in caplog.text
+            assert (
+                reopened.get_trade_page(
+                    101, since=datetime(2020, 1, 1, tzinfo=UTC)
+                ).total
+                == 0
+            )
+            assert reopened.get_open_lots(101) == {}
+            assert reopened.get_rollup_state(101).computed_through is None
+            assert len(reopened.get_transactions(101, "history_buys")) == 1
+            # The choice is still there, waiting for the pair to come back.
+            assert not reopened.set_trade_exclusion(101, "sell", "buy", True)
+        finally:
+            reopened.close()
 
 
 class TestRollupStore:
@@ -4354,6 +4450,74 @@ class TestRollupRewind:
         )
         assert after == (whole.total_profit, whole.total_matched_quantity)
         assert store.get_open_lots(101) == whole.unmatched_buys
+        # The trades are the same matches one by one, so after the rewind
+        # they are exactly the pairs a whole rematch makes: none lost behind
+        # the boundary, and the April sale - matched before the rewind and
+        # again after it - written once.
+        stored = store.get_trade_page(
+            101, since=datetime(2020, 1, 1, tzinfo=UTC), size=50
+        )
+        rematched = calculate_realized_profit(
+            store.get_transactions(101, "history_buys"),
+            store.get_transactions(101, "history_sells"),
+            with_trades=True,
+        )
+        assert sorted(stored.trades, key=lambda trade: trade.key) == sorted(
+            rematched.trades, key=lambda trade: trade.key
+        )
+        assert trade_keys(stored.trades) == [("s1", "b1"), ("s0", "b1")]
+
+    async def test_a_late_purchase_re_pairs_the_sales_after_it(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # A purchase that turns up behind the watermark goes to the front of
+        # the queue, so a sale that was paired with one buy is paired with
+        # another. The old pair is not a trade any more and must not linger
+        # beside the new one.
+        store, _, _ = profit_store
+        stored_at = datetime(2026, 4, 10, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                # An early trade of another item, so a March checkpoint
+                # exists to rewind to.
+                transaction("other", item_id=2, quantity=1,
+                            occurred_at=datetime(2026, 1, 2, tzinfo=UTC)),
+                transaction("b1", price=100, quantity=10,
+                            occurred_at=datetime(2026, 3, 10, tzinfo=UTC)),
+            ],
+            now=stored_at,
+        )
+        store.store_transactions(
+            101,
+            "history_sells",
+            [transaction("s1", price=200, quantity=6,
+                         occurred_at=datetime(2026, 4, 5, tzinfo=UTC))],
+            now=stored_at,
+        )
+        service = self._service(store)
+        await service._ensure_rollups(101, stored_at)
+        since = datetime(2020, 1, 1, tzinfo=UTC)
+        assert trade_keys(store.get_trade_page(101, since=since).trades) == [
+            ("s1", "b1")
+        ]
+
+        later = datetime(2026, 4, 11, tzinfo=UTC)
+        store.store_transactions(
+            101,
+            "history_buys",
+            [transaction("b0", price=90, quantity=10,
+                         occurred_at=datetime(2026, 3, 5, tzinfo=UTC))],
+            now=later,
+        )
+        assert await service._ensure_rollups(101, later)
+
+        page = store.get_trade_page(101, since=since)
+        assert trade_keys(page.trades) == [("s1", "b0")]
+        assert page.cost == 6 * 90
+        assert page.profit == self._totals(store)[0]
 
     async def test_a_late_trade_older_than_every_checkpoint_rebuilds(
         self,
@@ -4685,6 +4849,877 @@ class TestCheckpointBoundaries:
 
         # Rewound to March, not rebuilt from the beginning.
         assert "reason=rewound" in caplog.text
+
+
+class TestMatchedTrades:
+    """The matcher's pairing of each sale with the purchases it emptied."""
+
+    def test_a_sale_that_empties_two_purchases_is_two_trades(self) -> None:
+        first = datetime(2026, 8, 1, tzinfo=UTC)
+        second = datetime(2026, 8, 2, tzinfo=UTC)
+        sold = datetime(2026, 8, 4, tzinfo=UTC)
+        realized = calculate_realized_profit(
+            [
+                transaction("b1", price=100, quantity=3, occurred_at=first),
+                transaction("b2", price=120, quantity=5, occurred_at=second),
+            ],
+            [transaction("s1", price=200, quantity=6, occurred_at=sold)],
+            with_trades=True,
+        )
+
+        assert trade_keys(realized.trades) == [("s1", "b1"), ("s1", "b2")]
+        oldest, newest = realized.trades
+        assert (oldest.quantity, oldest.buy_price, oldest.cost) == (3, 100, 300)
+        assert (newest.quantity, newest.buy_price, newest.cost) == (3, 120, 360)
+        assert oldest.bought_at == first and newest.bought_at == second
+        assert oldest.sell_price == newest.sell_price == 200
+        assert oldest.hold_seconds == 3 * 86_400
+        assert newest.hold_seconds == 2 * 86_400
+        # The sale's fees are split between its trades without a copper lost
+        # to rounding, so the trades add up to the realized figures exactly.
+        assert oldest.net_revenue + newest.net_revenue == (
+            allocated_net_revenue(200, 6, 6)
+        )
+        assert sum(trade.profit for trade in realized.trades) == (
+            realized.total_profit
+        )
+        assert sum(trade.quantity for trade in realized.trades) == (
+            realized.total_matched_quantity
+        )
+
+    def test_trades_are_returned_only_when_asked_for(self) -> None:
+        realized = calculate_realized_profit(
+            [transaction("b1", occurred_at=datetime(2026, 8, 1, tzinfo=UTC))],
+            [transaction("s1", occurred_at=datetime(2026, 8, 2, tzinfo=UTC))],
+        )
+
+        assert realized.total_matched_quantity == 1
+        assert realized.trades == ()
+
+    def test_an_uncounted_sale_is_matched_but_not_listed(self) -> None:
+        # The sale before the window still takes the first purchase, so the
+        # one inside it is paired with the second - the same pair the stored
+        # rows were built from.
+        realized = calculate_realized_profit(
+            [
+                transaction("b1", quantity=2,
+                            occurred_at=datetime(2026, 8, 1, tzinfo=UTC)),
+                transaction("b2", quantity=2,
+                            occurred_at=datetime(2026, 8, 2, tzinfo=UTC)),
+            ],
+            [
+                transaction("s1", quantity=2,
+                            occurred_at=datetime(2026, 8, 3, tzinfo=UTC)),
+                transaction("s2", quantity=2,
+                            occurred_at=datetime(2026, 8, 5, tzinfo=UTC)),
+            ],
+            with_trades=True,
+            counted_from=datetime(2026, 8, 4, tzinfo=UTC),
+        )
+
+        assert trade_keys(realized.trades) == [("s2", "b2")]
+
+    def test_a_carried_lot_still_names_its_purchase(self) -> None:
+        bought = datetime(2026, 7, 1, tzinfo=UTC)
+        realized = calculate_realized_profit(
+            [],
+            [transaction("s1", quantity=2,
+                         occurred_at=datetime(2026, 8, 5, tzinfo=UTC))],
+            with_trades=True,
+            opening_lots={1: (BuyLot(5, 100, bought, "carried"),)},
+        )
+
+        assert trade_keys(realized.trades) == [("s1", "carried")]
+        # What is left of it is carried on under the same name.
+        assert realized.unmatched_buys == {
+            1: (BuyLot(3, 100, bought, "carried"),)
+        }
+
+    def test_the_averaged_lot_names_no_purchase(self) -> None:
+        boundary = datetime(2026, 8, 1, tzinfo=UTC)
+        recent = BuyLot(1, 300, datetime(2026, 7, 20, tzinfo=UTC), "recent")
+        pruned = prune_open_lots(
+            {
+                1: (
+                    BuyLot(1, 100, datetime(2024, 1, 1, tzinfo=UTC), "old-1"),
+                    BuyLot(1, 200, datetime(2024, 2, 1, tzinfo=UTC), "old-2"),
+                    recent,
+                )
+            },
+            older_than=boundary - timedelta(days=365),
+        )
+
+        averaged, kept = pruned[1]
+        assert averaged.transaction_id == ""
+        assert kept == recent
+
+    def test_a_repeated_pair_is_folded_into_one_trade(self) -> None:
+        # Only the averaged lot lacks a purchase of its own, and there is one
+        # of those per item, so this is defensive: two of them must still
+        # store as one trade rather than refuse to store at all.
+        realized = calculate_realized_profit(
+            [],
+            [transaction("s1", price=200, quantity=4,
+                         occurred_at=datetime(2026, 8, 5, tzinfo=UTC))],
+            with_trades=True,
+            opening_lots={
+                1: (
+                    BuyLot(2, 100, datetime(2025, 1, 1, tzinfo=UTC)),
+                    BuyLot(2, 140, datetime(2025, 2, 1, tzinfo=UTC)),
+                )
+            },
+        )
+
+        (trade,) = realized.trades
+        assert trade.key == ("s1", "")
+        assert (trade.quantity, trade.cost, trade.buy_price) == (4, 480, 120)
+        assert trade.bought_at == datetime(2025, 1, 1, tzinfo=UTC)
+        assert trade.profit == realized.total_profit
+
+    def test_withdrawing_trades_subtracts_them_from_their_rows(self) -> None:
+        kept = matched("s1", "b1", item_id=1, quantity=2,
+                       hold_seconds=7_200.0)
+        hidden = matched("s2", "b1", item_id=1, quantity=3,
+                         hold_seconds=3_600.0)
+        alone = matched("s3", "b9", item_id=2, quantity=1)
+        day = kept.sold_day
+
+        def row(*trades: MatchedTrade) -> ItemDayProfit:
+            return ItemDayProfit(
+                sum(trade.quantity for trade in trades),
+                sum(trade.cost for trade in trades),
+                sum(trade.net_revenue for trade in trades),
+                sum(trade.profit for trade in trades),
+                sum(trade.hold_seconds * trade.quantity for trade in trades),
+            )
+
+        rollups = [(1, day, row(kept, hidden)), (2, day, row(alone))]
+
+        withdrawn = withdraw_trades(rollups, [hidden, alone])
+
+        # The item keeps the trade that was not hidden, to the copper, and an
+        # item left with nothing on that date has no row at all.
+        assert withdrawn == [(1, day, row(kept))]
+        assert withdraw_trades(rollups, []) == rollups
+
+
+class TestMatchedTradeStore:
+    def test_trades_are_replaced_with_the_rollups_they_add_up_to(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        since = datetime(2026, 1, 1, tzinfo=UTC)
+        store.store_rollups(
+            101, {}, {}, None, trades=[matched("s1"), matched("s2")]
+        )
+        store.store_rollups(202, {}, {}, None, trades=[matched("s9")])
+
+        assert store.get_trade_page(101, since=since).total == 2
+
+        store.store_rollups(101, {}, {}, None, trades=[matched("s3")])
+
+        assert trade_keys(store.get_trade_page(101, since=since).trades) == [
+            ("s3", "buy")
+        ]
+        # Another member's trades are theirs alone.
+        assert store.get_trade_page(202, since=since).total == 1
+
+    def test_merging_a_trade_twice_leaves_it_as_it_was(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        through = datetime(2026, 8, 21, tzinfo=UTC)
+        trade = matched("s1", quantity=3)
+
+        store.merge_rollups(101, {}, {}, through, trades=[trade])
+        store.merge_rollups(
+            101, {}, {}, through, trades=[trade, matched("s2")]
+        )
+
+        page = store.get_trade_page(
+            101, since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+        assert page.total == 2
+        assert page.quantity == 4
+
+    def test_a_page_is_sorted_cut_and_totalled_across_every_page(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        base = datetime(2026, 8, 10, tzinfo=UTC)
+        trades = [
+            matched(f"s{index}", sold_at=base + timedelta(days=index),
+                    quantity=index + 1, sell_price=150 + 40 * index)
+            for index in range(5)
+        ]
+        store.store_rollups(101, {}, {}, None, trades=trades)
+        since = datetime(2026, 1, 1, tzinfo=UTC)
+
+        page = store.get_trade_page(101, since=since, page=2, size=2)
+
+        # Newest sale first, by default.
+        assert trade_keys(page.trades) == [("s2", "buy"), ("s1", "buy")]
+        assert (page.total, page.page, page.pages, page.size) == (5, 2, 3, 2)
+        # The totals are every trade's, whichever page is on screen.
+        assert page.quantity == sum(trade.quantity for trade in trades)
+        assert page.cost == sum(trade.cost for trade in trades)
+        assert page.net_revenue == sum(trade.net_revenue for trade in trades)
+        assert page.profit == sum(trade.profit for trade in trades)
+
+        # A page past the end is the last one rather than an empty one: the
+        # list can shrink between two requests.
+        assert store.get_trade_page(
+            101, since=since, page=99, size=2
+        ).page == 3
+
+        by_profit = store.get_trade_page(
+            101, since=since, sort="profit", descending=False, size=5
+        )
+        assert [trade.profit for trade in by_profit.trades] == sorted(
+            trade.profit for trade in trades
+        )
+
+    def test_every_sort_key_orders_the_list(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101, {}, {}, None, trades=[matched("s1"), matched("s2")]
+        )
+        since = datetime(2026, 1, 1, tzinfo=UTC)
+
+        for sort in (
+            "item", "bought", "buy-price", "sold", "sell-price", "units",
+            "cost", "net-revenue", "profit", "roi", "held",
+        ):
+            assert store.get_trade_page(101, since=since, sort=sort).total == 2
+        with pytest.raises(ValueError):
+            store.get_trade_page(101, since=since, sort="name")
+
+    def test_the_window_bounds_which_sales_are_listed(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101,
+            {},
+            {},
+            None,
+            trades=[
+                matched("before", sold_at=datetime(2026, 8, 9, 23, 59,
+                                                   tzinfo=UTC)),
+                matched("first", sold_at=datetime(2026, 8, 10, tzinfo=UTC)),
+                matched("last", sold_at=datetime(2026, 8, 12, 23, 59, 59,
+                                                 tzinfo=UTC)),
+                matched("after", sold_at=datetime(2026, 8, 13, tzinfo=UTC)),
+            ],
+        )
+
+        page = store.get_trade_page(
+            101,
+            since=datetime(2026, 8, 10, tzinfo=UTC),
+            until=datetime(2026, 8, 12, 23, 59, 59, tzinfo=UTC),
+        )
+
+        assert trade_keys(page.trades) == [("last", "buy"), ("first", "buy")]
+
+    def test_hidden_items_and_hidden_trades_are_not_listed(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101,
+            {},
+            {},
+            None,
+            trades=[
+                matched("kept", item_id=1),
+                matched("hidden-trade", item_id=1),
+                matched("hidden-item", item_id=2),
+            ],
+        )
+        store.set_trade_exclusion(101, "hidden-trade", "buy", True)
+        store.set_item_exclusion(101, 2, True)
+        # Another member hiding the kept trade's pair hides nothing here.
+        store.set_trade_exclusion(202, "kept", "buy", True)
+
+        page = store.get_trade_page(
+            101, since=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+
+        assert trade_keys(page.trades) == [("kept", "buy")]
+        assert page.total == 1
+
+    def test_a_search_matches_the_item_name(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_item_facts(
+            {
+                1: ItemFacts("Glob of Ectoplasm", "Crafting Material"),
+                2: ItemFacts("Mithril Ore", "Crafting Material"),
+            }
+        )
+        store.store_rollups(
+            101,
+            {},
+            {},
+            None,
+            trades=[
+                matched("ecto", item_id=1, quantity=2),
+                matched("ore", item_id=2),
+                matched("unnamed", item_id=3),
+            ],
+        )
+        since = datetime(2026, 1, 1, tzinfo=UTC)
+
+        found = store.get_trade_page(101, since=since, search="ECTO")
+
+        assert trade_keys(found.trades) == [("ecto", "buy")]
+        # The footer is the narrowed list's, not the window's.
+        assert found.quantity == 2
+        # What is typed is matched as text, not as a pattern.
+        assert store.get_trade_page(101, since=since, search="%").total == 0
+        assert store.get_trade_page(101, since=since, search="_").total == 0
+
+    def test_a_discard_takes_the_trades_from_its_boundary_on(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101,
+            {},
+            {},
+            None,
+            trades=[
+                matched("february", sold_at=datetime(2026, 2, 28, 23,
+                                                     tzinfo=UTC)),
+                matched("march", sold_at=datetime(2026, 3, 1, tzinfo=UTC)),
+            ],
+        )
+
+        store.discard_rollups_from(101, datetime(2026, 3, 1, tzinfo=UTC))
+
+        assert trade_keys(
+            store.get_trade_page(
+                101, since=datetime(2026, 1, 1, tzinfo=UTC)
+            ).trades
+        ) == [("february", "buy")]
+
+    def test_held_lots_keep_the_purchase_behind_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        lots = {
+            1: (
+                BuyLot(2, 100, datetime(2026, 7, 1, tzinfo=UTC), "b1"),
+                BuyLot(3, 150, datetime(2025, 6, 1, tzinfo=UTC)),
+            )
+        }
+
+        store.store_rollups(
+            101, {}, lots, datetime(2026, 8, 1, tzinfo=UTC)
+        )
+        store.store_lot_checkpoint(
+            101, datetime(2026, 8, 1, tzinfo=UTC), lots
+        )
+
+        assert store.get_open_lots(101) == lots
+        checkpoint = store.get_lot_checkpoint_at_or_before(
+            101, datetime(2026, 8, 1, tzinfo=UTC)
+        )
+        assert checkpoint is not None
+        assert checkpoint[1] == lots
+
+    def test_trade_exclusions_stay_with_the_member_who_set_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.store_rollups(
+            101,
+            {},
+            {},
+            None,
+            trades=[
+                matched("older", sold_at=datetime(2026, 8, 1, tzinfo=UTC)),
+                matched("newer", sold_at=datetime(2026, 8, 9, tzinfo=UTC)),
+                matched("kept", sold_at=datetime(2026, 8, 5, tzinfo=UTC)),
+            ],
+        )
+
+        assert store.set_trade_exclusion(101, "older", "buy", True)
+        # Hiding a hidden trade changes nothing and does not fail.
+        assert not store.set_trade_exclusion(101, "older", "buy", True)
+        assert store.set_trade_exclusion(101, "newer", "buy", True)
+        # A pair the matcher does not make is kept - a rematch may make it -
+        # but there is no trade to list for it.
+        assert store.set_trade_exclusion(101, "gone", "buy", True)
+        assert store.set_trade_exclusion(202, "kept", "buy", True)
+
+        assert trade_keys(store.get_hidden_trades(101)) == [
+            ("newer", "buy"),
+            ("older", "buy"),
+        ]
+        assert store.get_hidden_trades(202) == []
+        # Bounded by sale date, the way the rollups it is withdrawn from are.
+        assert trade_keys(
+            store.get_hidden_trades(
+                101,
+                datetime(2026, 8, 2, 15, tzinfo=UTC),
+                datetime(2026, 8, 9, 1, tzinfo=UTC),
+            )
+        ) == [("newer", "buy")]
+
+        assert store.set_trade_exclusion(101, "newer", "buy", False)
+        assert not store.set_trade_exclusion(101, "newer", "buy", False)
+        assert trade_keys(store.get_hidden_trades(101)) == [("older", "buy")]
+
+        with pytest.raises(ValueError):
+            store.set_trade_exclusion(101, "", "buy", True)
+
+    def test_replacing_a_key_keeps_hidden_trades_and_deleting_it_drops_them(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "first-member-secret")
+        store.store_rollups(101, {}, {}, None, trades=[matched("s1")])
+        store.set_trade_exclusion(101, "s1", "buy", True)
+        store.set_api_key(202, "other-member-secret")
+        store.set_trade_exclusion(202, "s2", "buy", True)
+
+        store.set_api_key(101, "replacement-member-secret")
+
+        # The trades were matched from the cache the new key replaces, so
+        # they go with it; the choice to hide one is the member's and stays.
+        assert store.get_trade_page(
+            101, since=datetime(2026, 1, 1, tzinfo=UTC)
+        ).total == 0
+        assert not store.set_trade_exclusion(101, "s1", "buy", True)
+
+        assert store.delete_api_key(101)
+
+        assert store.set_trade_exclusion(101, "s1", "buy", True)
+        assert not store.set_trade_exclusion(202, "s2", "buy", True)
+
+
+class TestLotTransactionMigration:
+    def test_a_database_whose_lots_name_no_purchase_gains_the_column(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        database = tmp_path / "gw2bot.db"
+        engine = create_engine(f"sqlite:///{database}")
+        metadata = MetaData()
+        for name, keys in (
+            ("gw2_profit_open_lots", ()),
+            ("gw2_profit_lot_checkpoints", ("checkpoint_at",)),
+        ):
+            Table(
+                name,
+                metadata,
+                Column("discord_user_id", Integer, primary_key=True),
+                *(Column(key, String, primary_key=True) for key in keys),
+                Column("item_id", Integer, primary_key=True),
+                Column("lot_index", Integer, primary_key=True),
+                Column("remaining", Integer, nullable=False),
+                Column("unit_price", Integer, nullable=False),
+                Column("occurred_at", String, nullable=False),
+            )
+        metadata.create_all(engine)
+        engine.dispose()
+
+        store = ProfitStore(
+            str(database), SettingsCipher(Fernet.generate_key())
+        )
+
+        try:
+            lots = {1: (BuyLot(2, 100, datetime(2026, 7, 1, tzinfo=UTC),
+                               "b1"),)}
+            store.store_rollups(
+                101, {}, lots, datetime(2026, 8, 1, tzinfo=UTC)
+            )
+            store.store_lot_checkpoint(
+                101, datetime(2026, 8, 1, tzinfo=UTC), lots
+            )
+            assert store.get_open_lots(101) == lots
+        finally:
+            store.close()
+        with sqlite3.connect(database) as connection:
+            for table in ("gw2_profit_open_lots", "gw2_profit_lot_checkpoints"):
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        f"PRAGMA table_info({table})"
+                    )
+                }
+                assert "transaction_id" in columns
+
+
+class TestMatchedTradeService:
+    NOW = datetime(2026, 8, 21, 18, 30, tzinfo=UTC)
+
+    @staticmethod
+    def _service(
+        store: ProfitStore,
+        buys: list[Transaction],
+        sells: list[Transaction],
+    ) -> ProfitService:
+        async def fetched(
+            path: str,
+            api_key: str,
+            *,
+            since: datetime | None = None,
+        ) -> list[Transaction]:
+            if path.endswith("history/buys"):
+                return list(buys)
+            if path.endswith("history/sells"):
+                return list(sells)
+            return []
+
+        names = named({1: "Flipped Item", 2: "Other Item"})
+        service = ProfitService(
+            store,
+            cast(aiohttp.ClientSession, None),
+            "https://api.example",
+        )
+        service._api = SimpleNamespace(  # type: ignore[assignment]
+            fetch_transactions=AsyncMock(side_effect=fetched),
+            fetch_item_facts=AsyncMock(
+                side_effect=lambda ids: {
+                    item_id: facts
+                    for item_id, facts in names.items()
+                    if item_id in ids
+                }
+            ),
+            fetch_market_prices=AsyncMock(return_value={}),
+        )
+        return service
+
+    @staticmethod
+    def _history() -> tuple[list[Transaction], list[Transaction]]:
+        def on(day: int, hour: int = 0) -> datetime:
+            return datetime(2026, 8, day, hour, tzinfo=UTC)
+
+        buys = [
+            transaction("b1", item_id=1, price=100, quantity=10,
+                        occurred_at=on(10)),
+            transaction("b2", item_id=1, price=120, quantity=10,
+                        occurred_at=on(12)),
+            transaction("c1", item_id=2, price=50, quantity=5,
+                        occurred_at=on(11)),
+        ]
+        sells = [
+            transaction("s1", item_id=1, price=200, quantity=6,
+                        occurred_at=on(15)),
+            transaction("s2", item_id=1, price=210, quantity=8,
+                        occurred_at=on(18)),
+            transaction("t1", item_id=2, price=100, quantity=5,
+                        occurred_at=on(16)),
+        ]
+        return buys, sells
+
+    async def test_the_trades_listed_are_the_ones_the_report_adds_up(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys, sells = self._history()
+        service = self._service(store, buys, sells)
+        window = ReportWindow(days=7)
+
+        report = await service.load_report(101, window, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), size=10, now=self.NOW
+        )
+
+        # s2 empties what is left of b1 and starts on b2, so it is two.
+        assert sorted(trade_keys(listed.page.trades)) == [
+            ("s1", "b1"), ("s2", "b1"), ("s2", "b2"), ("t1", "c1"),
+        ]
+        assert listed.page.total == 4
+        assert listed.page.quantity == report.realized.total_matched_quantity
+        assert listed.page.cost == report.realized.total_cost
+        assert listed.page.net_revenue == report.realized.total_net_revenue
+        assert listed.page.profit == report.realized.total_profit
+        assert listed.item_names == {1: "Flipped Item", 2: "Other Item"}
+        assert listed.hidden == ()
+
+        payload = cast(dict[str, Any], serialize_trades(listed))
+        assert payload["total"] == 4
+        assert payload["sort"] == "sold"
+        assert payload["direction"] == "descending"
+        assert payload["totals"]["profit"] == report.realized.total_profit
+        assert payload["trades"][0]["sell_transaction_id"] == "s2"
+        assert payload["trades"][0]["name"] == "Flipped Item"
+
+    async def test_hiding_a_trade_takes_it_out_of_every_figure(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys, sells = self._history()
+        service = self._service(store, buys, sells)
+        window = ReportWindow(days=7)
+        before = await service.load_report(101, window, now=self.NOW)
+        lots = store.get_open_lots(101)
+        listed = await service.load_trades(
+            101, *report_bounds(before), now=self.NOW
+        )
+        target = next(
+            trade for trade in listed.page.trades
+            if trade.key == ("s2", "b1")
+        )
+
+        assert await service.set_trade_exclusion(101, "s2", "b1", True)
+        hidden = await service.load_report(101, window, now=self.NOW)
+
+        assert hidden.realized.total_profit == (
+            before.realized.total_profit - target.profit
+        )
+        assert hidden.realized.items[1].matched_quantity == (
+            before.realized.items[1].matched_quantity - target.quantity
+        )
+        assert hidden.realized.items[2] == before.realized.items[2]
+        sold_day = target.sold_day
+        assert hidden.realized.days[sold_day].profit == (
+            before.realized.days[sold_day].profit - target.profit
+        )
+        # The trailing average leaves out the same trade the window does.
+        assert hidden.trailing_days[sold_day] == (
+            hidden.realized.days[sold_day].profit
+        )
+        # Hiding is a view over the stored matches: nothing is rematched,
+        # and what is still held is what was held.
+        assert store.get_open_lots(101) == lots
+
+        relisted = await service.load_trades(
+            101, *report_bounds(hidden), now=self.NOW
+        )
+        assert ("s2", "b1") not in trade_keys(relisted.page.trades)
+        assert trade_keys(relisted.hidden) == [("s2", "b1")]
+        assert relisted.page.profit == hidden.realized.total_profit
+
+        # Restoring brings the same report back, to the copper.
+        assert await service.set_trade_exclusion(101, "s2", "b1", False)
+        restored = await service.load_report(101, window, now=self.NOW)
+        assert restored.realized == before.realized
+        assert restored.trailing_days == before.trailing_days
+
+    async def test_hiding_every_trade_of_an_item_takes_the_item_away(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys, sells = self._history()
+        service = self._service(store, buys, sells)
+        window = ReportWindow(days=7)
+        await service.load_report(101, window, now=self.NOW)
+
+        await service.set_trade_exclusion(101, "t1", "c1", True)
+        report = await service.load_report(101, window, now=self.NOW)
+
+        assert set(report.realized.items) == {1}
+        assert "2026-08-16" not in report.realized.days
+        assert "2026-08-16" not in report.trailing_days
+
+    async def test_a_hidden_trade_is_cut_at_the_hour_in_the_24h_window(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # 24h opens at 18:30 yesterday, partway through a date, and its rows
+        # are matched again rather than read. A trade hidden from before the
+        # hour shares the date's row in storage and not in the window, so it
+        # must not be taken out of a window it is not in.
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys = [
+            transaction("b1", price=100, quantity=30,
+                        occurred_at=datetime(2026, 8, 19, tzinfo=UTC)),
+        ]
+        sells = [
+            transaction("early", price=200, quantity=10,
+                        occurred_at=datetime(2026, 8, 20, 12, tzinfo=UTC)),
+            transaction("evening", price=200, quantity=10,
+                        occurred_at=datetime(2026, 8, 20, 20, tzinfo=UTC)),
+            transaction("morning", price=200, quantity=10,
+                        occurred_at=datetime(2026, 8, 21, 9, tzinfo=UTC)),
+        ]
+        service = self._service(store, buys, sells)
+        day = ReportWindow(days=1)
+        week = ReportWindow(days=7)
+        unhidden = await service.load_report(101, day, now=self.NOW)
+        assert unhidden.realized.total_matched_quantity == 20
+
+        await service.set_trade_exclusion(101, "early", "b1", True)
+
+        assert (await service.load_report(101, day, now=self.NOW)).realized == (
+            unhidden.realized
+        )
+        weekly = await service.load_report(101, week, now=self.NOW)
+        assert weekly.realized.total_matched_quantity == 20
+
+        await service.set_trade_exclusion(101, "evening", "b1", True)
+        hidden = await service.load_report(101, day, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(hidden), now=self.NOW
+        )
+
+        assert hidden.realized.total_matched_quantity == 10
+        assert trade_keys(listed.page.trades) == [("morning", "b1")]
+        assert listed.page.profit == hidden.realized.total_profit
+
+    async def test_trades_of_a_hidden_item_are_not_listed(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys, sells = self._history()
+        service = self._service(store, buys, sells)
+        window = ReportWindow(days=7)
+        await service.set_item_exclusion(101, 2, True)
+
+        report = await service.load_report(101, window, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), now=self.NOW
+        )
+
+        assert ("t1", "c1") not in trade_keys(listed.page.trades)
+        assert listed.page.profit == report.realized.total_profit
+
+    async def test_a_later_sale_is_paired_with_the_purchase_still_held(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The second pass resumes from the stored lots rather than the
+        # purchases themselves, so the lot has to carry its purchase there.
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys = [
+            transaction("b1", price=100, quantity=10,
+                        occurred_at=datetime(2026, 8, 10, tzinfo=UTC)),
+        ]
+        sells = [
+            transaction("s1", price=200, quantity=4,
+                        occurred_at=datetime(2026, 8, 15, tzinfo=UTC)),
+        ]
+        service = self._service(store, buys, sells)
+        window = ReportWindow(days=30)
+        await service.load_report(101, window, now=self.NOW)
+        sells.append(
+            transaction("s2", price=200, quantity=3,
+                        occurred_at=datetime(2026, 8, 19, tzinfo=UTC))
+        )
+
+        report = await service.load_report(
+            101, window, force=True, now=self.NOW
+        )
+        listed = await service.load_trades(
+            101, *report_bounds(report), now=self.NOW
+        )
+
+        assert trade_keys(listed.page.trades) == [("s2", "b1"), ("s1", "b1")]
+        assert listed.page.quantity == report.realized.total_matched_quantity
+
+    async def test_trades_need_a_key_and_bounds_in_order(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        service = self._service(store, [], [])
+
+        with pytest.raises(MissingProfitApiKey):
+            await service.load_trades(101, self.NOW - timedelta(days=7))
+        store.set_api_key(101, "member-secret")
+        with pytest.raises(ValueError):
+            await service.load_trades(
+                101, self.NOW, self.NOW - timedelta(days=1)
+            )
+
+    async def test_the_24h_list_keeps_the_cutoff_its_report_was_cut_at(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # 24h is measured back from the moment it is read. The list is asked
+        # for after its report has landed, so a second reading of the clock
+        # would open it later than the report and drop a sale the report
+        # counted. It is asked for with the report's own bounds instead.
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        # Read part way through a second: the window is named by the second,
+        # so it opens on it, and a sale stamped on it is in both.
+        read_at = datetime(2026, 8, 21, 18, 30, 0, 600_000, tzinfo=UTC)
+        cutoff = datetime(2026, 8, 20, 18, 30, tzinfo=UTC)
+        buys = [
+            transaction("b1", price=100, quantity=20,
+                        occurred_at=datetime(2026, 8, 19, tzinfo=UTC)),
+        ]
+        sells = [
+            transaction("edge", price=200, quantity=10, occurred_at=cutoff),
+            transaction("later", price=200, quantity=10,
+                        occurred_at=cutoff + timedelta(seconds=5)),
+        ]
+        service = self._service(store, buys, sells)
+
+        report = await service.load_report(
+            101, ReportWindow(days=1), now=read_at
+        )
+        listed = await service.load_trades(
+            101,
+            *report_bounds(report),
+            # Read well after the report, past the sale on the cutoff and
+            # the one five seconds behind it.
+            now=read_at + timedelta(seconds=30),
+        )
+
+        assert report.window_start == cutoff
+        assert not report.window_closed
+        assert report.realized.total_matched_quantity == 20
+        assert sorted(trade_keys(listed.page.trades)) == [
+            ("edge", "b1"), ("later", "b1"),
+        ]
+        assert listed.page.profit == report.realized.total_profit
+        payload = cast(dict[str, Any], serialize_profit_report(report))
+        assert payload["window"]["start"] == int(cutoff.timestamp())
+        assert payload["window"]["closed"] is False
+
+    async def test_a_picked_pair_of_dates_is_listed_between_both_bounds(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        store, _, _ = profit_store
+        store.set_api_key(101, "member-secret")
+        buys, sells = self._history()
+        service = self._service(store, buys, sells)
+        picked = ReportWindow.between(
+            int(datetime(2026, 8, 15, tzinfo=UTC).timestamp()),
+            int(datetime(2026, 8, 16, 23, 59, 59, tzinfo=UTC).timestamp()),
+        )
+
+        report = await service.load_report(101, picked, now=self.NOW)
+        listed = await service.load_trades(
+            101, *report_bounds(report), now=self.NOW
+        )
+
+        assert report.window_closed
+        assert sorted(trade_keys(listed.page.trades)) == [
+            ("s1", "b1"), ("t1", "c1"),
+        ]
+        assert listed.page.profit == report.realized.total_profit
 
 
 class TestProfitBackgroundSync:

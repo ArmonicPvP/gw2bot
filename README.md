@@ -1563,20 +1563,22 @@ the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
   dashboards do; this argument is the way to name a length none of those
   buttons covers.
 - `/profit deletekey` removes the caller's encrypted key, cached Trading Post
-  data, remembered report window, and both lists of hidden items — the Open
-  Orders one and the realized-profit one. It cannot affect any other member's
-  key, cache, or choices. Replacing a key with `/profit setkey` keeps the
-  window and the hidden items.
+  data, remembered report window, both lists of hidden items — the Open
+  Orders one and the realized-profit one — and their hidden matched trades.
+  It cannot affect any other member's key, cache, or choices. Replacing a key
+  with `/profit setkey` keeps the window, the hidden items and the hidden
+  trades.
 
 The `/profit` page replaces the former `/profit summary`, `/profit item`,
 `/profit day`, and `/profit unrealized` Discord tables. It presents the realized
 summary, realized profit grouped by item, realized profit grouped by sale date,
-projected profit for held purchases currently listed for sale, the items the
-member is currently buying, and the coins and each item awaiting pickup from the
-Trading Post. The
-realized-profit-by-item and realized-profit-by-day tables are each paginated with
-10 rows by default; the bottom-left control of either accepts page sizes from 1
-through 90, and a page picker appears above and below both tables. That picker
+every buy and sell the bot matched, projected profit for held purchases
+currently listed for sale, the items the member is currently buying, and the
+coins and each item awaiting pickup from the Trading Post. The
+realized-profit-by-item, realized-profit-by-day and matched trades tables are
+each paginated with 10 rows by default; the bottom-left control of each accepts
+page sizes from 1 through 90, and a page picker appears above and below all
+three tables. That picker
 is a double arrow to the first or last page, a single arrow to the previous or
 next one, and between them a box holding the current page, which accepts a page
 typed straight into it. An arrow that would move nothing — a previous arrow on
@@ -1642,6 +1644,47 @@ the section open a **Hidden items** window listing them in a searchable table,
 each with a **Restore** button; an item with no trades in the window on screen
 is listed there too, so it can always be put back. **Open Orders** keeps its
 own separate list: hiding an item from one table says nothing about the other.
+
+**Matched Trades** lists every sale in the window beside the purchase FIFO
+matched it against: the item, when it was bought and at what unit price, when
+it sold and at what unit price, the units the pair covers, their cost, net
+revenue after both fees, profit and ROI, and how long those units were held. A
+sale that emptied two purchases is two rows, and a purchase sold off in three
+sales is three, so the rows add up to the window's realized figures exactly —
+the footer's **Total** is the summary's matched units, cost, net revenue and
+realized profit. Times are UTC, like every date on the page, and a purchase
+from a year other than the window's says which year it was. A purchase held
+long enough to be merged into the averaged lot described under
+[Precomputed results](#precomputed-results) is no single buy, and hovering its
+Bought time says so.
+
+The list is sorted, searched and paged by the server rather than in the
+browser, because a busy trader matches thousands of pairs a month. It opens on
+the newest sale; click any column heading to sort the whole list by it, and
+again to reverse it. The search box narrows the list to the items whose names
+contain what was typed, and the footer then becomes a **Filtered total** of
+every trade that matches, on every page. Trades of an item hidden from
+**Realized Profit by Item** are not listed, since they are in none of the
+figures.
+
+Each row ends with the same crossed-out eye, and it hides that one trade
+rather than the item: the trade leaves the summary, the charts, both realized
+tables and **Your Picks**, and the item's other trades stay. Use it for the
+single pairing that is not a flip — a sale of stock that was looted or crafted
+and happened to be matched against a purchase, or one wild outlier — where
+hiding the whole item would take its real flips with it. As with hidden
+items, the matching itself is untouched: the purchase is still the one that
+sale used up, so later sales are costed exactly as before, and restoring the
+trade puts its figures back to the copper. The three dots at the top right of
+the section open a **Hidden trades** window listing every hidden trade, from
+any window, with its sale time, units and profit and a **Restore** button.
+
+A hidden trade is remembered against the member's Discord account as the pair
+of Trading Post transactions it matched, so it survives a reload, a new
+sign-in and a different browser. If later history changes which purchase that
+sale is matched against — a backfill reaching further than before — the pair
+no longer exists and hides nothing, and it comes back into force if the pair
+ever does.
 
 The **Your Picks** table revisits items flipped in the selected window using
 their current highest buy order and lowest sell listing. Its columns sort like
@@ -1843,9 +1886,16 @@ the page down with it. **Unclaimed Trading Post** needs one request and is
 usually first; **Open Orders** needs one short collection; the realized report
 needs the whole trade history and is last.
 
-Hiding or restoring a realized item asks for the report again, because the
-summary, the charts, the daily table and **Your Picks** all move with it, and
-every one of them is summed on the server. That redraw is quiet: the sections
+**Matched Trades** is asked for once the realized report has landed rather
+than alongside it, because it reads the matches that report's load brings up
+to date, and it waits under its spinner until then. Moving to another page of
+it, sorting it or searching it asks the server for that page and keeps the
+rows on screen, dimmed, until the new ones arrive.
+
+Hiding or restoring a realized item or a matched trade asks for the report
+again, because the summary, the charts, the daily table and **Your Picks** all
+move with it, and every one of them is summed on the server. That redraw is
+quiet: the sections
 keep the numbers already on screen until the new ones are ready to replace
 them, rather than collapsing to spinners and back, which used to shorten the
 page under the reader and carry the row they had just clicked well off screen.
@@ -1885,6 +1935,10 @@ That is what makes a long window cost the same as a short one. Measured on a
 real account, reading and summing a window takes about 16ms whether it asks for
 30 days or ten years, where matching the raw transactions took 131ms for 30
 days and 355ms for 90 and would grow with every month collected.
+
+Each match is also stored on its own, as the sale and the purchase it paired,
+which is what **Matched Trades** lists and what a hidden trade is subtracted
+from those rows by.
 
 The purchases the matching pass never sold are stored alongside, and they are
 the whole of the state a later pass needs. So when new trades land, only the
@@ -1932,6 +1986,12 @@ hidden items and their stored trades are all kept, and the next `/profit`
 report each member opens rematches their history from those trades in one
 pass. That first report is as slow as their first one ever was; every report
 after it is as quick as before.
+
+The release that added **Matched Trades** drops those results once more, for
+the same reason: results matched before it list no trades, and their held
+lots cannot name the purchase a later sale is paired with. A database still
+missing both drops them once, not twice. Hidden trades are choices rather than
+results and are kept.
 
 **Unrealized Profit** covers everything the member still holds that is listed
 for sale, drawn from all their stored history rather than from the selected
