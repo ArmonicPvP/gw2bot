@@ -950,28 +950,33 @@ class ProfitStore:
         taken: dict[int, list[BuyLot]] = {}
         covered: dict[int, int] = {}
         with self._sessions() as session:
-            for record in session.scalars(query).yield_per(500):
-                still_wanted = wanted[record.item_id] - covered.get(
-                    record.item_id, 0
-                )
-                if still_wanted <= 0:
-                    continue
-                try:
-                    occurred_at = parse_gw2_time(record.occurred_at)
-                except (TypeError, ValueError):
-                    continue
-                units = min(record.quantity, still_wanted)
-                taken.setdefault(record.item_id, []).append(
-                    BuyLot(units, record.price, occurred_at)
-                )
-                covered[record.item_id] = (
-                    covered.get(record.item_id, 0) + units
-                )
-                if len(covered) == len(wanted) and all(
-                    covered[item_id] >= quantity
-                    for item_id, quantity in wanted.items()
-                ):
-                    break
+            # Closed on the way out rather than left to the collector: the
+            # loop stops as soon as the box is covered, and a stream left
+            # half read keeps its read lock on the pooled connection, which
+            # every write waits on until it gives up as "database is locked".
+            with session.scalars(query).yield_per(500) as records:
+                for record in records:
+                    still_wanted = wanted[record.item_id] - covered.get(
+                        record.item_id, 0
+                    )
+                    if still_wanted <= 0:
+                        continue
+                    try:
+                        occurred_at = parse_gw2_time(record.occurred_at)
+                    except (TypeError, ValueError):
+                        continue
+                    units = min(record.quantity, still_wanted)
+                    taken.setdefault(record.item_id, []).append(
+                        BuyLot(units, record.price, occurred_at)
+                    )
+                    covered[record.item_id] = (
+                        covered.get(record.item_id, 0) + units
+                    )
+                    if len(covered) == len(wanted) and all(
+                        covered[item_id] >= quantity
+                        for item_id, quantity in wanted.items()
+                    ):
+                        break
         LOGGER.debug(
             "Read recent profit purchases; user_id=%s items=%s covered=%s",
             discord_user_id,
