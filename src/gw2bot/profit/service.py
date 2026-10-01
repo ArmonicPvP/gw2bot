@@ -15,6 +15,7 @@ from gw2bot.profit.api import (
     ProfitApiError,
 )
 from gw2bot.profit.models import (
+    DEFAULT_TRADE_SORT,
     ROLLING_AVERAGE_DAYS,
     UNCATEGORIZED,
     DeliveryItem,
@@ -28,7 +29,9 @@ from gw2bot.profit.models import (
     BuyLot,
     ItemDayProfit,
     ItemFacts,
+    MatchedTrade,
     RealizedProfit,
+    TradePage,
     aggregate_rollups,
     calculate_realized_profit,
     calculate_unrealized_profit,
@@ -36,6 +39,7 @@ from gw2bot.profit.models import (
     month_boundaries,
     prune_open_lots,
     sale_fee_total,
+    withdraw_trades,
 )
 from gw2bot.profit.store import (
     HISTORY_KINDS,
@@ -83,6 +87,18 @@ class _DeliverySnapshot:
     items: tuple[DeliveryItem, ...] | None
     generation: str
     fetched_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TradesReport:
+    """One page of matched trades, the hidden ones, and the names for both."""
+
+    page: TradePage
+    hidden: tuple[MatchedTrade, ...]
+    item_names: dict[int, str]
+    sort: str
+    descending: bool
+    search: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +198,114 @@ class ProfitService:
             discord_user_id,
             item_id,
             excluded,
+        )
+
+    async def set_trade_exclusion(
+        self,
+        discord_user_id: int,
+        sell_transaction_id: str,
+        buy_transaction_id: str,
+        excluded: bool,
+    ) -> bool:
+        """Hide or restore one matched trade in the realized profit."""
+        return await asyncio.to_thread(
+            self._store.set_trade_exclusion,
+            discord_user_id,
+            sell_transaction_id,
+            buy_transaction_id,
+            excluded,
+        )
+
+    async def load_trades(
+        self,
+        discord_user_id: int,
+        window: ReportWindow,
+        *,
+        page: int = 1,
+        size: int = 10,
+        sort: str = DEFAULT_TRADE_SORT,
+        descending: bool = True,
+        search: str = "",
+        now: datetime | None = None,
+    ) -> TradesReport:
+        """One page of the trades sold in a window, from the stored matches.
+
+        This reads what the realized report's own load just brought up to
+        date, and brings nothing up to date itself: the page asks for it once
+        the report has landed, and a second pass racing that one over the
+        same member's rollups would add the same sales twice. The window is
+        read the way the report reads it, so the list holds exactly the
+        trades its figures were summed from.
+        """
+        if not MIN_REPORT_DAYS <= window.days <= MAX_REPORT_DAYS:
+            raise ValueError(
+                "Profit report days must be between "
+                f"{MIN_REPORT_DAYS} and {MAX_REPORT_DAYS}"
+            )
+        loaded_at = datetime.now(UTC) if now is None else now
+        span = window.span(loaded_at)
+        await self._require_api_key(discord_user_id)
+        trade_page, hidden = await asyncio.to_thread(
+            self._read_trades,
+            discord_user_id,
+            span.start,
+            span.end if span.end < loaded_at else None,
+            sort,
+            descending,
+            search,
+            page,
+            size,
+        )
+        item_names = await self._resolve_item_names(
+            # A hidden trade is listed for restoring, so it is named too.
+            {trade.item_id for trade in (*trade_page.trades, *hidden)},
+            loaded_at,
+        )
+        LOGGER.debug(
+            "Loaded profit trades; user_id=%s range=%s total=%s page=%s "
+            "rows=%s hidden=%s",
+            discord_user_id,
+            window.range_key,
+            trade_page.total,
+            trade_page.page,
+            len(trade_page.trades),
+            len(hidden),
+        )
+        return TradesReport(
+            page=trade_page,
+            hidden=tuple(hidden),
+            item_names=item_names,
+            sort=sort,
+            descending=descending,
+            search=search,
+        )
+
+    def _read_trades(
+        self,
+        discord_user_id: int,
+        since: datetime,
+        until: datetime | None,
+        sort: str,
+        descending: bool,
+        search: str,
+        page: int,
+        size: int,
+    ) -> tuple[TradePage, list[MatchedTrade]]:
+        return (
+            self._store.get_trade_page(
+                discord_user_id,
+                since=since,
+                until=until,
+                sort=sort,
+                descending=descending,
+                search=search,
+                page=page,
+                size=size,
+            ),
+            # Every hidden trade rather than the window's alone, the way the
+            # hidden items are listed: one hidden in another window still
+            # needs a way back.
+            self._store.get_hidden_trades(discord_user_id),
         )
 
     async def load_delivery(
@@ -640,7 +764,7 @@ class ProfitService:
         # than here against the clock. What is carried out of the last
         # boundary is left as it is: it is at most a month of purchases, and
         # the next pass to cross a boundary collapses it there.
-        item_days, carried = self._match_in_segments(
+        item_days, carried, trades = self._match_in_segments(
             discord_user_id,
             buys,
             sells,
@@ -651,20 +775,31 @@ class ProfitService:
         )
         if resume_from is None:
             self._store.store_rollups(
-                discord_user_id, item_days, carried, newest, now=now
+                discord_user_id,
+                item_days,
+                carried,
+                newest,
+                trades=trades,
+                now=now,
             )
         else:
             self._store.merge_rollups(
-                discord_user_id, item_days, carried, newest, now=now
+                discord_user_id,
+                item_days,
+                carried,
+                newest,
+                trades=trades,
+                now=now,
             )
         LOGGER.info(
             "Advanced profit rollups; user_id=%s reason=%s transactions=%s "
-            "rows=%s carried_items=%s",
+            "rows=%s carried_items=%s trades=%s",
             discord_user_id,
             reason,
             len(buys) + len(sells),
             len(item_days),
             len(carried),
+            len(trades),
         )
 
     def _match_segments(
@@ -678,10 +813,12 @@ class ProfitService:
         *,
         counted_from: datetime | None = None,
         counted_through: datetime | None = None,
+        with_trades: bool = False,
     ) -> tuple[
         dict[tuple[int, str], ItemDayProfit],
         dict[int, tuple[BuyLot, ...]],
         list[tuple[datetime, dict[int, tuple[BuyLot, ...]]]],
+        list[MatchedTrade],
     ]:
         """Match a stretch of history, pausing at each month boundary.
 
@@ -705,7 +842,9 @@ class ProfitService:
 
         ``counted_from`` and ``counted_through`` are handed to every segment,
         so a caller reporting on part of this stretch matches it exactly as a
-        caller reporting on all of it does.
+        caller reporting on all of it does. ``with_trades`` also returns each
+        counted match as the pair of trades it was, for the caller that
+        stores them.
 
         A boundary belongs to the segment after it, and a resume from one
         replays that instant itself. Keeping those two halves on the same side
@@ -720,6 +859,7 @@ class ProfitService:
             through,
         )
         item_days: dict[tuple[int, str], ItemDayProfit] = {}
+        trades: list[MatchedTrade] = []
         paused_at: list[tuple[datetime, dict[int, tuple[BuyLot, ...]]]] = []
         carried = opening_lots
         lower = resume_from
@@ -748,11 +888,13 @@ class ProfitService:
                 [row for row in buys if within(row, end, last)],
                 [row for row in sells if within(row, end, last)],
                 with_item_days=True,
+                with_trades=with_trades,
                 opening_lots=carried,
                 counted_from=counted_from,
                 counted_through=counted_through,
             )
             item_days.update(realized.item_days)
+            trades.extend(realized.trades)
             carried = realized.unmatched_buys
             if boundary is not None:
                 carried = prune_open_lots(
@@ -763,7 +905,7 @@ class ProfitService:
                 paused_at.append((boundary, carried))
             lower = end
             lower_inclusive = True
-        return item_days, carried, paused_at
+        return item_days, carried, paused_at, trades
 
     def _match_in_segments(
         self,
@@ -774,20 +916,25 @@ class ProfitService:
         resume_from: datetime | None,
         resume_inclusive: bool,
         newest: datetime,
-    ) -> tuple[dict[tuple[int, str], ItemDayProfit], dict[int, tuple[BuyLot, ...]]]:
+    ) -> tuple[
+        dict[tuple[int, str], ItemDayProfit],
+        dict[int, tuple[BuyLot, ...]],
+        list[MatchedTrade],
+    ]:
         """Match a stretch of history and keep every pause it made.
 
         Each pause becomes the checkpoint a later rematch resumes from, and
         holds exactly the lots the matching after it ran from - see
         ``_match_segments`` for why that has to be true.
         """
-        item_days, carried, paused_at = self._match_segments(
+        item_days, carried, paused_at, trades = self._match_segments(
             buys,
             sells,
             opening_lots,
             resume_from,
             resume_inclusive,
             newest,
+            with_trades=True,
         )
         for boundary, lots in paused_at:
             self._store.store_lot_checkpoint(discord_user_id, boundary, lots)
@@ -798,7 +945,7 @@ class ProfitService:
             len(paused_at),
             len(item_days),
         )
-        return item_days, carried
+        return item_days, carried, trades
 
     def _read_windowed_report(
         self,
@@ -819,8 +966,15 @@ class ProfitService:
         # read in the same pass: one query for the whole stretch the charts
         # cover rather than a second one for its first week.
         trailing_start = cutoff - timedelta(days=ROLLING_AVERAGE_DAYS - 1)
-        rollups = self._store.get_rollups(
+        # The trades the member hid one by one come out of the rows they were
+        # summed into before anything is added up, over the same stretch, so
+        # the window and the trailing average leave out the same ones.
+        hidden_trades = self._store.get_hidden_trades(
             discord_user_id, trailing_start, until
+        )
+        rollups = withdraw_trades(
+            self._store.get_rollups(discord_user_id, trailing_start, until),
+            hidden_trades,
         )
         opening_day = cutoff.date().isoformat()
         open_lots = self._store.get_open_lots(discord_user_id)
@@ -835,7 +989,17 @@ class ProfitService:
         window_rows = (
             [row for row in rollups if row[1] >= opening_day]
             if cutoff == opening_midnight
-            else self._rematch_window(discord_user_id, cutoff, until, now)
+            # A rematched window is cut at the hour rather than the date, so
+            # the hidden trades are cut there with it.
+            else withdraw_trades(
+                self._rematch_window(discord_user_id, cutoff, until, now),
+                [
+                    trade
+                    for trade in hidden_trades
+                    if trade.sold_at >= cutoff
+                    and (until is None or trade.sold_at <= until)
+                ],
+            )
         )
         realized = aggregate_rollups(
             window_rows,
@@ -856,12 +1020,14 @@ class ProfitService:
         }
         LOGGER.debug(
             "Read windowed profit report; user_id=%s rollups=%s "
-            "window_days=%s trailing_days=%s hidden_items=%s rematched=%s",
+            "window_days=%s trailing_days=%s hidden_items=%s "
+            "hidden_trades=%s rematched=%s",
             discord_user_id,
             len(rollups),
             len(realized.days),
             len(trailing_days),
             len(excluded_items),
+            len(hidden_trades),
             len(window_rows) if cutoff != opening_midnight else 0,
         )
         return (
@@ -933,7 +1099,7 @@ class ProfitService:
             discord_user_id, "history_sells", at_or_after=resume_at
         )
         occurred = [transaction.occurred_at for transaction in (*buys, *sells)]
-        item_days, _carried, _paused_at = self._match_segments(
+        item_days, _carried, _paused_at, _trades = self._match_segments(
             buys,
             sells,
             opening_lots,
@@ -1427,6 +1593,52 @@ def serialize_profit_report(report: ProfitReport) -> dict[str, object]:
         # so a window kept in a browser is dropped once the key it belonged
         # to is deleted rather than outliving it.
         "key_generation": report.key_generation,
+    }
+
+
+def serialize_trades(report: TradesReport) -> dict[str, object]:
+    page = report.page
+    return {
+        "trades": [_trade_row(report, trade) for trade in page.trades],
+        "page": page.page,
+        "pages": page.pages,
+        "size": page.size,
+        "total": page.total,
+        # Every trade the list holds, on every page, so the footer reads the
+        # same whichever page is on screen.
+        "totals": {
+            "units": page.quantity,
+            "cost": page.cost,
+            "net_revenue": page.net_revenue,
+            "profit": page.profit,
+            "roi_percent": percentage(page.profit, page.cost),
+        },
+        # Echoed so the page marks the column the rows are actually in the
+        # order of, and knows which search they answer.
+        "sort": report.sort,
+        "direction": "descending" if report.descending else "ascending",
+        "search": report.search,
+        "hidden": [_trade_row(report, trade) for trade in report.hidden],
+    }
+
+
+def _trade_row(report: TradesReport, trade: MatchedTrade) -> dict[str, object]:
+    return {
+        "item_id": trade.item_id,
+        "name": report.item_names.get(trade.item_id, f"Item {trade.item_id}"),
+        # The pair is what the page hides the trade by. Neither id is shown.
+        "sell_transaction_id": trade.sell_transaction_id,
+        "buy_transaction_id": trade.buy_transaction_id,
+        "bought_at": trade.bought_at.isoformat(),
+        "sold_at": trade.sold_at.isoformat(),
+        "units": trade.quantity,
+        "buy_price": trade.buy_price,
+        "sell_price": trade.sell_price,
+        "cost": trade.cost,
+        "net_revenue": trade.net_revenue,
+        "profit": trade.profit,
+        "roi_percent": percentage(trade.profit, trade.cost),
+        "hold_seconds": trade.hold_seconds,
     }
 
 

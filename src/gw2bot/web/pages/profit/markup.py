@@ -48,6 +48,44 @@ def _hidden_items_dialog(group: str, subject: str) -> str:
 """
 
 
+def _hidden_trades_dialog() -> str:
+    """Return the Hidden trades window for Matched Trades.
+
+    It is the Hidden items window with a trade in each row rather than an
+    item: one item can have dozens of trades, so a row also says when the
+    trade sold, how many units it was and what it made, which is what tells
+    two hidden trades of the same item apart.
+    """
+    return """  <dialog id="trades-hidden-dialog" class="hidden-dialog wide-dialog"
+    aria-labelledby="trades-hidden-title">
+    <div class="modal-head">
+      <h2 id="trades-hidden-title">Hidden trades</h2>
+      <button id="trades-hidden-close" class="icon-button" type="button"
+        aria-label="Close hidden trades">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <p class="note hidden-count" id="trades-hidden-count"></p>
+    <label class="modal-search" for="trades-hidden-search">
+      <span class="visually-hidden">Search hidden trades</span>
+      <input id="trades-hidden-search" type="search"
+        placeholder="Search hidden trades" autocomplete="off">
+    </label>
+    <div class="modal-scroll"><table id="trades-hidden-table"
+      class="hidden-table">
+      <thead><tr><th>Item</th><th>Sold</th><th>Units</th><th>Profit</th>
+        <th>Restore</th></tr></thead>
+      <tbody id="trades-hidden-body"></tbody>
+    </table></div>
+  </dialog>
+"""
+
+
 def _pagination_nav(group: str, position: str, label: str) -> str:
     """Return one pagination bar for ``group``, above or below its table.
 
@@ -248,6 +286,53 @@ __DAYS_PAGES_TOP__
 __DAYS_PAGES_BOTTOM__
       <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
     </section>
+    <section class="card loading" data-source="trades">
+      <div class="card-heading">
+        <h2>Matched Trades</h2>
+        <button id="trades-menu" class="icon-button" type="button"
+          aria-haspopup="dialog" title="Hidden trades">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+            aria-hidden="true">
+            <circle cx="12" cy="5" r="2"></circle>
+            <circle cx="12" cy="12" r="2"></circle>
+            <circle cx="12" cy="19" r="2"></circle>
+          </svg>
+        </button>
+      </div>
+      <p class="note">Every sale in the selected window beside the purchase it was matched against, first in, first out. A sale that emptied two purchases is two rows, and a purchase sold off in three sales is three, so these rows add up to the realized figures above. Times are UTC, and Held is how long those units sat between the purchase and the sale. The crossed-out eye on a row leaves that one trade out of every figure on this page; the three dots above put a hidden trade back. Trades of an item you have hidden are not listed.</p>
+      <div class="table-filters" role="group"
+        aria-label="Narrow the matched trades table">
+        <label class="filter-field" for="trades-search">
+          <span class="visually-hidden">Search trades by item</span>
+          <input id="trades-search" type="search" placeholder="Search items"
+            autocomplete="off" maxlength="100">
+        </label>
+        <button id="trades-filter-clear" type="button" hidden>Clear</button>
+        <span class="filter-count" id="trades-filter-count"
+          role="status" aria-live="polite"></span>
+      </div>
+__TRADES_PAGES_TOP__
+      <div class="table-scroll"><table id="trades-table" data-server-sort="trades">
+        <thead><tr>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="item" data-sort-default="ascending">Item</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="bought" data-sort-default="descending">Bought</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="buy-price" data-sort-default="descending">Buy Price</button></th>
+          <th aria-sort="descending"><button class="sort-button" type="button" data-sort-key="sold" data-sort-default="descending">Sold</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="sell-price" data-sort-default="descending">Sell Price</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="units" data-sort-default="descending">Units</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="cost" data-sort-default="descending">Cost</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="net-revenue" data-sort-default="descending">Net Revenue</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="profit" data-sort-default="descending">Profit</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="roi" data-sort-default="descending">ROI</button></th>
+          <th aria-sort="none"><button class="sort-button" type="button" data-sort-key="held" data-sort-default="ascending">Held</button></th>
+          <th class="actions">Hide</th>
+        </tr></thead>
+        <tbody id="trades-body"></tbody>
+        <tfoot id="trades-foot"></tfoot>
+      </table></div>
+__TRADES_PAGES_BOTTOM__
+      <div class="section-spinner" role="status"><span class="spinner"></span><span class="section-message">Loading\u2026</span></div>
+    </section>
     <section class="card loading" data-source="report">
       <h2>Unrealized Profit</h2>
       <p class="note">Purchases you still hold that are currently listed for sale, from all your stored history rather than only the selected window. Stock listed at two prices is two rows, as in Open Orders. Your Price is what you listed at; Lowest Sell is the cheapest anyone is asking now, so a higher Your Price means someone is undercutting you. Projected ROI is projected profit divided by their matched cost.</p>
@@ -334,6 +419,7 @@ __DAYS_PAGES_BOTTOM__
   </div>
 __ORDERS_HIDDEN_DIALOG__
 __ITEMS_HIDDEN_DIALOG__
+__TRADES_HIDDEN_DIALOG__
 </main>
 """
 )

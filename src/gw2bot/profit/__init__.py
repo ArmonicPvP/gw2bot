@@ -8,12 +8,14 @@ from gw2bot.profit.models import (
     ItemDayProfit,
     ItemProfit,
     MarketPrice,
+    MatchedTrade,
     OpenBuyOrder,
     OpenOrdersReport,
     ProfitReport,
     RealizedProfit,
     ReportSpan,
     ReportWindow,
+    TradePage,
     Transaction,
     UnrealizedItemProfit,
     UnrealizedProfit,
@@ -24,6 +26,7 @@ from gw2bot.profit.models import (
     group_open_buy_orders,
     parse_gw2_time,
     sale_fee_total,
+    withdraw_trades,
 )
 
 __all__ = [
@@ -36,12 +39,14 @@ __all__ = [
     "ItemDayProfit",
     "ItemProfit",
     "MarketPrice",
+    "MatchedTrade",
     "OpenBuyOrder",
     "OpenOrdersReport",
     "ProfitReport",
     "RealizedProfit",
     "ReportSpan",
     "ReportWindow",
+    "TradePage",
     "Transaction",
     "UnrealizedItemProfit",
     "UnrealizedProfit",
@@ -52,4 +57,5 @@ __all__ = [
     "group_open_buy_orders",
     "parse_gw2_time",
     "sale_fee_total",
+    "withdraw_trades",
 ]

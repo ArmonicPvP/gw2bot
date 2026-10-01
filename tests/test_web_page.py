@@ -221,10 +221,10 @@ class TestProfitPage:
         assert 'id="items-menu" class="icon-button"' in PROFIT_PAGE
         assert 'aria-haspopup="dialog"' in PROFIT_PAGE
         # Three dots, drawn rather than typed so they line up at any size,
-        # once for each of the two sections that can hide a row.
-        assert PROFIT_PAGE.count('<circle cx="12" cy="5" r="2">') == 2
-        assert PROFIT_PAGE.count('<circle cx="12" cy="12" r="2">') == 2
-        assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 2
+        # once for each of the three sections that can hide a row.
+        assert PROFIT_PAGE.count('<circle cx="12" cy="5" r="2">') == 3
+        assert PROFIT_PAGE.count('<circle cx="12" cy="12" r="2">') == 3
+        assert PROFIT_PAGE.count('<circle cx="12" cy="19" r="2">') == 3
         for group in ("orders", "items"):
             assert f'<dialog id="{group}-hidden-dialog"' in PROFIT_PAGE
             assert (
@@ -317,6 +317,91 @@ class TestProfitPage:
         # The rows are what grows inside it.
         assert ".modal-scroll {\n  flex: 1;\n  min-height: 0;" in PROFIT_PAGE
 
+    def test_matched_trades_are_listed_a_page_at_a_time(self) -> None:
+        assert "<h2>Matched Trades</h2>" in PROFIT_PAGE
+        assert 'id="trades-table" data-server-sort="trades"' in PROFIT_PAGE
+        for heading in (
+            "Bought", "Buy Price", "Sold", "Sell Price", "Held",
+        ):
+            assert f">{heading}</button>" in PROFIT_PAGE
+        # The newest sale opens the list, the way the server orders it.
+        assert (
+            '<th aria-sort="descending"><button class="sort-button" '
+            'type="button" data-sort-key="sold" '
+            'data-sort-default="descending">Sold</button></th>'
+        ) in PROFIT_PAGE
+        # Its pages are cut on the server, so moving one asks for it rather
+        # than uncovering rows already drawn.
+        assert (
+            'trades: { page: 1, size: 10, pages: 1, body: "trades-body", '
+            "server: true }"
+        ) in PROFIT_PAGE
+        assert "if (pager.server) {\n      loadTrades(true);" in PROFIT_PAGE
+        assert 'id="trades-pages-top"' in PROFIT_PAGE
+        assert 'id="trades-pages-bottom"' in PROFIT_PAGE
+        assert 'return "/api/profit/trades?" + query;' in PROFIT_PAGE
+        # The window is the one the report on screen was drawn for.
+        assert "windowQuery().slice(1)," in PROFIT_PAGE
+        # A page overtaken by a later one is not drawn over it.
+        assert "if (request !== tradesView.request) {" in PROFIT_PAGE
+
+    def test_matched_trades_wait_for_the_report_they_read(self) -> None:
+        # The trades read the matches the report's load brings up to date,
+        # so they are asked for once it lands and not alongside it.
+        assert "    loadTrades(tradesQuiet);\n  }" in PROFIT_PAGE
+        assert 'markSection("trades", "loading");' in PROFIT_PAGE
+        assert 'fetchSection("trades", "/api/profit/trades' not in PROFIT_PAGE
+        # A report that never lands takes the trades down with it rather than
+        # leaving them spinning.
+        assert 'markSection("trades", "failed", missingKey' in PROFIT_PAGE
+        # A redraw after hiding something keeps the rows on screen.
+        assert "    tradesQuiet = true;\n    return fetchSection(" in (
+            PROFIT_PAGE
+        )
+
+    def test_matched_trades_are_searched_on_the_server(self) -> None:
+        assert 'id="trades-search" type="search"' in PROFIT_PAGE
+        assert 'id="trades-filter-clear"' in PROFIT_PAGE
+        assert "var TRADES_SEARCH_DELAY_MS = 250;" in PROFIT_PAGE
+        assert '"search=" + encodeURIComponent(tradesView.search)' in (
+            PROFIT_PAGE
+        )
+        assert 'searched ? "Filtered total" : "Total"' in PROFIT_PAGE
+
+    def test_a_trade_is_hidden_by_the_pair_it_matched(self) -> None:
+        assert 'fetch("/api/profit/trade-exclusions", {' in PROFIT_PAGE
+        assert "sell_transaction_id: trade.sell_transaction_id," in PROFIT_PAGE
+        assert "buy_transaction_id: trade.buy_transaction_id," in PROFIT_PAGE
+        assert "setTradeExclusion(trade, true, button);" in PROFIT_PAGE
+        assert "setTradeExclusion(trade, false, button);" in PROFIT_PAGE
+        # Every figure on the page moves with it, so the report is redrawn.
+        assert (
+            "      renderHiddenTrades();\n"
+            "      // A trade moves the summary"
+        ) in PROFIT_PAGE
+        assert 'id="trades-menu" class="icon-button"' in PROFIT_PAGE
+        assert '<dialog id="trades-hidden-dialog"' in PROFIT_PAGE
+        assert '<h2 id="trades-hidden-title">Hidden trades</h2>' in PROFIT_PAGE
+        assert 'id="trades-hidden-search" type="search"' in PROFIT_PAGE
+        assert '"You have not hidden any trades yet."' in PROFIT_PAGE
+        assert ".wide-dialog { width: min(42rem, calc(100vw - 2rem)); }" in (
+            PROFIT_PAGE
+        )
+
+    def test_trade_times_are_read_from_the_string_in_utc(self) -> None:
+        # As with the dates elsewhere, a Date round trip would print them in
+        # the viewer's zone; the note above the table says they are UTC.
+        assert (
+            'return shortDate(text.slice(0, 10), withYear) + " " '
+            "+ text.slice(11, 16);"
+        ) in PROFIT_PAGE
+        assert "Times are UTC" in PROFIT_PAGE
+        # A purchase can predate the window by years, so a date outside the
+        # window's year says which year it is.
+        assert "text.slice(0, 4) !== String(windowEndDate).slice(0, 4)" in (
+            PROFIT_PAGE
+        )
+
     def test_hidden_items_are_searchable_in_a_table(self) -> None:
         for group in ("orders", "items"):
             assert f'id="{group}-hidden-search" type="search"' in PROFIT_PAGE
@@ -328,8 +413,8 @@ class TestProfitPage:
         assert '"input", function () { renderHidden(group); }' in PROFIT_PAGE
 
     def test_hiding_a_row_uses_an_icon_rather_than_a_word(self) -> None:
-        # Both Open Orders and Realized Profit by Item carry the column.
-        assert PROFIT_PAGE.count('<th class="actions">Hide</th>') == 2
+        # Open Orders, Realized Profit by Item and Matched Trades carry it.
+        assert PROFIT_PAGE.count('<th class="actions">Hide</th>') == 3
         # The heading and the icon under it share an alignment.
         assert "th.actions, td.actions { text-align: center; }" in PROFIT_PAGE
         assert "<th>Exclude</th>" not in PROFIT_PAGE
@@ -401,14 +486,16 @@ class TestProfitPage:
         )
 
     def test_each_section_loads_on_its_own_with_a_spinner(self) -> None:
-        assert PROFIT_PAGE.count('class="section-spinner"') == 8
+        assert PROFIT_PAGE.count('class="section-spinner"') == 9
         assert PROFIT_PAGE.count('data-source="report"') == 6
         assert PROFIT_PAGE.count('data-source="orders"') == 1
         assert PROFIT_PAGE.count('data-source="delivery"') == 1
+        assert PROFIT_PAGE.count('data-source="trades"') == 1
         assert '<section class="card loading"' in PROFIT_PAGE
         assert "function markSection(source, state, message)" in PROFIT_PAGE
-        assert "function fetchSection(source, url, render, quiet)" in (
-            PROFIT_PAGE
+        assert (
+            "function fetchSection(source, url, render, quiet, quietFailure)"
+            in PROFIT_PAGE
         )
         assert 'if (!quiet) { markSection(source, "loading"); }' in PROFIT_PAGE
         # All three requests go out together rather than one after another.
@@ -566,20 +653,20 @@ class TestProfitPage:
             f'id="items-page-size" type="number" min="1"'
             f' max="{PAGE_SIZE_LIMIT}" value="{PAGE_SIZE_DEFAULT}"'
         ) in PROFIT_PAGE
-        assert PROFIT_PAGE.count('class="page-size-input"') == 2
+        assert PROFIT_PAGE.count('class="page-size-input"') == 3
         # Totals are in the foot, which no page hides.
         assert 'tr[data-sort-row]"))' in PROFIT_PAGE
 
     def test_page_pickers_step_to_the_ends_and_take_a_typed_page(self) -> None:
-        # Four bars - two tables, above and below - each with first, previous,
-        # a typeable page box, next and last.
+        # Six bars - three tables, above and below - each with first,
+        # previous, a typeable page box, next and last.
         for step in ("first", "previous", "next", "last"):
-            assert PROFIT_PAGE.count(f'data-page-step="{step}"') == 4
-        assert PROFIT_PAGE.count("&#171;") == 4
-        assert PROFIT_PAGE.count("&#8249;") == 4
-        assert PROFIT_PAGE.count("&#8250;") == 4
-        assert PROFIT_PAGE.count("&#187;") == 4
-        assert PROFIT_PAGE.count('class="page-input"') == 4
+            assert PROFIT_PAGE.count(f'data-page-step="{step}"') == 6
+        assert PROFIT_PAGE.count("&#171;") == 6
+        assert PROFIT_PAGE.count("&#8249;") == 6
+        assert PROFIT_PAGE.count("&#8250;") == 6
+        assert PROFIT_PAGE.count("&#187;") == 6
+        assert PROFIT_PAGE.count('class="page-input"') == 6
         assert ">Page number</label>" in PROFIT_PAGE
         assert "function commitTypedPage(input)" in PROFIT_PAGE
         assert "function goToPage(key, page)" in PROFIT_PAGE
@@ -725,7 +812,10 @@ class TestProfitPage:
 
     def test_detail_tables_have_accessible_sort_buttons(self) -> None:
         assert PROFIT_PAGE.count('data-sort-table="') == 6
-        assert PROFIT_PAGE.count('class="sort-button"') == 45
+        # Matched Trades is sorted on the server, so its eleven buttons sit
+        # outside the tables the page sorts itself.
+        assert PROFIT_PAGE.count('data-server-sort="') == 1
+        assert PROFIT_PAGE.count('class="sort-button"') == 56
         assert 'id="items-table" data-sort-table="items"' in PROFIT_PAGE
         assert 'id="days-table" data-sort-table="days"' in PROFIT_PAGE
         assert (

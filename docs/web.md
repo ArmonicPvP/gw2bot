@@ -46,7 +46,19 @@ harder look than a layout tweak.
 A page writes back through a JSON API too. The feast dashboard's cost editor
 posts to `/api/food/cost` as whole copper against the stock log row the restock
 was observed as, gated by the same role the page is; the profit dashboard's
-hidden-item controls post the same way.
+hidden-item and hidden-trade controls post the same way.
+
+The profit dashboard's Matched Trades table is the one table on the site paged
+on the server: `/api/profit/trades` answers one page in the order and search
+asked for, with totals across every page. A busy trader matches thousands of
+pairs a month, which is more rows than are worth sending to be sorted and
+hidden in the browser. It shares the other tables' pagination controls through
+the `server` flag on its entry in `pagers`, which turns a page move into a
+request, and its headings carry `data-server-sort` rather than
+`data-sort-table` so the in-page sorter leaves them alone. It is requested
+only after the realized report renders, because it reads the matches that
+report's load brings up to date; two loads matching the same member's history
+at once would add the same sales twice.
 
 ## `pages/` - one module per document
 
@@ -78,15 +90,15 @@ separate modules assembled in `__init__.py`:
 
 - `style.py` - the page's own CSS on top of the shared chrome.
 - `markup.py` - the header, the range picker, and the report tables rendered
-  empty. Also `PAGE_SIZE_DEFAULT`, `PAGE_SIZE_LIMIT`, and the two helpers that
-  build the pagination bars and hidden-item windows.
+  empty. Also `PAGE_SIZE_DEFAULT`, `PAGE_SIZE_LIMIT`, and the helpers that
+  build the pagination bars and the hidden-item and hidden-trade windows.
 - `script.py` - the client-side application: one IIFE that fetches each
   section, renders rows, and keeps the sort, pagination and hidden-item state
   the reader sets.
 
 `__init__.py` concatenates them and stamps in the pagination bars and
-hidden-item dialogs, so one control definition serves both paginated tables
-above and below their rows.
+hidden-item and hidden-trade dialogs, so one control definition serves every
+paginated table above and below its rows.
 
 The sibling pages keep their single module. They are around a thousand lines
 each, which is a size worth leaving alone.

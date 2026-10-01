@@ -218,6 +218,9 @@ th.actions, td.actions { text-align: center; }
   overflow: hidden;
 }
 .hidden-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+/* A hidden trade is a row of figures rather than a name, so its window is
+   wide enough to hold them side by side. */
+.wide-dialog { width: min(42rem, calc(100vw - 2rem)); }
 .hidden-dialog[open] { display: flex; flex-direction: column; }
 .modal-head {
   display: flex;
@@ -247,6 +250,10 @@ th.actions, td.actions { text-align: center; }
   width: 1%;
   text-align: right;
 }
+/* The matched trades are paged on the server, so a page waits on a request;
+   the rows on screen dim while it is out rather than vanishing under the
+   reader. */
+#trades-table.refreshing tbody { opacity: 0.55; }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {

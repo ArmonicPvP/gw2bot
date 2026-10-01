@@ -50,13 +50,19 @@ from gw2bot.gw2.feast_stock import (
 )
 from gw2bot.gold import GOLD_RANGES, GoldEvent, build_gold_series
 from gw2bot.profit.api import ProfitApiError
-from gw2bot.profit.models import PRESET_REPORT_RANGES, ReportWindow
+from gw2bot.profit.models import (
+    DEFAULT_TRADE_SORT,
+    PRESET_REPORT_RANGES,
+    TRADE_SORT_KEYS,
+    ReportWindow,
+)
 from gw2bot.profit.store import MAX_REPORT_DAYS, MIN_REPORT_DAYS
 from gw2bot.profit.service import (
     MissingProfitApiKey,
     serialize_delivery,
     serialize_open_orders,
     serialize_profit_report,
+    serialize_trades,
 )
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.web import auth
@@ -77,7 +83,11 @@ from gw2bot.web.pages import (
     SIGNED_OUT_PAGE,
     sign_in_page,
 )
-from gw2bot.web.pages.profit import PROFIT_PAGE
+from gw2bot.web.pages.profit import (
+    PAGE_SIZE_DEFAULT,
+    PAGE_SIZE_LIMIT,
+    PROFIT_PAGE,
+)
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -106,6 +116,14 @@ MEMBERSHIP_CACHE_TTL_SECONDS = 300
 MEMBERSHIP_FAILURE_BACKOFF_SECONDS = 60
 
 UNKNOWN_NAME = "Unknown"
+
+# The longest search the matched trade list accepts. Item names run to about
+# seventy characters, so anything longer can only match nothing.
+MAX_TRADE_SEARCH_LENGTH = 100
+
+# The longest transaction id a trade can be hidden by. GW2 sends a number;
+# one it ever sent without one is stored as a 64-character digest.
+MAX_TRANSACTION_ID_LENGTH = 128
 
 # How long one build of the pending-invite list is served to the roster page.
 # Building it costs a GW2 API call and a refresh of the Trial application forum
@@ -177,6 +195,17 @@ class _Window:
     until: float
     remembered: bool = False
     picked_until: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TradeQuery:
+    """The page of matched trades one request asks for, and in what order."""
+
+    page: int
+    size: int
+    sort: str
+    descending: bool
+    search: str
 
 
 def _redirect(location: str) -> web.Response:
@@ -265,6 +294,9 @@ class WebServer:
                 # slowest.
                 web.get("/api/profit/delivery", self._profit_delivery),
                 web.get("/api/profit/orders", self._profit_orders),
+                # Asked for once the realized report has landed, because it
+                # reads the matches that report's load brings up to date.
+                web.get("/api/profit/trades", self._profit_trades),
                 # POST, not GET: it changes stored member state, and the
                 # SameSite=Lax session cookie is withheld from a cross-site
                 # POST, so no third-party page can fire it.
@@ -275,6 +307,10 @@ class WebServer:
                 web.post(
                     "/api/profit/item-exclusions",
                     self._profit_item_exclusion,
+                ),
+                web.post(
+                    "/api/profit/trade-exclusions",
+                    self._profit_trade_exclusion,
                 ),
                 *(
                     web.get(path, self._legacy_dashboard)
@@ -1028,6 +1064,177 @@ class WebServer:
         request: web.Request,
     ) -> web.StreamResponse:
         return await self._profit_section(request, "orders")
+
+    async def _profit_trades(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        """One page of the matched trades sold in the window on screen.
+
+        The window is named the way the report's is, and read without being
+        remembered: paging through trades is not picking a window. A request
+        naming none is served the member's remembered one.
+        """
+        requested = self._requested_report_window(request)
+        if isinstance(requested, web.Response):
+            return requested
+        query = self._requested_trade_query(request)
+        if isinstance(query, web.Response):
+            return query
+        service = self._bot.profit_service
+        if service is None:
+            LOGGER.error("Could not serve profit trades; service=unavailable")
+            return self._json({"error": "unavailable"}, status=503)
+        session = request[SESSION_KEY]
+        try:
+            window = (
+                requested
+                if requested is not None
+                else (
+                    await service.resolve_report_window(session.user_id, None)
+                ).window
+            )
+            report = await service.load_trades(
+                session.user_id,
+                window,
+                page=query.page,
+                size=query.size,
+                sort=query.sort,
+                descending=query.descending,
+                search=query.search,
+            )
+        except MissingProfitApiKey:
+            LOGGER.debug(
+                "Rejected profit trades; user_id=%s reason=api-key-unset",
+                session.user_id,
+            )
+            return self._json({"error": "api_key_missing"}, status=409)
+        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
+            LOGGER.warning(
+                "Could not serve profit trades; user_id=%s error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "upstream unavailable"}, status=502)
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not build profit trades; user_id=%s error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "trades unavailable"}, status=500)
+        LOGGER.debug(
+            "Served profit trades; user_id=%s total=%s page=%s rows=%s "
+            "hidden=%s",
+            session.user_id,
+            report.page.total,
+            report.page.page,
+            len(report.page.trades),
+            len(report.hidden),
+        )
+        return self._json(serialize_trades(report))
+
+    def _requested_trade_query(
+        self,
+        request: web.Request,
+    ) -> _TradeQuery | web.Response:
+        """The page, order and search a trade list request asks for.
+
+        Each is optional and falls back to the list's first page, newest sale
+        first, unsearched. A page past the last is served the last rather
+        than refused: the list can shrink between two requests.
+        """
+        try:
+            page = int(request.query.get("page", "1"))
+            size = int(request.query.get("size", str(PAGE_SIZE_DEFAULT)))
+        except ValueError:
+            LOGGER.debug("Rejected profit trades; reason=page-malformed")
+            return self._json({"error": "invalid page"}, status=400)
+        if page < 1 or not 1 <= size <= PAGE_SIZE_LIMIT:
+            LOGGER.debug("Rejected profit trades; reason=page-range")
+            return self._json({"error": "invalid page"}, status=400)
+        sort = request.query.get("sort", DEFAULT_TRADE_SORT)
+        direction = request.query.get("direction", "descending")
+        if sort not in TRADE_SORT_KEYS or direction not in (
+            "ascending",
+            "descending",
+        ):
+            LOGGER.debug("Rejected profit trades; reason=sort")
+            return self._json({"error": "invalid sort"}, status=400)
+        search = request.query.get("search", "").strip()
+        if len(search) > MAX_TRADE_SEARCH_LENGTH:
+            LOGGER.debug("Rejected profit trades; reason=search-length")
+            return self._json({"error": "invalid search"}, status=400)
+        return _TradeQuery(
+            page=page,
+            size=size,
+            sort=sort,
+            descending=direction == "descending",
+            search=search,
+        )
+
+    async def _profit_trade_exclusion(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        """Hide or restore one matched trade in the member's realized profit.
+
+        A trade is named by the sale and the purchase it paired, which is
+        what stays the same however often the history is matched again.
+        """
+        session = request[SESSION_KEY]
+        try:
+            body = await request.json()
+        except ValueError:
+            LOGGER.debug(
+                "Rejected profit trade exclusion; user_id=%s reason=malformed",
+                session.user_id,
+            )
+            return self._json({"error": "invalid request"}, status=400)
+        fields = body if isinstance(body, dict) else {}
+        sell_id = fields.get("sell_transaction_id")
+        buy_id = fields.get("buy_transaction_id")
+        excluded = fields.get("excluded")
+        if (
+            not isinstance(sell_id, str)
+            or not isinstance(buy_id, str)
+            or not sell_id
+            or len(sell_id) > MAX_TRANSACTION_ID_LENGTH
+            or len(buy_id) > MAX_TRANSACTION_ID_LENGTH
+            or not isinstance(excluded, bool)
+        ):
+            LOGGER.debug(
+                "Rejected profit trade exclusion; user_id=%s reason=fields",
+                session.user_id,
+            )
+            return self._json({"error": "invalid request"}, status=400)
+        service = self._bot.profit_service
+        if service is None:
+            LOGGER.error(
+                "Could not store profit trade exclusion; service=unavailable"
+            )
+            return self._json({"error": "unavailable"}, status=503)
+        try:
+            changed = await service.set_trade_exclusion(
+                session.user_id, sell_id, buy_id, excluded
+            )
+        except (SQLAlchemyError, ValueError) as exc:
+            LOGGER.error(
+                "Could not store profit trade exclusion; user_id=%s "
+                "error_type=%s",
+                session.user_id,
+                type(exc).__name__,
+            )
+            return self._json({"error": "exclusion unavailable"}, status=500)
+        # The ids are what the member sent, so they stay out of the log.
+        LOGGER.info(
+            "Stored profit trade exclusion; user_id=%s excluded=%s "
+            "changed=%s",
+            session.user_id,
+            excluded,
+            changed,
+        )
+        return self._json({"excluded": excluded, "changed": changed})
 
     async def _profit_exclusion(
         self,

@@ -9,6 +9,7 @@ from gw2bot.web.pages.profit.markup import (
     PAGE_SIZE_LIMIT as PAGE_SIZE_LIMIT,
     PROFIT_MARKUP,
     _hidden_items_dialog,
+    _hidden_trades_dialog,
     _pagination_nav,
 )
 from gw2bot.web.pages.profit.script import PROFIT_SCRIPT
@@ -57,6 +58,18 @@ PROFIT_PAGE = (
         _pagination_nav("days", "bottom", "Daily profit pages and page size"),
     )
     .replace(
+        "__TRADES_PAGES_TOP__",
+        _pagination_nav("trades", "top", "Matched trades pages"),
+    )
+    .replace(
+        "__TRADES_PAGES_BOTTOM__",
+        _pagination_nav(
+            "trades",
+            "bottom",
+            "Matched trades pages and page size",
+        ),
+    )
+    .replace(
         "__ORDERS_HIDDEN_DIALOG__",
         _hidden_items_dialog("orders", "open order"),
     )
@@ -64,4 +77,5 @@ PROFIT_PAGE = (
         "__ITEMS_HIDDEN_DIALOG__",
         _hidden_items_dialog("items", "realized profit"),
     )
+    .replace("__TRADES_HIDDEN_DIALOG__", _hidden_trades_dialog())
 )

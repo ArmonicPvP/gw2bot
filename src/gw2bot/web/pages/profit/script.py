@@ -27,9 +27,14 @@ PROFIT_SCRIPT = (
   // than rebuilt on each move, so a page typed into the box keeps the caret
   // where the reader put it. Page sizes are read from the controls at start-up
   // so the page and the markup cannot disagree about the default.
+  // Matched Trades runs on the same controls, but its pages are cut on the
+  // server: a busy trader matches thousands of pairs a month, far more rows
+  // than are worth sending to sort and hide here. Moving its page asks for
+  // the page rather than uncovering rows already drawn.
   var pagers = {
     items: { page: 1, size: 10, pages: 1, body: "items-body" },
-    days: { page: 1, size: 10, pages: 1, body: "days-body" }
+    days: { page: 1, size: 10, pages: 1, body: "days-body" },
+    trades: { page: 1, size: 10, pages: 1, body: "trades-body", server: true }
   };
   var historyStart = null;
   var historyStartLabel = null;
@@ -333,6 +338,10 @@ PROFIT_SCRIPT = (
 
   function paginate(key) {
     var pager = pagers[key];
+    if (pager.server) {
+      loadTrades(true);
+      return;
+    }
     var all = Array.prototype.slice.call(
       document.querySelectorAll("#" + pager.body + " tr[data-sort-row]"));
     // A row a filter has ruled out is not on any page, so it neither shows
@@ -1810,6 +1819,320 @@ PROFIT_SCRIPT = (
     trace("delivery", items.length);
   }
 
+  // Matched Trades: every sale in the window beside the purchase it was
+  // matched against. The list is sorted, searched and paged by the server,
+  // so what is held here is the page on screen, how it was asked for, and
+  // the trades the member has hidden.
+  var tradesView = {
+    sort: "sold",
+    direction: "descending",
+    search: "",
+    hidden: [],
+    loaded: false,
+    // Each request is numbered, so an answer overtaken by a later one - a
+    // reader clicking through pages faster than they arrive - is dropped
+    // rather than drawn over the newer page.
+    request: 0
+  };
+  // Whether the trades asked for after the next report keep the rows on
+  // screen. A redraw after hiding something does; a new window does not.
+  var tradesQuiet = false;
+  // The last date of the window on screen. A purchase can predate the window
+  // by years, so a trade's dates carry their year whenever it is not this
+  // one's, as well as whenever the window itself crosses a year.
+  var windowEndDate = null;
+  var TRADES_SEARCH_DELAY_MS = 250;
+  var tradesSearchTimer = null;
+
+  function tradeTime(iso) {
+    var text = String(iso);
+    var withYear = showYear || (windowEndDate !== null
+      && text.slice(0, 4) !== String(windowEndDate).slice(0, 4));
+    return shortDate(text.slice(0, 10), withYear) + " " + text.slice(11, 16);
+  }
+
+  function tradeStamp(iso) {
+    var text = String(iso);
+    return text.slice(0, 10) + " " + text.slice(11, 19) + " UTC";
+  }
+
+  function tradesUrl() {
+    var pager = pagers.trades;
+    var query = [
+      windowQuery().slice(1),
+      "page=" + encodeURIComponent(String(pager.page)),
+      "size=" + encodeURIComponent(String(pager.size)),
+      "sort=" + encodeURIComponent(tradesView.sort),
+      "direction=" + encodeURIComponent(tradesView.direction),
+      tradesView.search
+        ? "search=" + encodeURIComponent(tradesView.search) : ""
+    ].filter(Boolean).join("&");
+    return "/api/profit/trades?" + query;
+  }
+
+  function loadTrades(quiet) {
+    tradesView.request += 1;
+    var request = tradesView.request;
+    var keep = quiet && tradesView.loaded;
+    var table = document.getElementById("trades-table");
+    if (keep) { table.classList.add("refreshing"); }
+    return fetchSection("trades", tradesUrl(), function (data) {
+      if (request !== tradesView.request) {
+        trace("trades-overtaken", 0);
+        return;
+      }
+      renderTrades(data);
+    }, keep, "The matched trades could not be loaded. Try again in a moment.")
+      .then(function (ready) {
+        if (request === tradesView.request) {
+          table.classList.remove("refreshing");
+        }
+        return ready;
+      });
+  }
+
+  function markTradeSort() {
+    document.querySelectorAll("#trades-table th[aria-sort]").forEach(
+      function (heading) {
+        var button = heading.querySelector(".sort-button");
+        heading.setAttribute(
+          "aria-sort", button.dataset.sortKey === tradesView.sort
+            ? tradesView.direction : "none");
+      });
+  }
+
+  function initializeTradeSorter() {
+    document.querySelectorAll("#trades-table .sort-button").forEach(
+      function (button) {
+        button.addEventListener("click", function () {
+          var key = button.dataset.sortKey;
+          var direction = button.dataset.sortDefault;
+          if (tradesView.sort === key) {
+            direction = tradesView.direction === "ascending"
+              ? "descending" : "ascending";
+          }
+          tradesView.sort = key;
+          tradesView.direction = direction;
+          markTradeSort();
+          // A new order is a new run of pages, so it opens on the first.
+          pagers.trades.page = 1;
+          loadTrades(true);
+          traceSort("trades", key, direction, 0);
+        });
+      });
+  }
+
+  function applyTradesSearch() {
+    var search = document.getElementById("trades-search");
+    var wanted = search.value.trim();
+    document.getElementById("trades-filter-clear").hidden = wanted === "";
+    if (wanted === tradesView.search) { return; }
+    tradesView.search = wanted;
+    pagers.trades.page = 1;
+    loadTrades(true);
+    trace("trades-searched", wanted.length);
+  }
+
+  function initializeTradesSearch() {
+    var search = document.getElementById("trades-search");
+    var clear = document.getElementById("trades-filter-clear");
+    // Each keystroke would be a request, so the list waits for a pause.
+    search.addEventListener("input", function () {
+      clearTimeout(tradesSearchTimer);
+      tradesSearchTimer = setTimeout(
+        applyTradesSearch, TRADES_SEARCH_DELAY_MS);
+    });
+    search.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        clearTimeout(tradesSearchTimer);
+        applyTradesSearch();
+      }
+    });
+    clear.addEventListener("click", function () {
+      clearTimeout(tradesSearchTimer);
+      search.value = "";
+      applyTradesSearch();
+      search.focus();
+    });
+  }
+
+  function renderTrades(data) {
+    var body = document.getElementById("trades-body");
+    body.replaceChildren();
+    tradesView.loaded = true;
+    // The server says which order and page it answered with, which is the
+    // one the headings and the page box mark.
+    tradesView.sort = data.sort;
+    tradesView.direction = data.direction;
+    markTradeSort();
+    pagers.trades.page = data.page;
+    pagers.trades.pages = data.pages;
+    pagers.trades.size = data.size;
+    updatePagerControls("trades");
+    data.trades.forEach(function (trade) {
+      var row = document.createElement("tr");
+      cell(row, itemLink(trade), "name");
+      var bought = cell(row, tradeTime(trade.bought_at));
+      // The one buy that is no single purchase is the averaged lot that
+      // stock held over a year is collapsed into.
+      bought.title = trade.buy_transaction_id
+        ? tradeStamp(trade.bought_at)
+        : "Averaged across purchases held over a year, dated at the "
+          + "oldest of them.";
+      cell(row, coin(trade.buy_price));
+      cell(row, tradeTime(trade.sold_at)).title = tradeStamp(trade.sold_at);
+      cell(row, coin(trade.sell_price));
+      cell(row, trade.units);
+      cell(row, coin(trade.cost));
+      cell(row, coin(trade.net_revenue));
+      profitCell(row, trade.profit);
+      percentCell(row, trade.roi_percent);
+      cell(row, duration(trade.hold_seconds));
+      cell(row, "", "actions").appendChild(
+        hideButton("this " + trade.name + " trade", function (button) {
+          setTradeExclusion(trade, true, button);
+        }));
+      body.appendChild(row);
+    });
+    var searched = data.search !== "";
+    if (!data.trades.length) {
+      emptyRow(body, 12, searched
+        ? "No trades in this window match that search."
+        : "No matched trades were found in this window.");
+    }
+    var totals = data.totals;
+    // The footer covers every trade the list holds, on every page, so it is
+    // the window's realized total until a search narrows it.
+    totalRow(document.getElementById("trades-foot"), [
+      searched ? "Filtered total" : "Total", "\u2014", "\u2014", "\u2014",
+      "\u2014", totals.units, coin(totals.cost), coin(totals.net_revenue),
+      totals.profit, percent(totals.roi_percent), "\u2014", ""
+    ], 8);
+    document.getElementById("trades-filter-count").textContent =
+      data.total + " trade" + (data.total === 1 ? "" : "s")
+      + (searched ? " match." : " in this window.");
+    tradesView.hidden = data.hidden;
+    renderHiddenTrades();
+    trace("trades", data.trades.length);
+  }
+
+  function sameTrade(left, right) {
+    return left.sell_transaction_id === right.sell_transaction_id
+      && left.buy_transaction_id === right.buy_transaction_id;
+  }
+
+  function setTradeExclusion(trade, excluded, button) {
+    button.disabled = true;
+    fetch("/api/profit/trade-exclusions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sell_transaction_id: trade.sell_transaction_id,
+        buy_transaction_id: trade.buy_transaction_id,
+        excluded: excluded
+      })
+    }).then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login?next=" + encodeURIComponent(
+          location.pathname + location.search);
+        return false;
+      }
+      if (!response.ok) { throw new Error("trade exclusion request failed"); }
+      return true;
+    }).then(function (stored) {
+      if (!stored) { return; }
+      status.className = "";
+      status.textContent = (excluded
+        ? "Hid that trade from "
+        : "Restored that trade to ") + "your realized profit.";
+      // The Hidden trades window answers at once, the way the Hidden items
+      // one does; the reloaded trades replace this list when they land.
+      tradesView.hidden = tradesView.hidden.filter(function (held) {
+        return !sameTrade(held, trade);
+      });
+      if (excluded) { tradesView.hidden = [trade].concat(tradesView.hidden); }
+      renderHiddenTrades();
+      // A trade moves the summary, the charts, both realized tables and Your
+      // Picks, all summed by the server, so the report is asked for again;
+      // the trades follow it once it lands.
+      reloadReport();
+      trace(excluded ? "trades-hidden" : "trades-restored", 1);
+    }).catch(function () {
+      button.disabled = false;
+      status.className = "error";
+      status.textContent =
+        "That change could not be saved. Try again in a moment.";
+      trace("trades-hidden-failure", 0);
+    });
+  }
+
+  function renderHiddenTrades() {
+    var body = document.getElementById("trades-hidden-body");
+    var search = document.getElementById("trades-hidden-search").value
+      .trim().toLowerCase();
+    var hidden = tradesView.hidden;
+    var shown = search
+      ? hidden.filter(function (trade) {
+        return trade.name.toLowerCase().indexOf(search) !== -1;
+      })
+      : hidden;
+    body.replaceChildren();
+    shown.forEach(function (trade) {
+      var row = document.createElement("tr");
+      cell(row, itemLink(trade), "name");
+      cell(row, tradeTime(trade.sold_at)).title = tradeStamp(trade.sold_at);
+      cell(row, trade.units);
+      profitCell(row, trade.profit);
+      cell(row, "", "actions").appendChild(
+        restoreButton("this " + trade.name + " trade", function (button) {
+          setTradeExclusion(trade, false, button);
+        }));
+      body.appendChild(row);
+    });
+    if (!shown.length) {
+      emptyRow(body, 5, hidden.length
+        ? "No hidden trades match that search."
+        : "You have not hidden any trades yet.");
+    }
+    document.getElementById("trades-hidden-count").textContent =
+      (hidden.length === 1
+        ? "1 trade is hidden from "
+        : hidden.length + " trades are hidden from ")
+      + "your realized profit.";
+    document.getElementById("trades-menu").title = hidden.length
+      ? "Hidden trades (" + hidden.length + ")"
+      : "Hidden trades";
+    trace("trades-hidden-shown", shown.length);
+  }
+
+  function openHiddenTrades() {
+    var dialog = document.getElementById("trades-hidden-dialog");
+    var search = document.getElementById("trades-hidden-search");
+    search.value = "";
+    renderHiddenTrades();
+    dialog.showModal();
+    search.focus();
+    trace("trades-hidden-open", tradesView.hidden.length);
+  }
+
+  function initializeHiddenTrades() {
+    var dialog = document.getElementById("trades-hidden-dialog");
+    document.getElementById("trades-menu").addEventListener(
+      "click", openHiddenTrades);
+    document.getElementById("trades-hidden-close").addEventListener(
+      "click", function () { dialog.close(); });
+    document.getElementById("trades-hidden-search").addEventListener(
+      "input", renderHiddenTrades);
+    dialog.addEventListener("click", function (event) {
+      // The backdrop is part of the dialog element, as in Hidden items.
+      if (event.target === dialog) {
+        dialog.close();
+        trace("trades-hidden-dismiss", 0);
+      }
+    });
+  }
+
   function renderReport(data) {
     // The window the server served is the one it remembered, so the header
     // and the address bar follow it rather than the other way round.
@@ -1837,6 +2160,7 @@ PROFIT_SCRIPT = (
       writeStoredRange(data.key_generation);
     }
     historyStart = data.history_start_date;
+    windowEndDate = data.window.end_date;
     showYear = spansYears(data.window.start_date, data.window.end_date);
     // "Held since" is a single date whose range runs to the window's end,
     // so it decides its year on its own rather than following the table.
@@ -1856,6 +2180,8 @@ PROFIT_SCRIPT = (
       "render-report",
       data.items.length + data.days_table.length
         + data.unrealized.items.length);
+    // The window on screen is the one the trades are now asked for.
+    loadTrades(tradesQuiet);
   }
 
   function renderOrdersSection(data) {
@@ -1923,7 +2249,10 @@ PROFIT_SCRIPT = (
   // under the reader, who was looking at one row in one table. A quiet fetch
   // leaves the numbers on screen until the new ones are ready to replace
   // them, so nothing moves and nothing is lost if the request fails.
-  function fetchSection(source, url, render, quiet) {
+  // ``quietFailure`` is what a quiet fetch that fails tells the reader. The
+  // default is right for a redraw after a hiding change; Matched Trades also
+  // pages quietly, where nothing was saved and the message says so.
+  function fetchSection(source, url, render, quiet, quietFailure) {
     if (!quiet) { markSection(source, "loading"); }
     return fetch(url).then(function (response) {
       if (response.status === 401) {
@@ -1950,9 +2279,9 @@ PROFIT_SCRIPT = (
         // that prompted this is already stored, so the reader is told rather
         // than shown an emptied page.
         status.className = "error";
-        status.textContent =
-          "That change was saved, but the report could not be redrawn. "
-          + "Reload the page to catch up.";
+        status.textContent = quietFailure
+          || "That change was saved, but the report could not be redrawn. "
+            + "Reload the page to catch up.";
         trace("section-" + source + "-quiet-failure", 0);
         return false;
       }
@@ -2025,6 +2354,7 @@ PROFIT_SCRIPT = (
   // clicked, and collapsing every card to a spinner underneath them would
   // carry that row off the screen.
   function reloadReport() {
+    tradesQuiet = true;
     return fetchSection("report", reportUrl(false), renderReport, true);
   }
 
@@ -2040,8 +2370,21 @@ PROFIT_SCRIPT = (
     // the address bar carries one after every render, so treating that as a
     // forced refresh would make each ordinary reload bypass every cache.
     var refresh = forced ? "refresh=1" : "";
+    // Matched Trades reads what the report's load brings up to date, so it
+    // is asked for once the report lands rather than alongside it. Until
+    // then it waits under a spinner like every other section.
+    markSection("trades", "loading");
+    tradesQuiet = false;
     Promise.all([
-      fetchSection("report", reportUrl(forced), renderReport),
+      fetchSection("report", reportUrl(forced), renderReport).then(
+        function (ready) {
+          if (!ready) {
+            markSection("trades", "failed", missingKey
+              ? "A Trading Post API key is required."
+              : "This section could not be loaded. Try again in a moment.");
+          }
+          return ready;
+        }),
       fetchSection("orders", "/api/profit/orders"
         + (refresh ? "?" + refresh : ""), renderOrdersSection),
       fetchSection("delivery", "/api/profit/delivery"
@@ -2140,6 +2483,9 @@ PROFIT_SCRIPT = (
   initializePagers();
   initializeSorters();
   initializeItemsFilter();
+  initializeTradeSorter();
+  initializeTradesSearch();
+  initializeHiddenTrades();
   readInitialRange();
   syncRangeButtons();
   fetch("/api/me")

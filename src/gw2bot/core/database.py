@@ -178,6 +178,10 @@ class ProfitOpenLotRecord(Base):
     remaining: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    # The purchase the lot is what is left of, so the next pass can name the
+    # buy a sale is matched against. Nullable because a row written before
+    # the column existed names none.
+    transaction_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class ProfitLotCheckpointRecord(Base):
@@ -206,6 +210,8 @@ class ProfitLotCheckpointRecord(Base):
     remaining: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
     occurred_at: Mapped[str] = mapped_column(String, nullable=False)
+    # As on an open lot: the purchase behind it, when there is one.
+    transaction_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class ProfitLotCheckpointIndexRecord(Base):
@@ -221,6 +227,41 @@ class ProfitLotCheckpointIndexRecord(Base):
 
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     checkpoint_at: Mapped[str] = mapped_column(String, primary_key=True)
+
+
+class ProfitMatchedTradeRecord(Base):
+    """One sale paired with one purchase it was matched against.
+
+    The rollups above are these added up per item and sale date. They are
+    kept one by one as well so a member can read which purchase each sale was
+    costed from, and leave out a single pairing that was not a flip.
+    """
+
+    __tablename__ = "gw2_profit_matched_trades"
+    __table_args__ = (
+        Index(
+            "idx_gw2_profit_matched_trades_window",
+            "discord_user_id",
+            "sold_at",
+        ),
+    )
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sell_transaction_id: Mapped[str] = mapped_column(String, primary_key=True)
+    # Empty for the averaged lot long-held stock is collapsed into, which is
+    # no one purchase.
+    buy_transaction_id: Mapped[str] = mapped_column(String, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    sold_at: Mapped[str] = mapped_column(String, nullable=False)
+    sold_day: Mapped[str] = mapped_column(String, nullable=False)
+    bought_at: Mapped[str] = mapped_column(String, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    buy_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    sell_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost: Mapped[int] = mapped_column(Integer, nullable=False)
+    net_revenue: Mapped[int] = mapped_column(Integer, nullable=False)
+    profit: Mapped[int] = mapped_column(Integer, nullable=False)
+    hold_seconds: Mapped[float] = mapped_column(Float, nullable=False)
 
 
 class ProfitRollupStateRecord(Base):
@@ -305,6 +346,24 @@ class ProfitItemExclusionRecord(Base):
 
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     item_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProfitTradeExclusionRecord(Base):
+    """One matched trade a member left out of their realized profit.
+
+    Keyed by the pair of transactions rather than by a stored trade row:
+    the rows are results, rebuilt whenever history is rematched, and the
+    member's choice has to outlive that. A rematch that pairs the sale with a
+    different purchase simply leaves this naming a trade that no longer
+    exists, rather than hiding one the member never chose.
+    """
+
+    __tablename__ = "gw2_profit_trade_exclusions"
+
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sell_transaction_id: Mapped[str] = mapped_column(String, primary_key=True)
+    buy_transaction_id: Mapped[str] = mapped_column(String, primary_key=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
@@ -1052,6 +1111,24 @@ def initialize_database(engine: Engine) -> set[str]:
                 "WHERE category IS NULL"
             )
             added_columns.add("category")
+
+        for record_type in (ProfitOpenLotRecord, ProfitLotCheckpointRecord):
+            lot_columns = {
+                column["name"]
+                for column in inspect(connection).get_columns(
+                    record_type.__tablename__
+                )
+            }
+            if "transaction_id" in lot_columns:
+                continue
+            # Nothing to backfill: the lots are results, and the profit store
+            # drops every member's results once so they are matched again
+            # with the purchase behind each lot recorded.
+            operations.add_column(
+                record_type.__tablename__,
+                Column("transaction_id", String, nullable=True),
+            )
+            added_columns.add(f"{record_type.__tablename__}.transaction_id")
 
         preference_columns = {
             column["name"]
