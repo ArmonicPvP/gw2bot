@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1570,6 +1572,50 @@ class TestProfitStore:
             )
         }
         assert store.get_recent_purchases(101, {}) == {}
+
+    def test_recent_purchases_release_the_database_when_they_stop_early(
+        self,
+        profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    ) -> None:
+        # The read stops once the box is covered, with more rows still
+        # unread. Left to the collector, that half-read stream held its
+        # read lock on a pooled connection, and every write in the meantime
+        # - the Open Orders snapshot first - failed as "database is locked".
+        store, _, database = profit_store
+        now = datetime(2026, 8, 22, tzinfo=UTC)
+        store.set_api_key(101, "early-stop-secret")
+        store.store_transactions(
+            101,
+            "history_buys",
+            [
+                transaction(
+                    f"buy-{index}",
+                    occurred_at=now - timedelta(minutes=index),
+                )
+                for index in range(1_200)
+            ],
+            now=now,
+        )
+
+        # The collector would release a forgotten stream on its own
+        # schedule; held off, it shows whether the read released it.
+        collecting = gc.isenabled()
+        gc.disable()
+        try:
+            purchases = store.get_recent_purchases(101, {1: 3})
+            with closing(sqlite3.connect(database, timeout=0)) as writer:
+                writer.execute("BEGIN EXCLUSIVE")
+                writer.execute("ROLLBACK")
+        finally:
+            if collecting:
+                gc.enable()
+
+        assert purchases == {
+            1: tuple(
+                BuyLot(1, 100, now - timedelta(minutes=index))
+                for index in range(3)
+            )
+        }
 
     def test_recent_purchases_ignore_sales_and_other_members(
         self,
