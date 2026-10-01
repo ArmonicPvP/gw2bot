@@ -430,6 +430,7 @@ The category fixes the squad, and the bot enforces it:
 | Dungeon | 5 | 0 | 5 | 1 | 1 |
 | Story | 5 | — | — | — | — |
 | World vs. World | 50 | — | — | — | — |
+| Player vs. Player | 5 | 1 Support | 4 | 0 | 0 |
 | Open World | 50 | — | — | — | — |
 | General | No limit | — | — | — | — |
 
@@ -437,9 +438,12 @@ Raid, Strike, Fractal, and Dungeon events are role-based: members pick one of
 Just DPS, Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and
 the healer, DPS, quickness, and alacrity caps are all honoured at once. Dungeon
 groups have no healer slot: they require one Quickness DPS, one Alacrity DPS,
-and three Just DPS, and their embeds omit the empty healer section. Story,
-World vs. World, Open World, and General events are a plain headcount with no
-roles to pick.
+and three Just DPS, and their embeds omit the empty healer section. Player vs.
+Player events are role-based too, but with no boons: members pick Just DPS or
+Support (🩹), a healer with no boon requirement, and a team is four DPS and one
+Support. Support is offered only there, and a PvP embed names its heal seat
+Support and leaves out the boon tally. Story, World vs. World, Open World, and
+General events are a plain headcount with no roles to pick.
 General has no squad size at all: everyone who signs up is seated, so it never
 fills and never waitlists anyone, and its embed shows the participant count on
 its own rather than as a share of a total.
@@ -1462,7 +1466,10 @@ parameters to `--user 99:100`.
 An optional website shows the guild event calendar in day, week, and month
 views. Events appear as one-line entries on their day, and hovering over an
 entry shows the full details: category, description, requirements, times,
-duration, leader, status, and roster counts. Clicking an event pins those
+duration, leader, status, and roster counts. The counts name only the seats
+the event's category has: a Dungeon shows no healers, a Player vs. Player event
+counts its Support and DPS without boons, and a headcount event such as World
+vs. World shows its participants alone. Clicking an event pins those
 details until the next click; clicking a different event switches the pinned
 details to it. Day headings in week view and every date in month view open that
 date's day view.

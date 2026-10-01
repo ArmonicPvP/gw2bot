@@ -7,9 +7,11 @@ from zoneinfo import ZoneInfo
 
 from gw2bot.events.formatting import next_occurrence_start
 from gw2bot.events.models import (
+    CategoryCapacity,
     Event,
     EventStatus,
     RepeatFrequency,
+    RosterCounts,
     count_roster,
 )
 from gw2bot.events.posting import occurrence_status
@@ -33,6 +35,40 @@ PROJECTION_ENTRY_CAP = 100
 
 
 @dataclass(frozen=True, slots=True)
+class RoleTally:
+    """One kind of seat an event has, and how many of them are taken."""
+
+    label: str
+    count: int
+
+
+def role_tallies(
+    capacity: CategoryCapacity,
+    counts: RosterCounts,
+) -> tuple[RoleTally, ...]:
+    """The kinds of seat a category has, each with its seated count.
+
+    Only the seats the category actually has are listed: a dungeon has no
+    healer and PvP has no boons, and a "0" beside a seat nobody can take
+    reads as one still waiting for somebody. PvP's heal seat is its Support,
+    named as the event post names it. A role-less category has none.
+    """
+    if not capacity.has_roles:
+        return ()
+    tallies: list[RoleTally] = []
+    if capacity.healers:
+        label = "Support" if capacity.heals_are_supports else "Healers"
+        tallies.append(RoleTally(label, counts.healers))
+    if capacity.dps:
+        tallies.append(RoleTally("DPS", counts.dps))
+    if capacity.quickness:
+        tallies.append(RoleTally("Quickness", counts.quickness))
+    if capacity.alacrity:
+        tallies.append(RoleTally("Alacrity", counts.alacrity))
+    return tuple(tallies)
+
+
+@dataclass(frozen=True, slots=True)
 class CalendarEntry:
     event_id: int
     occurrence_id: int | None
@@ -47,14 +83,12 @@ class CalendarEntry:
     projected: bool
     active_count: int
     waitlist_count: int
-    healers: int
-    dps: int
-    quickness: int
-    alacrity: int
+    # Empty for a role-less category, which the page shows as a headcount
+    # alone.
+    roles: tuple[RoleTally, ...]
     # None for an uncapped category (General): the page shows a plain headcount
     # rather than a "seated of total" ratio.
     capacity_total: int | None
-    has_roles: bool
 
 
 def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
@@ -73,12 +107,8 @@ def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
         projected=True,
         active_count=0,
         waitlist_count=0,
-        healers=0,
-        dps=0,
-        quickness=0,
-        alacrity=0,
+        roles=role_tallies(capacity, count_roster([])),
         capacity_total=capacity.total,
-        has_roles=capacity.has_roles,
     )
 
 
@@ -125,12 +155,8 @@ def calendar_entries(
             waitlist_count=sum(
                 1 for signup in signups if signup.waitlisted
             ),
-            healers=counts.healers,
-            dps=counts.dps,
-            quickness=counts.quickness,
-            alacrity=counts.alacrity,
+            roles=role_tallies(capacity, counts),
             capacity_total=capacity.total,
-            has_roles=capacity.has_roles,
         )
 
     projected = 0

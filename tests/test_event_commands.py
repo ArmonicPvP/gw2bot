@@ -1599,9 +1599,13 @@ class TestRolePickSelect:
         select = RolePickSelect(flow)
         labels = {option.value: option.label for option in select.options}
 
-        # Every role is selectable so a full preferred role can fall back to
-        # an open flex role (or waitlist for a specific role).
-        assert set(labels) == {role.value for role in EventRole}
+        # Every role the raid seats is selectable so a full preferred role
+        # can fall back to an open flex role (or waitlist for a specific
+        # role). Support is not one of them: a raid's heal seats are boon
+        # seats.
+        assert set(labels) == {
+            role.value for role in EventRole if role is not EventRole.SUPPORT
+        }
         assert labels[EventRole.QUICKNESS_HEAL.value] == "Quickness Heal (full)"
         assert labels[EventRole.QUICKNESS_DPS.value] == "Quickness DPS (full)"
         assert labels[EventRole.ALACRITY_HEAL.value] == "Alacrity Heal"
@@ -1645,6 +1649,44 @@ class TestRolePickSelect:
             for option in AddSignupsRoleSelect(event, []).options
         }
         assert add_values == dps_roles
+
+    def test_pvp_pickers_offer_only_dps_and_support(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.PVP,
+            title="Ranked",
+            description="Bring your build.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=datetime(2107, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        flow = SignupFlow(fake_bot, event, occurrence, 42)
+        pvp_roles = [EventRole.DPS.value, EventRole.SUPPORT.value]
+
+        role_select = RolePickSelect(flow)
+        assert [option.value for option in role_select.options] == pvp_roles
+        assert {
+            option.value: str(option.emoji) for option in role_select.options
+        }[EventRole.SUPPORT.value] == "🩹"
+
+        flow.role = EventRole.DPS
+        flex_values = [
+            option.value for option in FlexRolesSelect(flow).options
+        ]
+        assert flex_values == [EventRole.SUPPORT.value]
+
+        add_values = [
+            option.value
+            for option in AddSignupsRoleSelect(event, []).options
+        ]
+        assert add_values == pvp_roles
 
     def test_boon_seat_held_by_a_flexer_is_not_labelled_full(
         self,
@@ -1724,7 +1766,7 @@ class TestRolePickSelect:
         select = RolePickSelect(flow)
 
         assert {option.value for option in select.options} == {
-            role.value for role in EventRole
+            role.value for role in EventRole if role is not EventRole.SUPPORT
         }
         assert all(
             option.label.endswith("(waitlist)") for option in select.options
@@ -9807,7 +9849,7 @@ class TestAddSignups:
             if isinstance(item, AddSignupsRoleSelect)
         )
         assert [option.value for option in select.options] == [
-            role.value for role in EventRole
+            role.value for role in EventRole if role is not EventRole.SUPPORT
         ]
 
     async def test_a_headcount_event_adds_without_asking_for_a_role(

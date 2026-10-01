@@ -66,6 +66,15 @@ class TestCalendarMarkdown:
         assert "#tooltip .desc .md-subtext" in CALENDAR_PAGE
 
 
+class TestCalendarTooltip:
+    def test_lists_the_seat_kinds_the_server_sends(self) -> None:
+        # Which seats an event has is the category's to say, so the tooltip
+        # draws the list it is given rather than naming seats of its own.
+        assert "entry.roles.map(" in CALENDAR_PAGE
+        for field in ("healers", "quickness", "alacrity", "has_roles"):
+            assert f"entry.{field}" not in CALENDAR_PAGE
+
+
 class TestProfitPage:
     def test_contains_all_profit_reports_and_unclaimed_delivery(self) -> None:
         assert "Summary" in PROFIT_PAGE

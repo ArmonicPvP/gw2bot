@@ -1037,11 +1037,13 @@ button:focus-visible, .chip:focus-visible {
     tooltip.appendChild(el("div", "row",
       "Participants: " + entry.active_count +
       (entry.capacity_total === null ? "" : "/" + entry.capacity_total)));
-    if (entry.has_roles) {
+    // Only the seats the event's category has: a dungeon lists no healer and
+    // PvP no boons. A role-less event sends none, and gets no row.
+    if (entry.roles.length) {
       tooltip.appendChild(el("div", "row",
-        "Healers " + entry.healers + " \\u00b7 DPS " + entry.dps +
-        " \\u00b7 Quickness " + entry.quickness +
-        " \\u00b7 Alacrity " + entry.alacrity));
+        entry.roles.map(function (role) {
+          return role.label + " " + role.count;
+        }).join(" \\u00b7 ")));
     }
     if (entry.waitlist_count > 0) {
       tooltip.appendChild(el("div", "row",
