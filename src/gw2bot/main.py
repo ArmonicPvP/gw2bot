@@ -33,7 +33,11 @@ def main() -> None:
             os.environ.get(ENCRYPTION_KEY_VARIABLE, "").strip() or None,
         )
     )
-    configure_logging(bootstrap.debug, secrets)
+    configure_logging(
+        bootstrap.debug,
+        secrets,
+        log_directory=bootstrap.log_directory,
+    )
     LOGGER.debug("Debug logging enabled")
 
     try:

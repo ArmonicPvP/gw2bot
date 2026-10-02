@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -219,6 +220,16 @@ class BootstrapConfig:
     gw2_api_base_url: str = "https://api.guildwars2.com"
     web_enabled: bool = False
     web_port: int = 2222
+
+    @property
+    def log_directory(self) -> Path:
+        """Where the log files go: a `log` folder beside the database.
+
+        The database's folder is the one an install already persists - the
+        compose volume, or the Unraid appdata share - and already owns, so the
+        logs survive a container rebuild without another mount.
+        """
+        return Path(self.raffle_db_path).parent / "log"
 
 
 def bootstrap_from_env(env: Mapping[str, str] | None = None) -> BootstrapConfig:

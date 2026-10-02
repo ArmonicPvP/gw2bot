@@ -7,9 +7,9 @@ services:
     init: true
     restart: unless-stopped
     volumes:
-      # Holds the database and, unless SETTINGS_ENCRYPTION_KEY is set, the key
-      # that decrypts credential settings and member profit keys. Back up both
-      # together.
+      # Holds the database, the log/ folder and, unless SETTINGS_ENCRYPTION_KEY
+      # is set, the key that decrypts credential settings and member profit
+      # keys. Back up the database and key together.
       - bot-data:/app/data
     # Uncomment to publish the web site (set WEB_ENABLED=true in .env, then
     # set its four credentials with /settings). Both sides follow WEB_PORT, so

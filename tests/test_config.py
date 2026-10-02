@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -80,6 +81,16 @@ class TestBootstrap:
 
         assert bootstrap.raffle_db_path == "custom.db"
         assert bootstrap.gw2_api_base_url == "https://example.test"
+
+    def test_log_directory_sits_beside_the_database(self) -> None:
+        # The database's folder is the one an install already persists, so
+        # the logs follow RAFFLE_DB_PATH rather than the working directory.
+        assert bootstrap_from_env(environment()).log_directory == Path(
+            "data/log"
+        )
+        assert bootstrap_from_env(
+            environment(RAFFLE_DB_PATH="/app/data/gw2bot.db")
+        ).log_directory == Path("/app/data/log")
 
     @patch("gw2bot.config.load_dotenv")
     @patch.dict(
