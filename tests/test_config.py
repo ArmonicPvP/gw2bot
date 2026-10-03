@@ -1,3 +1,6 @@
+import os
+import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -106,6 +109,25 @@ class TestBootstrap:
 
         assert bootstrap.discord_token == "runtime-token"
         load_dotenv.assert_called_once_with(override=False)  # type: ignore[attr-defined]
+
+    def test_applies_a_timezone_that_only_dotenv_sets(self) -> None:
+        if sys.platform == "win32":
+            pytest.skip("time.tzset is POSIX-only")
+        # The C library reads TZ once at startup, so a zone named only in
+        # .env would leave log timestamps and the log file's midnight on the
+        # host's zone.
+
+        def load_timezone(override: bool) -> bool:
+            os.environ["TZ"] = "GWT+05"
+            return True
+
+        with (
+            patch.dict("os.environ", BOOTSTRAP, clear=True),
+            patch("gw2bot.config.load_dotenv", side_effect=load_timezone),
+        ):
+            bootstrap_from_env()
+
+            assert time.timezone == 5 * 60 * 60
 
     def test_no_variable_is_both_bootstrap_and_setting(self) -> None:
         # A variable in both tiers would be read twice with different rules,
