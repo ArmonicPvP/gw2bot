@@ -72,6 +72,7 @@ class TestCommand:
 
         debug, secrets = configure.call_args.args
         assert debug
+        assert configure.call_args.kwargs["log_directory"] == tmp_path / "log"
         # The registry is shared with the handler, so a secret set later is
         # redacted too; every credential this configuration carries has to be
         # in it before anything can log one.

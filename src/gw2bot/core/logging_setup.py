@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import sys
+import time
 from collections.abc import Iterable, Sequence
+from datetime import datetime, timezone
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+LOG_FILE_NAME = "gw2bot.jsonl"
+# Each midnight the day's file is renamed to gw2bot.<date>.jsonl, and the
+# oldest is deleted once there are more than this many.
+LOG_FILE_RETENTION_DAYS = 30
 LOG_URL_QUERY_PATTERN = re.compile(
     r"(?i)\b(https?://[^\s?\"'<>]+)\?[^\s\"'<>]*"
 )
@@ -93,8 +106,152 @@ class RedactingFormatter(logging.Formatter):
         return redact_log_text(super().format(record), self._secrets)
 
 
-def configure_logging(debug: bool, secrets: Secrets = ()) -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(RedactingFormatter(LOG_FORMAT, secrets))
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+class JsonLinesFormatter(logging.Formatter):
+    """One JSON object per record, for the log file.
+
+    Each field is redacted before it is encoded rather than the finished line
+    after: JSON escapes the quotes the secret patterns anchor on, so a
+    payload like `{"token": "..."}` would no longer match once encoded, and
+    redacting inside an escape sequence could break the line. Every field is,
+    not just the message, because the console redacts its whole line - the
+    logger name included - and a field added later is then covered too.
+    """
+
+    def __init__(self, secrets: Secrets = ()) -> None:
+        super().__init__()
+        self._secrets = secrets
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "time": datetime.fromtimestamp(record.created, timezone.utc)
+            .astimezone()
+            .isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            entry["exception"] = record.exc_text
+        if record.stack_info:
+            entry["stack"] = self.formatStack(record.stack_info)
+        return json.dumps(
+            {
+                field: redact_log_text(value, self._secrets)
+                for field, value in entry.items()
+            },
+            ensure_ascii=False,
+        )
+
+
+def _dated_log_file_name(default_name: str) -> str:
+    """Put the rotation date before the extension, so it stays `.jsonl`.
+
+    The rotating handler's own spelling is `gw2bot.jsonl.2026-10-01`. It also
+    matches old files against this namer when deciding which to delete, so
+    the two cannot drift apart.
+    """
+    current, _, date = default_name.rpartition(".")
+    stem, extension = os.path.splitext(current)
+    return f"{stem}.{date}{extension}"
+
+
+class _LogFileHandler(TimedRotatingFileHandler):
+    def __init__(self, path: Path, secrets: Secrets) -> None:
+        super().__init__(
+            path,
+            when="midnight",
+            backupCount=LOG_FILE_RETENTION_DAYS,
+            encoding="utf-8",
+        )
+        self.namer = _dated_log_file_name
+        self.setFormatter(JsonLinesFormatter(secrets))
+        self._renamed = False
+
+    def rotate(self, source: str, dest: str) -> None:
+        super().rotate(source, dest)
+        self._renamed = True
+
+    def doRollover(self) -> None:
+        # The stdlib moves the schedule on as the last step of a rollover, and
+        # not at all when the dated file is already there, so how far one got
+        # decides what happens next.
+        self._renamed = False
+        try:
+            super().doRollover()
+        except OSError as error:
+            if self._renamed:
+                # Renamed, then failed to prune or reopen. The dated file
+                # exists now, so a schedule left in the past would make every
+                # later attempt return early and never rotate again.
+                self._schedule_next_rollover()
+                raise
+            # The rename itself failed, so the file still holds the day it is
+            # to be named for. Keep writing to it and leave the schedule in
+            # the past for the next record to retry, rather than file this
+            # day under the next one's date or drop records until it works.
+            _report_log_file_error(error)
+            if self.stream is None:
+                self.stream = self._open()
+            return
+        self._schedule_next_rollover()
+
+    def _schedule_next_rollover(self) -> None:
+        now = int(time.time())
+        if self.rolloverAt <= now:
+            self.rolloverAt = self.computeRollover(now)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        # The default prints the record's raw message and arguments to stderr,
+        # past every redacting formatter, and a full disk would do that for
+        # every record. Name only what went wrong.
+        error = sys.exc_info()[1]
+        if error is not None:
+            _report_log_file_error(error)
+
+
+def _report_log_file_error(error: BaseException) -> None:
+    if not logging.raiseExceptions or not sys.stderr:
+        return
+    reason = type(error).__name__
+    if isinstance(error, OSError) and error.strerror:
+        reason = f"{reason}: {error.strerror}"
+    sys.stderr.write(f"Could not write the log file. error={reason}\n")
+
+
+def configure_logging(
+    debug: bool,
+    secrets: Secrets = (),
+    log_directory: Path | None = None,
+) -> None:
+    """Log to the console, and to a daily JSON Lines file when given a directory.
+
+    Both handlers hold the same secrets, so nothing reaches the file that the
+    console would have redacted. A directory that cannot be written is warned
+    about and skipped: the file is a diagnostic, and losing it is no reason to
+    keep the bot from starting.
+    """
+    console = logging.StreamHandler()
+    console.setFormatter(RedactingFormatter(LOG_FORMAT, secrets))
+    handlers: list[logging.Handler] = [console]
+    file_error: OSError | None = None
+    if log_directory is not None:
+        try:
+            log_directory.mkdir(parents=True, exist_ok=True)
+            handlers.append(_LogFileHandler(log_directory / LOG_FILE_NAME, secrets))
+        except OSError as exc:
+            file_error = exc
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
     logging.getLogger("gw2bot").setLevel(logging.DEBUG if debug else logging.INFO)
+    if log_directory is None:
+        return
+    if file_error is not None:
+        LOGGER.warning(
+            "Could not open the log file; logging to the console only. "
+            "directory=%s error=%s",
+            log_directory,
+            file_error.strerror or type(file_error).__name__,
+        )
+    else:
+        LOGGER.info("Writing log file %s", log_directory / LOG_FILE_NAME)

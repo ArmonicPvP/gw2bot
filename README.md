@@ -34,8 +34,8 @@ it is allowed to send the API key. Everything else is a `/settings` subcommand.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in console logs. |
-| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. Settings, encrypted member profit keys, and Trading Post caches live here too. The Docker image overrides this default with `/app/data/gw2bot.db`. |
+| `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in the console and the [log file](#log-files). |
+| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. Settings, encrypted member profit keys, and Trading Post caches live here too, and the [log files](#log-files) go in a `log` folder beside it. The Docker image overrides this default with `/app/data/gw2bot.db`. |
 | `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar and dashboards (see [Web Calendar](#web-calendar)). It opens the listening port; the site's four credentials are settings. |
 | `WEB_PORT` | `2222` | Port the web site listens on. |
 | `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. It decides where the API key is sent, which is why it is not settable from Discord. |
@@ -313,12 +313,13 @@ the same way an unset API key disables Guild Wars 2 polling.
 Run the missing `/settings` subcommand and the feature switches on; nothing
 else has to be reconfigured and the bot does not have to be restarted.
 
-When `DEBUG=true`, detailed `gw2bot` diagnostics are written to the console.
-Third-party library debug logging remains disabled, and credentials and full
-notification contents are not included in application debug messages. All
-console records, including third-party logs and exception tracebacks, pass
-through a final credential-redacting formatter — including a credential set
-with `/settings` while the bot is running.
+When `DEBUG=true`, detailed `gw2bot` diagnostics are written to the console
+and the [log file](#log-files). Third-party library debug logging remains
+disabled, and credentials and full notification contents are not included in
+application debug messages. All console and log file records, including
+third-party logs and exception tracebacks, pass through a final
+credential-redacting formatter — including a credential set with `/settings`
+while the bot is running.
 
 The bot must have `View Channel` and `Send Messages` permissions in the
 configured notification channel. Users running raffle commands must have
@@ -346,6 +347,46 @@ the Trial application forum — `/settings channels trial_forum`, by default
 `1317206104727621693` — so it can link Trial applications to Discord members.
 Grant `Manage Threads` there as well so it can automatically tag new posts as
 `In Review`.
+
+### Log Files
+
+Everything the console shows is also written to `gw2bot.jsonl` in a `log`
+folder beside the database: `data/log/` when run locally and `/app/data/log/`
+in the Docker image. That is `/mnt/user/appdata/gw2bot/log/` with the usual
+Unraid mapping, and part of the `bot-data` volume under Docker Compose, so
+nothing extra has to be mounted. `DEBUG` decides how much is written, the same
+as for the console.
+
+Each line is one JSON object, so the file reads top to bottom like the console
+and any JSON tool can filter it without a custom parser:
+
+```json
+{"time": "2026-10-02T14:03:11.123-04:00", "level": "INFO", "logger": "gw2bot.bot", "message": "Discord bot connected as GW2 Bot#1234"}
+```
+
+| Field | Contents |
+| --- | --- |
+| `time` | When the record was written, in the container's time zone (`TZ`), with its UTC offset. |
+| `level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
+| `logger` | The module that wrote it, such as `gw2bot.gw2.guild_log`. |
+| `message` | The message, redacted the same way as the console. |
+| `exception` | The traceback, when the record carries one. Absent otherwise. |
+
+For example, every warning and error in today's file:
+
+```sh
+jq -r 'select(.level == "WARNING" or .level == "ERROR") | "\(.time) \(.logger): \(.message)"' gw2bot.jsonl
+```
+
+```powershell
+Get-Content gw2bot.jsonl | ConvertFrom-Json | Where-Object level -in 'WARNING', 'ERROR'
+```
+
+At midnight the day's file is renamed with its date — `gw2bot.2026-10-01.jsonl`
+— and a new `gw2bot.jsonl` is started. The newest 30 dated files are kept and
+older ones are deleted. If the folder cannot be created or written, the bot
+says so in a console warning at startup and keeps running with console logging
+only.
 
 ## Guild Events
 
@@ -1446,8 +1487,9 @@ diagnostic preview delivery is attempted independently, so one failed preview
 does not prevent later previews from being sent.
 
 Docker Compose stores the database in the persistent `bot-data` volume, along
-with `settings.key` unless you set `SETTINGS_ENCRYPTION_KEY` yourself. Back
-both up together: the key is what makes the encrypted settings readable.
+with `settings.key` unless you set `SETTINGS_ENCRYPTION_KEY` yourself, and the
+`log` folder. Back the database and key up together: the key is what makes
+the encrypted settings readable. The bot does not make backups itself.
 
 For Unraid, map persistent app data to `/app/data`:
 

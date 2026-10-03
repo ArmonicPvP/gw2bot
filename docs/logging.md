@@ -10,10 +10,17 @@
 - All console logging must retain the redacting formatter configured by
   `gw2bot.main.configure_logging`. Do not add independent handlers that bypass
   it.
+- The log file is the second handler `configure_logging` installs: daily
+  JSON Lines in `log/` beside the database, written by `JsonLinesFormatter`
+  with the same `SecretRegistry` as the console. It redacts each field before
+  encoding, never the encoded line - JSON escapes the quotes the secret
+  patterns anchor on. A failed write reports only the error, because the
+  stdlib's `handleError` would print the raw record to stderr. A new handler,
+  or a new field in a line, goes through the same redaction.
 - Every new credential or token environment variable must be supplied to the
   redacting formatter during startup.
 - Add regression tests whenever request, response, exception, or logging code
-  changes to prove secrets cannot appear in console output.
+  changes to prove secrets cannot appear in console or log file output.
 - Never read, print, commit, or include the local `.env` file in diagnostics.
 
 ## Diagnostic Logging Coverage

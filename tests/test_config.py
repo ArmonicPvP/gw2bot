@@ -1,3 +1,7 @@
+import os
+import sys
+import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -81,6 +85,16 @@ class TestBootstrap:
         assert bootstrap.raffle_db_path == "custom.db"
         assert bootstrap.gw2_api_base_url == "https://example.test"
 
+    def test_log_directory_sits_beside_the_database(self) -> None:
+        # The database's folder is the one an install already persists, so
+        # the logs follow RAFFLE_DB_PATH rather than the working directory.
+        assert bootstrap_from_env(environment()).log_directory == Path(
+            "data/log"
+        )
+        assert bootstrap_from_env(
+            environment(RAFFLE_DB_PATH="/app/data/gw2bot.db")
+        ).log_directory == Path("/app/data/log")
+
     @patch("gw2bot.config.load_dotenv")
     @patch.dict(
         "os.environ",
@@ -95,6 +109,25 @@ class TestBootstrap:
 
         assert bootstrap.discord_token == "runtime-token"
         load_dotenv.assert_called_once_with(override=False)  # type: ignore[attr-defined]
+
+    def test_applies_a_timezone_that_only_dotenv_sets(self) -> None:
+        if sys.platform == "win32":
+            pytest.skip("time.tzset is POSIX-only")
+        # The C library reads TZ once at startup, so a zone named only in
+        # .env would leave log timestamps and the log file's midnight on the
+        # host's zone.
+
+        def load_timezone(override: bool) -> bool:
+            os.environ["TZ"] = "GWT+05"
+            return True
+
+        with (
+            patch.dict("os.environ", BOOTSTRAP, clear=True),
+            patch("gw2bot.config.load_dotenv", side_effect=load_timezone),
+        ):
+            bootstrap_from_env()
+
+            assert time.timezone == 5 * 60 * 60
 
     def test_no_variable_is_both_bootstrap_and_setting(self) -> None:
         # A variable in both tiers would be read twice with different rules,
