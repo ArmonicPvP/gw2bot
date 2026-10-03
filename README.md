@@ -2264,7 +2264,8 @@ to match.
 
 The y axis covers the counts the window actually reached rather than the whole
 500-member ceiling, so a handful of departures is visible rather than a flat
-line near the top.
+line near the top. It never reaches above 500 or below 0, the most and fewest
+members a guild can have.
 
 Below the changes, a **Pending invites** section lists the accounts that have
 been invited in-game and have not accepted yet — the `y` of the `x/500 (y
