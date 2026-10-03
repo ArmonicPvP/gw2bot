@@ -190,6 +190,24 @@ class TestLogFile:
         assert entry["exception"].startswith("Traceback")
         assert "[REDACTED]" in entry["exception"]
 
+    def test_redacts_the_logger_name_like_the_console_does(self) -> None:
+        # The console redacts its whole line, so the file cannot be the one
+        # place a secret in record metadata survives.
+        record = logging.LogRecord(
+            "plugin.configured-secret",
+            logging.INFO,
+            __file__,
+            1,
+            "connected",
+            (),
+            None,
+        )
+
+        line = JsonLinesFormatter(("configured-secret",)).format(record)
+
+        assert "configured-secret" not in line
+        assert json.loads(line)["logger"] == "plugin.[REDACTED]"
+
     def test_redacts_a_secret_registered_after_the_formatter(self) -> None:
         # /settings can set a credential long after logging was configured.
         registry = SecretRegistry()

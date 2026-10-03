@@ -111,7 +111,9 @@ class JsonLinesFormatter(logging.Formatter):
     Each field is redacted before it is encoded rather than the finished line
     after: JSON escapes the quotes the secret patterns anchor on, so a
     payload like `{"token": "..."}` would no longer match once encoded, and
-    redacting inside an escape sequence could break the line.
+    redacting inside an escape sequence could break the line. Every field is,
+    not just the message, because the console redacts its whole line - the
+    logger name included - and a field added later is then covered too.
     """
 
     def __init__(self, secrets: Secrets = ()) -> None:
@@ -125,18 +127,21 @@ class JsonLinesFormatter(logging.Formatter):
             .isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "logger": record.name,
-            "message": self._redact(record.getMessage()),
+            "message": record.getMessage(),
         }
         if record.exc_info and not record.exc_text:
             record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:
-            entry["exception"] = self._redact(record.exc_text)
+            entry["exception"] = record.exc_text
         if record.stack_info:
-            entry["stack"] = self._redact(self.formatStack(record.stack_info))
-        return json.dumps(entry, ensure_ascii=False)
-
-    def _redact(self, text: str) -> str:
-        return redact_log_text(text, self._secrets)
+            entry["stack"] = self.formatStack(record.stack_info)
+        return json.dumps(
+            {
+                field: redact_log_text(value, self._secrets)
+                for field, value in entry.items()
+            },
+            ensure_ascii=False,
+        )
 
 
 def _dated_log_file_name(default_name: str) -> str:
