@@ -167,31 +167,57 @@ class _LogFileHandler(TimedRotatingFileHandler):
         )
         self.namer = _dated_log_file_name
         self.setFormatter(JsonLinesFormatter(secrets))
+        self._renamed = False
+
+    def rotate(self, source: str, dest: str) -> None:
+        super().rotate(source, dest)
+        self._renamed = True
 
     def doRollover(self) -> None:
+        # The stdlib moves the schedule on as the last step of a rollover, and
+        # not at all when the dated file is already there, so how far one got
+        # decides what happens next.
+        self._renamed = False
         try:
             super().doRollover()
-        finally:
-            # The stdlib moves the schedule on as its last step, so a rollover
-            # that renamed the file and then failed to prune or reopen leaves
-            # it in the past. Every record after that finds the dated file
-            # already there and returns early, and the file would never be
-            # rotated or pruned again until a restart.
-            now = int(time.time())
-            if self.rolloverAt <= now:
-                self.rolloverAt = self.computeRollover(now)
+        except OSError as error:
+            if self._renamed:
+                # Renamed, then failed to prune or reopen. The dated file
+                # exists now, so a schedule left in the past would make every
+                # later attempt return early and never rotate again.
+                self._schedule_next_rollover()
+                raise
+            # The rename itself failed, so the file still holds the day it is
+            # to be named for. Keep writing to it and leave the schedule in
+            # the past for the next record to retry, rather than file this
+            # day under the next one's date or drop records until it works.
+            _report_log_file_error(error)
+            if self.stream is None:
+                self.stream = self._open()
+            return
+        self._schedule_next_rollover()
+
+    def _schedule_next_rollover(self) -> None:
+        now = int(time.time())
+        if self.rolloverAt <= now:
+            self.rolloverAt = self.computeRollover(now)
 
     def handleError(self, record: logging.LogRecord) -> None:
         # The default prints the record's raw message and arguments to stderr,
         # past every redacting formatter, and a full disk would do that for
         # every record. Name only what went wrong.
         error = sys.exc_info()[1]
-        if not logging.raiseExceptions or not sys.stderr or error is None:
-            return
-        reason = type(error).__name__
-        if isinstance(error, OSError) and error.strerror:
-            reason = f"{reason}: {error.strerror}"
-        sys.stderr.write(f"Could not write the log file. error={reason}\n")
+        if error is not None:
+            _report_log_file_error(error)
+
+
+def _report_log_file_error(error: BaseException) -> None:
+    if not logging.raiseExceptions or not sys.stderr:
+        return
+    reason = type(error).__name__
+    if isinstance(error, OSError) and error.strerror:
+        reason = f"{reason}: {error.strerror}"
+    sys.stderr.write(f"Could not write the log file. error={reason}\n")
 
 
 def configure_logging(

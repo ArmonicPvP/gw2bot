@@ -306,6 +306,45 @@ class TestLogFile:
         )
         assert _lines(rotated)[0]["message"] == "before midnight"
 
+    def test_a_failed_rename_keeps_writing_and_retries(
+        self,
+        basic_config: MagicMock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Nothing was renamed, so the file still holds the day it will be
+        # named for. Moving the schedule on would file that day under the
+        # next one's date, and raising would drop every record until the
+        # rename worked.
+        configure_logging(False, log_directory=tmp_path)
+        handler = _file_handler(basic_config)
+        handler.handle(_record("before midnight"))
+        handler.rolloverAt = due = int(time.time()) - 1
+
+        with patch(
+            "logging.handlers.os.rename",
+            side_effect=PermissionError(errno.EACCES, "Permission denied"),
+        ):
+            handler.handle(_record("while the rename fails"))
+
+        assert handler.rolloverAt == due
+        assert [path.name for path in tmp_path.iterdir()] == [LOG_FILE_NAME]
+        assert "Permission denied" in capsys.readouterr().err
+
+        handler.handle(_record("once the rename works"))
+
+        assert handler.rolloverAt > time.time()
+        (rotated,) = (
+            path for path in tmp_path.iterdir() if path.name != LOG_FILE_NAME
+        )
+        assert [entry["message"] for entry in _lines(rotated)] == [
+            "before midnight",
+            "while the rename fails",
+        ]
+        assert [entry["message"] for entry in _lines(tmp_path / LOG_FILE_NAME)] == [
+            "once the rename works"
+        ]
+
     def test_an_unwritable_directory_logs_to_the_console_only(
         self,
         basic_config: MagicMock,
