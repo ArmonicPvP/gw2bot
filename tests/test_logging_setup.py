@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sys
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
@@ -273,6 +274,37 @@ class TestLogFile:
         assert "gw2bot.2026-08-01.jsonl" not in names
         assert "gw2bot.2026-08-02.jsonl" not in names
         assert {LOG_FILE_NAME, "notes.txt"} <= names
+
+    def test_a_rollover_that_stops_short_still_moves_the_schedule_on(
+        self,
+        basic_config: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The stdlib advances the next rollover as its last step. If pruning
+        # fails after the rename, the dated file already exists on every
+        # later attempt, which returns early, and the file is never rotated
+        # or pruned again.
+        configure_logging(False, log_directory=tmp_path)
+        handler = _file_handler(basic_config)
+        handler.handle(_record("before midnight"))
+        handler.rolloverAt = int(time.time()) - 1
+
+        with patch.object(
+            handler,
+            "getFilesToDelete",
+            side_effect=PermissionError(errno.EACCES, "Permission denied"),
+        ):
+            handler.handle(_record("during the failed rollover"))
+        handler.handle(_record("after the failed rollover"))
+
+        assert handler.rolloverAt > time.time()
+        assert [entry["message"] for entry in _lines(tmp_path / LOG_FILE_NAME)] == [
+            "after the failed rollover"
+        ]
+        (rotated,) = (
+            path for path in tmp_path.iterdir() if path.name != LOG_FILE_NAME
+        )
+        assert _lines(rotated)[0]["message"] == "before midnight"
 
     def test_an_unwritable_directory_logs_to_the_console_only(
         self,

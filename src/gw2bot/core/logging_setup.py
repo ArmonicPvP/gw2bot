@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
@@ -166,6 +167,19 @@ class _LogFileHandler(TimedRotatingFileHandler):
         )
         self.namer = _dated_log_file_name
         self.setFormatter(JsonLinesFormatter(secrets))
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        finally:
+            # The stdlib moves the schedule on as its last step, so a rollover
+            # that renamed the file and then failed to prune or reopen leaves
+            # it in the past. Every record after that finds the dated file
+            # already there and returns early, and the file would never be
+            # rotated or pruned again until a restart.
+            now = int(time.time())
+            if self.rolloverAt <= now:
+                self.rolloverAt = self.computeRollover(now)
 
     def handleError(self, record: logging.LogRecord) -> None:
         # The default prints the record's raw message and arguments to stderr,
