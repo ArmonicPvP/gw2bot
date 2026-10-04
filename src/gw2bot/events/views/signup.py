@@ -1359,10 +1359,16 @@ class SignupFlow:
 
 
 def _signup_summary(signup: EventSignup) -> str:
-    if signup.waitlisted:
+    if signup.waitlisted and signup.role is None:
         return (
             "The event is currently full, so you were added to the "
             "**waitlist**."
+        )
+    if signup.waitlisted:
+        return (
+            "No open seat fits your roles - the event is full, or the seats "
+            "left are held for the boons and heals it still needs - so you "
+            "were added to the **waitlist**."
         )
     if signup.assigned_role is not None:
         summary = f"You signed up as **{signup.assigned_role.value}**."

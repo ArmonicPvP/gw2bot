@@ -3657,6 +3657,21 @@ class TestSignupViews:
         )
 
         assert "waitlist" in summary
+        # An open seat can be held for a boon the picked role cannot bring,
+        # so a role-based waitlisting does not claim the event is full.
+        assert "held for the boons" in summary
+
+    def test_headcount_signup_summary_says_the_event_is_full(self) -> None:
+        summary = _signup_summary(
+            SimpleNamespace(
+                waitlisted=True,
+                assigned_role=None,
+                role=None,
+            )  # type: ignore[arg-type]
+        )
+
+        assert "currently full" in summary
+        assert "waitlist" in summary
 
 
 FAR_FUTURE = datetime(2107, 1, 30, 20, 0, tzinfo=UTC)
@@ -6035,12 +6050,13 @@ class TestEventEditConfirmView:
             for signup in signups
             if not signup.waitlisted
         ]
-        # The fractal's four DPS seats go to members who can still see the
-        # event; seating the two who left would hold two of them for a squad
-        # they are not in, and leave their automatic sign-up on.
+        # The fractal's three plain DPS seats go to members who can still see
+        # the event (its fourth is held for a boon DPS); seating the two who
+        # left would hold two of them for a squad they are not in, and leave
+        # their automatic sign-up on.
         assert 1 not in on_roster
         assert 2 not in on_roster
-        assert seated == [3, 4, 5, 6]
+        assert seated == [3, 4, 5]
 
     async def test_category_change_renders_the_event_as_it_was_saved_last(
         self,
@@ -6162,12 +6178,14 @@ class TestEventEditConfirmView:
         signups = store.get_signups(occurrence.occurrence_id)
         admitted = [signup for signup in signups if not signup.waitlisted]
         waitlisted = [signup for signup in signups if signup.waitlisted]
-        # A Fractal seats 1 healer and 4 DPS. Nobody picked a role in WvW, so
-        # they all fall back to DPS: the first four keep seats in sign-up order
-        # and the rest are waitlisted, instead of seven role-less signups the
-        # capacity check would read as an empty roster and keep admitting onto.
-        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3, 4]
-        assert len(waitlisted) == 3
+        # A Fractal seats 1 healer and 4 DPS, one of them a boon DPS. Nobody
+        # picked a role in WvW, so they all fall back to plain DPS: the first
+        # three keep seats in sign-up order and the rest are waitlisted,
+        # instead of seven role-less signups the capacity check would read as
+        # an empty roster and keep admitting onto. The fourth DPS seat stays
+        # open for the boon DPS the run still needs.
+        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3]
+        assert len(waitlisted) == 4
         assert all(
             signup.assigned_role is EventRole.DPS for signup in admitted
         )
@@ -8154,14 +8172,15 @@ class TestRemoveSignups:
             )
 
     def make_full_roster(self, store: EventStore) -> Any:
-        # Fractal capacity is 1 healer and 4 DPS, so this roster is full and
-        # user 6 lands on the waitlist behind it.
+        # Fractal capacity is 1 healer and 4 DPS, one of each bringing a
+        # boon, so this roster is full and user 6 lands on the waitlist
+        # behind it.
         event, occurrence = make_posted_edit_event(store)
         assignments = [
             (1, EventRole.QUICKNESS_HEAL, False),
             (2, EventRole.DPS, False),
             (3, EventRole.DPS, False),
-            (4, EventRole.DPS, False),
+            (4, EventRole.ALACRITY_DPS, False),
             (5, EventRole.DPS, False),
             (6, EventRole.DPS, True),
         ]
@@ -8742,7 +8761,7 @@ class TestRemoveSignups:
             (1, EventRole.QUICKNESS_HEAL, False),
             (2, EventRole.DPS, False),
             (3, EventRole.DPS, False),
-            (4, EventRole.DPS, False),
+            (4, EventRole.ALACRITY_DPS, False),
             (5, EventRole.DPS, False),
             (6, EventRole.DPS, True),
         ):
@@ -10051,7 +10070,8 @@ class TestAddSignups:
             "content"
         ]
         assert (
-            "The event is full, so <@11> was added to the waitlist." in content
+            "No open seat could take <@11>, so they were added to the "
+            "waitlist." in content
         )
         assert "Added <@11> to the roster." not in content
         # They are still told, because they are on the event either way.
@@ -10064,7 +10084,8 @@ class TestAddSignups:
     ) -> None:
         event, occurrence = self.make_event(store)
         self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
-        for user_id in (2, 3, 4, 5):
+        self.seat(store, occurrence, 2, EventRole.ALACRITY_DPS)
+        for user_id in (3, 4, 5):
             self.seat(store, occurrence, user_id, EventRole.DPS)
         # /event edit checked this roster before drawing the picker, and
         # found everyone present.
@@ -10392,7 +10413,8 @@ class TestAddSignups:
             "content"
         ]
         assert (
-            "The event is full, so <@11> was added to the waitlist." in content
+            "No open seat could take <@11>, so they were added to the "
+            "waitlist." in content
         )
         assert "Added <@11> to the roster." not in content
 

@@ -1,7 +1,10 @@
 import asyncio
 import logging
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import combinations_with_replacement
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -19,6 +22,7 @@ from gw2bot.events.posting import roster as posting_roster
 from gw2bot.events.models import (
     CATEGORY_CAPACITIES,
     AutoSignupChoice,
+    CategoryCapacity,
     EventCategory,
     EventRole,
     EventSignup,
@@ -33,7 +37,8 @@ from gw2bot.events.models import (
     is_roster_full,
     normalize_stored_roles,
     preferred_role_order,
-    roster_feasible,
+    roster_admits,
+    roster_shortfall,
     seated_candidates,
     solve_roster,
     supported_roles,
@@ -532,9 +537,12 @@ class TestSolveRoster:
             make_candidate(11, EventRole.QUICKNESS_HEAL),
             make_candidate(12, EventRole.QUICKNESS_HEAL),
         ]
-        assert not roster_feasible(
-            FRACTAL_CAPACITY,
-            [candidate.preferences for candidate in rigid_heals],
+        assert (
+            roster_shortfall(
+                FRACTAL_CAPACITY,
+                [candidate.preferences for candidate in rigid_heals],
+            )
+            is None
         )
         assert solve_roster(FRACTAL_CAPACITY, rigid_heals) is None
 
@@ -5802,9 +5810,9 @@ class TestRemoveSignupResettle:
             occurrence,
             12,
             EventRole.QUICKNESS_DPS,
-            (EventRole.ALACRITY_DPS,),
+            (EventRole.ALACRITY_HEAL,),
         )
-        assert flexed.assigned_role is EventRole.ALACRITY_DPS
+        assert flexed.assigned_role is EventRole.ALACRITY_HEAL
 
         removed, update = await remove_signup(bot, event, occurrence, 11)
 
@@ -5812,7 +5820,7 @@ class TestRemoveSignupResettle:
         assert update.reassigned == (
             RoleChange(
                 discord_user_id=12,
-                old_role=EventRole.ALACRITY_DPS,
+                old_role=EventRole.ALACRITY_HEAL,
                 new_role=EventRole.QUICKNESS_DPS,
             ),
         )
@@ -5994,7 +6002,7 @@ class TestRemoveSignupResettle:
             occurrence,
             12,
             EventRole.QUICKNESS_DPS,
-            (EventRole.ALACRITY_DPS,),
+            (EventRole.ALACRITY_HEAL,),
         )
 
         removed, update = await remove_signup(bot, event, occurrence, 11)
@@ -6136,7 +6144,7 @@ class TestApplySignupEdit:
             (12, EventRole.DPS),
             (13, EventRole.DPS),
             (14, EventRole.DPS),
-            (15, EventRole.DPS),
+            (15, EventRole.ALACRITY_DPS),
         ]
         for user_id, role in roster:
             await complete_signup(bot, event, occurrence, user_id, role, ())
@@ -6495,29 +6503,187 @@ class TestRosterFullComposition:
         ]
         assert is_roster_full(RAID_CAPACITY, two_boon_dps)
 
-    async def test_status_stays_open_without_boon_coverage(
+    async def test_the_last_seat_is_held_for_the_missing_boon(
         self,
         bot: Any,
         store: EventStore,
     ) -> None:
+        # A healer and three plain DPS leave one DPS seat, and the fractal
+        # still needs a boon DPS: a fourth plain DPS would take the last seat
+        # and leave the boon with nobody to bring it.
         event, occurrence = await post_new_event(bot, store)
         roster = [
             (11, EventRole.QUICKNESS_HEAL),
             (12, EventRole.DPS),
             (13, EventRole.DPS),
             (14, EventRole.DPS),
-            (15, EventRole.DPS),
         ]
         for user_id, role in roster:
             await complete_signup(bot, event, occurrence, user_id, role, ())
 
+        plain = await complete_signup(
+            bot, event, occurrence, 15, EventRole.DPS, ()
+        )
+
+        assert plain.waitlisted
+        signups = store.get_signups(occurrence.occurrence_id)
         updated = store.get_occurrence(occurrence.occurrence_id)
         assert updated is not None
-        signups = store.get_signups(occurrence.occurrence_id)
         assert (
             occurrence_status(event, updated, signups, BEFORE_START)
             is EventStatus.OPEN
         )
+        fits = fitting_roles(event.capacity, signups)
+        assert EventRole.DPS not in fits
+        assert EventRole.ALACRITY_DPS in fits
+
+        boon = await complete_signup(
+            bot, event, occurrence, 16, EventRole.ALACRITY_DPS, ()
+        )
+
+        assert not boon.waitlisted
+        assert boon.assigned_role is EventRole.ALACRITY_DPS
+        signups = store.get_signups(occurrence.occurrence_id)
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert (
+            occurrence_status(event, updated, signups, BEFORE_START)
+            is EventStatus.FULL
+        )
+
+    async def test_boon_dps_cannot_take_the_healers_boons(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A fractal's one heal seat needs a boon, and Support is not offered
+        # there: a quickness and an alacrity DPS would use both, leaving a
+        # heal seat no healer could ever take.
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot, event, occurrence, 11, EventRole.QUICKNESS_DPS, ()
+        )
+
+        second = await complete_signup(
+            bot, event, occurrence, 12, EventRole.ALACRITY_DPS, ()
+        )
+
+        assert second.waitlisted
+        healer = await complete_signup(
+            bot, event, occurrence, 13, EventRole.ALACRITY_HEAL, ()
+        )
+        assert not healer.waitlisted
+        assert healer.assigned_role is EventRole.ALACRITY_HEAL
+
+    async def test_a_flexer_moves_onto_the_boon_to_make_room(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The flexer's plain DPS seat is the last one the boon DPS could
+        # have, so seating a later plain DPS moves them onto their boon flex
+        # rather than waitlist the newcomer.
+        event, occurrence = await post_new_event(bot, store)
+        await complete_signup(
+            bot,
+            event,
+            occurrence,
+            11,
+            EventRole.DPS,
+            (EventRole.ALACRITY_DPS,),
+        )
+        for user_id, role in (
+            (12, EventRole.QUICKNESS_HEAL),
+            (13, EventRole.DPS),
+            (14, EventRole.DPS),
+        ):
+            await complete_signup(bot, event, occurrence, user_id, role, ())
+        flexer = store.get_signup(occurrence.occurrence_id, 11)
+        assert flexer is not None
+        assert flexer.assigned_role is EventRole.DPS
+
+        newcomer = await complete_signup(
+            bot, event, occurrence, 15, EventRole.DPS, ()
+        )
+
+        assert not newcomer.waitlisted
+        flexer = store.get_signup(occurrence.occurrence_id, 11)
+        assert flexer is not None
+        assert flexer.assigned_role is EventRole.ALACRITY_DPS
+
+    async def test_a_freed_seat_goes_to_who_can_cover_the_boon(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Promotion holds the seat the same way: the plain DPS ahead in the
+        # queue waits, and the boon DPS behind them takes it.
+        event, occurrence = await post_new_event(bot, store)
+        roster = [
+            (11, EventRole.QUICKNESS_HEAL),
+            (12, EventRole.ALACRITY_DPS),
+            (13, EventRole.DPS),
+            (14, EventRole.DPS),
+            (15, EventRole.DPS),
+            (16, EventRole.DPS),
+            (17, EventRole.ALACRITY_DPS),
+        ]
+        for user_id, role in roster:
+            await complete_signup(bot, event, occurrence, user_id, role, ())
+
+        _, update = await remove_signup(bot, event, occurrence, 12)
+
+        assert [signup.discord_user_id for signup in update.promoted] == [17]
+        waiting = store.get_signup(occurrence.occurrence_id, 16)
+        assert waiting is not None
+        assert waiting.waitlisted
+
+    async def test_dungeon_holds_two_dps_seats_for_its_boons(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot, store, category=EventCategory.DUNGEON
+        )
+        for user_id in (11, 12, 13):
+            seated = await complete_signup(
+                bot, event, occurrence, user_id, EventRole.DPS, ()
+            )
+            assert not seated.waitlisted
+
+        fourth = await complete_signup(
+            bot, event, occurrence, 14, EventRole.DPS, ()
+        )
+
+        assert fourth.waitlisted
+        for user_id, role in (
+            (15, EventRole.QUICKNESS_DPS),
+            (16, EventRole.ALACRITY_DPS),
+        ):
+            boon = await complete_signup(
+                bot, event, occurrence, user_id, role, ()
+            )
+            assert not boon.waitlisted
+        assert is_roster_full(
+            event.capacity, store.get_signups(occurrence.occurrence_id)
+        )
+
+    def test_a_roster_seated_short_still_takes_who_leaves_it_no_worse(
+        self,
+    ) -> None:
+        # A healer and four plain DPS were seatable before the last seats were
+        # held for the boons. That roster is one boon DPS short with no seat
+        # to put one in; freeing a DPS seat must still let a boon DPS in,
+        # and must not let a plain DPS take it back.
+        seated = [(EventRole.QUICKNESS_HEAL,)] + [(EventRole.DPS,)] * 4
+        assert roster_shortfall(FRACTAL_CAPACITY, seated) == 1
+
+        one_freed = seated[:-1]
+        assert roster_admits(
+            FRACTAL_CAPACITY, one_freed, (EventRole.ALACRITY_DPS,)
+        )
+        assert not roster_admits(FRACTAL_CAPACITY, one_freed, (EventRole.DPS,))
 
 
 class TestPvpComposition:
@@ -6551,13 +6717,13 @@ class TestPvpComposition:
         assert fitting_roles(PVP_CAPACITY, signups) == []
 
     def test_five_dps_cannot_all_be_seated(self) -> None:
-        assert not roster_feasible(
-            PVP_CAPACITY,
-            [(EventRole.DPS,)] * 5,
-        )
-        assert roster_feasible(
-            PVP_CAPACITY,
-            [(EventRole.DPS,)] * 4 + [(EventRole.DPS, EventRole.SUPPORT)],
+        assert roster_shortfall(PVP_CAPACITY, [(EventRole.DPS,)] * 5) is None
+        assert (
+            roster_shortfall(
+                PVP_CAPACITY,
+                [(EventRole.DPS,)] * 4 + [(EventRole.DPS, EventRole.SUPPORT)],
+            )
+            == 0
         )
 
     def test_a_support_counts_as_a_healer_without_a_boon(self) -> None:
@@ -6586,6 +6752,208 @@ class TestPvpComposition:
             EventRole.SUPPORT,
             (EventRole.DPS,),
         ) == (EventRole.DPS, ())
+
+
+ROLE_BASED_CATEGORIES = (
+    EventCategory.RAID,
+    EventCategory.STRIKE,
+    EventCategory.FRACTAL,
+    EventCategory.DUNGEON,
+    EventCategory.PVP,
+)
+
+
+def _assigned(roles: Sequence[EventRole]) -> list[EventSignup]:
+    return [
+        make_signup(user_id, role, role)
+        for user_id, role in enumerate(roles, start=1)
+    ]
+
+
+def _within_caps(capacity: CategoryCapacity, roles: Sequence[EventRole]) -> bool:
+    counts = count_roster(_assigned(roles))
+    return (
+        counts.healers <= (capacity.healers or 0)
+        and counts.dps <= (capacity.dps or 0)
+        and counts.quickness <= (capacity.quickness or 0)
+        and counts.alacrity <= (capacity.alacrity or 0)
+        and counts.supports <= capacity.supports
+    )
+
+
+def _full_rosters(capacity: CategoryCapacity) -> list[Counter[EventRole]]:
+    # Every FULL roster the category has, by how many of each role it seats,
+    # found by listing every roster of its size rather than by reasoning
+    # about the caps.
+    assert capacity.total is not None
+    return [
+        Counter(roles)
+        for roles in combinations_with_replacement(EventRole, capacity.total)
+        if _within_caps(capacity, roles)
+        and is_roster_full(capacity, _assigned(roles))
+    ]
+
+
+class TestCompositionAcrossCategories:
+    """The held seats, for 10-member and 5-member runs alike.
+
+    A raid or strike seats two healers and eight DPS with two quickness and
+    two alacrity between them; a fractal one healer and four DPS with one of
+    each; a dungeon five DPS, two of them boon DPS; PvP four DPS and a
+    Support.
+    """
+
+    @pytest.mark.parametrize("category", ROLE_BASED_CATEGORIES)
+    def test_shortfall_matches_every_full_roster(
+        self,
+        category: EventCategory,
+    ) -> None:
+        # Checked against every roster the category can seat: a set of
+        # members has no shortfall exactly when some FULL roster contains
+        # them, so admission never turns away a member the run could still
+        # use, nor seats one who would leave it unable to fill up.
+        capacity = CATEGORY_CAPACITIES[category]
+        assert capacity.total is not None
+        full = _full_rosters(capacity)
+        assert full
+        for size in range(capacity.total + 1):
+            for roles in combinations_with_replacement(EventRole, size):
+                shortfall = roster_shortfall(
+                    capacity, [(role,) for role in roles]
+                )
+                if not _within_caps(capacity, roles):
+                    assert shortfall is None, roles
+                    continue
+                seated = Counter(roles)
+                completable = any(
+                    all(roster[role] >= count for role, count in seated.items())
+                    for roster in full
+                )
+                assert (shortfall == 0) is completable, roles
+
+    @pytest.mark.parametrize(
+        ("category", "plain_dps", "rest"),
+        [
+            (
+                EventCategory.RAID,
+                6,
+                (
+                    EventRole.QUICKNESS_HEAL,
+                    EventRole.ALACRITY_HEAL,
+                    EventRole.QUICKNESS_DPS,
+                    EventRole.ALACRITY_DPS,
+                ),
+            ),
+            (
+                EventCategory.STRIKE,
+                6,
+                (
+                    EventRole.ALACRITY_HEAL,
+                    EventRole.ALACRITY_HEAL,
+                    EventRole.QUICKNESS_DPS,
+                    EventRole.QUICKNESS_DPS,
+                ),
+            ),
+            (
+                EventCategory.FRACTAL,
+                3,
+                (EventRole.QUICKNESS_HEAL, EventRole.ALACRITY_DPS),
+            ),
+            (
+                EventCategory.DUNGEON,
+                3,
+                (EventRole.QUICKNESS_DPS, EventRole.ALACRITY_DPS),
+            ),
+            (EventCategory.PVP, 4, (EventRole.SUPPORT,)),
+        ],
+    )
+    async def test_plain_dps_stop_where_the_boons_need_the_seats(
+        self,
+        bot: Any,
+        store: EventStore,
+        category: EventCategory,
+        plain_dps: int,
+        rest: tuple[EventRole, ...],
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store, category=category)
+        user_ids = iter(range(11, 100))
+        for _ in range(plain_dps):
+            seated = await complete_signup(
+                bot, event, occurrence, next(user_ids), EventRole.DPS, ()
+            )
+            assert not seated.waitlisted
+
+        extra = await complete_signup(
+            bot, event, occurrence, next(user_ids), EventRole.DPS, ()
+        )
+
+        assert extra.waitlisted
+        for role in rest:
+            seated = await complete_signup(
+                bot, event, occurrence, next(user_ids), role, ()
+            )
+            assert not seated.waitlisted, role
+            assert seated.assigned_role is role
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert count_roster(signups).active == event.capacity.total
+        assert is_roster_full(event.capacity, signups)
+
+    @pytest.mark.parametrize(
+        ("category", "boon_dps", "fits"),
+        [
+            # Ten-member runs: two quickness DPS take both quickness seats,
+            # so both healers must bring alacrity, and an alacrity DPS would
+            # take a boon one of them needs.
+            (
+                EventCategory.RAID,
+                (EventRole.QUICKNESS_DPS, EventRole.QUICKNESS_DPS),
+                {EventRole.DPS, EventRole.ALACRITY_HEAL},
+            ),
+            (
+                EventCategory.STRIKE,
+                (EventRole.ALACRITY_DPS, EventRole.ALACRITY_DPS),
+                {EventRole.DPS, EventRole.QUICKNESS_HEAL},
+            ),
+            # One of each still leaves a quickness and an alacrity seat for
+            # the two healers, and nothing for a third boon DPS.
+            (
+                EventCategory.RAID,
+                (EventRole.QUICKNESS_DPS, EventRole.ALACRITY_DPS),
+                {
+                    EventRole.DPS,
+                    EventRole.QUICKNESS_HEAL,
+                    EventRole.ALACRITY_HEAL,
+                },
+            ),
+            # Five-member runs: one boon DPS leaves the other boon for the
+            # one healer.
+            (
+                EventCategory.FRACTAL,
+                (EventRole.QUICKNESS_DPS,),
+                {EventRole.DPS, EventRole.ALACRITY_HEAL},
+            ),
+            (
+                EventCategory.FRACTAL,
+                (EventRole.ALACRITY_DPS,),
+                {EventRole.DPS, EventRole.QUICKNESS_HEAL},
+            ),
+            # No healer to save a boon for: the dungeon's boons are both DPS.
+            (
+                EventCategory.DUNGEON,
+                (EventRole.QUICKNESS_DPS,),
+                {EventRole.DPS, EventRole.ALACRITY_DPS},
+            ),
+        ],
+    )
+    def test_boon_dps_leave_the_healers_their_boons(
+        self,
+        category: EventCategory,
+        boon_dps: tuple[EventRole, ...],
+        fits: set[EventRole],
+    ) -> None:
+        capacity = CATEGORY_CAPACITIES[category]
+
+        assert set(fitting_roles(capacity, _assigned(boon_dps))) == fits
 
 
 class TestFittingRolesReshuffle:
@@ -6618,8 +6986,9 @@ class TestFittingRolesReshuffle:
     ) -> None:
         # Both boon caps and the DPS cap are saturated by rigid members while
         # the heal seats sit empty: nobody can join, yet the count-based FULL
-        # status stays OPEN. This asymmetry predates the solver and is pinned
-        # here deliberately.
+        # status stays OPEN. Admission no longer seats a roster like this (the
+        # third boon DPS would take a healer's boon), so it is only ever one
+        # seated before that, and it must not read as full.
         signups = [
             make_signup(1, EventRole.QUICKNESS_DPS, EventRole.QUICKNESS_DPS),
             make_signup(2, EventRole.QUICKNESS_DPS, EventRole.QUICKNESS_DPS),
@@ -7654,9 +8023,10 @@ class TestRebalanceOccurrenceRoster:
         assert changed == 7
         signups = store.get_signups(occurrence.occurrence_id)
         admitted = [signup for signup in signups if not signup.waitlisted]
-        # Fractal seats 4 DPS; the role-less WvW roster would otherwise read as
-        # zero DPS and keep admitting past capacity.
-        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3, 4]
+        # Fractal seats 4 DPS, one of them a boon DPS, so three plain DPS fit;
+        # the role-less WvW roster would otherwise read as zero DPS and keep
+        # admitting past capacity.
+        assert [signup.discord_user_id for signup in admitted] == [1, 2, 3]
         assert all(
             signup.assigned_role is EventRole.DPS for signup in admitted
         )
@@ -7804,22 +8174,21 @@ class TestRebalanceOccurrenceRoster:
         }
         # Fractal seats 1 healer and 4 DPS. User 1 keeps the only heal seat.
         # User 2 was the second healer and no longer fits as one, so rather than
-        # being waitlisted they take the DPS fallback. That plus users 3-5 fills
-        # the 4 DPS seats, and the remaining DPS drop to the waitlist in sign-up
+        # being waitlisted they take the DPS fallback. That plus users 3-4
+        # fills the plain DPS seats; the last is held for the boon DPS the
+        # roster lacks, so the remaining DPS drop to the waitlist in sign-up
         # order.
         assert seats == {
             1: EventRole.QUICKNESS_HEAL,
             2: EventRole.DPS,
             3: EventRole.DPS,
             4: EventRole.DPS,
-            5: EventRole.DPS,
         }
         assert [
             signup.discord_user_id for signup in signups if signup.waitlisted
-        ] == [6, 7, 8, 9, 10]
+        ] == [5, 6, 7, 8, 9, 10]
         assert len(signups) == 10
-        # Every seat is taken, but the reseated roster has no boon DPS, so
-        # the composition-gated FULL keeps the event reading as open.
+        # The held seat is still open, so the event keeps reading as open.
         assert not is_roster_full(fractal.capacity, signups)
 
     def test_moving_to_a_role_less_category_clears_the_assignments(
