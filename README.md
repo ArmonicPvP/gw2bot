@@ -505,7 +505,19 @@ or as a waitlist-only pick, before it is chosen. A member is seated in their
 main role when it still fits; otherwise a flex role is used, and the bot fills
 the scarcer seats first, so a flexer lands on an open heal or boon seat before a
 plain DPS one. When no acceptable seat is free the member joins the waitlist,
-marked ⌛️ in the embed. A Story, World vs. World, Open World, or General event
+marked ⌛️ in the embed.
+
+The last seats of a role-based roster are held for the composition it still
+lacks: two boon healers and two boon DPS in a raid or strike, one of each in a
+fractal, two boon DPS in a dungeon, and the Support in PvP. A member who could
+only take one of those seats without covering it joins the waitlist instead —
+a seventh Just DPS in a raid or a fourth in a fractal, or a boon DPS who would
+use the quickness or alacrity a healer still needs — and the picker marks that
+role full. A seated flexer is moved onto their boon role when that makes room.
+The same rule decides who is promoted off the waitlist, so a roster with every
+seat taken always has its boons covered.
+
+A Story, World vs. World, Open World, or General event
 has no roles to pick, so one click seats the member or waitlists them — and on a
 General event it always seats them.
 
@@ -540,7 +552,8 @@ thread, `<status> | MM.dd.yyyy | HH:mm`:
 | 🟡 ongoing | Started, not yet finished. |
 | ⚫️ over | Past its start plus duration. |
 
-A roster that occupies every seat without covering its required boons keeps
+A roster that occupies every seat without covering its required boons — only
+possible for one seated before its last seats were held for them — keeps
 reading as open rather than full, because it is still short of a squad.
 
 ### Repeating Events

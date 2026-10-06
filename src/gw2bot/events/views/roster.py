@@ -1961,14 +1961,11 @@ def _addition_summary(outcome: _AdditionOutcome) -> str:
     elif not outcome.added:
         lines.append("Nobody was added to the roster.")
     if waitlisted:
+        # Not "the event is full": a seat can be open and still held for the
+        # boons or heals the roster lacks, which the role picked cannot cover.
         lines.append(
-            "The event is full, so "
-            + _mention_list(waitlisted)
-            + (
-                " was added to the waitlist."
-                if len(waitlisted) == 1
-                else " were added to the waitlist."
-            )
+            f"No open seat could take {_mention_list(waitlisted)}, so they "
+            "were added to the waitlist."
         )
     if outcome.skipped:
         skipped = _mention_list(outcome.skipped)

@@ -155,9 +155,11 @@ class CategoryCapacity:
     dps: int | None
     quickness: int | None
     alacrity: int | None
-    # Minimum composition a roster must hold before it counts as FULL: seats
-    # can all be taken while the boons are uncovered (say, a healer plus four
-    # plain DPS), and such a roster should keep advertising itself as open.
+    # Minimum composition a roster must hold before it counts as FULL. Seats
+    # alone could all be taken while the boons are uncovered (say, a healer
+    # plus four plain DPS), so admission holds the last seats for whatever
+    # the roster still lacks: a member who can only take a plain seat waits
+    # rather than fill the roster up without its boons.
     required_boon_healers: int | None = None
     required_boon_dps: int | None = None
     # How many of the heal seats a Support may take. A Support brings no boon,
@@ -644,27 +646,80 @@ class RosterUpdate:
         return bool(self.reassigned or self.promoted or self.mentee_promoted)
 
 
-def roster_feasible(
+def _composition_gap(
+    capacity: CategoryCapacity,
+    healers: int,
+    dps: int,
+    quickness: int,
+    alacrity: int,
+    supports: int,
+) -> int:
+    # The required seats a seated roster leaves uncovered once its open seats
+    # are filled as well as they can be: a heal seat by a Support or a boon
+    # healer, a DPS seat by a boon DPS while the minimum is unmet, and every
+    # boon filler needing a quickness or alacrity seat still open. A boon
+    # healer covers a missing boon healer and an empty heal seat at once, so
+    # every count of them is tried rather than one guessed.
+    boon_healers = healers - supports
+    boon_dps = quickness + alacrity - boon_healers
+    open_heals = (capacity.healers or 0) - healers
+    open_dps = (capacity.dps or 0) - dps
+    open_supports = capacity.supports - supports
+    open_boons = (
+        (capacity.quickness or 0)
+        - quickness
+        + (capacity.alacrity or 0)
+        - alacrity
+    )
+    missing_boon_healers = max(
+        0, (capacity.required_boon_healers or 0) - boon_healers
+    )
+    missing_boon_dps = max(0, (capacity.required_boon_dps or 0) - boon_dps)
+    gaps: list[int] = []
+    for added_boon_healers in range(min(open_heals, open_boons) + 1):
+        added_boon_dps = min(
+            open_dps,
+            missing_boon_dps,
+            open_boons - added_boon_healers,
+        )
+        gaps.append(
+            max(0, missing_boon_healers - added_boon_healers)
+            + missing_boon_dps
+            - added_boon_dps
+            + max(0, open_heals - open_supports - added_boon_healers)
+        )
+    return min(gaps)
+
+
+def roster_shortfall(
     capacity: CategoryCapacity,
     acceptable: Sequence[tuple[EventRole, ...]],
-) -> bool:
-    """Whether every member can be seated in one of their acceptable roles.
+) -> int | None:
+    """How far the best seating of these members leaves the roster short.
+
+    None when they cannot all be seated in one of their acceptable roles.
+    Otherwise the fewest required seats left uncovered across every way of
+    seating them and filling the seats still open: boon healers and boon DPS
+    short of the category's minimum, and heal seats nobody could take. Zero
+    means the roster can still fill up to FULL.
 
     The quickness, alacrity and support caps cross-cut the healer/DPS split
     (a quickness seat can be QDPS or QHEAL), so this is a search rather than
-    simple counting. Members are assigned depth-first in order; count states
-    proven dead are memoised, which bounds the search by the tiny number of
+    simple counting. Members are assigned depth-first in order; each count
+    state is solved once, which bounds the search by the tiny number of
     distinct (index, healers, quickness, alacrity, supports) states rather
     than the number of role combinations.
     """
     if not capacity.has_roles:
-        return capacity.total is None or len(acceptable) <= capacity.total
+        if capacity.total is not None and len(acceptable) > capacity.total:
+            return None
+        return 0
     healer_cap = capacity.healers or 0
     dps_cap = capacity.dps or 0
     quickness_cap = capacity.quickness or 0
     alacrity_cap = capacity.alacrity or 0
     support_cap = capacity.supports
-    dead: set[tuple[int, int, int, int, int]] = set()
+    solved: dict[tuple[int, int, int, int, int], int | None] = {}
 
     def search(
         index: int,
@@ -673,14 +728,17 @@ def roster_feasible(
         quickness: int,
         alacrity: int,
         supports: int,
-    ) -> bool:
+    ) -> int | None:
         if index == len(acceptable):
-            return True
+            return _composition_gap(
+                capacity, healers, dps, quickness, alacrity, supports
+            )
         # dps is implied by (index, healers): every role occupies exactly one
         # of the healer/DPS groups, so it stays out of the memo key.
         key = (index, healers, quickness, alacrity, supports)
-        if key in dead:
-            return False
+        if key in solved:
+            return solved[key]
+        best: int | None = None
         for role in acceptable[index]:
             next_healers = healers + (role in HEAL_ROLES)
             next_dps = dps + (role in DPS_ROLES)
@@ -688,25 +746,52 @@ def roster_feasible(
             next_alacrity = alacrity + (role in ALACRITY_ROLES)
             next_supports = supports + (role is EventRole.SUPPORT)
             if (
-                next_healers <= healer_cap
-                and next_dps <= dps_cap
-                and next_quickness <= quickness_cap
-                and next_alacrity <= alacrity_cap
-                and next_supports <= support_cap
-                and search(
-                    index + 1,
-                    next_healers,
-                    next_dps,
-                    next_quickness,
-                    next_alacrity,
-                    next_supports,
-                )
+                next_healers > healer_cap
+                or next_dps > dps_cap
+                or next_quickness > quickness_cap
+                or next_alacrity > alacrity_cap
+                or next_supports > support_cap
             ):
-                return True
-        dead.add(key)
-        return False
+                continue
+            gap = search(
+                index + 1,
+                next_healers,
+                next_dps,
+                next_quickness,
+                next_alacrity,
+                next_supports,
+            )
+            if gap is not None and (best is None or gap < best):
+                best = gap
+                if best == 0:
+                    break
+        solved[key] = best
+        return best
 
     return search(0, 0, 0, 0, 0, 0)
+
+
+def roster_admits(
+    capacity: CategoryCapacity,
+    seated: Sequence[tuple[EventRole, ...]],
+    newcomer: tuple[EventRole, ...],
+) -> bool:
+    """Whether a newcomer can take a seat beside the members already seated.
+
+    Everyone must still fit in one of their acceptable roles, and the
+    newcomer must not leave the roster any further short of its required
+    composition. The last seats are held for the boons and heals a roster
+    still lacks, so a member who could only take a plain seat waits rather
+    than fill the roster up without them. Seated members keep their full
+    acceptable sets, so they may be flexed aside to make the room.
+
+    Judged against the seated roster's own shortfall rather than zero, so a
+    roster that is short already - seated before its last seats were held -
+    still takes a member who leaves it no worse.
+    """
+    before = roster_shortfall(capacity, seated)
+    after = roster_shortfall(capacity, [*seated, newcomer])
+    return before is not None and after is not None and after <= before
 
 
 def solve_roster(
@@ -717,21 +802,24 @@ def solve_roster(
 
     Candidates must already be in sign-up order. Each in turn is fixed to the
     first of their preferences that still lets everyone after them be seated
-    somehow, so an earlier signup only gets flexed off a preferred role when
-    keeping it would force a later member out entirely. Returns None when no
-    complete assignment exists.
+    somehow, with the required composition as reachable as it can be, so an
+    earlier signup only gets flexed off a preferred role when keeping it
+    would force a later member out entirely or leave a boon or heal seat the
+    roster needs with nobody to take it. Returns None when no complete
+    assignment exists.
     """
     if not capacity.has_roles:
         raise ValueError("solve_roster requires a role-based capacity")
     acceptable = [candidate.preferences for candidate in candidates]
-    if not roster_feasible(capacity, acceptable):
+    target = roster_shortfall(capacity, acceptable)
+    if target is None:
         return None
     assignment: dict[int, EventRole] = {}
     fixed: list[tuple[EventRole, ...]] = []
     for index, candidate in enumerate(candidates):
         for preference in candidate.preferences:
             trial = [*fixed, (preference,), *acceptable[index + 1 :]]
-            if roster_feasible(capacity, trial):
+            if roster_shortfall(capacity, trial) == target:
                 assignment[candidate.discord_user_id] = preference
                 fixed.append((preference,))
                 break
@@ -776,15 +864,19 @@ def can_admit(
     Seated members are never unseated: they keep their full acceptable sets,
     so a feasible solution seats all of them plus the newcomer. Feasibility
     only depends on membership, so the newcomer's position in the list does
-    not matter.
+    not matter. A seat the roster's missing boons or heals still need is not
+    open to a newcomer who cannot cover them; see roster_admits.
     """
     if not capacity.has_roles:
         return not is_roster_full(capacity, list(signups))
     acceptable = [
         candidate.preferences for candidate in seated_candidates(signups)
     ]
-    acceptable.append(preferred_role_order(role, flex_roles))
-    return roster_feasible(capacity, acceptable)
+    return roster_admits(
+        capacity,
+        acceptable,
+        preferred_role_order(role, flex_roles),
+    )
 
 
 def fitting_roles(
@@ -793,7 +885,8 @@ def fitting_roles(
 ) -> list[EventRole]:
     # A role fits when a rigid signup for it could be admitted, counting the
     # seated flexers' ability to move aside — so a boon seat held by someone
-    # who can flex elsewhere does not read as full.
+    # who can flex elsewhere does not read as full, while plain DPS does once
+    # the DPS seats left are the ones the boons still need.
     if not capacity.has_roles:
         return []
     acceptable = [
@@ -802,7 +895,7 @@ def fitting_roles(
     return [
         role
         for role in EventRole
-        if roster_feasible(capacity, [*acceptable, (role,)])
+        if roster_admits(capacity, acceptable, (role,))
     ]
 
 
@@ -837,10 +930,11 @@ def is_roster_full(
     capacity: CategoryCapacity,
     signups: list[EventSignup],
 ) -> bool:
-    # FULL means "seats taken AND the composition is covered": a roster can
-    # occupy every seat without its required boon coverage (a healer plus
-    # four plain DPS leaves a boon uncovered), and such an event should keep
-    # reading as open rather than done.
+    # FULL means "seats taken AND the composition is covered". Admission holds
+    # the last seats for the composition, so a roster seated since then has
+    # it whenever every seat is taken; one seated before could occupy every
+    # seat without it (a healer plus four plain DPS leaves a boon uncovered),
+    # and such an event should keep reading as open rather than done.
     counts = count_roster(signups)
     if not capacity.has_roles:
         # An uncapped roster is never full, so its status stays OPEN until the
@@ -871,7 +965,8 @@ def rebalance_signups(
     Signups are re-seated in sign-up order, so seats stay first come, first
     served. Each is offered its own role and flex roles, widened with a plain
     DPS fallback so one that no longer fits any declared role still keeps a
-    seat when a DPS slot is left; it is waitlisted only when even that fails.
+    seat when a DPS slot is left that the new category's boons do not need;
+    it is waitlisted only when even that fails.
     A signup carried over from a role-less category has no stored role, so it
     starts from that same DPS fallback, and the role is materialised because
     waitlist promotion skips a role-less signup. Admitted members may be
@@ -916,7 +1011,7 @@ def rebalance_signups(
         if EventRole.DPS not in preferences:
             preferences = (*preferences, EventRole.DPS)
             flex_roles = (*flex_roles, EventRole.DPS)
-        if roster_feasible(capacity, [*admitted_prefs, preferences]):
+        if roster_admits(capacity, admitted_prefs, preferences):
             admitted.append(
                 replace(signup, role=role, flex_roles=flex_roles)
             )

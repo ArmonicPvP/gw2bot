@@ -44,7 +44,7 @@ from gw2bot.events.models import (
     normalize_stored_roles,
     preferred_role_order,
     rebalance_signups,
-    roster_feasible,
+    roster_admits,
     seated_candidates,
     solve_roster,
 )
@@ -184,8 +184,9 @@ async def seat_signup(
         # re-sorted: their signup time is "now", so they carry the lowest
         # seating priority. Seated members keep their full acceptable sets,
         # so admission may flex them to another of their roles but can never
-        # unseat them; when even that cannot fit the newcomer, they are
-        # waitlisted.
+        # unseat them; when even that cannot fit the newcomer, or fits them
+        # only in a seat the roster's missing boons or heals still need, they
+        # are waitlisted.
         candidates = seated_candidates(signups)
         candidates.append(
             RosterCandidate(
@@ -193,7 +194,11 @@ async def seat_signup(
                 preferences=preferred_role_order(role, flex_roles),
             )
         )
-        solution = solve_roster(event.capacity, candidates)
+        solution = (
+            solve_roster(event.capacity, candidates)
+            if can_admit(event.capacity, signups, role, flex_roles)
+            else None
+        )
         waitlisted = solution is None
         if solution is not None:
             assigned_role = solution[discord_user_id]
@@ -1477,9 +1482,11 @@ def _resettle_roster(
     Runs after a seated member departs. Fully synchronous - callers rely on
     the store read and every write landing without an intervening await. The
     waitlist is swept once in FCFS order and each candidate whose addition is
-    feasible (counting seated flexers moving aside) is admitted; one pass is
-    complete because admitting a member never makes another candidate newly
-    feasible. The final solve then snaps every seated flexer back to the best
+    feasible (counting seated flexers moving aside) is admitted, except into
+    a seat the roster's missing boons or heals need - that one waits for a
+    later candidate who can cover them. One pass is complete because
+    admitting a member never makes another candidate newly feasible. The
+    final solve then snaps every seated flexer back to the best
     role their seniority allows, so a member flexed away from their primary
     pick recovers it as soon as the roster permits.
     """
@@ -1881,9 +1888,10 @@ async def apply_signup_edit(
             for candidate in seated_candidates(signups)
             if candidate.discord_user_id != discord_user_id
         ]
-        keeps_seat = roster_feasible(
+        keeps_seat = roster_admits(
             event.capacity,
-            [*others, preferred_role_order(role, flex_roles)],
+            others,
+            preferred_role_order(role, flex_roles),
         )
         if not keeps_seat and not allow_waitlist:
             LOGGER.debug(
@@ -2187,8 +2195,9 @@ def apply_auto_signups(
                     len(signup_flex_roles),
                 )
             # Same admission as a live signup: earlier entries may be flexed
-            # aside to fit this one, but are never unseated. The roster is
-            # freshly seeded and unseen, so the reshuffle happens silently.
+            # aside to fit this one, but are never unseated, and the seats
+            # the missing boons or heals need are held for them. The roster
+            # is freshly seeded and unseen, so the reshuffle happens silently.
             candidates = seated_candidates(signups)
             candidates.append(
                 RosterCandidate(
@@ -2199,7 +2208,16 @@ def apply_auto_signups(
                     ),
                 )
             )
-            solution = solve_roster(event.capacity, candidates)
+            solution = (
+                solve_roster(event.capacity, candidates)
+                if can_admit(
+                    event.capacity,
+                    signups,
+                    signup_role,
+                    signup_flex_roles,
+                )
+                else None
+            )
             waitlisted = solution is None
             if solution is not None:
                 assigned_role = solution[entry.discord_user_id]
