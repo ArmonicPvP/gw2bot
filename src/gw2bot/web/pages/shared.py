@@ -15,7 +15,7 @@ SHARED_STYLE = """
   --border: #3d4249;
   --text: #e8eaed;
   --muted: #9aa0a6;
-  --accent: #5865f2;
+  --accent: #a17bd0;
   --open: #2ecc71;
   --ongoing: #f1c40f;
   --full: #e74c3c;
