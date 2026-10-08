@@ -32,7 +32,11 @@ body {
   overflow: hidden;
 }
 .controls, .views { display: flex; gap: 0.25rem; }
-button.active { background: var(--accent); border-color: var(--accent); }
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
 #period { font-weight: 600; font-size: 0.95rem; min-width: 11rem; }
 main {
   /* min-height:0 lets this flex child shrink to the viewport so its own
