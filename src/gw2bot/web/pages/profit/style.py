@@ -31,7 +31,14 @@ input {
   font: inherit;
   font-size: 0.85rem;
 }
-.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+/* button:hover outranks .primary and swaps the fill for --border, which the
+   dark accent text would vanish into. */
+.primary:hover { color: var(--text); }
 /* The narrow width above is meant for the paginator's number boxes; a date
    field needs whatever its browser's spelling of a date takes. */
 .custom input[type="date"] { width: auto; }

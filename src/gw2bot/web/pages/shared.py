@@ -16,6 +16,9 @@ SHARED_STYLE = """
   --text: #e8eaed;
   --muted: #9aa0a6;
   --accent: #a17bd0;
+  /* Text on an accent fill: white on the purple reads at 3.4:1, short of
+     the 4.5:1 body text needs, and this reads at 5:1. */
+  --on-accent: #1b1e21;
   --open: #2ecc71;
   --ongoing: #f1c40f;
   --full: #e74c3c;
@@ -89,7 +92,11 @@ header form { display: flex; }
 RANGE_PICKER_STYLE = """
 .ranges { display: flex; gap: 0.25rem; }
 button:disabled { opacity: 0.4; cursor: default; }
-button.active { background: var(--accent); border-color: var(--accent); }
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
 /* The date picker is a second header row that stays out of the way until the
    Custom button reveals it, so the preset windows remain one tap apart. */
 .custom {
@@ -418,7 +425,7 @@ body { display: flex; align-items: center; justify-content: center; }
 .button {
   display: inline-block;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   text-decoration: none;
   padding: 0.6rem 1.4rem;
   border-radius: 8px;
