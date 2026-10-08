@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import combinations_with_replacement
@@ -40,6 +40,8 @@ from gw2bot.events.models import (
     roster_admits,
     roster_shortfall,
     seated_candidates,
+    seated_roster_short,
+    seats_to_release,
     solve_roster,
     supported_roles,
 )
@@ -63,6 +65,7 @@ from gw2bot.events.posting import (
     rebalance_occurrence_roster,
     refresh_occurrence_message,
     refresh_retired_posts,
+    release_held_seats,
     remove_signup,
     repost_occurrence,
     seat_signup,
@@ -7111,6 +7114,289 @@ class TestNotifyRosterUpdate:
         for content in roster_update_messages(update):
             assert content not in caplog.text
         assert "Forbidden" in caplog.text
+
+
+def _seat_in_order(
+    store: EventStore,
+    occurrence_id: int,
+    roster: Sequence[tuple[int, EventRole, EventRole | None]],
+    flex_roles: Mapping[int, tuple[EventRole, ...]] | None = None,
+) -> None:
+    # Stored straight into the rows, the way a roster seated before
+    # admission held its last seats can still be lying in the database.
+    # A None seat is a member on the waitlist.
+    for minute, (user_id, role, seat) in enumerate(roster):
+        store.add_signup(
+            occurrence_id=occurrence_id,
+            discord_user_id=user_id,
+            role=role,
+            assigned_role=seat,
+            flex_roles=(flex_roles or {}).get(user_id, ()),
+            waitlisted=seat is None,
+            now=START + timedelta(minutes=minute),
+        )
+
+
+def _joined(
+    roster: Sequence[tuple[int, EventRole, EventRole]],
+) -> list[EventSignup]:
+    return [
+        make_signup(
+            user_id,
+            role,
+            seat,
+            signed_up_at=START + timedelta(minutes=minute),
+        )
+        for minute, (user_id, role, seat) in enumerate(roster)
+    ]
+
+
+class TestReleaseHeldSeats:
+    def test_the_last_plain_dps_to_join_a_short_fractal_is_released(
+        self,
+    ) -> None:
+        signups = _joined(
+            [
+                (1, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+                (2, EventRole.DPS, EventRole.DPS),
+                (3, EventRole.DPS, EventRole.DPS),
+                (4, EventRole.DPS, EventRole.DPS),
+                (5, EventRole.DPS, EventRole.DPS),
+            ]
+        )
+
+        assert seated_roster_short(FRACTAL_CAPACITY, signups)
+        assert seats_to_release(FRACTAL_CAPACITY, signups) == {5}
+
+    def test_a_raid_releases_its_last_two_plain_dps_in_join_order(
+        self,
+    ) -> None:
+        # Six plain DPS fit beside the two boon DPS a raid needs; the
+        # seventh and eighth to join are the ones in those seats, wherever
+        # the healers joined between them.
+        roster: list[tuple[int, EventRole, EventRole]] = [
+            (1, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+        ]
+        roster += [
+            (user_id, EventRole.DPS, EventRole.DPS) for user_id in range(2, 9)
+        ]
+        roster += [
+            (9, EventRole.ALACRITY_HEAL, EventRole.ALACRITY_HEAL),
+            (10, EventRole.DPS, EventRole.DPS),
+        ]
+
+        assert seats_to_release(RAID_CAPACITY, _joined(roster)) == {8, 10}
+
+    def test_a_boon_dps_holding_the_healers_boon_is_released(self) -> None:
+        # Quickness and alacrity DPS use both of a fractal's boons, so no
+        # healer could take its heal seat: the later of the two gives it up.
+        signups = _joined(
+            [
+                (1, EventRole.QUICKNESS_DPS, EventRole.QUICKNESS_DPS),
+                (2, EventRole.ALACRITY_DPS, EventRole.ALACRITY_DPS),
+                (3, EventRole.DPS, EventRole.DPS),
+                (4, EventRole.DPS, EventRole.DPS),
+            ]
+        )
+
+        assert seats_to_release(FRACTAL_CAPACITY, signups) == {2}
+
+    def test_a_flexer_who_can_cover_the_boon_releases_nobody(self) -> None:
+        signups = [
+            make_signup(1, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+            make_signup(
+                2,
+                EventRole.DPS,
+                EventRole.DPS,
+                flex_roles=(EventRole.ALACRITY_DPS,),
+            ),
+            make_signup(3, EventRole.DPS, EventRole.DPS),
+            make_signup(4, EventRole.DPS, EventRole.DPS),
+            make_signup(5, EventRole.DPS, EventRole.DPS),
+        ]
+
+        # Seated as stored it is short, but moving the flexer covers it.
+        assert seated_roster_short(FRACTAL_CAPACITY, signups)
+        assert seats_to_release(FRACTAL_CAPACITY, signups) == frozenset()
+
+    @pytest.mark.parametrize(
+        ("capacity", "roster"),
+        [
+            (
+                RAID_CAPACITY,
+                [
+                    EventRole.QUICKNESS_HEAL,
+                    EventRole.ALACRITY_HEAL,
+                    EventRole.QUICKNESS_DPS,
+                    EventRole.ALACRITY_DPS,
+                    *[EventRole.DPS] * 6,
+                ],
+            ),
+            (
+                FRACTAL_CAPACITY,
+                [EventRole.ALACRITY_HEAL, EventRole.QUICKNESS_DPS],
+            ),
+            (PVP_CAPACITY, [EventRole.DPS] * 4),
+        ],
+    )
+    def test_a_roster_that_can_still_fill_up_is_left_alone(
+        self,
+        capacity: CategoryCapacity,
+        roster: list[EventRole],
+    ) -> None:
+        signups = _joined(
+            [
+                (user_id, role, role)
+                for user_id, role in enumerate(roster, start=1)
+            ]
+        )
+
+        assert not seated_roster_short(capacity, signups)
+        assert seats_to_release(capacity, signups) == frozenset()
+
+    async def test_release_waitlists_the_seat_and_promotes_who_covers_it(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        _seat_in_order(
+            store,
+            occurrence.occurrence_id,
+            [
+                (11, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+                (12, EventRole.DPS, EventRole.DPS),
+                (13, EventRole.DPS, EventRole.DPS),
+                (14, EventRole.DPS, EventRole.DPS),
+                (15, EventRole.DPS, EventRole.DPS),
+                (16, EventRole.DPS, None),
+                (17, EventRole.ALACRITY_DPS, None),
+            ],
+        )
+
+        update = release_held_seats(bot, event, occurrence)
+
+        assert [signup.discord_user_id for signup in update.waitlisted] == [
+            15
+        ]
+        assert [signup.discord_user_id for signup in update.promoted] == [17]
+        released = store.get_signup(occurrence.occurrence_id, 15)
+        assert released is not None
+        assert released.waitlisted
+        assert released.assigned_role is None
+        # Their sign-up time is kept, so they stay ahead of anyone who
+        # joined after them on the waitlist.
+        assert released.signed_up_at == START + timedelta(minutes=4)
+        still_waiting = store.get_signup(occurrence.occurrence_id, 16)
+        assert still_waiting is not None
+        assert still_waiting.waitlisted
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert is_roster_full(event.capacity, signups)
+
+        await notify_roster_update(bot, occurrence, update)
+
+        assert channel.thread.send.await_args is not None
+        content = channel.thread.send.await_args.args[0]
+        assert "<@15> moved to the waitlist" in content
+        assert "<@17> moved up from the waitlist" in content
+
+    async def test_release_moves_a_flexer_onto_the_boon_instead(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(bot, store)
+        _seat_in_order(
+            store,
+            occurrence.occurrence_id,
+            [
+                (11, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+                (12, EventRole.DPS, EventRole.DPS),
+                (13, EventRole.DPS, EventRole.DPS),
+                (14, EventRole.DPS, EventRole.DPS),
+                (15, EventRole.DPS, EventRole.DPS),
+            ],
+            flex_roles={12: (EventRole.ALACRITY_DPS,)},
+        )
+
+        update = release_held_seats(bot, event, occurrence)
+
+        assert update.waitlisted == ()
+        assert update.reassigned == (
+            RoleChange(
+                discord_user_id=12,
+                old_role=EventRole.DPS,
+                new_role=EventRole.ALACRITY_DPS,
+            ),
+        )
+        assert is_roster_full(
+            event.capacity, store.get_signups(occurrence.occurrence_id)
+        )
+
+    async def test_release_hands_a_released_mentees_slot_on(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        event = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            mentee_enabled=True,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        _seat_in_order(
+            store,
+            occurrence.occurrence_id,
+            [
+                (11, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+                (12, EventRole.DPS, EventRole.DPS),
+                (13, EventRole.DPS, EventRole.DPS),
+                (14, EventRole.DPS, EventRole.DPS),
+                (15, EventRole.DPS, EventRole.DPS),
+            ],
+        )
+        store.set_signup_mentee(occurrence.occurrence_id, 15, True)
+        store.set_signup_mentee(occurrence.occurrence_id, 12, True)
+
+        update = release_held_seats(bot, event, occurrence)
+
+        assert [signup.discord_user_id for signup in update.waitlisted] == [
+            15
+        ]
+        assert [
+            signup.discord_user_id for signup in update.mentee_promoted
+        ] == [12]
+
+    def test_merge_keeps_a_release_and_drops_a_departed_member(self) -> None:
+        released = make_signup(15, EventRole.DPS, None, waitlisted=True)
+        departed = make_signup(16, EventRole.DPS, None, waitlisted=True)
+        moved = RoleChange(
+            discord_user_id=15,
+            old_role=EventRole.ALACRITY_DPS,
+            new_role=EventRole.DPS,
+        )
+
+        merged = merge_roster_updates(
+            [
+                RosterUpdate(reassigned=(moved,)),
+                RosterUpdate(waitlisted=(released, departed)),
+            ],
+            removed_user_ids=[16],
+        )
+
+        # Moved and then released reads as the release alone.
+        assert merged.reassigned == ()
+        assert merged.waitlisted == (released,)
 
 
 class TestMergeRosterUpdates:

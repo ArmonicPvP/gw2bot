@@ -6131,6 +6131,114 @@ class TestEventEditConfirmView:
         assert edit is not None
         assert "Renamed Mid-Check" in edit.kwargs["embed"].title
 
+    async def save_unchanged(
+        self,
+        fake_bot: Any,
+        event: Any,
+        occurrence: Any,
+    ) -> None:
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+    @staticmethod
+    def seat_in_order(
+        store: EventStore,
+        occurrence: Any,
+        roster: list[tuple[int, EventRole, bool]],
+    ) -> None:
+        for minute, (user_id, role, waitlisted) in enumerate(roster):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=None if waitlisted else role,
+                flex_roles=(),
+                waitlisted=waitlisted,
+                now=FAR_FUTURE - timedelta(days=30, minutes=-minute),
+            )
+
+    async def test_saving_unchanged_releases_seats_held_for_a_boon(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Seated before the last seats were held for the boons: a healer and
+        # four plain DPS leave the fractal's boon DPS with no seat. Saving the
+        # edit as it stands is how a commander puts an old run right.
+        event, occurrence = make_posted_edit_event(store)
+        self.seat_in_order(
+            store,
+            occurrence,
+            [
+                (1, EventRole.QUICKNESS_HEAL, False),
+                (2, EventRole.DPS, False),
+                (3, EventRole.DPS, False),
+                (4, EventRole.DPS, False),
+                (5, EventRole.DPS, False),
+                (6, EventRole.ALACRITY_DPS, True),
+            ],
+        )
+
+        await self.save_unchanged(fake_bot, event, occurrence)
+
+        released = store.get_signup(occurrence.occurrence_id, 5)
+        assert released is not None
+        assert released.waitlisted
+        promoted = store.get_signup(occurrence.occurrence_id, 6)
+        assert promoted is not None
+        assert not promoted.waitlisted
+        assert promoted.assigned_role is EventRole.ALACRITY_DPS
+        sent = [
+            call.args[0] for call in channel.thread.send.await_args_list
+        ]
+        assert any("<@5> moved to the waitlist" in content for content in sent)
+        assert any(
+            "<@6> moved up from the waitlist" in content for content in sent
+        )
+        edit = channel.partial_message.edit.await_args
+        assert edit is not None
+        assert edit.kwargs["embed"].color.value == STATUS_COLORS[
+            EventStatus.FULL
+        ]
+
+    async def test_saving_unchanged_leaves_a_sound_roster_alone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        roster = [
+            (1, EventRole.QUICKNESS_HEAL, False),
+            (2, EventRole.ALACRITY_DPS, False),
+            (3, EventRole.DPS, False),
+            (4, EventRole.DPS, False),
+            (5, EventRole.DPS, False),
+            (6, EventRole.DPS, True),
+        ]
+        self.seat_in_order(store, occurrence, roster)
+        before = store.get_signups(occurrence.occurrence_id)
+
+        await self.save_unchanged(fake_bot, event, occurrence)
+
+        assert store.get_signups(occurrence.occurrence_id) == before
+        assert not any(
+            "Roster update" in call.args[0]
+            for call in channel.thread.send.await_args_list
+        )
+
     async def test_category_change_reseats_the_roster(
         self,
         fake_bot: Any,

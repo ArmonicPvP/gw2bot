@@ -422,6 +422,17 @@ class TestRosterUpdateMessage:
         assert "<@12> moved up from the waitlist" in messages[0]
         assert " as " not in messages[0]
 
+    def test_release_to_the_waitlist_says_why(self) -> None:
+        update = RosterUpdate(waitlisted=(make_signup(15),))
+
+        messages = roster_update_messages(update)
+
+        assert len(messages) == 1
+        assert (
+            "<@15> moved to the waitlist: their seat is held for a boon or "
+            "heal the run still needs"
+        ) in messages[0]
+
     def test_empty_update_produces_no_message(self) -> None:
         assert roster_update_messages(RosterUpdate()) == []
 

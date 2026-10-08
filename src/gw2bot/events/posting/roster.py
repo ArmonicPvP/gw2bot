@@ -46,6 +46,7 @@ from gw2bot.events.models import (
     rebalance_signups,
     roster_admits,
     seated_candidates,
+    seats_to_release,
     solve_roster,
 )
 from gw2bot.events.posting.channels import (
@@ -1476,6 +1477,8 @@ def _resettle_roster(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
+    *,
+    release_held: bool = False,
 ) -> RosterUpdate:
     """Promote fitting waitlisted members and re-canonicalise assignments.
 
@@ -1489,6 +1492,10 @@ def _resettle_roster(
     final solve then snaps every seated flexer back to the best
     role their seniority allows, so a member flexed away from their primary
     pick recovers it as soon as the roster permits.
+
+    With release_held, the seated members admission would have turned away
+    are first moved to the waitlist (see seats_to_release), in the same
+    write as the promotions their seats make room for.
     """
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not event.capacity.has_roles:
@@ -1523,9 +1530,28 @@ def _resettle_roster(
             len(promoted),
         )
         return RosterUpdate(promoted=tuple(promoted))
-    seated = [signup for signup in signups if not signup.waitlisted]
+    released = (
+        seats_to_release(event.capacity, signups)
+        if release_held
+        else frozenset[int]()
+    )
+    seated = [
+        signup
+        for signup in signups
+        if not signup.waitlisted and signup.discord_user_id not in released
+    ]
+    # A released member joins the waitlist at their own sign-up time, ahead
+    # of anyone who joined after them, and is swept with the rest. They are
+    # never promoted straight back: the seats they were turned away from
+    # only fill further.
     waitlisted = sorted(
-        (signup for signup in signups if signup.waitlisted),
+        (
+            replace(signup, assigned_role=None, waitlisted=True)
+            if signup.discord_user_id in released
+            else signup
+            for signup in signups
+            if signup.waitlisted or signup.discord_user_id in released
+        ),
         key=lambda signup: (signup.signed_up_at, signup.discord_user_id),
     )
     admitted_ids: set[int] = set()
@@ -1583,23 +1609,73 @@ def _resettle_roster(
             )
         )
         promoted_signups.append(promoted_signup)
+    released_signups = [
+        signup
+        for signup in waitlisted
+        if signup.discord_user_id in released
+        and signup.discord_user_id not in admitted_ids
+    ]
+    assignments.extend(
+        RosterAssignment(
+            discord_user_id=signup.discord_user_id,
+            role=signup.role,
+            assigned_role=None,
+            waitlisted=True,
+        )
+        for signup in released_signups
+    )
     bot.event_store.apply_roster_assignments(
         occurrence.occurrence_id,
         assignments,
     )
     LOGGER.debug(
         "Resettled event roster; occurrence_id=%s seated=%s "
-        "waitlist_skipped=%s promoted=%s reassigned=%s",
+        "waitlist_skipped=%s promoted=%s reassigned=%s released=%s",
         occurrence.occurrence_id,
         len(seated),
         skipped,
         len(promoted_signups),
         len(changes),
+        len(released_signups),
     )
     return RosterUpdate(
         reassigned=tuple(changes),
         promoted=tuple(promoted_signups),
+        waitlisted=tuple(released_signups),
     )
+
+
+def release_held_seats(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> RosterUpdate:
+    """Waitlist the latest members seated in a seat the boons or heals need.
+
+    A roster seated before admission held its last seats for the composition
+    can hold every seat without it. This re-seats it as admission would have:
+    the latest to join of those holding a seat the missing boons or heals
+    need move to the waitlist, a flexer who can cover the gap is moved onto
+    the boon instead, and the freed seats go to whoever on the waitlist
+    covers it. Fully synchronous, like the resettle it runs, and a roster
+    that is short of nothing is left as it is.
+    """
+    if not event.capacity.has_roles:
+        return RosterUpdate()
+    before = mentee_snapshot(bot, event, occurrence.occurrence_id)
+    update = _resettle_roster(bot, event, occurrence, release_held=True)
+    # A released mentee can no longer co-lead, and the store hands the slot
+    # on in the same write.
+    mentee = mentee_movement(bot, event, occurrence.occurrence_id, before)
+    LOGGER.debug(
+        "Released held roster seats; occurrence_id=%s released=%s "
+        "promoted=%s reassigned=%s",
+        occurrence.occurrence_id,
+        len(update.waitlisted),
+        len(update.promoted),
+        len(update.reassigned),
+    )
+    return replace(update, mentee_promoted=mentee.mentee_promoted)
 
 
 async def notify_roster_update(
@@ -1690,11 +1766,20 @@ def merge_roster_updates(
     removed = set(removed_user_ids)
     chains: dict[int, RoleChange] = {}
     promoted: dict[int, EventSignup] = {}
+    waitlisted: dict[int, EventSignup] = {}
     mentee: EventSignup | None = None
     for update in updates:
         for signup in update.mentee_promoted:
             mentee = signup
+        # A member moved to the waitlist after earlier moves ends the batch
+        # there, so their earlier lines are dropped; one moved back up later
+        # reads as the promotion that put them where they are.
+        for signup in update.waitlisted:
+            waitlisted[signup.discord_user_id] = signup
+            promoted.pop(signup.discord_user_id, None)
+            chains.pop(signup.discord_user_id, None)
         for signup in update.promoted:
+            waitlisted.pop(signup.discord_user_id, None)
             promoted[signup.discord_user_id] = signup
         for change in update.reassigned:
             promoted_signup = promoted.get(change.discord_user_id)
@@ -1731,6 +1816,11 @@ def merge_roster_updates(
             if mentee is not None and mentee.discord_user_id not in removed
             else ()
         ),
+        waitlisted=tuple(
+            signup
+            for user_id, signup in waitlisted.items()
+            if user_id not in removed
+        ),
     )
 
 
@@ -1763,6 +1853,11 @@ def _without_member(update: RosterUpdate, discord_user_id: int) -> RosterUpdate:
         # member waiting for the mentee slot hands it to them, and the
         # summary the editor sees is about their roles, not the slot.
         mentee_promoted=update.mentee_promoted,
+        waitlisted=tuple(
+            signup
+            for signup in update.waitlisted
+            if signup.discord_user_id != discord_user_id
+        ),
     )
 
 

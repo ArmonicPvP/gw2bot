@@ -293,8 +293,9 @@ def roster_update_messages(update: RosterUpdate) -> list[str]:
     """Announce a roster mutation, split to stay inside Discord's limit.
 
     One batched thread message per roster mutation: every reassigned member,
-    waitlist promotion and move up into the mentee slot is listed once, so a
-    single signup or departure never produces more than one ping. That is
+    waitlist promotion, move up into the mentee slot and move down to the
+    waitlist is listed once, so a single signup or departure never produces
+    more than one ping. That is
     almost always a single message - a mutation moves a handful of members -
     but an uncapped category (General) has no bound on its roster, and
     switching a capped event to one promotes the whole waitlist at once, which
@@ -327,6 +328,11 @@ def roster_update_messages(update: RosterUpdate) -> list[str]:
         lines.append(
             f"└ <@{signup.discord_user_id}> moved up from the mentee waitlist "
             "and is now the 🎓 mentee"
+        )
+    for signup in update.waitlisted:
+        lines.append(
+            f"└ <@{signup.discord_user_id}> moved to the waitlist: their seat "
+            "is held for a boon or heal the run still needs"
         )
     return _chunk_message_lines(ROSTER_UPDATE_HEADER, lines)
 

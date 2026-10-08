@@ -19,6 +19,7 @@ from gw2bot.events.models import (
     EventStatus,
     RepeatFrequency,
     RosterUpdate,
+    seated_roster_short,
 )
 from gw2bot.events.views.preview import send_event_preview
 from gw2bot.events.views.shared import (
@@ -112,6 +113,7 @@ async def apply_event_edit(
         occurrence_finished,
         rebalance_occurrence_roster,
         refresh_occurrence_message,
+        release_held_seats,
         repost_occurrence,
     )
 
@@ -277,7 +279,12 @@ async def apply_event_edit(
             )
             if refetched is not None:
                 current = refetched
-        if category_changed:
+        # A roster seated before admission held its last seats for the boons
+        # can be holding them without the boons, and any save puts it right -
+        # a commander saving an edit unchanged is how an old run is fixed.
+        # Every other roster is left exactly as it is.
+        reseat = category_changed or _seated_short(bot, updated, current)
+        if reseat:
             # Re-seat the members who are actually still here. The preview's
             # check can be minutes old by the time the pickers and the modal
             # are done with, and a departed member re-seated under the new
@@ -299,13 +306,14 @@ async def apply_event_edit(
                 # A roster the bot could not check is still a roster to
                 # re-seat; the departures wait for the next check.
                 LOGGER.error(
-                    "Could not check the roster before a category rebalance; "
-                    "occurrence_id=%s error_type=%s",
+                    "Could not check the roster before re-seating it; "
+                    "occurrence_id=%s category_changed=%s error_type=%s",
                     current.occurrence_id,
+                    category_changed,
                     type(exc).__name__,
                 )
             # The check removes through remove_signup, which re-solves the
-            # roster it leaves behind, so the rebalance below must see those
+            # roster it leaves behind, so the re-seat below must see those
             # rows rather than the ones read before it. That removal also
             # refreshes a message somebody may have deleted, and the NotFound
             # behind it retires the run: re-seating a roster that is history,
@@ -357,8 +365,8 @@ async def apply_event_edit(
                 or occurrence_finished(resaved, reread)
             ):
                 LOGGER.debug(
-                    "Skipped a category rebalance for a run the check "
-                    "retired; occurrence_id=%s exists=%s event_exists=%s",
+                    "Skipped re-seating a run the check retired; "
+                    "occurrence_id=%s exists=%s event_exists=%s",
                     current.occurrence_id,
                     reread is not None,
                     resaved is not None,
@@ -375,11 +383,15 @@ async def apply_event_edit(
             # changing it invalidates every stored assignment. Re-seat the roster
             # before the message is re-rendered, so the embed and the capacity
             # checks both describe the new category, and announce the moves in
-            # the occurrence's thread so members learn their new seat.
+            # the occurrence's thread so members learn their new seat. Without
+            # a new category, only the seats held for the boons are released.
             try:
-                _, rebalanced = rebalance_occurrence_roster(
-                    bot, updated, current
-                )
+                if category_changed:
+                    _, rebalanced = rebalance_occurrence_roster(
+                        bot, updated, current
+                    )
+                else:
+                    rebalanced = release_held_seats(bot, updated, current)
                 # The check moved the roster before the re-seat did, and it
                 # can have moved the same member: folded, they read as one
                 # move, and anybody it took off is dropped rather than given a
@@ -390,9 +402,10 @@ async def apply_event_edit(
             except (SQLAlchemyError, ValueError) as exc:
                 # A stale roster must not block the rest of the edit.
                 LOGGER.error(
-                    "Could not rebalance roster after a category change; "
-                    "occurrence_id=%s error_type=%s",
+                    "Could not re-seat the roster after an edit; "
+                    "occurrence_id=%s category_changed=%s error_type=%s",
                     current.occurrence_id,
+                    category_changed,
                     type(exc).__name__,
                 )
                 # The check's own movements are committed whatever the
@@ -516,6 +529,26 @@ async def apply_event_edit(
     else:
         content = f"Event **{updated.event_id}** was updated."
     await interaction.edit_original_response(content=content, view=None)
+
+
+def _seated_short(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> bool:
+    # Read for the edit's own sake: a store that will not answer leaves the
+    # roster as it is, and the rest of the save goes ahead.
+    try:
+        signups = bot.event_store.get_signups(occurrence.occurrence_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the roster to check its held seats; "
+            "occurrence_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return False
+    return seated_roster_short(event.capacity, signups)
 
 
 def _deleted_history_note(kept: int) -> str:

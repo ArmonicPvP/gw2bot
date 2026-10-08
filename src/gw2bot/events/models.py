@@ -640,10 +640,19 @@ class RosterUpdate:
     # store hands the slot on inside the same write that frees it, so this is
     # read off the roster before and after a change rather than decided here.
     mentee_promoted: tuple[EventSignup, ...] = ()
+    # Seated members moved to the waitlist because the seat they held is one
+    # the roster's missing boons or heals need. Admission never seats anybody
+    # there, so only a roster seated before it held those seats has any.
+    waitlisted: tuple[EventSignup, ...] = ()
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.reassigned or self.promoted or self.mentee_promoted)
+        return bool(
+            self.reassigned
+            or self.promoted
+            or self.mentee_promoted
+            or self.waitlisted
+        )
 
 
 def _composition_gap(
@@ -851,6 +860,60 @@ def seated_candidates(
             )
         )
     return candidates
+
+
+def seated_roster_short(
+    capacity: CategoryCapacity,
+    signups: Sequence[EventSignup],
+) -> bool:
+    """Whether the roster, seated as it is stored, could not fill up to FULL.
+
+    Every roster seated since admission held its last seats for the boons
+    and heals is never short this way. One seated before can be, either
+    because somebody holds a seat the composition needs or because a flexer
+    sits on a role that leaves a boon uncovered; releasing the held seats
+    puts either right.
+    """
+    if not capacity.has_roles:
+        return False
+    seated = [
+        (
+            signup.assigned_role
+            if signup.assigned_role is not None
+            else EventRole.DPS,
+        )
+        for signup in signups
+        if not signup.waitlisted
+    ]
+    return roster_shortfall(capacity, seated) != 0
+
+
+def seats_to_release(
+    capacity: CategoryCapacity,
+    signups: Sequence[EventSignup],
+) -> frozenset[int]:
+    """The seated members admission would have sent to the waitlist.
+
+    Seated members are re-admitted in sign-up order, exactly as admission
+    would have taken them, and whoever it turns away is returned: the latest
+    to join of those holding a seat the roster's missing boons or heals
+    need. A flexer who could cover the gap keeps their seat, moved onto the
+    boon. Empty for any roster that can still fill up.
+    """
+    if not capacity.has_roles:
+        return frozenset()
+    candidates = seated_candidates(signups)
+    acceptable = [candidate.preferences for candidate in candidates]
+    if roster_shortfall(capacity, acceptable) == 0:
+        return frozenset()
+    kept: list[tuple[EventRole, ...]] = []
+    released: set[int] = set()
+    for candidate in candidates:
+        if roster_admits(capacity, kept, candidate.preferences):
+            kept.append(candidate.preferences)
+        else:
+            released.add(candidate.discord_user_id)
+    return frozenset(released)
 
 
 def can_admit(
