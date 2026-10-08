@@ -7377,6 +7377,104 @@ class TestReleaseHeldSeats:
             signup.discord_user_id for signup in update.mentee_promoted
         ] == [12]
 
+    async def test_a_sign_up_releases_held_seats_before_judging(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Judged against the roster as it stood, the alacrity DPS would find
+        # every DPS seat taken. Released first, the last plain DPS gives up
+        # the seat the boon needs, and the newcomer takes it.
+        event, occurrence = await post_new_event(bot, store)
+        _seat_in_order(
+            store,
+            occurrence.occurrence_id,
+            [
+                (11, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+                (12, EventRole.DPS, EventRole.DPS),
+                (13, EventRole.DPS, EventRole.DPS),
+                (14, EventRole.DPS, EventRole.DPS),
+                (15, EventRole.DPS, EventRole.DPS),
+            ],
+        )
+
+        signup, update = await seat_signup(
+            bot, event, occurrence, 16, EventRole.ALACRITY_DPS, ()
+        )
+
+        assert not signup.waitlisted
+        assert signup.assigned_role is EventRole.ALACRITY_DPS
+        assert [entry.discord_user_id for entry in update.waitlisted] == [15]
+        released = store.get_signup(occurrence.occurrence_id, 15)
+        assert released is not None
+        assert released.waitlisted
+
+    async def test_a_sign_out_releases_what_is_still_held(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Two healers and eight plain DPS: one DPS leaving still leaves seven
+        # where a raid has room for six beside its two boon DPS, so the last
+        # to join gives theirs up, and the boon DPS waiting take both.
+        event, occurrence = await post_new_event(
+            bot, store, category=EventCategory.RAID
+        )
+        roster: list[tuple[int, EventRole, EventRole | None]] = [
+            (11, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+            (12, EventRole.ALACRITY_HEAL, EventRole.ALACRITY_HEAL),
+        ]
+        roster += [
+            (user_id, EventRole.DPS, EventRole.DPS)
+            for user_id in range(13, 21)
+        ]
+        roster += [
+            (21, EventRole.QUICKNESS_DPS, None),
+            (22, EventRole.ALACRITY_DPS, None),
+        ]
+        _seat_in_order(store, occurrence.occurrence_id, roster)
+
+        _, update = await remove_signup(bot, event, occurrence, 13)
+
+        assert [entry.discord_user_id for entry in update.waitlisted] == [20]
+        assert sorted(
+            entry.discord_user_id for entry in update.promoted
+        ) == [21, 22]
+        assert is_roster_full(
+            event.capacity, store.get_signups(occurrence.occurrence_id)
+        )
+
+    async def test_a_run_under_way_keeps_its_roster_on_a_sign_out(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot, store, category=EventCategory.RAID
+        )
+        roster: list[tuple[int, EventRole, EventRole | None]] = [
+            (11, EventRole.QUICKNESS_HEAL, EventRole.QUICKNESS_HEAL),
+            (12, EventRole.ALACRITY_HEAL, EventRole.ALACRITY_HEAL),
+        ]
+        roster += [
+            (user_id, EventRole.DPS, EventRole.DPS)
+            for user_id in range(13, 21)
+        ]
+        _seat_in_order(store, occurrence.occurrence_id, roster)
+        store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            datetime.now(UTC) - timedelta(minutes=5),
+        )
+        started = store.get_occurrence(occurrence.occurrence_id)
+        assert started is not None
+
+        _, update = await remove_signup(bot, event, started, 13)
+
+        assert update.waitlisted == ()
+        last = store.get_signup(occurrence.occurrence_id, 20)
+        assert last is not None
+        assert not last.waitlisted
+
     def test_merge_keeps_a_release_and_drops_a_departed_member(self) -> None:
         released = make_signup(15, EventRole.DPS, None, waitlisted=True)
         departed = make_signup(16, EventRole.DPS, None, waitlisted=True)

@@ -518,13 +518,16 @@ The same rule decides who is promoted off the waitlist, so a roster with every
 seat taken always has its boons covered.
 
 A roster seated before those seats were held can still be holding them without
-the boons. Saving it through `/event edit` — even with nothing changed — puts
-it right: the members are re-seated in the order they joined, the last to join
-of those holding a seat the boons or heals need move to the waitlist (keeping
-their place in it), a flexer who can bring the missing boon is moved onto it
-instead, and the freed seats go to whoever on the waitlist brings it. The
-signup thread names everyone who moved. A roster that can already fill up is
-left exactly as it is.
+the boons, and the bot puts it right on its own: within a minute of starting,
+on its regular check of upcoming events, and again whenever somebody signs up,
+signs out, edits a signup, or a commander saves `/event edit`. The members who
+left the server come off first; the rest are re-seated in the order they
+joined, the last to join of those holding a seat the boons or heals need move
+to the waitlist (keeping their place in it), a flexer who can bring the missing
+boon is moved onto it instead, and the freed seats go to whoever on the
+waitlist brings it. The signup thread names everyone who moved and the post is
+updated. A run already under way is left as it is played, and a roster that
+can already fill up is never touched.
 
 A Story, World vs. World, Open World, or General event
 has no roles to pick, so one click seats the member or waitlists them — and on a
@@ -562,9 +565,9 @@ thread, `<status> | MM.dd.yyyy | HH:mm`:
 | ⚫️ over | Past its start plus duration. |
 
 A roster that occupies every seat without covering its required boons — only
-possible for one seated before its last seats were held for them, until an
-`/event edit` save re-seats it — keeps reading as open rather than full,
-because it is still short of a squad.
+possible for a run already under way that was seated before its last seats
+were held for them — keeps reading as open rather than full, because it is
+still short of a squad.
 
 ### Repeating Events
 

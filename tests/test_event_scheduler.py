@@ -611,3 +611,113 @@ class TestRunEventMaintenance:
 
         assert title not in caplog.text
         assert description not in caplog.text
+
+
+class TestHeldSeatRelease:
+    """Rosters seated before admission held their last seats for the boons."""
+
+    @staticmethod
+    def seat_old_roster(store: EventStore, occurrence_id: int) -> None:
+        # A healer and four plain DPS leave the fractal's boon DPS with no
+        # seat; the alacrity DPS who could bring it is stuck behind them.
+        for minute, (user_id, role, waitlisted) in enumerate(
+            [
+                (11, EventRole.QUICKNESS_HEAL, False),
+                (12, EventRole.DPS, False),
+                (13, EventRole.DPS, False),
+                (14, EventRole.DPS, False),
+                (15, EventRole.DPS, False),
+                (16, EventRole.ALACRITY_DPS, True),
+            ]
+        ):
+            store.add_signup(
+                occurrence_id=occurrence_id,
+                discord_user_id=user_id,
+                role=role,
+                assigned_role=None if waitlisted else role,
+                flex_roles=(),
+                waitlisted=waitlisted,
+                now=BEFORE_START - timedelta(days=1, minutes=-minute),
+            )
+
+    async def test_the_pass_releases_the_seat_and_says_so(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        _, occurrence = await post_event(bot, store)
+        self.seat_old_roster(store, occurrence.occurrence_id)
+
+        await run_event_maintenance(bot, BEFORE_START)
+
+        released = store.get_signup(occurrence.occurrence_id, 15)
+        assert released is not None
+        assert released.waitlisted
+        promoted = store.get_signup(occurrence.occurrence_id, 16)
+        assert promoted is not None
+        assert promoted.assigned_role is EventRole.ALACRITY_DPS
+        assert channel.thread.send.await_args is not None
+        content = channel.thread.send.await_args.args[0]
+        assert "<@15> moved to the waitlist" in content
+        assert "<@16> moved up from the waitlist" in content
+        # The post is refreshed to show the roster that now stands.
+        channel.partial_message.edit.assert_awaited()
+        updated = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None
+        assert updated.status is EventStatus.FULL
+
+    async def test_a_later_pass_finds_nothing_left_to_release(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        _, occurrence = await post_event(bot, store)
+        self.seat_old_roster(store, occurrence.occurrence_id)
+        await run_event_maintenance(bot, BEFORE_START)
+        sent = channel.thread.send.await_count
+        edits = channel.partial_message.edit.await_count
+
+        await run_event_maintenance(bot, BEFORE_START)
+
+        assert channel.thread.send.await_count == sent
+        assert channel.partial_message.edit.await_count == edits
+
+    async def test_a_run_under_way_is_left_as_it_is_played(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        _, occurrence = await post_event(bot, store)
+        self.seat_old_roster(store, occurrence.occurrence_id)
+
+        await run_event_maintenance(bot, START + timedelta(minutes=5))
+
+        seated = store.get_signup(occurrence.occurrence_id, 15)
+        assert seated is not None
+        assert not seated.waitlisted
+
+    async def test_a_roster_that_cannot_be_settled_does_not_stop_the_pass(
+        self,
+        bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, first = await post_event(bot, store)
+        self.seat_old_roster(store, first.occurrence_id)
+        _, second = await post_event(bot, store)
+        # Owed a re-render, so the pass has work to do on it after the
+        # first run's failure.
+        store.set_occurrence_needs_refresh(second.occurrence_id, True)
+        broken = AsyncMock(side_effect=RuntimeError("boom"))
+        monkeypatch.setattr(
+            "gw2bot.events.scheduler.settle_held_seats", broken
+        )
+
+        await run_event_maintenance(bot, BEFORE_START)
+
+        broken.assert_awaited_once()
+        refreshed = store.get_occurrence(second.occurrence_id)
+        assert refreshed is not None
+        assert not refreshed.needs_refresh

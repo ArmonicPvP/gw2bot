@@ -49,6 +49,7 @@ from gw2bot.events.posting.roster import (
     remove_signup as remove_signup,
     seat_signup as seat_signup,
     set_mentee_request as set_mentee_request,
+    settle_held_seats as settle_held_seats,
 )
 from gw2bot.events.posting.state import (
     leading_occurrence as leading_occurrence,

@@ -46,6 +46,7 @@ from gw2bot.events.models import (
     rebalance_signups,
     roster_admits,
     seated_candidates,
+    seated_roster_short,
     seats_to_release,
     solve_roster,
 )
@@ -1361,6 +1362,41 @@ async def _checked_roster(
     if occurrence_finished(edited, current, now):
         await notify_roster_update(bot, occurrence, checked)
         raise ValueError(ended_message)
+    under_way = current.start_time <= (
+        now if now is not None else datetime.now(UTC)
+    )
+    if not under_way and seated_roster_short(edited.capacity, signups):
+        # Seated before admission held the last seats for the boons, and
+        # still holding them. Put right before the caller judges anybody
+        # against it, and folded into what the check moved.
+        try:
+            released = release_held_seats(bot, edited, current)
+        except SQLAlchemyError as exc:
+            # One write, so nothing of it landed. The caller goes ahead
+            # against the roster as it stands, and the maintenance pass
+            # tries again.
+            LOGGER.error(
+                "Could not release the seats a roster holds for its boons; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+        else:
+            checked = merge_roster_updates([checked, released])
+            try:
+                signups = bot.event_store.get_signups(current.occurrence_id)
+            except SQLAlchemyError as exc:
+                LOGGER.error(
+                    "Could not read the roster back after releasing its "
+                    "held seats; occurrence_id=%s error_type=%s",
+                    current.occurrence_id,
+                    type(exc).__name__,
+                )
+                await notify_roster_update(bot, current, checked)
+                raise ValueError(
+                    "The roster could not be read just now. Try again in a "
+                    "moment."
+                ) from exc
     return edited, current, signups, checked
 
 
@@ -1477,8 +1513,6 @@ def _resettle_roster(
     bot: Gw2Bot,
     event: Event,
     occurrence: EventOccurrence,
-    *,
-    release_held: bool = False,
 ) -> RosterUpdate:
     """Promote fitting waitlisted members and re-canonicalise assignments.
 
@@ -1493,9 +1527,11 @@ def _resettle_roster(
     role their seniority allows, so a member flexed away from their primary
     pick recovers it as soon as the roster permits.
 
-    With release_held, the seated members admission would have turned away
-    are first moved to the waitlist (see seats_to_release), in the same
-    write as the promotions their seats make room for.
+    A roster seated before admission held its last seats for the boons can
+    still be holding them, so the seated members admission would have turned
+    away are moved to the waitlist first (see seats_to_release), in the same
+    write as the promotions their seats make room for. Every other roster
+    has nobody to release.
     """
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not event.capacity.has_roles:
@@ -1530,9 +1566,11 @@ def _resettle_roster(
             len(promoted),
         )
         return RosterUpdate(promoted=tuple(promoted))
+    # A run under way is left as it is played: releasing a seat mid-run
+    # helps nobody fill it.
     released = (
         seats_to_release(event.capacity, signups)
-        if release_held
+        if occurrence.start_time > datetime.now(UTC)
         else frozenset[int]()
     )
     seated = [
@@ -1663,7 +1701,7 @@ def release_held_seats(
     if not event.capacity.has_roles:
         return RosterUpdate()
     before = mentee_snapshot(bot, event, occurrence.occurrence_id)
-    update = _resettle_roster(bot, event, occurrence, release_held=True)
+    update = _resettle_roster(bot, event, occurrence)
     # A released mentee can no longer co-lead, and the store hands the slot
     # on in the same write.
     mentee = mentee_movement(bot, event, occurrence.occurrence_id, before)
@@ -1676,6 +1714,56 @@ def release_held_seats(
         len(update.reassigned),
     )
     return replace(update, mentee_promoted=mentee.mentee_promoted)
+
+
+async def settle_held_seats(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    now: datetime | None = None,
+) -> None:
+    """Release an old roster's held seats on its own, and say so.
+
+    For the maintenance pass, which finds a roster seated before admission
+    held its last seats for the boons and still holding them. Nobody has to
+    touch the event: the roster is checked against the server first, so a
+    member who has left gives up their seat before anybody present does,
+    then released, announced in the signup thread, and its post refreshed.
+    A run that ended or went away meanwhile is left to the next pass.
+    """
+    # As in seat_signup above.
+    from gw2bot.events.posting.messages import (
+        refresh_occurrence_message,
+    )
+
+    try:
+        event, occurrence, _, update = await _checked_roster(
+            bot,
+            event,
+            occurrence,
+            now,
+            "This event has already ended.",
+            force=True,
+        )
+    except ValueError:
+        # Ended, gone, or unreadable: whatever the check moved has been
+        # announced, and the next pass looks again.
+        LOGGER.debug(
+            "Skipped releasing held seats on a run that cannot take it; "
+            "occurrence_id=%s",
+            occurrence.occurrence_id,
+        )
+        return
+    LOGGER.debug(
+        "Released the seats an old roster held for its boons; "
+        "occurrence_id=%s released=%s promoted=%s reassigned=%s",
+        occurrence.occurrence_id,
+        len(update.waitlisted),
+        len(update.promoted),
+        len(update.reassigned),
+    )
+    await notify_roster_update(bot, occurrence, update)
+    await refresh_occurrence_message(bot, event, occurrence, now)
 
 
 async def notify_roster_update(

@@ -5,13 +5,14 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from gw2bot.events.models import EventStatus
+from gw2bot.events.models import EventStatus, seated_roster_short
 from gw2bot.events.posting import (
     ensure_next_recurring_occurrence,
     occurrence_status,
     post_pending_occurrence,
     prune_superseded_occurrences,
     refresh_occurrence_message,
+    settle_held_seats,
     sweep_stale_announcement,
 )
 from gw2bot.events.reminders import deliver_due_reminders
@@ -77,6 +78,28 @@ async def run_event_maintenance(
                 type(exc).__name__,
             )
         signups = bot.event_store.get_signups(occurrence.occurrence_id)
+        if occurrence.start_time > current_time and seated_roster_short(
+            event.capacity, signups
+        ):
+            # Seated before admission held the last seats for the boons, and
+            # still holding them without the boons: put right here, with no
+            # commander needing to touch the event. Settling refreshes the
+            # post itself, which covers the status work below; a run that is
+            # under way is left as it is played. Contained like the reminders:
+            # one roster that cannot be settled must not stop the pass.
+            try:
+                await settle_held_seats(bot, event, occurrence, current_time)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.error(
+                    "Could not release the seats an old roster holds; "
+                    "occurrence_id=%s error_type=%s",
+                    occurrence.occurrence_id,
+                    type(exc).__name__,
+                )
+            swept.add(occurrence.occurrence_id)
+            continue
         status = occurrence_status(event, occurrence, signups, current_time)
         # A dirty occurrence still needs its message re-rendered even when the
         # status is unchanged, because an earlier roster-change refresh failed.
