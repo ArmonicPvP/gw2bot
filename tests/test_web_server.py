@@ -24,7 +24,12 @@ from factories import (
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.core.dashboard_ranges import StoredRange
-from gw2bot.events.models import EventCategory, EventStatus, RepeatFrequency
+from gw2bot.events.models import (
+    EventCategory,
+    EventRole,
+    EventStatus,
+    RepeatFrequency,
+)
 from gw2bot.events.store import EventStore
 from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
@@ -1043,6 +1048,89 @@ class TestEventsApi:
         assert second.status == 200
         payload = await second.json()
         assert payload["entries"][0]["leader_name"] == "Leader Kitty"
+
+    async def test_marks_only_the_readers_own_signups(
+        self,
+        client: TestClient,
+        store: EventStore,
+        guild: FakeGuild,
+    ) -> None:
+        other_reader = 99
+        guild.members[other_reader] = member("Other Kitty")
+        event = store.create_event(
+            category=EventCategory.RAID,
+            title="Weekly Raid",
+            description="Bring snacks.",
+            channel_id=1,
+            leader_discord_id=42,
+            start_time=datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        seated = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 16, 20, 0, tzinfo=UTC),
+        )
+        waitlisted = store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 23, 20, 0, tzinfo=UTC),
+        )
+        store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+        store.add_signup(
+            occurrence_id=seated.occurrence_id,
+            discord_user_id=SESSION_USER_ID,
+            role=EventRole.ALACRITY_HEAL,
+            assigned_role=EventRole.ALACRITY_HEAL,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.add_signup(
+            occurrence_id=waitlisted.occurrence_id,
+            discord_user_id=SESSION_USER_ID,
+            role=EventRole.DPS,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+        params = {
+            "start": str(int(datetime(2027, 1, 1, tzinfo=UTC).timestamp())),
+            "end": str(int(datetime(2027, 2, 1, tzinfo=UTC).timestamp())),
+        }
+
+        mine = await client.get(
+            "/api/events",
+            params=params,
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+        theirs = await client.get(
+            "/api/events",
+            params=params,
+            headers={
+                "Cookie": (
+                    f"{auth.SESSION_COOKIE}="
+                    f"{session_cookie(user_id=other_reader)}"
+                )
+            },
+        )
+
+        assert mine.status == 200
+        assert [
+            entry["viewer_signup"] for entry in (await mine.json())["entries"]
+        ] == [
+            {"role": "Alacrity Heal", "waitlisted": False},
+            {"role": None, "waitlisted": True},
+            None,
+        ]
+        # The same runs read for somebody on none of their rosters mark
+        # nothing: one reader's signups are never shown to another.
+        assert theirs.status == 200
+        assert [
+            entry["viewer_signup"] for entry in (await theirs.json())["entries"]
+        ] == [None, None, None]
 
     @pytest.mark.parametrize(
         "params",

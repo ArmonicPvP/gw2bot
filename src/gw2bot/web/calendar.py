@@ -9,6 +9,7 @@ from gw2bot.events.formatting import next_occurrence_start
 from gw2bot.events.models import (
     CategoryCapacity,
     Event,
+    EventSignup,
     EventStatus,
     RepeatFrequency,
     RosterCounts,
@@ -69,6 +70,34 @@ def role_tallies(
 
 
 @dataclass(frozen=True, slots=True)
+class ViewerSignup:
+    """The signed-in member's own place on one run's roster."""
+
+    # The seat they hold, or None while they are waitlisted or when the
+    # category has no roles to seat them in.
+    role: str | None
+    waitlisted: bool
+
+
+def _viewer_signup(
+    signups: list[EventSignup],
+    viewer_discord_id: int | None,
+) -> ViewerSignup | None:
+    """The viewer's signup among ``signups``, or None when they have none."""
+    if viewer_discord_id is None:
+        return None
+    for signup in signups:
+        if signup.discord_user_id != viewer_discord_id:
+            continue
+        seat = None if signup.waitlisted else signup.assigned_role
+        return ViewerSignup(
+            role=None if seat is None else seat.value,
+            waitlisted=signup.waitlisted,
+        )
+    return None
+
+
+@dataclass(frozen=True, slots=True)
 class CalendarEntry:
     event_id: int
     occurrence_id: int | None
@@ -89,6 +118,9 @@ class CalendarEntry:
     # None for an uncapped category (General): the page shows a plain headcount
     # rather than a "seated of total" ratio.
     capacity_total: int | None
+    # The member asking, when they are on this run's roster. Always None for a
+    # projection, which nobody can sign up for until it is posted.
+    viewer_signup: ViewerSignup | None
 
 
 def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
@@ -109,6 +141,7 @@ def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
         waitlist_count=0,
         roles=role_tallies(capacity, count_roster([])),
         capacity_total=capacity.total,
+        viewer_signup=None,
     )
 
 
@@ -118,7 +151,14 @@ def calendar_entries(
     range_start: datetime,
     range_end: datetime,
     now: datetime,
+    *,
+    viewer_discord_id: int | None = None,
 ) -> list[CalendarEntry]:
+    """Every run between the range's edges, posted or projected.
+
+    ``viewer_discord_id`` is the member the calendar is drawn for, whose own
+    signups are marked on the runs they are on; None marks none.
+    """
     entries: dict[tuple[int, int], CalendarEntry] = {}
 
     materialized = store.get_occurrences_between(range_start, range_end)
@@ -157,6 +197,7 @@ def calendar_entries(
             ),
             roles=role_tallies(capacity, counts),
             capacity_total=capacity.total,
+            viewer_signup=_viewer_signup(signups, viewer_discord_id),
         )
 
     projected = 0
@@ -222,9 +263,11 @@ def calendar_entries(
 
     results = sorted(entries.values(), key=lambda entry: entry.start_epoch)
     LOGGER.debug(
-        "Computed calendar entries; materialized=%s projected=%s total=%s",
+        "Computed calendar entries; materialized=%s projected=%s total=%s "
+        "signed_up=%s",
         len(materialized),
         projected,
         len(results),
+        sum(1 for entry in results if entry.viewer_signup is not None),
     )
     return results

@@ -2306,6 +2306,7 @@ class WebServer:
             LOGGER.debug("Rejected calendar range request; reason=span")
             return self._json({"error": "invalid range"}, status=400)
 
+        session = request[SESSION_KEY]
         # calendar_entries is synchronous SQLite plus a bounded but non-trivial
         # recurrence projection, and this server shares the Discord client's
         # event loop. Running it inline stalls the gateway, the signup buttons
@@ -2319,6 +2320,7 @@ class WebServer:
             range_start,
             range_end,
             datetime.now(UTC),
+            viewer_discord_id=session.user_id,
         )
         names = await self._display_names(
             {entry.leader_discord_id for entry in entries}
@@ -2356,6 +2358,16 @@ class WebServer:
                 for tally in entry.roles
             ],
             "capacity_total": entry.capacity_total,
+            # Only the reader's own place, so the response names nobody else
+            # on the roster.
+            "viewer_signup": (
+                None
+                if entry.viewer_signup is None
+                else {
+                    "role": entry.viewer_signup.role,
+                    "waitlisted": entry.viewer_signup.waitlisted,
+                }
+            ),
         }
 
     async def _display_names(self, user_ids: set[int]) -> dict[int, str]:

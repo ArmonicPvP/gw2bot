@@ -16,6 +16,7 @@ from gw2bot.web.calendar import (
     PROJECTION_ENTRY_CAP,
     PROJECTION_STEP_CAP,
     RoleTally,
+    ViewerSignup,
     calendar_entries,
 )
 
@@ -401,6 +402,163 @@ class TestMaterializedEntries:
             finished.occurrence_id
         ]
         assert not entries[0].projected
+
+
+class TestViewerSignup:
+    @staticmethod
+    def _entries(store: EventStore, viewer_discord_id: int | None):
+        return calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 3, 1, 0, 0, tzinfo=UTC),
+            NOW,
+            viewer_discord_id=viewer_discord_id,
+        )
+
+    @staticmethod
+    def _occurrence(store: EventStore, **overrides: object):
+        event = create_event(store, **overrides)
+        return store.create_occurrence(
+            event.event_id,
+            datetime(2027, 1, 30, 20, 0, tzinfo=UTC),
+        )
+
+    def test_marks_the_seat_the_viewer_holds(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence = self._occurrence(store, category=EventCategory.RAID)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.QUICKNESS_DPS,
+            flex_roles=(EventRole.QUICKNESS_DPS,),
+            waitlisted=False,
+        )
+
+        entries = self._entries(store, viewer_discord_id=7)
+
+        # The seat they were given, not the one they asked for first.
+        assert [entry.viewer_signup for entry in entries] == [
+            ViewerSignup(role="Quickness DPS", waitlisted=False)
+        ]
+
+    def test_marks_a_waitlisted_viewer_without_a_seat(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence = self._occurrence(store, category=EventCategory.RAID)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=True,
+        )
+
+        entries = self._entries(store, viewer_discord_id=7)
+
+        assert [entry.viewer_signup for entry in entries] == [
+            ViewerSignup(role=None, waitlisted=True)
+        ]
+
+    def test_role_less_signup_names_no_seat(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence = self._occurrence(store, category=EventCategory.WVW)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        entries = self._entries(store, viewer_discord_id=7)
+
+        assert [entry.viewer_signup for entry in entries] == [
+            ViewerSignup(role=None, waitlisted=False)
+        ]
+
+    def test_someone_elses_signup_is_not_the_viewers(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence = self._occurrence(store, category=EventCategory.RAID)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=8,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        entries = self._entries(store, viewer_discord_id=7)
+
+        assert [entry.viewer_signup for entry in entries] == [None]
+        assert [entry.active_count for entry in entries] == [1]
+
+    def test_no_viewer_marks_nothing(
+        self,
+        store: EventStore,
+    ) -> None:
+        occurrence = self._occurrence(store, category=EventCategory.RAID)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        entries = self._entries(store, viewer_discord_id=None)
+
+        assert [entry.viewer_signup for entry in entries] == [None]
+
+    def test_projection_carries_no_viewer_signup(
+        self,
+        store: EventStore,
+    ) -> None:
+        anchor = datetime(2027, 1, 6, 20, 0, tzinfo=UTC)
+        event = create_event(
+            store,
+            category=EventCategory.RAID,
+            start_time=anchor,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(2,),
+        )
+        occurrence = store.create_occurrence(event.event_id, anchor)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=7,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 1, 17, 0, 0, tzinfo=UTC),
+            NOW,
+            viewer_discord_id=7,
+        )
+
+        # Being on one run's roster says nothing about the next, which nobody
+        # can sign up for until it is posted.
+        assert [
+            (entry.projected, entry.viewer_signup is not None)
+            for entry in entries
+        ] == [(False, True), (True, False)]
 
 
 class TestProjectedEntries:

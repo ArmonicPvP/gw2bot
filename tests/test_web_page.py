@@ -74,6 +74,43 @@ class TestCalendarTooltip:
         for field in ("healers", "quickness", "alacrity", "has_roles"):
             assert f"entry.{field}" not in CALENDAR_PAGE
 
+    def test_says_where_the_reader_sits(self) -> None:
+        assert 'el("div", "row mine",' in CALENDAR_PAGE
+        assert "viewerSignupText(entry.viewer_signup," in CALENDAR_PAGE
+        assert '"You\'re on the waitlist."' in CALENDAR_PAGE
+
+
+class TestCalendarSignedUpChips:
+    def test_outlines_the_readers_runs_but_keeps_the_status_stripe(
+        self,
+    ) -> None:
+        rule = re.search(r"\.chip\.mine \{(.*?)\}", CALENDAR_PAGE, re.S)
+        assert rule is not None
+        # border-color would repaint the left stripe the status draws, so
+        # only the other three sides take the accent.
+        assert rule.group(1).split() == [
+            "border-top-color:",
+            "var(--accent);",
+            "border-right-color:",
+            "var(--accent);",
+            "border-bottom-color:",
+            "var(--accent);",
+        ]
+
+    def test_marks_the_chip_without_relying_on_color(self) -> None:
+        assert 'chip.classList.add("mine");' in CALENDAR_PAGE
+        assert 'el("span", "mine-mark", "\\u2713")' in CALENDAR_PAGE
+        assert 'mark.setAttribute("aria-label", "Signed up");' in CALENDAR_PAGE
+
+    def test_mobile_day_label_names_the_readers_runs(self) -> None:
+        # Mobile month chips are hidden from assistive tech, so the date
+        # button's label is the only place the mark can be read.
+        assert 'entry.title + " (signed up)"' in CALENDAR_PAGE
+
+    def test_mobile_month_chips_keep_their_room_for_the_title(self) -> None:
+        mobile = CALENDAR_PAGE.split("@media (max-width: 640px)", 1)[1]
+        assert "#grid.month .chip .mine-mark { display: none; }" in mobile
+
 
 class TestProfitPage:
     def test_contains_all_profit_reports_and_unclaimed_delivery(self) -> None:

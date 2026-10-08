@@ -240,6 +240,15 @@ main {
 .chip.st-scheduled { border-left-color: var(--scheduled); }
 .chip.over { opacity: 0.45; }
 .chip.projected { border-style: dashed; border-left-style: solid; }
+/* A run the reader is on the roster of, seated or waitlisted. The outline
+   leaves the status stripe alone, and the check mark says the same thing
+   without leaning on color. */
+.chip.mine {
+  border-top-color: var(--accent);
+  border-right-color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.chip .mine-mark { color: var(--accent); flex-shrink: 0; font-weight: 700; }
 #tooltip {
   position: fixed;
   z-index: 10;
@@ -258,6 +267,7 @@ main {
 #tooltip .desc { margin-bottom: 0.35rem; white-space: pre-wrap; }
 #tooltip .sep { border-top: 1px solid var(--border); margin: 0.45rem 0; }
 #tooltip .row { color: var(--text); }
+#tooltip .row.mine { color: var(--accent); font-weight: 600; }
 #tooltip .desc code,
 #tooltip .desc pre {
   font-family: ui-monospace, Consolas, "Courier New", monospace;
@@ -365,6 +375,10 @@ button:focus-visible, .chip:focus-visible {
     padding: 0.05rem 0.2rem;
     margin-bottom: 0.1rem;
   }
+  /* A month chip this small holds only a few letters of its title, so the
+     outline alone marks the reader's runs rather than spend one on the
+     check mark. */
+  #grid.month .chip .mine-mark { display: none; }
 }
 </style>
 </head>
@@ -630,6 +644,13 @@ button:focus-visible, .chip:focus-visible {
     chip.setAttribute("role", "button");
     chip.setAttribute("aria-haspopup", "true");
     chip.setAttribute("aria-expanded", "false");
+    if (entry.viewer_signup) {
+      chip.classList.add("mine");
+      var mark = el("span", "mine-mark", "\\u2713");
+      mark.setAttribute("role", "img");
+      mark.setAttribute("aria-label", "Signed up");
+      chip.appendChild(mark);
+    }
     if (!hideTime) {
       chip.appendChild(el("span", "time", formatTime(start)));
     }
@@ -657,7 +678,11 @@ button:focus-visible, .chip:focus-visible {
     var count = dayEntries.length === 1
       ? "1 event"
       : dayEntries.length + " events";
-    var titles = dayEntries.map(function (entry) { return entry.title; });
+    var titles = dayEntries.map(function (entry) {
+      return entry.viewer_signup
+        ? entry.title + " (signed up)"
+        : entry.title;
+    });
     return dateName + ", " + count + ": " + titles.join(", ");
   }
 
@@ -1005,6 +1030,17 @@ button:focus-visible, .chip:focus-visible {
     periodLabel.textContent = text;
   }
 
+  // The reader's own place on the roster: the seat they hold, or that they
+  // are waiting for one. A role-less event seats nobody in a role, so it only
+  // says they are on it.
+  function viewerSignupText(signup, over) {
+    if (signup.waitlisted) {
+      return over ? "You were on the waitlist." : "You're on the waitlist.";
+    }
+    var text = over ? "You were signed up" : "You're signed up";
+    return text + (signup.role ? " as " + signup.role : "") + ".";
+  }
+
   function tooltipContent(entry) {
     tooltip.replaceChildren();
     var title = el("h2", null, entry.title);
@@ -1031,6 +1067,10 @@ button:focus-visible, .chip:focus-visible {
     appendMarkdown(reqs, entry.requirements || "None");
     tooltip.appendChild(reqs);
     tooltip.appendChild(el("div", "sep"));
+    if (entry.viewer_signup) {
+      tooltip.appendChild(el("div", "row mine",
+        viewerSignupText(entry.viewer_signup, entry.status === "over")));
+    }
     tooltip.appendChild(el("div", "row",
       "Leader: " + entry.leader_name));
     if (entry.projected) {
