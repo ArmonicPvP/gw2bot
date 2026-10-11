@@ -2366,6 +2366,7 @@ class WebServer:
                 else {
                     "role": entry.viewer_signup.role,
                     "waitlisted": entry.viewer_signup.waitlisted,
+                    "automatic": entry.viewer_signup.automatic,
                 }
             ),
         }

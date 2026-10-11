@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from gw2bot.events.models import (
+    AutoSignupChoice,
     EventCategory,
     EventRole,
     EventStatus,
@@ -442,7 +443,9 @@ class TestViewerSignup:
 
         # The seat they were given, not the one they asked for first.
         assert [entry.viewer_signup for entry in entries] == [
-            ViewerSignup(role="Quickness DPS", waitlisted=False)
+            ViewerSignup(
+                role="Quickness DPS", waitlisted=False, automatic=False
+            )
         ]
 
     def test_marks_a_waitlisted_viewer_without_a_seat(
@@ -462,7 +465,7 @@ class TestViewerSignup:
         entries = self._entries(store, viewer_discord_id=7)
 
         assert [entry.viewer_signup for entry in entries] == [
-            ViewerSignup(role=None, waitlisted=True)
+            ViewerSignup(role=None, waitlisted=True, automatic=False)
         ]
 
     def test_role_less_signup_names_no_seat(
@@ -482,7 +485,7 @@ class TestViewerSignup:
         entries = self._entries(store, viewer_discord_id=7)
 
         assert [entry.viewer_signup for entry in entries] == [
-            ViewerSignup(role=None, waitlisted=False)
+            ViewerSignup(role=None, waitlisted=False, automatic=False)
         ]
 
     def test_someone_elses_signup_is_not_the_viewers(
@@ -522,7 +525,7 @@ class TestViewerSignup:
 
         assert [entry.viewer_signup for entry in entries] == [None]
 
-    def test_projection_carries_no_viewer_signup(
+    def test_projection_without_automatic_sign_up_is_unmarked(
         self,
         store: EventStore,
     ) -> None:
@@ -554,11 +557,185 @@ class TestViewerSignup:
         )
 
         # Being on one run's roster says nothing about the next, which nobody
-        # can sign up for until it is posted.
+        # can sign up for by hand until it is posted.
         assert [
             (entry.projected, entry.viewer_signup is not None)
             for entry in entries
         ] == [(False, True), (True, False)]
+
+
+class TestAutomaticViewerSignup:
+    ANCHOR = datetime(2027, 1, 6, 20, 0, tzinfo=UTC)
+
+    def _series(self, store: EventStore, category: EventCategory):
+        event = create_event(
+            store,
+            category=category,
+            start_time=self.ANCHOR,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(2,),
+        )
+        store.create_occurrence(event.event_id, self.ANCHOR)
+        return event
+
+    @staticmethod
+    def _entries(store: EventStore, viewer_discord_id: int | None = 7):
+        # The posted anchor run and the two projected after it.
+        return calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2027, 1, 24, 0, 0, tzinfo=UTC),
+            NOW,
+            viewer_discord_id=viewer_discord_id,
+        )
+
+    def test_marks_the_projections_it_will_seat_the_viewer_on(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = self._series(store, EventCategory.RAID)
+        store.set_auto_signup(
+            event.event_id,
+            7,
+            AutoSignupChoice.YES,
+            EventRole.ALACRITY_HEAL,
+            (),
+        )
+
+        entries = self._entries(store)
+
+        automatic = ViewerSignup(
+            role="Alacrity Heal", waitlisted=False, automatic=True
+        )
+        # The posted run holds no signup of theirs - they may have signed out
+        # of it - so only the runs still to be seeded are marked.
+        assert [
+            (entry.projected, entry.viewer_signup) for entry in entries
+        ] == [(False, None), (True, automatic), (True, automatic)]
+
+    def test_reads_a_stored_role_as_the_category_will_take_it(
+        self,
+        store: EventStore,
+    ) -> None:
+        # A dungeon has no healer seat, so seeding falls back to the first
+        # flex role the category does have.
+        event = self._series(store, EventCategory.DUNGEON)
+        store.set_auto_signup(
+            event.event_id,
+            7,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (EventRole.QUICKNESS_DPS,),
+        )
+
+        projected = [
+            entry for entry in self._entries(store) if entry.projected
+        ]
+
+        assert {entry.viewer_signup for entry in projected} == {
+            ViewerSignup(
+                role="Quickness DPS", waitlisted=False, automatic=True
+            )
+        }
+
+    def test_role_less_series_names_no_role(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = self._series(store, EventCategory.WVW)
+        store.set_auto_signup(
+            event.event_id,
+            7,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        projected = [
+            entry for entry in self._entries(store) if entry.projected
+        ]
+
+        assert {entry.viewer_signup for entry in projected} == {
+            ViewerSignup(role=None, waitlisted=False, automatic=True)
+        }
+
+    def test_role_series_without_a_stored_role_is_unmarked(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Seeding skips such a sign-up, so the calendar must not promise it.
+        event = self._series(store, EventCategory.RAID)
+        store.set_auto_signup(
+            event.event_id,
+            7,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        entries = self._entries(store)
+
+        assert [entry.viewer_signup for entry in entries] == [None] * 3
+
+    @pytest.mark.parametrize(
+        "choice",
+        [AutoSignupChoice.NO, AutoSignupChoice.NEVER_ASK],
+    )
+    def test_a_switched_off_choice_is_unmarked(
+        self,
+        store: EventStore,
+        choice: AutoSignupChoice,
+    ) -> None:
+        event = self._series(store, EventCategory.RAID)
+        store.set_auto_signup(event.event_id, 7, choice, EventRole.DPS, ())
+
+        entries = self._entries(store)
+
+        assert [entry.viewer_signup for entry in entries] == [None] * 3
+
+    def test_someone_elses_automatic_sign_up_is_not_the_viewers(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = self._series(store, EventCategory.RAID)
+        store.set_auto_signup(
+            event.event_id,
+            8,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        assert [
+            entry.viewer_signup for entry in self._entries(store)
+        ] == [None] * 3
+        assert [
+            entry.viewer_signup
+            for entry in self._entries(store, viewer_discord_id=None)
+        ] == [None] * 3
+
+    def test_only_its_own_series_is_marked(
+        self,
+        store: EventStore,
+    ) -> None:
+        mine = self._series(store, EventCategory.RAID)
+        self._series(store, EventCategory.RAID)
+        store.set_auto_signup(
+            mine.event_id,
+            7,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        marked = {
+            entry.event_id
+            for entry in self._entries(store)
+            if entry.viewer_signup is not None
+        }
+
+        assert marked == {mine.event_id}
 
 
 class TestProjectedEntries:

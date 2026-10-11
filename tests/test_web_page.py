@@ -78,6 +78,7 @@ class TestCalendarTooltip:
         assert 'el("div", "row mine",' in CALENDAR_PAGE
         assert "viewerSignupText(entry.viewer_signup," in CALENDAR_PAGE
         assert '"You\'re on the waitlist."' in CALENDAR_PAGE
+        assert '"You\'ll be signed up automatically" + asRole' in CALENDAR_PAGE
 
 
 class TestCalendarSignedUpChips:
@@ -97,15 +98,34 @@ class TestCalendarSignedUpChips:
             "var(--accent);",
         ]
 
+    def test_a_projection_keeps_its_dashes_in_the_accent(self) -> None:
+        # The outline sets only colors, so a projection the reader's
+        # automatic sign-up will seat them on stays dashed - now in purple.
+        assert (
+            ".chip.projected { border-style: dashed; "
+            "border-left-style: solid; }" in CALENDAR_PAGE
+        )
+        rule = re.search(r"\.chip\.mine \{(.*?)\}", CALENDAR_PAGE, re.S)
+        assert rule is not None
+        assert "style" not in rule.group(1)
+
     def test_marks_the_chip_without_relying_on_color(self) -> None:
         assert 'chip.classList.add("mine");' in CALENDAR_PAGE
         assert 'el("span", "mine-mark", "\\u2713")' in CALENDAR_PAGE
-        assert 'mark.setAttribute("aria-label", "Signed up");' in CALENDAR_PAGE
+        assert _call_arguments(CALENDAR_PAGE, "mark.setAttribute") == [
+            ['"role"', '"img"'],
+            [
+                '"aria-label"',
+                'entry.viewer_signup.automatic ? "Automatic sign-up" : '
+                '"Signed up"',
+            ],
+        ]
 
     def test_mobile_day_label_names_the_readers_runs(self) -> None:
         # Mobile month chips are hidden from assistive tech, so the date
         # button's label is the only place the mark can be read.
-        assert 'entry.title + " (signed up)"' in CALENDAR_PAGE
+        assert '" (automatic sign-up)"' in CALENDAR_PAGE
+        assert '" (signed up)"' in CALENDAR_PAGE
 
     def test_mobile_month_chips_keep_their_room_for_the_title(self) -> None:
         mobile = CALENDAR_PAGE.split("@media (max-width: 640px)", 1)[1]

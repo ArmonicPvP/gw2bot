@@ -201,6 +201,16 @@ def _signup_from_record(record: EventSignupRecord) -> EventSignup:
     )
 
 
+def _auto_signup_from_record(record: EventAutoSignupRecord) -> AutoSignup:
+    return AutoSignup(
+        event_id=record.event_id,
+        discord_user_id=record.discord_user_id,
+        choice=AutoSignupChoice(record.choice),
+        role=EventRole(record.role) if record.role else None,
+        flex_roles=_parse_roles(record.flex_roles),
+    )
+
+
 def _settle_mentee(session: Session, occurrence_id: int) -> None:
     """Re-settle an occurrence's mentee slot inside the caller's transaction.
 
@@ -1767,13 +1777,7 @@ class EventStore:
             )
             if record is None:
                 return None
-            return AutoSignup(
-                event_id=record.event_id,
-                discord_user_id=record.discord_user_id,
-                choice=AutoSignupChoice(record.choice),
-                role=EventRole(record.role) if record.role else None,
-                flex_roles=_parse_roles(record.flex_roles),
-            )
+            return _auto_signup_from_record(record)
 
     def set_auto_signup(
         self,
@@ -1817,13 +1821,35 @@ class EventStore:
                 )
                 .order_by(EventAutoSignupRecord.discord_user_id)
             ).all()
-            return [
-                AutoSignup(
-                    event_id=record.event_id,
-                    discord_user_id=record.discord_user_id,
-                    choice=AutoSignupChoice(record.choice),
-                    role=EventRole(record.role) if record.role else None,
-                    flex_roles=_parse_roles(record.flex_roles),
+            return [_auto_signup_from_record(record) for record in records]
+
+    def get_member_auto_signups(
+        self,
+        discord_user_id: int,
+    ) -> dict[int, AutoSignup]:
+        """One member's switched-on automatic sign-ups, keyed by event id.
+
+        The calendar marks every projected run these will seat the member on,
+        across every series, so they are read in one query rather than one
+        per event.
+        """
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventAutoSignupRecord)
+                .where(
+                    EventAutoSignupRecord.discord_user_id == discord_user_id
                 )
+                .where(
+                    EventAutoSignupRecord.choice == AutoSignupChoice.YES.value
+                )
+            ).all()
+            entries = {
+                record.event_id: _auto_signup_from_record(record)
                 for record in records
-            ]
+            }
+        LOGGER.debug(
+            "Loaded member auto signups; user_id=%s count=%s",
+            discord_user_id,
+            len(entries),
+        )
+        return entries

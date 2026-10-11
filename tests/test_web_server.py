@@ -25,6 +25,7 @@ from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
 from gw2bot.core.dashboard_ranges import StoredRange
 from gw2bot.events.models import (
+    AutoSignupChoice,
     EventCategory,
     EventRole,
     EventStatus,
@@ -1121,8 +1122,8 @@ class TestEventsApi:
         assert [
             entry["viewer_signup"] for entry in (await mine.json())["entries"]
         ] == [
-            {"role": "Alacrity Heal", "waitlisted": False},
-            {"role": None, "waitlisted": True},
+            {"role": "Alacrity Heal", "waitlisted": False, "automatic": False},
+            {"role": None, "waitlisted": True, "automatic": False},
             None,
         ]
         # The same runs read for somebody on none of their rosters mark
@@ -1131,6 +1132,61 @@ class TestEventsApi:
         assert [
             entry["viewer_signup"] for entry in (await theirs.json())["entries"]
         ] == [None, None, None]
+
+    async def test_marks_the_projections_an_automatic_sign_up_will_seat(
+        self,
+        client: TestClient,
+        store: EventStore,
+    ) -> None:
+        anchor = datetime(2027, 1, 6, 20, 0, tzinfo=UTC)
+        event = store.create_event(
+            category=EventCategory.RAID,
+            title="Weekly Raid",
+            description="Bring snacks.",
+            channel_id=1,
+            leader_discord_id=42,
+            start_time=anchor,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(2,),
+        )
+        store.create_occurrence(event.event_id, anchor)
+        store.set_auto_signup(
+            event.event_id,
+            SESSION_USER_ID,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_DPS,
+            (),
+        )
+
+        response = await client.get(
+            "/api/events",
+            params={
+                "start": str(
+                    int(datetime(2027, 1, 1, tzinfo=UTC).timestamp())
+                ),
+                "end": str(
+                    int(datetime(2027, 1, 17, tzinfo=UTC).timestamp())
+                ),
+            },
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 200
+        assert [
+            (entry["projected"], entry["viewer_signup"])
+            for entry in (await response.json())["entries"]
+        ] == [
+            (False, None),
+            (
+                True,
+                {
+                    "role": "Quickness DPS",
+                    "waitlisted": False,
+                    "automatic": True,
+                },
+            ),
+        ]
 
     @pytest.mark.parametrize(
         "params",

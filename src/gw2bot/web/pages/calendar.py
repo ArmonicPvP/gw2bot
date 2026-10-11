@@ -240,9 +240,10 @@ main {
 .chip.st-scheduled { border-left-color: var(--scheduled); }
 .chip.over { opacity: 0.45; }
 .chip.projected { border-style: dashed; border-left-style: solid; }
-/* A run the reader is on the roster of, seated or waitlisted. The outline
-   leaves the status stripe alone, and the check mark says the same thing
-   without leaning on color. */
+/* A run the reader is on the roster of, seated or waitlisted, or a projected
+   one their automatic sign-up will put them on. Only the color changes, so a
+   projection keeps the dashes above and the status stripe stays as it is; the
+   check mark says the same thing without leaning on color. */
 .chip.mine {
   border-top-color: var(--accent);
   border-right-color: var(--accent);
@@ -648,7 +649,9 @@ button:focus-visible, .chip:focus-visible {
       chip.classList.add("mine");
       var mark = el("span", "mine-mark", "\\u2713");
       mark.setAttribute("role", "img");
-      mark.setAttribute("aria-label", "Signed up");
+      mark.setAttribute("aria-label", entry.viewer_signup.automatic
+        ? "Automatic sign-up"
+        : "Signed up");
       chip.appendChild(mark);
     }
     if (!hideTime) {
@@ -679,9 +682,10 @@ button:focus-visible, .chip:focus-visible {
       ? "1 event"
       : dayEntries.length + " events";
     var titles = dayEntries.map(function (entry) {
-      return entry.viewer_signup
-        ? entry.title + " (signed up)"
-        : entry.title;
+      if (!entry.viewer_signup) { return entry.title; }
+      return entry.title + (entry.viewer_signup.automatic
+        ? " (automatic sign-up)"
+        : " (signed up)");
     });
     return dateName + ", " + count + ": " + titles.join(", ");
   }
@@ -1030,15 +1034,20 @@ button:focus-visible, .chip:focus-visible {
     periodLabel.textContent = text;
   }
 
-  // The reader's own place on the roster: the seat they hold, or that they
-  // are waiting for one. A role-less event seats nobody in a role, so it only
-  // says they are on it.
+  // The reader's own place on the roster: the seat they hold, that they are
+  // waiting for one, or, on a projection, the role their automatic sign-up
+  // will ask for. A role-less event seats nobody in a role, so it only says
+  // they are on it.
   function viewerSignupText(signup, over) {
+    var asRole = signup.role ? " as " + signup.role : "";
+    if (signup.automatic) {
+      return "You'll be signed up automatically" + asRole + ".";
+    }
     if (signup.waitlisted) {
       return over ? "You were on the waitlist." : "You're on the waitlist.";
     }
-    var text = over ? "You were signed up" : "You're signed up";
-    return text + (signup.role ? " as " + signup.role : "") + ".";
+    return (over ? "You were signed up" : "You're signed up") + asRole +
+      ".";
   }
 
   function tooltipContent(entry) {
