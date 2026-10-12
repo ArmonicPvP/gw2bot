@@ -75,7 +75,10 @@ MENTEE_SLOT_HINT = (
 
 
 MAX_PARTICIPANTS_PROMPT = "Max participants"
-MAX_PARTICIPANTS_HINT = f"0 for no limit, up to {MAX_PARTICIPANTS_LIMIT}."
+MAX_PARTICIPANTS_HINT = (
+    f"0 for no limit, up to {MAX_PARTICIPANTS_LIMIT}. "
+    "-1 resets to the category's default."
+)
 
 
 FLOW_TIMEOUT_SECONDS = 600

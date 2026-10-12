@@ -185,8 +185,12 @@ class TestParseMaxParticipants:
         assert parse_max_participants(" 75 ") == 75
         assert parse_max_participants("500") == 500
 
+    def test_minus_one_asks_for_the_category_default(self) -> None:
+        assert parse_max_participants("-1") is None
+        assert parse_max_participants(" -1 ") is None
+
     def test_rejects_anything_outside_it(self) -> None:
-        for text in ("501", "999", "-1", "1.5", "ten", "", "0500"):
+        for text in ("501", "999", "-2", "-0", "1.5", "ten", "", "0500"):
             with pytest.raises(ValueError, match=r"0 \(no limit\) to 500"):
                 parse_max_participants(text)
 

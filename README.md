@@ -494,10 +494,10 @@ its own rather than as a share of a total.
 A headcount event's size can be changed through **Change something → Max
 participants**, on `/event new` and `/event edit` alike: any whole number from 1
 to 500, or 0 for no limit, in which case it seats everyone the way General does.
-The modal opens on the current size, and entering the category's own size
-returns the event to it, so a later change of category brings that category's
-size along; a size of its own is kept across headcount categories and dropped on
-a move to a role-based one. Role-based events never offer it: their squad is
+The modal opens on the current size. Entering -1, or the category's own size,
+resets the event to the category's default, so a later change of category
+brings that category's size along; a size of its own is kept across headcount
+categories and dropped on a move to a role-based one. Role-based events never offer it: their squad is
 fixed by the composition in the table. Saving a new size re-seats the roster
 first come, first served, as a category change does — a smaller one moves the
 latest sign-ups to the waitlist, a larger one promotes from it — and the preview

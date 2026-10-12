@@ -4760,7 +4760,9 @@ class TestMaxParticipantsOption:
             if isinstance(item, discord.ui.Label)
         )
         assert label.text == "Max participants"
-        assert label.description == "0 for no limit, up to 500."
+        assert label.description == (
+            "0 for no limit, up to 500. -1 resets to the category's default."
+        )
         # The category's own squad size until the commander sets one.
         assert modal.field_input.default == "50"
         draft.max_participants = 0
@@ -4794,6 +4796,23 @@ class TestMaxParticipantsOption:
         # Back to following the category, so a later change of category
         # brings that category's own size with it.
         assert draft.max_participants is None
+        draft.category = EventCategory.STORY
+        assert draft.to_event().capacity.total == 5
+
+    async def test_minus_one_resets_to_the_category_default(self) -> None:
+        draft = replace(self.headcount_draft(), max_participants=120)
+
+        interaction = await self.submit(draft, "-1")
+
+        assert draft.max_participants is None
+        names = [
+            field.name
+            for field in awaited_kwargs(interaction.response.edit_message)[
+                "embeds"
+            ][0].fields
+        ]
+        assert "👥 Participants (0/50)" in names
+        # A reset follows the category, as a cap never set does.
         draft.category = EventCategory.STORY
         assert draft.to_event().capacity.total == 5
 

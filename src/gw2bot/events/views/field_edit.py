@@ -203,7 +203,7 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
             )
             self.field_input = discord.ui.TextInput["EventFieldEditModal"](
                 default=str(current),
-                placeholder=f"0-{MAX_PARTICIPANTS_LIMIT}",
+                placeholder=f"-1 to {MAX_PARTICIPANTS_LIMIT}",
                 max_length=len(str(MAX_PARTICIPANTS_LIMIT)),
             )
         elif field_name == "start":
@@ -244,11 +244,13 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
                 self._draft.requirements = value
             elif self._field_name == "max_participants":
                 cap = parse_max_participants(value)
-                # The category's own size is stored as no cap of the event's
-                # own, so it keeps following the category if that changes.
+                # The category's own size - asked for with -1, or typed out -
+                # is stored as no cap of the event's own, so it keeps
+                # following the category if that changes.
                 self._draft.max_participants = (
                     None
-                    if cap == _category_participant_cap(self._draft.category)
+                    if cap is None
+                    or cap == _category_participant_cap(self._draft.category)
                     else cap
                 )
                 LOGGER.debug(
