@@ -30,6 +30,7 @@ from gw2bot.events.formatting import (
 )
 from gw2bot.events.models import (
     AutoSignupChoice,
+    CATEGORY_CAPACITIES,
     CATEGORY_EMOJI,
     Event,
     EventCategory,
@@ -37,6 +38,7 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
+    MAX_PARTICIPANTS_LIMIT,
     MAX_PING_ROLES,
     PING_ROLE_PREFIX,
     RepeatFrequency,
@@ -70,6 +72,10 @@ MENTEE_SLOT_HINT = (
     "A member training to command co-leads the event. Members are asked "
     "after signing up."
 )
+
+
+MAX_PARTICIPANTS_PROMPT = "Max participants"
+MAX_PARTICIPANTS_HINT = f"0 for no limit, up to {MAX_PARTICIPANTS_LIMIT}."
 
 
 FLOW_TIMEOUT_SECONDS = 600
@@ -201,6 +207,10 @@ class EventDraft:
     # Off unless the commander turns it on, so a draft that never reaches the
     # question is still a finished answer.
     mentee_enabled: bool = False
+    # None keeps the category's own squad size, so a draft that never reaches
+    # the question is a finished answer too. Only a headcount category takes
+    # one; see to_event.
+    max_participants: int | None = None
     posted: bool = False
     # Set when the draft edits an existing event rather than creating one. The
     # whole "Change something" flow reuses this draft, so a single flag steers
@@ -256,6 +266,14 @@ class EventDraft:
             ping_role_ids=self.ping_role_ids,
             requirements=self.requirements,
             mentee_enabled=self.mentee_enabled,
+            # Dropped for a role-based category rather than stored where it
+            # would never be read, so moving a capped headcount event into one
+            # cannot leave a cap behind on the row.
+            max_participants=(
+                self.max_participants
+                if _offers_participant_cap(self.category)
+                else None
+            ),
         )
 
 
@@ -297,6 +315,7 @@ def draft_from_event(
         ping_role_ids=event.ping_role_ids,
         requirements=event.requirements,
         mentee_enabled=event.mentee_enabled,
+        max_participants=event.max_participants,
         editing_event_id=event.event_id,
         roster_only=roster_only,
         editing_occurrence_id=editing_occurrence_id,
@@ -332,6 +351,19 @@ def _category_options(
         )
         for category in EventCategory
     ]
+
+
+def _offers_participant_cap(category: EventCategory | None) -> bool:
+    # Only a headcount roster has a cap of its own to change: a role-based
+    # squad's size is fixed by the composition it seats.
+    return category is not None and not CATEGORY_CAPACITIES[category].has_roles
+
+
+def _category_participant_cap(category: EventCategory | None) -> int:
+    """A category's own squad size, spelled as the cap is: zero for none."""
+    if category is None:
+        return 0
+    return CATEGORY_CAPACITIES[category].total or 0
 
 
 def _yes_no_options(selected: bool | None) -> list[discord.SelectOption]:
@@ -760,6 +792,7 @@ def _restore_event_channel(
             ping_role_ids=event.ping_role_ids,
             requirements=event.requirements,
             mentee_enabled=event.mentee_enabled,
+            max_participants=event.max_participants,
         )
     except SQLAlchemyError as exc:
         LOGGER.error(
@@ -840,6 +873,7 @@ _CHANGE_FIELDS = (
     ("start", "Date & time"),
     ("duration", "Duration"),
     ("requirements", "Requirements"),
+    ("max_participants", "Max participants"),
     ("mentee", "Mentee slot"),
     ("repeat", "Repeat settings"),
     ("leader", "Leader"),
@@ -855,6 +889,15 @@ _DETAILS_CHANGE_FIELDS = tuple(
     if entry[0]
     in ("category", "title", "description", "channel", "leader", "ping_roles")
 )
+
+
+def _change_fields_for(draft: EventDraft) -> tuple[tuple[str, str], ...]:
+    """The fields a draft can change, without a cap its category cannot take."""
+    if _offers_participant_cap(draft.category):
+        return _CHANGE_FIELDS
+    return tuple(
+        entry for entry in _CHANGE_FIELDS if entry[0] != "max_participants"
+    )
 
 
 def occurrence_has_ended(

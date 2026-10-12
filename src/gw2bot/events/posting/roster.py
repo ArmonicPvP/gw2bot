@@ -1368,10 +1368,10 @@ def rebalance_occurrence_roster(
     event: Event,
     occurrence: EventOccurrence,
 ) -> tuple[int, RosterUpdate]:
-    # Call this after an edit changes an event's category: the stored
-    # assignments were seated against the old category's capacity and no longer
-    # describe a valid roster. Returns how many signups actually moved and the
-    # role changes to announce.
+    # Call this after an edit changes an event's category or its participant
+    # cap: the stored assignments were seated against the old capacity and no
+    # longer describe a valid roster. Returns how many signups actually moved
+    # and the role changes to announce.
     signups = bot.event_store.get_signups(occurrence.occurrence_id)
     if not signups:
         return 0, RosterUpdate()
@@ -1415,7 +1415,7 @@ def rebalance_occurrence_roster(
         occurrence.occurrence_id,
         assignments,
     )
-    # A new category re-seats everyone, which can unseat the mentee or seat
+    # A new capacity re-seats everyone, which can unseat the mentee or seat
     # somebody waiting for the slot.
     mentee = mentee_movement(
         bot,
@@ -1424,10 +1424,11 @@ def rebalance_occurrence_roster(
         signups if event.mentee_enabled else None,
     )
     LOGGER.debug(
-        "Rebalanced event roster for a new category; occurrence_id=%s "
-        "category=%s signups=%s changed=%s",
+        "Rebalanced event roster for a new capacity; occurrence_id=%s "
+        "category=%s capacity_total=%s signups=%s changed=%s",
         occurrence.occurrence_id,
         event.category.value,
+        event.capacity.total,
         len(signups),
         len(assignments),
     )

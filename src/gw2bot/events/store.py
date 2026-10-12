@@ -153,6 +153,7 @@ def _event_from_record(record: EventRecord) -> Event:
         ping_role_ids=_parse_ids(record.ping_role_ids),
         requirements=record.requirements,
         mentee_enabled=record.mentee_enabled,
+        max_participants=record.max_participants,
     )
 
 
@@ -418,6 +419,7 @@ class EventStore:
         ping_role_ids: tuple[int, ...] = (),
         requirements: str = "",
         mentee_enabled: bool = False,
+        max_participants: int | None = None,
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -438,18 +440,21 @@ class EventStore:
                 ping_role_ids=_serialize_ids(ping_role_ids),
                 requirements=requirements,
                 mentee_enabled=mentee_enabled,
+                max_participants=max_participants,
             )
             session.add(record)
             session.commit()
             LOGGER.debug(
                 "Created event; event_id=%s category=%s repeat=%s "
-                "title_characters=%s ping_roles=%s mentee_enabled=%s",
+                "title_characters=%s ping_roles=%s mentee_enabled=%s "
+                "max_participants=%s",
                 record.event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
                 len(ping_role_ids),
                 mentee_enabled,
+                max_participants,
             )
             return _event_from_record(record)
 
@@ -470,6 +475,7 @@ class EventStore:
         ping_role_ids: tuple[int, ...] = (),
         requirements: str = "",
         mentee_enabled: bool = False,
+        max_participants: int | None = None,
     ) -> Event:
         with self._sessions() as session:
             record = session.get(EventRecord, event_id)
@@ -489,6 +495,7 @@ class EventStore:
             record.ping_role_ids = _serialize_ids(ping_role_ids)
             record.requirements = requirements
             record.mentee_enabled = mentee_enabled
+            record.max_participants = max_participants
             if leader_changed:
                 # The new leader may hold, or be waiting for, the mentee slot
                 # on a run still to come. The slot is settled again on each of
@@ -504,13 +511,15 @@ class EventStore:
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "
-                "title_characters=%s ping_roles=%s mentee_enabled=%s",
+                "title_characters=%s ping_roles=%s mentee_enabled=%s "
+                "max_participants=%s",
                 event_id,
                 category.value,
                 repeat_frequency.value,
                 len(title),
                 len(ping_role_ids),
                 mentee_enabled,
+                max_participants,
             )
             return _event_from_record(record)
 

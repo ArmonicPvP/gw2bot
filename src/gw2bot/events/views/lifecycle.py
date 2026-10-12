@@ -230,6 +230,7 @@ async def apply_event_edit(
             ping_role_ids=edited.ping_role_ids,
             requirements=edited.requirements,
             mentee_enabled=edited.mentee_enabled,
+            max_participants=edited.max_participants,
         )
     except SQLAlchemyError as exc:
         # The save did not happen, so clear the guard to allow a fresh retry.
@@ -246,8 +247,12 @@ async def apply_event_edit(
         return
     channel_changed = old_channel_id != updated.channel_id
     moving = repost and channel_changed
-    category_changed = (
-        previous is not None and previous.category is not updated.category
+    # The category picks the capacity the roster was seated against, and a
+    # headcount event's own cap resizes it, so changing either invalidates the
+    # stored seats.
+    roster_resized = previous is not None and (
+        previous.category is not updated.category
+        or previous.capacity != updated.capacity
     )
     attempted = 0
     refreshed = 0
@@ -277,7 +282,7 @@ async def apply_event_edit(
             )
             if refetched is not None:
                 current = refetched
-        if category_changed:
+        if roster_resized:
             # Re-seat the members who are actually still here. The preview's
             # check can be minutes old by the time the pickers and the modal
             # are done with, and a departed member re-seated under the new
@@ -299,7 +304,7 @@ async def apply_event_edit(
                 # A roster the bot could not check is still a roster to
                 # re-seat; the departures wait for the next check.
                 LOGGER.error(
-                    "Could not check the roster before a category rebalance; "
+                    "Could not check the roster before a rebalance; "
                     "occurrence_id=%s error_type=%s",
                     current.occurrence_id,
                     type(exc).__name__,
@@ -357,7 +362,7 @@ async def apply_event_edit(
                 or occurrence_finished(resaved, reread)
             ):
                 LOGGER.debug(
-                    "Skipped a category rebalance for a run the check "
+                    "Skipped a roster rebalance for a run the check "
                     "retired; occurrence_id=%s exists=%s event_exists=%s",
                     current.occurrence_id,
                     reread is not None,
@@ -371,11 +376,11 @@ async def apply_event_edit(
                 continue
             current = reread
             updated = resaved
-            # The category picks the capacity the roster was seated against, so
-            # changing it invalidates every stored assignment. Re-seat the roster
-            # before the message is re-rendered, so the embed and the capacity
-            # checks both describe the new category, and announce the moves in
-            # the occurrence's thread so members learn their new seat.
+            # The stored assignments were seated against the old capacity.
+            # Re-seat the roster before the message is re-rendered, so the
+            # embed and the capacity checks both describe the new one, and
+            # announce the moves in the occurrence's thread so members learn
+            # their new seat.
             try:
                 _, rebalanced = rebalance_occurrence_roster(
                     bot, updated, current
@@ -390,7 +395,7 @@ async def apply_event_edit(
             except (SQLAlchemyError, ValueError) as exc:
                 # A stale roster must not block the rest of the edit.
                 LOGGER.error(
-                    "Could not rebalance roster after a category change; "
+                    "Could not rebalance roster after a capacity change; "
                     "occurrence_id=%s error_type=%s",
                     current.occurrence_id,
                     type(exc).__name__,

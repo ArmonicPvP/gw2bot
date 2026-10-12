@@ -539,6 +539,7 @@ class EventConfirmView(_PreviewConfirmView):
                 ping_role_ids=draft_event.ping_role_ids,
                 requirements=draft_event.requirements,
                 mentee_enabled=draft_event.mentee_enabled,
+                max_participants=draft_event.max_participants,
             )
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,

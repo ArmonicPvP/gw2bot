@@ -26,13 +26,18 @@ from gw2bot.events.formatting import (
     event_embed,
     roster_edit_embed,
 )
-from gw2bot.events.models import EventOccurrence, EventStatus, RepeatFrequency
+from gw2bot.events.models import (
+    EventOccurrence,
+    EventStatus,
+    RepeatFrequency,
+    rebalance_signups,
+)
 from gw2bot.events.views.shared import (
     EventDraft,
     PREVIEW_EVENT_ID_TEXT,
-    _CHANGE_FIELDS,
     _EditFlowView,
     _append_ping_note,
+    _change_fields_for,
     _editing_occurrence,
     _is_ephemeral_component_interaction,
     _preview_status,
@@ -108,6 +113,20 @@ def build_event_preview(
             else []
         )
         edited = draft.to_event(editing_event_id)
+        stored = (
+            None
+            if draft.roster_only
+            else bot.event_store.get_event(editing_event_id)
+        )
+        if (
+            stored is not None
+            and not edited.capacity.has_roles
+            and stored.capacity != edited.capacity
+        ):
+            # Saving re-seats a headcount roster against its new size, so the
+            # preview shows the seats the save will leave: who a lower cap
+            # sends to the waitlist, and who a higher one promotes off it.
+            signups = rebalance_signups(edited.capacity, signups)
         preview = event_embed(
             edited,
             signups,
@@ -206,7 +225,9 @@ class _PreviewConfirmView(_EditFlowView):
     def change_fields(self) -> tuple[tuple[str, str], ...]:
         # A method rather than a class attribute so a subclass can narrow the
         # list; the step-one preview offers only the fields entered by then.
-        return _CHANGE_FIELDS
+        # Read when the button is pressed, so the cap is offered for the
+        # category the draft has now.
+        return _change_fields_for(self._draft)
 
     @discord.ui.button(
         label="Change something",

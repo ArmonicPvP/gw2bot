@@ -16,6 +16,7 @@ from gw2bot.events.models import (
     EMOJI_ALACRITY,
     EMOJI_QUICKNESS,
     HEAL_ROLES,
+    MAX_PARTICIPANTS_LIMIT,
     ROLE_EMOJI,
     SIGNUP_EDIT_REFILL_SECONDS,
     STATUS_COLORS,
@@ -38,6 +39,7 @@ from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
 EVENT_DATETIME_FORMAT = "%m.%d.%Y %H:%M"
 EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"
 EVENT_DURATION_PATTERN = re.compile(r"^(\d{1,3}):([0-5]\d)$")
+MAX_PARTICIPANTS_PATTERN = re.compile(r"^\d{1,3}$")
 EMBED_FIELD_VALUE_LIMIT = 1024
 EMBED_TOTAL_LIMIT = 6000
 EMBED_TITLE_LIMIT = 256
@@ -109,6 +111,20 @@ def parse_event_duration(text: str) -> int:
     if minutes <= 0:
         raise ValueError("The duration must be longer than zero minutes.")
     return minutes
+
+
+def parse_max_participants(text: str) -> int:
+    """Read a participant cap, where zero means no cap at all."""
+    stripped = text.strip()
+    if (
+        MAX_PARTICIPANTS_PATTERN.match(stripped) is None
+        or int(stripped) > MAX_PARTICIPANTS_LIMIT
+    ):
+        raise ValueError(
+            "The max participants must be a whole number from 0 (no limit) "
+            f"to {MAX_PARTICIPANTS_LIMIT}."
+        )
+    return int(stripped)
 
 
 def format_duration(minutes: int) -> str:

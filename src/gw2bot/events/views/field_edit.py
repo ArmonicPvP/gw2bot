@@ -14,8 +14,14 @@ from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
     parse_event_datetime,
     parse_event_duration,
+    parse_max_participants,
 )
-from gw2bot.events.models import Event, EventCategory, MAX_PING_ROLES
+from gw2bot.events.models import (
+    Event,
+    EventCategory,
+    MAX_PARTICIPANTS_LIMIT,
+    MAX_PING_ROLES,
+)
 from gw2bot.events.views.create import RepeatChoiceView
 from gw2bot.events.views.preview import send_event_preview
 from gw2bot.events.views.shared import (
@@ -29,6 +35,8 @@ from gw2bot.events.views.shared import (
     EVENT_TITLE_MAX_LENGTH,
     EventDraft,
     FLOW_TIMEOUT_SECONDS,
+    MAX_PARTICIPANTS_HINT,
+    MAX_PARTICIPANTS_PROMPT,
     MENTEE_SLOT_HINT,
     MENTEE_SLOT_PROMPT,
     PING_ROLE_HINT,
@@ -37,6 +45,7 @@ from gw2bot.events.views.shared import (
     _CHANGE_FIELDS,
     _ModalOpenView,
     _category_options,
+    _category_participant_cap,
     _destination_error,
     _picked_ping_role_ids,
     _ping_role_options,
@@ -94,6 +103,7 @@ class ChangeFieldView(discord.ui.View):
             "start",
             "duration",
             "requirements",
+            "max_participants",
         ):
             await interaction.response.send_modal(
                 EventFieldEditModal(self._bot, self._draft, choice)
@@ -183,6 +193,19 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
                 max_length=EVENT_REQUIREMENTS_MAX_LENGTH,
                 required=False,
             )
+        elif field_name == "max_participants":
+            label = MAX_PARTICIPANTS_PROMPT
+            description = MAX_PARTICIPANTS_HINT
+            current = (
+                draft.max_participants
+                if draft.max_participants is not None
+                else _category_participant_cap(draft.category)
+            )
+            self.field_input = discord.ui.TextInput["EventFieldEditModal"](
+                default=str(current),
+                placeholder=f"0-{MAX_PARTICIPANTS_LIMIT}",
+                max_length=len(str(MAX_PARTICIPANTS_LIMIT)),
+            )
         elif field_name == "start":
             label = f"When will your event be? ({EVENT_DATETIME_PLACEHOLDER})"
             self.field_input = discord.ui.TextInput["EventFieldEditModal"](
@@ -219,6 +242,22 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
             elif self._field_name == "requirements":
                 # Blank is a real answer: it clears the requirements.
                 self._draft.requirements = value
+            elif self._field_name == "max_participants":
+                cap = parse_max_participants(value)
+                # The category's own size is stored as no cap of the event's
+                # own, so it keeps following the category if that changes.
+                self._draft.max_participants = (
+                    None
+                    if cap == _category_participant_cap(self._draft.category)
+                    else cap
+                )
+                LOGGER.debug(
+                    "Event max participants picked; user_id=%s "
+                    "max_participants=%s custom=%s",
+                    interaction.user.id,
+                    cap,
+                    self._draft.max_participants is not None,
+                )
             elif self._field_name == "start":
                 self._draft.start_text = value
                 start_time = parse_event_datetime(
