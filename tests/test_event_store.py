@@ -1699,6 +1699,52 @@ class TestEventStoreAutoSignups:
 
         assert [entry.discord_user_id for entry in entries] == [1]
 
+    def test_member_auto_signups_span_events_and_skip_other_choices(
+        self,
+        store: EventStore,
+    ) -> None:
+        raid = create_event(store, title="Raid")
+        fractals = create_event(store, title="Fractals")
+        declined = create_event(store, title="Strikes")
+        store.set_auto_signup(
+            raid.event_id,
+            1,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (EventRole.QUICKNESS_DPS,),
+        )
+        store.set_auto_signup(
+            fractals.event_id,
+            1,
+            AutoSignupChoice.YES,
+            EventRole.ALACRITY_HEAL,
+            (),
+        )
+        store.set_auto_signup(
+            declined.event_id,
+            1,
+            AutoSignupChoice.NO,
+            None,
+            (),
+        )
+        store.set_auto_signup(
+            raid.event_id,
+            2,
+            AutoSignupChoice.YES,
+            EventRole.DPS,
+            (),
+        )
+
+        entries = store.get_member_auto_signups(1)
+
+        assert sorted(entries) == sorted([raid.event_id, fractals.event_id])
+        assert entries[raid.event_id].discord_user_id == 1
+        assert entries[raid.event_id].flex_roles == (
+            EventRole.QUICKNESS_DPS,
+        )
+        assert entries[fractals.event_id].role is EventRole.ALACRITY_HEAL
+        assert store.get_member_auto_signups(3) == {}
+
 
 class TestEventStoreOccurrenceRange:
     def test_range_is_inclusive_start_exclusive_end(

@@ -7,12 +7,15 @@ from zoneinfo import ZoneInfo
 
 from gw2bot.events.formatting import next_occurrence_start
 from gw2bot.events.models import (
+    AutoSignup,
     CategoryCapacity,
     Event,
+    EventSignup,
     EventStatus,
     RepeatFrequency,
     RosterCounts,
     count_roster,
+    normalize_stored_roles,
 )
 from gw2bot.events.posting import occurrence_status
 from gw2bot.events.store import EventStore
@@ -69,6 +72,61 @@ def role_tallies(
 
 
 @dataclass(frozen=True, slots=True)
+class ViewerSignup:
+    """The signed-in member's own place on one run's roster."""
+
+    # The seat they hold, or None while they are waitlisted or when the
+    # category has no roles to seat them in. For an automatic sign-up it is the
+    # role the sign-up will ask for, which capacity may still flex or waitlist.
+    role: str | None
+    waitlisted: bool
+    # True on a projected run their automatic sign-up will put them on when
+    # it is posted, rather than a roster they are already on.
+    automatic: bool
+
+
+def _viewer_signup(
+    signups: list[EventSignup],
+    viewer_discord_id: int | None,
+) -> ViewerSignup | None:
+    """The viewer's signup among ``signups``, or None when they have none."""
+    if viewer_discord_id is None:
+        return None
+    for signup in signups:
+        if signup.discord_user_id != viewer_discord_id:
+            continue
+        seat = None if signup.waitlisted else signup.assigned_role
+        return ViewerSignup(
+            role=None if seat is None else seat.value,
+            waitlisted=signup.waitlisted,
+            automatic=False,
+        )
+    return None
+
+
+def _automatic_viewer_signup(
+    event: Event,
+    auto: AutoSignup | None,
+) -> ViewerSignup | None:
+    """What the viewer's automatic sign-up will do to the event's next runs.
+
+    Mirrors what seeding a new run does with it: a sign-up for a category with
+    roles but no stored role is skipped there, so it marks nothing here, and a
+    stored role the category no longer offers is read as the one it will be
+    normalized to.
+    """
+    if auto is None:
+        return None
+    capacity = event.capacity
+    if not capacity.has_roles:
+        return ViewerSignup(role=None, waitlisted=False, automatic=True)
+    if auto.role is None:
+        return None
+    role, _ = normalize_stored_roles(capacity, auto.role, auto.flex_roles)
+    return ViewerSignup(role=role.value, waitlisted=False, automatic=True)
+
+
+@dataclass(frozen=True, slots=True)
 class CalendarEntry:
     event_id: int
     occurrence_id: int | None
@@ -89,9 +147,16 @@ class CalendarEntry:
     # None for an uncapped category (General): the page shows a plain headcount
     # rather than a "seated of total" ratio.
     capacity_total: int | None
+    # The member asking, when they are on this run's roster - or, on a
+    # projection, when their automatic sign-up will put them on it.
+    viewer_signup: ViewerSignup | None
 
 
-def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
+def _projected_entry(
+    event: Event,
+    start_time: datetime,
+    viewer_signup: ViewerSignup | None,
+) -> CalendarEntry:
     capacity = event.capacity
     return CalendarEntry(
         event_id=event.event_id,
@@ -109,6 +174,7 @@ def _projected_entry(event: Event, start_time: datetime) -> CalendarEntry:
         waitlist_count=0,
         roles=role_tallies(capacity, count_roster([])),
         capacity_total=capacity.total,
+        viewer_signup=viewer_signup,
     )
 
 
@@ -118,7 +184,15 @@ def calendar_entries(
     range_start: datetime,
     range_end: datetime,
     now: datetime,
+    *,
+    viewer_discord_id: int | None = None,
 ) -> list[CalendarEntry]:
+    """Every run between the range's edges, posted or projected.
+
+    ``viewer_discord_id`` is the member the calendar is drawn for, whose own
+    signups are marked on the runs they are on, and whose automatic sign-ups
+    are marked on the projections they will be put on; None marks none.
+    """
     entries: dict[tuple[int, int], CalendarEntry] = {}
 
     materialized = store.get_occurrences_between(range_start, range_end)
@@ -157,10 +231,16 @@ def calendar_entries(
             ),
             roles=role_tallies(capacity, counts),
             capacity_total=capacity.total,
+            viewer_signup=_viewer_signup(signups, viewer_discord_id),
         )
 
     projected = 0
     latest_starts = store.get_latest_occurrence_starts()
+    auto_signups: dict[int, AutoSignup] = (
+        {}
+        if viewer_discord_id is None
+        else store.get_member_auto_signups(viewer_discord_id)
+    )
     for event in store.get_active_events():
         if event.repeat_frequency is RepeatFrequency.NONE:
             continue
@@ -174,6 +254,10 @@ def calendar_entries(
                 event.event_id,
             )
             continue
+        automatic = _automatic_viewer_signup(
+            event,
+            auto_signups.get(event.event_id),
+        )
         emitted = 0
         for _ in range(PROJECTION_STEP_CAP):
             if emitted >= PROJECTION_ENTRY_CAP:
@@ -205,7 +289,7 @@ def calendar_entries(
             key = (event.event_id, int(cursor.timestamp()))
             if key in entries:
                 continue
-            entries[key] = _projected_entry(event, cursor)
+            entries[key] = _projected_entry(event, cursor, automatic)
             emitted += 1
             projected += 1
         else:
@@ -222,9 +306,17 @@ def calendar_entries(
 
     results = sorted(entries.values(), key=lambda entry: entry.start_epoch)
     LOGGER.debug(
-        "Computed calendar entries; materialized=%s projected=%s total=%s",
+        "Computed calendar entries; materialized=%s projected=%s total=%s "
+        "signed_up=%s automatic=%s",
         len(materialized),
         projected,
         len(results),
+        sum(1 for entry in results if entry.viewer_signup is not None),
+        sum(
+            1
+            for entry in results
+            if entry.viewer_signup is not None
+            and entry.viewer_signup.automatic
+        ),
     )
     return results

@@ -1524,7 +1524,16 @@ entry shows the full details: category, description, requirements, times,
 duration, leader, status, and roster counts. The counts name only the seats
 the event's category has: a Dungeon shows no healers, a Player vs. Player event
 counts its Support and DPS without boons, and a headcount event such as World
-vs. World shows its participants alone. Clicking an event pins those
+vs. World shows its participants alone. Events you are signed up for, seated
+or on the waitlist, are outlined in the site's accent color with a ✓ before
+the time, and their details say which seat you hold or that you are on the
+waitlist; in the month view on a phone, where an entry has room for only a few
+letters, the outline alone marks them. A projected run that your
+[automatic sign-up](#automatic-sign-up-and-role-memory) will put you on is
+marked the same way, its dashed border turned to the accent color, and its
+details name the role the sign-up will ask for; the same capacity rules as any
+sign-up still apply when it is posted, so you can land on another role or the
+waitlist. Clicking an event pins those
 details until the next click; clicking a different event switches the pinned
 details to it. Day headings in week view and every date in month view open that
 date's day view.
