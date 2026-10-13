@@ -25,6 +25,7 @@ from gw2bot.events.formatting import (
     next_occurrence_start,
     parse_event_datetime,
     parse_event_duration,
+    parse_max_participants,
     parse_repeat_days,
     roster_update_messages,
     signup_edit_limit_message,
@@ -176,6 +177,22 @@ class TestParseEventDatetime:
     def test_rejects_impossible_dates(self) -> None:
         with pytest.raises(ValueError):
             parse_event_datetime("02.30.2027 20:00", UTC_ZONE)
+
+
+class TestParseMaxParticipants:
+    def test_reads_the_whole_range(self) -> None:
+        assert parse_max_participants("0") == 0
+        assert parse_max_participants(" 75 ") == 75
+        assert parse_max_participants("500") == 500
+
+    def test_minus_one_asks_for_the_category_default(self) -> None:
+        assert parse_max_participants("-1") is None
+        assert parse_max_participants(" -1 ") is None
+
+    def test_rejects_anything_outside_it(self) -> None:
+        for text in ("501", "999", "-2", "-0", "1.5", "ten", "", "0500"):
+            with pytest.raises(ValueError, match=r"0 \(no limit\) to 500"):
+                parse_max_participants(text)
 
 
 class TestParseEventDuration:
@@ -849,6 +866,45 @@ class TestEventEmbed:
         left, right = _participant_columns(embed)
         assert left == "└ <@1>\n└ <@2>"
         assert right == "└ <@3>"
+
+    def test_a_custom_cap_replaces_the_category_size(self) -> None:
+        event = replace(
+            make_event(EventCategory.OPEN_WORLD),
+            max_participants=120,
+        )
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        names = [field.name or "" for field in embed.fields]
+        assert "👥 Participants (3/120)" in names
+
+    def test_a_cap_of_zero_reads_as_a_plain_headcount(self) -> None:
+        event = replace(make_event(EventCategory.WVW), max_participants=0)
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        names = [field.name or "" for field in embed.fields]
+        assert "👥 Participants (3)" in names
+
+    def test_a_small_custom_cap_keeps_one_participant_column(self) -> None:
+        event = replace(
+            make_event(EventCategory.OPEN_WORLD),
+            max_participants=8,
+        )
+        signups = [make_signup(user_id) for user_id in range(1, 4)]
+
+        embed = event_embed(event, signups, EventStatus.OPEN)
+
+        assert _roster_fields(embed) == [
+            ("👥 Participants (3/8)", "└ <@1>\n└ <@2>\n└ <@3>", False),
+        ]
+
+    def test_a_role_based_category_ignores_a_cap(self) -> None:
+        event = replace(make_event(EventCategory.RAID), max_participants=3)
+
+        assert event.capacity == CATEGORY_CAPACITIES[EventCategory.RAID]
 
     def test_small_role_less_squad_keeps_one_participant_column(
         self,

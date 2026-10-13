@@ -332,6 +332,7 @@ def create_event(
     channel_id: int = 1234,
     ping_role_ids: tuple[int, ...] = (),
     requirements: str = "",
+    max_participants: int | None = None,
 ):
     return store.create_event(
         category=category,
@@ -346,6 +347,7 @@ def create_event(
         delete_previous_on_repeat=delete_previous_on_repeat,
         ping_role_ids=ping_role_ids,
         requirements=requirements,
+        max_participants=max_participants,
     )
 
 
@@ -355,8 +357,15 @@ async def post_new_event(
     category: EventCategory = EventCategory.FRACTAL,
     repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
     repeat_days: tuple[int, ...] = (),
+    max_participants: int | None = None,
 ):
-    event = create_event(store, category, repeat_frequency, repeat_days)
+    event = create_event(
+        store,
+        category,
+        repeat_frequency,
+        repeat_days,
+        max_participants=max_participants,
+    )
     occurrence = store.create_occurrence(event.event_id, event.start_time)
     posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
     return event, posted
@@ -2388,6 +2397,61 @@ class TestCompleteSignup:
         assert occurrence_status(event, occurrence, signups) is (
             EventStatus.OPEN
         )
+
+    async def test_a_custom_cap_waitlists_beyond_its_own_size(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.OPEN_WORLD,
+            max_participants=3,
+        )
+        for user_id in range(1, 4):
+            signup = await complete_signup(
+                bot,
+                event,
+                occurrence,
+                user_id,
+                None,
+                (),
+            )
+            assert not signup.waitlisted
+
+        overflow = await complete_signup(bot, event, occurrence, 4, None, ())
+
+        # The commander's cap, not the category's fifty seats, fills it.
+        assert overflow.waitlisted
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert is_roster_full(event.capacity, signups)
+
+    async def test_a_cap_of_zero_seats_everyone(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = await post_new_event(
+            bot,
+            store,
+            category=EventCategory.WVW,
+            max_participants=0,
+        )
+        # Past the fifty seats a World vs. World event stops at by default.
+        for user_id in range(1, 61):
+            signup = await complete_signup(
+                bot,
+                event,
+                occurrence,
+                user_id,
+                None,
+                (),
+            )
+            assert not signup.waitlisted
+
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert not is_roster_full(event.capacity, signups)
 
     async def test_instanced_event_requires_a_role(
         self,
@@ -8120,6 +8184,88 @@ class TestRebalanceOccurrenceRoster:
         assert not any(signup.waitlisted for signup in signups)
         assert all(signup.assigned_role is None for signup in signups)
         assert not is_roster_full(general.capacity, signups)
+
+    def resize(self, store: EventStore, event: Any, cap: int | None) -> Any:
+        return store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            max_participants=cap,
+        )
+
+    def test_lowering_a_headcount_cap_waitlists_the_latest_signups(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store, category=EventCategory.OPEN_WORLD)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        for user_id in range(1, 6):
+            self.seat(store, occurrence.occurrence_id, user_id, None, None)
+
+        changed, update = rebalance_occurrence_roster(
+            bot,
+            self.resize(store, event, 3),
+            occurrence,
+        )
+
+        assert changed == 2
+        assert not update.has_changes
+        signups = store.get_signups(occurrence.occurrence_id)
+        # First come, first served: the earliest three keep their seats.
+        assert [
+            signup.discord_user_id
+            for signup in signups
+            if not signup.waitlisted
+        ] == [1, 2, 3]
+
+    def test_raising_a_headcount_cap_promotes_the_waitlist(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = create_event(
+            store,
+            category=EventCategory.STORY,
+            max_participants=2,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        for user_id in range(1, 3):
+            self.seat(store, occurrence.occurrence_id, user_id, None, None)
+        for user_id in range(3, 6):
+            self.seat(
+                store,
+                occurrence.occurrence_id,
+                user_id,
+                None,
+                None,
+                waitlisted=True,
+            )
+
+        changed, update = rebalance_occurrence_roster(
+            bot,
+            self.resize(store, event, 4),
+            occurrence,
+        )
+
+        assert changed == 2
+        assert [signup.discord_user_id for signup in update.promoted] == [
+            3,
+            4,
+        ]
+        waitlisted = [
+            signup.discord_user_id
+            for signup in store.get_signups(occurrence.occurrence_id)
+            if signup.waitlisted
+        ]
+        assert waitlisted == [5]
 
     def test_shrinking_capacity_waitlists_the_overflow_in_signup_order(
         self,

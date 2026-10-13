@@ -447,10 +447,11 @@ page to keep current. Their `eventID: N` stays readable either way.
 
 A private preview of the finished post follows each step. **Change something**
 reopens any single field — category, title, description, channel, date & time,
-duration, requirements, mentee slot, repeat settings, leader, or roles to ping —
-without walking the flow again, and **Post event** sends it. Nothing is
-written to the database until the event is posted, so abandoning the flow
-leaves nothing behind.
+duration, requirements, max participants (on a headcount event; see [Squad Size
+And Roles](#squad-size-and-roles)), mentee slot, repeat settings, leader, or
+roles to ping — without walking the flow again, and **Post event** sends it.
+Nothing is written to the database until the event is posted, so abandoning the
+flow leaves nothing behind.
 
 `/event edit` opens the same preview for an existing event, with **Save changes**
 in place of **Post event**. Changing the channel re-posts the event at the new
@@ -461,7 +462,8 @@ with its roster buttons alone. An event that is over cannot be edited at all.
 
 ### Squad Size And Roles
 
-The category fixes the squad, and the bot enforces it:
+The category fixes the squad, and the bot enforces it (a headcount event can
+set a size of its own; see below):
 
 | Category | Squad | Healers | DPS | Quickness | Alacrity |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -489,10 +491,23 @@ General has no squad size at all: everyone who signs up is seated, so it never
 fills and never waitlists anyone, and its embed shows the participant count on
 its own rather than as a share of a total.
 
-A role-less squad bigger than ten seats — World vs. World and Open World, and
-General with no cap at all — lists its participants in two side-by-side
-columns, read down the left column and then down the right one, so a long
-roster does not stretch the event post down the channel.
+A headcount event's size can be changed through **Change something → Max
+participants**, on `/event new` and `/event edit` alike: any whole number from 1
+to 500, or 0 for no limit, in which case it seats everyone the way General does.
+The modal opens on the current size. Entering -1, or the category's own size,
+resets the event to the category's default, so a later change of category
+brings that category's size along; a size of its own is kept across headcount
+categories and dropped on a move to a role-based one. Role-based events never offer it: their squad is
+fixed by the composition in the table. Saving a new size re-seats the roster
+first come, first served, as a category change does — a smaller one moves the
+latest sign-ups to the waitlist, a larger one promotes from it — and the preview
+shows the roster as the save will leave it.
+
+A role-less squad bigger than ten seats — World vs. World and Open World at
+their own size, and General or any event with no cap at all — lists its
+participants in two side-by-side columns, read down the left column and then
+down the right one, so a long roster does not stretch the event post down the
+channel.
 
 ### Signing Up
 

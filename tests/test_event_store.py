@@ -443,6 +443,46 @@ def test_migration_adds_the_mentee_columns_to_existing_db(
         store.close()
 
 
+def test_migration_adds_max_participants_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before a
+    # headcount event could carry its own cap by dropping the column.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_events DROP COLUMN max_participants")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat, ping_role_ids, requirements, "
+                "mentee_enabled) VALUES ('Open World', 't', 'd', 1, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0, '', '', 0)"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "max_participants" in added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_event(1)
+        assert legacy is not None
+        # An event created before the cap existed seats its category's own
+        # squad size.
+        assert legacy.max_participants is None
+        assert legacy.capacity.total == 50
+    finally:
+        store.close()
+
+
 def create_event(store: EventStore, **overrides: object):
     parameters: dict = {
         "category": EventCategory.FRACTAL,
@@ -1987,6 +2027,43 @@ class TestEventStoreLoggingSafety:
 
         assert title not in caplog.text
         assert description not in caplog.text
+
+
+class TestEventStoreMaxParticipants:
+    def test_the_cap_round_trips_through_create_and_update(
+        self,
+        store: EventStore,
+    ) -> None:
+        created = create_event(
+            store,
+            category=EventCategory.OPEN_WORLD,
+            max_participants=120,
+        )
+        loaded = store.get_event(created.event_id)
+        assert loaded is not None
+        assert loaded.max_participants == 120
+        assert loaded.capacity.total == 120
+
+        updated = store.update_event(
+            event_id=created.event_id,
+            category=created.category,
+            title=created.title,
+            description=created.description,
+            channel_id=created.channel_id,
+            leader_discord_id=created.leader_discord_id,
+            start_time=created.start_time,
+            duration_minutes=created.duration_minutes,
+            repeat_frequency=created.repeat_frequency,
+            repeat_days=created.repeat_days,
+            max_participants=0,
+        )
+
+        # Zero is a cap of its own, distinct from the category's default:
+        # it lifts the cap altogether.
+        assert updated.max_participants == 0
+        assert updated.capacity.total is None
+        # An event nobody gave a cap keeps its category's own.
+        assert create_event(store).max_participants is None
 
 
 class TestEventStoreMenteeSlot:

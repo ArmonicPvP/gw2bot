@@ -90,6 +90,10 @@ PING_ROLE_PREFIX = "[GW2]"
 # announcement, and a post that pings half the server stops being one.
 MAX_PING_ROLES = 3
 
+# The largest participant cap a commander may give a headcount event. Zero is
+# the other end of the range and means no cap at all.
+MAX_PARTICIPANTS_LIMIT = 500
+
 
 def is_pingable_role_name(name: str) -> bool:
     return name.casefold().startswith(PING_ROLE_PREFIX.casefold())
@@ -272,10 +276,19 @@ class Event:
     # who co-leads the run. Only then are members asked about it after signing
     # up, and only then does the post show the slot.
     mentee_enabled: bool = False
+    # The commander's own cap on a headcount event's roster, in place of the
+    # category's squad size: zero lifts the cap altogether. None keeps the
+    # category's own, which is what every event created before the cap
+    # existed reads as. A role-based squad is fixed by its composition, so
+    # only a category with no roles ever honours one.
+    max_participants: int | None = None
 
     @property
     def capacity(self) -> CategoryCapacity:
-        return CATEGORY_CAPACITIES[self.category]
+        capacity = CATEGORY_CAPACITIES[self.category]
+        if self.max_participants is None or capacity.has_roles:
+            return capacity
+        return replace(capacity, total=self.max_participants or None)
 
 
 @dataclass(frozen=True, slots=True)

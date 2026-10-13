@@ -84,6 +84,7 @@ from gw2bot.events.views import (
     RemoveSignupsView,
     RememberChoiceView,
     RepeatChoiceView,
+    RetryFieldEditView,
     RolePickSelect,
     RolePickView,
     SignOutChoiceView,
@@ -1113,6 +1114,7 @@ class TestModalComponentLimits:
                     "start",
                     "duration",
                     "requirements",
+                    "max_participants",
                 )
             ),
         ]
@@ -4699,6 +4701,230 @@ class TestRequirementsEndToEnd:
         )
         assert label.text == "Requirements"
         assert label.description == "Event Requirements (Leave blank for none)"
+
+
+class TestMaxParticipantsOption:
+    def headcount_draft(self) -> EventDraft:
+        return replace(
+            make_complete_draft(),
+            category=EventCategory.OPEN_WORLD,
+        )
+
+    async def offered_fields(self, draft: EventDraft) -> list[str]:
+        view = EventConfirmView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await cast(Any, view.change_something.callback)(interaction)
+
+        change_view = awaited_kwargs(interaction.response.send_message)[
+            "view"
+        ]
+        select = next(
+            item
+            for item in change_view.children
+            if isinstance(item, ChangeFieldSelect)
+        )
+        return [option.value for option in select.options]
+
+    async def test_only_a_headcount_event_offers_it(self) -> None:
+        assert "max_participants" in await self.offered_fields(
+            self.headcount_draft()
+        )
+        # A role-based squad is sized by its composition, so it has no cap
+        # of its own to change.
+        assert "max_participants" not in await self.offered_fields(
+            make_complete_draft()
+        )
+
+    async def submit(self, draft: EventDraft, text: str) -> Any:
+        modal = EventFieldEditModal(make_bot(), draft, "max_participants")
+        modal.field_input._value = text
+        interaction = make_interaction(message=ephemeral_message())
+        await modal.on_submit(interaction)
+        return interaction
+
+    async def test_choosing_it_opens_the_modal_on_the_current_size(
+        self,
+    ) -> None:
+        draft = self.headcount_draft()
+        view = ChangeFieldView(make_bot(), draft)
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.handle_choice(interaction, "max_participants")
+
+        modal = interaction.response.send_modal.await_args.args[0]
+        assert isinstance(modal, EventFieldEditModal)
+        label = next(
+            item
+            for item in modal.children
+            if isinstance(item, discord.ui.Label)
+        )
+        assert label.text == "Max participants"
+        assert label.description == (
+            "0 for no limit, up to 500. -1 resets to the category's default."
+        )
+        # The category's own squad size until the commander sets one.
+        assert modal.field_input.default == "50"
+        draft.max_participants = 0
+        reopened = EventFieldEditModal(make_bot(), draft, "max_participants")
+        assert reopened.field_input.default == "0"
+
+    async def test_a_cap_returns_to_the_preview_showing_it(self) -> None:
+        draft = self.headcount_draft()
+
+        interaction = await self.submit(draft, "120")
+
+        assert draft.max_participants == 120
+        previewed = awaited_kwargs(interaction.response.edit_message)
+        assert isinstance(previewed["view"], EventConfirmView)
+        names = [field.name for field in previewed["embeds"][0].fields]
+        assert "👥 Participants (0/120)" in names
+
+    async def test_zero_lifts_the_cap(self) -> None:
+        draft = self.headcount_draft()
+
+        await self.submit(draft, "0")
+
+        assert draft.max_participants == 0
+        assert draft.to_event().capacity.total is None
+
+    async def test_the_category_size_is_not_stored_as_a_cap(self) -> None:
+        draft = replace(self.headcount_draft(), max_participants=120)
+
+        await self.submit(draft, "50")
+
+        # Back to following the category, so a later change of category
+        # brings that category's own size with it.
+        assert draft.max_participants is None
+        draft.category = EventCategory.STORY
+        assert draft.to_event().capacity.total == 5
+
+    async def test_minus_one_resets_to_the_category_default(self) -> None:
+        draft = replace(self.headcount_draft(), max_participants=120)
+
+        interaction = await self.submit(draft, "-1")
+
+        assert draft.max_participants is None
+        names = [
+            field.name
+            for field in awaited_kwargs(interaction.response.edit_message)[
+                "embeds"
+            ][0].fields
+        ]
+        assert "👥 Participants (0/50)" in names
+        # A reset follows the category, as a cap never set does.
+        draft.category = EventCategory.STORY
+        assert draft.to_event().capacity.total == 5
+
+    async def test_an_out_of_range_cap_offers_a_retry(self) -> None:
+        draft = replace(self.headcount_draft(), max_participants=120)
+
+        interaction = await self.submit(draft, "501")
+
+        assert draft.max_participants == 120
+        retry = awaited_kwargs(interaction.response.edit_message)
+        assert "0 (no limit) to 500" in retry["content"]
+        assert isinstance(retry["view"], RetryFieldEditView)
+
+    def test_a_role_based_category_drops_the_cap(self) -> None:
+        draft = replace(self.headcount_draft(), max_participants=30)
+        draft.category = EventCategory.RAID
+
+        assert draft.to_event().max_participants is None
+
+    async def test_posting_stores_the_cap(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = replace(self.headcount_draft(), max_participants=120)
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await view.post_event.callback(interaction)
+
+        stored = store.get_event(1)
+        assert stored is not None
+        assert stored.max_participants == 120
+        assert any(
+            field.name == "👥 Participants (0/120)"
+            for field in channel.sent[0]["embed"].fields
+        )
+
+    async def test_saving_a_lower_cap_waitlists_the_latest_signups(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event = store.create_event(
+            category=EventCategory.OPEN_WORLD,
+            title="Meta Train",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        joined = FAR_FUTURE - timedelta(days=2)
+        for user_id in range(1, 6):
+            store.add_signup(
+                occurrence_id=occurrence.occurrence_id,
+                discord_user_id=user_id,
+                role=None,
+                assigned_role=None,
+                flex_roles=(),
+                waitlisted=False,
+                now=joined + timedelta(minutes=user_id),
+            )
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        modal = EventFieldEditModal(fake_bot, draft, "max_participants")
+        modal.field_input._value = "3"
+        preview = make_interaction(message=ephemeral_message())
+
+        await modal.on_submit(preview)
+
+        # The preview shows the seats the save will leave, not the roster as
+        # it stands under the old size.
+        names = [
+            field.name
+            for field in awaited_kwargs(preview.response.edit_message)[
+                "embeds"
+            ][0].fields
+        ]
+        assert "👥 Participants (3/3)" in names
+        assert "⌛️ Waitlist" in names
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await EventEditConfirmView(fake_bot, draft).save_changes.callback(
+            interaction
+        )
+
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.max_participants == 3
+        signups = store.get_signups(occurrence.occurrence_id)
+        assert [
+            signup.discord_user_id
+            for signup in signups
+            if signup.waitlisted
+        ] == [4, 5]
 
 
 class TestMenteeSlotOption:

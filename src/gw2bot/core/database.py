@@ -746,6 +746,12 @@ class EventRecord(Base):
         default=False,
         server_default="0",
     )
+    # The commander's cap on a headcount event's roster: 0 for no cap, NULL
+    # for the category's own squad size.
+    max_participants: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
 
 
 class EventOccurrenceRecord(Base):
@@ -1284,6 +1290,15 @@ def initialize_database(engine: Engine) -> set[str]:
                 ),
             )
             added_columns.add("mentee_enabled")
+
+        if "max_participants" not in event_columns:
+            # Events created before the cap existed seat the category's own
+            # squad size, which is what NULL records.
+            operations.add_column(
+                EventRecord.__tablename__,
+                Column("max_participants", Integer, nullable=True),
+            )
+            added_columns.add("max_participants")
 
         signup_columns = {
             column["name"]
