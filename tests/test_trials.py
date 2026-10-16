@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -18,7 +19,7 @@ from factories import (
     not_found_error,
     unconfigured_bot,
 )
-from gw2bot.gw2.guild_members import TrialMemberReportEntry
+from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.bot import Gw2Bot
 from gw2bot.raffle import RaffleStore, TrialForumPost
 from gw2bot.config import (
@@ -752,6 +753,7 @@ class TestTrackCommand:
     async def test_rejects_non_guild_member(self) -> None:
         bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value=None),
+            is_overdue_trial_member=AsyncMock(),
             toggle_trial_member_tracking=MagicMock(),
         )
         interaction = SimpleNamespace(
@@ -769,6 +771,7 @@ class TestTrackCommand:
             "Ghost.1234",
         )
 
+        bot.is_overdue_trial_member.assert_not_awaited()
         bot.toggle_trial_member_tracking.assert_not_called()
         message = interaction.followup.send.await_args.args[0]
         assert "is not a member of the configured guild" in message
@@ -800,6 +803,7 @@ class TestTrackCommand:
     async def test_tracks_member_and_posts_audit(self) -> None:
         bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            is_overdue_trial_member=AsyncMock(return_value=True),
             toggle_trial_member_tracking=MagicMock(return_value=True),
             send_notification=AsyncMock(return_value=True),
         )
@@ -818,6 +822,7 @@ class TestTrackCommand:
             "username.1234",
         )
 
+        bot.is_overdue_trial_member.assert_awaited_once_with("Username.1234")
         bot.toggle_trial_member_tracking.assert_called_once_with(
             "Username.1234",
             99,
@@ -832,6 +837,7 @@ class TestTrackCommand:
     async def test_untracks_member_and_posts_audit(self) -> None:
         bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            is_overdue_trial_member=AsyncMock(return_value=True),
             toggle_trial_member_tracking=MagicMock(return_value=False),
             send_notification=AsyncMock(return_value=True),
         )
@@ -859,6 +865,7 @@ class TestTrackCommand:
     async def test_notes_when_audit_delivery_fails(self) -> None:
         bot = configured_bot(
             resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            is_overdue_trial_member=AsyncMock(return_value=True),
             toggle_trial_member_tracking=MagicMock(return_value=True),
             send_notification=AsyncMock(return_value=False),
         )
@@ -879,6 +886,99 @@ class TestTrackCommand:
 
         reply = interaction.followup.send.await_args.args[0]
         assert "The audit log could not be delivered." in reply
+
+    async def test_rejects_member_before_the_fourteen_day_mark(self) -> None:
+        bot = configured_bot(
+            resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            is_overdue_trial_member=AsyncMock(return_value=False),
+            is_trial_member_tracked=MagicMock(return_value=False),
+            toggle_trial_member_tracking=MagicMock(),
+            send_notification=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=99,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "username.1234",
+        )
+
+        bot.is_overdue_trial_member.assert_awaited_once_with("Username.1234")
+        bot.is_trial_member_tracked.assert_called_once_with("Username.1234")
+        bot.toggle_trial_member_tracking.assert_not_called()
+        bot.send_notification.assert_not_awaited()
+        assert interaction.followup.send.await_args.args == (
+            "**Username.1234** is not a Trial member past the 14-day mark, "
+            "so their warning cannot be tracked.",
+        )
+        assert interaction.followup.send.await_args.kwargs == {"ephemeral": True}
+
+    async def test_untracks_tracked_member_no_longer_past_the_mark(
+        self,
+    ) -> None:
+        bot = configured_bot(
+            resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            is_overdue_trial_member=AsyncMock(return_value=False),
+            is_trial_member_tracked=MagicMock(return_value=True),
+            toggle_trial_member_tracking=MagicMock(return_value=False),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=99,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Username.1234",
+        )
+
+        bot.toggle_trial_member_tracking.assert_called_once_with(
+            "Username.1234",
+            99,
+        )
+        bot.send_notification.assert_awaited_once_with(
+            "Username.1234 warning untracked by <@99>"
+        )
+        reply = interaction.followup.send.await_args.args[0]
+        assert "Stopped tracking **Username.1234**" in reply
+
+    async def test_reports_fourteen_day_mark_lookup_failure(self) -> None:
+        bot = configured_bot(
+            resolve_guild_member=AsyncMock(return_value="Username.1234"),
+            is_overdue_trial_member=AsyncMock(side_effect=asyncio.TimeoutError()),
+            toggle_trial_member_tracking=MagicMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=1,
+                roles=[SimpleNamespace(id=RAFFLE_OFFICER_ROLE_ID)],
+            ),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await Gw2Bot._handle_track_command(
+            cast(Gw2Bot, bot),
+            cast(discord.Interaction, interaction),
+            "Username.1234",
+        )
+
+        bot.toggle_trial_member_tracking.assert_not_called()
+        message = interaction.followup.send.await_args.args[0]
+        assert "Could not verify guild membership" in message
 
     async def test_reports_membership_lookup_failure(self) -> None:
         bot = configured_bot(
@@ -907,7 +1007,7 @@ class TestTrackCommand:
     async def test_autocomplete_requires_officer_role(self) -> None:
         bot = SimpleNamespace(
             _config=default_config(),
-            search_guild_members=AsyncMock(),
+            search_overdue_trial_members=AsyncMock(),
         )
         interaction = SimpleNamespace(user=SimpleNamespace(id=1, roles=[]))
 
@@ -918,12 +1018,12 @@ class TestTrackCommand:
         )
 
         assert choices == []
-        bot.search_guild_members.assert_not_awaited()
+        bot.search_overdue_trial_members.assert_not_awaited()
 
     async def test_autocomplete_offers_no_choices_without_gw2_credentials(
         self,
     ) -> None:
-        bot = unconfigured_bot(search_guild_members=AsyncMock())
+        bot = unconfigured_bot(search_overdue_trial_members=AsyncMock())
         interaction = SimpleNamespace(
             user=SimpleNamespace(
                 id=1,
@@ -938,11 +1038,11 @@ class TestTrackCommand:
         )
 
         assert choices == []
-        bot.search_guild_members.assert_not_awaited()
+        bot.search_overdue_trial_members.assert_not_awaited()
 
     async def test_autocomplete_returns_officer_choices(self) -> None:
         bot = configured_bot(
-            search_guild_members=AsyncMock(return_value=["Username.1234"]),
+            search_overdue_trial_members=AsyncMock(return_value=["Username.1234"]),
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(
@@ -957,9 +1057,67 @@ class TestTrackCommand:
             "User",
         )
 
+        bot.search_overdue_trial_members.assert_awaited_once_with(
+            "User",
+            limit=25,
+        )
         assert [(choice.name, choice.value) for choice in choices] == [
             ("Username.1234", "Username.1234")
         ]
+
+    async def test_bot_lookups_judge_the_fourteen_day_mark_from_now(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+
+        class TrialRosterApi:
+            async def get_guild_members(
+                self,
+                guild_id: str,
+            ) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "name": "Overdue.1234",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=15)).isoformat(),
+                    },
+                    {
+                        "name": "Recent.5678",
+                        "rank": "Trial",
+                        "joined": (now - timedelta(days=13)).isoformat(),
+                    },
+                    {
+                        "name": "Veteran.9012",
+                        "rank": "Member",
+                        "joined": (now - timedelta(days=90)).isoformat(),
+                    },
+                ]
+
+        bot = SimpleNamespace(
+            _guild_members=GuildMemberCache(
+                TrialRosterApi(),
+                "guild-id",
+                ttl_seconds=60,
+            ),
+        )
+        await bot._guild_members.resolve("Overdue.1234")
+
+        assert await Gw2Bot.search_overdue_trial_members(
+            cast(Gw2Bot, bot),
+            "",
+        ) == ["Overdue.1234"]
+        assert await Gw2Bot.is_overdue_trial_member(
+            cast(Gw2Bot, bot),
+            "overdue.1234",
+        )
+        assert not await Gw2Bot.is_overdue_trial_member(
+            cast(Gw2Bot, bot),
+            "Recent.5678",
+        )
+        assert not await Gw2Bot.is_overdue_trial_member(
+            cast(Gw2Bot, bot),
+            "Veteran.9012",
+        )
 
 
 class TestTrialMemberStatusResolution:

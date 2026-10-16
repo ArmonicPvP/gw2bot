@@ -76,6 +76,71 @@ class TestGuildMemberCache:
         assert await cache.usernames_with_rank("Member") == {"Another Member.5678"}
         assert api.calls == 1
 
+    async def test_judges_the_fourteen_day_mark_from_trial_join_dates(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = FakeGuildApi()
+        api.members = [
+            {"name": "Exactly.1234", "rank": "Trial", "joined": "2026-05-24T17:00:00Z"},
+            {"name": "Recent.5678", "rank": "trial", "joined": "2026-05-24T17:00:01Z"},
+            {"name": "Veteran.9012", "rank": "Member", "joined": "2026-01-01T00:00:00Z"},
+            {"name": "Undated.3456", "rank": "Trial"},
+        ]
+        cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
+
+        assert await cache.is_overdue_trial("exactly.1234", now)
+        assert not await cache.is_overdue_trial("Recent.5678", now)
+        assert not await cache.is_overdue_trial("Veteran.9012", now)
+        assert not await cache.is_overdue_trial("Undated.3456", now)
+        assert not await cache.is_overdue_trial("Ghost.0000", now)
+        assert await cache.is_overdue_trial(
+            "Recent.5678",
+            now + timedelta(seconds=1),
+        )
+        assert api.calls == 1
+
+    async def test_search_can_narrow_to_overdue_trial_members(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = FakeGuildApi()
+        api.members = [
+            {"name": "Trial Old.1234", "rank": "Trial", "joined": "2026-05-01T00:00:00Z"},
+            {"name": "Trial New.5678", "rank": "Trial", "joined": "2026-06-01T00:00:00Z"},
+            {"name": "Trial Member.9012", "rank": "Member", "joined": "2026-01-01T00:00:00Z"},
+        ]
+        cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
+        await cache.resolve("Trial Old.1234")
+
+        assert await cache.search("trial") == [
+            "Trial Member.9012",
+            "Trial New.5678",
+            "Trial Old.1234",
+        ]
+        assert await cache.search("trial", overdue_trials_at=now) == [
+            "Trial Old.1234",
+        ]
+        assert await cache.search("new", overdue_trials_at=now) == []
+
+    async def test_overdue_trial_lookup_follows_a_refreshed_rank(self) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = FakeGuildApi()
+        api.members = [
+            {"name": "Promoted.1234", "rank": "Trial", "joined": "2026-05-01T00:00:00Z"},
+        ]
+        cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
+        assert await cache.is_overdue_trial("Promoted.1234", now)
+
+        api.members = [
+            {"name": "Promoted.1234", "rank": "Member", "joined": "2026-05-01T00:00:00Z"},
+        ]
+
+        assert not await cache.is_overdue_trial(
+            "Promoted.1234",
+            now,
+            force_refresh=True,
+        )
+        assert await cache.search("promoted", overdue_trials_at=now) == []
+
     async def test_force_refresh_verifies_current_guild_membership(self) -> None:
         api = FakeGuildApi()
         cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
@@ -122,7 +187,7 @@ class TestGuildMemberCache:
         assert secret not in caplog.text
         assert (
             "Guild member cache search started; query_chars=25 limit=25 "
-            "cached_members=2 cache_expired=False"
+            "cached_members=2 cache_expired=False overdue_trials_only=False"
             in caplog.text
         )
         assert (
