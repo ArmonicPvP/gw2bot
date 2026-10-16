@@ -96,7 +96,15 @@ main {
   letter-spacing: 0.06em;
 }
 .tg-daynum { font-size: 1rem; font-weight: 600; }
-.tg-head.today .tg-dow, .tg-head.today .tg-daynum { color: var(--accent); }
+.tg-head.today .tg-dow, .tg-head.today .tg-daynum {
+  color: var(--accent-on-dark);
+}
+/* In the week view the header is a button, and hovering it lifts the
+   background to --border, where the purple above reads at 3.9:1. The light
+   tint keeps today's date at 6.3:1 there. */
+.tg-head.today:hover .tg-dow, .tg-head.today:hover .tg-daynum {
+  color: var(--accent-light);
+}
 .tg-head.clickable {
   border: 0;
   border-bottom: 1px solid var(--border);
@@ -172,7 +180,7 @@ main {
   min-height: 0;
 }
 .cell.outside { opacity: 0.45; }
-.cell.today { border-color: var(--accent); }
+.cell.today { border-color: var(--accent-on-dark); }
 .cell-head {
   display: flex;
   align-items: center;
@@ -190,7 +198,7 @@ main {
   cursor: pointer;
 }
 .day-link:hover, .more:hover { background: transparent; }
-.day-link:hover .daynum { color: var(--accent); }
+.day-link:hover .daynum { color: var(--accent-on-dark); }
 .daynum {
   font-size: 0.75rem;
   color: var(--muted);
@@ -200,13 +208,13 @@ main {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-on-dark);
   font-size: 0.7rem;
   font-weight: 600;
   padding: 0 0.2rem 0.15rem;
   white-space: nowrap;
 }
-.cell.today .daynum { color: var(--accent); font-weight: 700; }
+.cell.today .daynum { color: var(--accent-on-dark); font-weight: 700; }
 .cell-events { min-height: 0; overflow: hidden; }
 .chip {
   display: flex;
@@ -245,11 +253,15 @@ main {
    projection keeps the dashes above and the status stripe stays as it is; the
    check mark says the same thing without leaning on color. */
 .chip.mine {
-  border-top-color: var(--accent);
-  border-right-color: var(--accent);
-  border-bottom-color: var(--accent);
+  border-top-color: var(--accent-on-dark);
+  border-right-color: var(--accent-on-dark);
+  border-bottom-color: var(--accent-on-dark);
 }
-.chip .mine-mark { color: var(--accent); flex-shrink: 0; font-weight: 700; }
+.chip .mine-mark {
+  color: var(--accent-on-dark);
+  flex-shrink: 0;
+  font-weight: 700;
+}
 #tooltip {
   position: fixed;
   z-index: 10;
@@ -268,7 +280,7 @@ main {
 #tooltip .desc { margin-bottom: 0.35rem; white-space: pre-wrap; }
 #tooltip .sep { border-top: 1px solid var(--border); margin: 0.45rem 0; }
 #tooltip .row { color: var(--text); }
-#tooltip .row.mine { color: var(--accent); font-weight: 600; }
+#tooltip .row.mine { color: var(--accent-on-dark); font-weight: 600; }
 #tooltip .desc code,
 #tooltip .desc pre {
   font-family: ui-monospace, Consolas, "Courier New", monospace;
@@ -325,8 +337,8 @@ main {
 .badge.over { background: var(--over); }
 .badge.scheduled { background: var(--scheduled); }
 #status { color: var(--muted); font-size: 0.85rem; padding: 0.5rem 0.2rem; }
-button:focus-visible, .chip:focus-visible {
-  outline: 2px solid var(--accent);
+.chip:focus-visible {
+  outline: 2px solid var(--accent-on-dark);
   outline-offset: 1px;
 }
 @media (max-width: 640px) {

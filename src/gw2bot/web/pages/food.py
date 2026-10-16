@@ -274,10 +274,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   color: var(--muted);
   font-size: 0.85rem;
 }
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
 @media (max-width: 640px) {
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }

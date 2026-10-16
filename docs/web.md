@@ -83,6 +83,17 @@ The names in `shared.py` are public (`SHARED_STYLE`, `DASHBOARD_HEADER_STYLE`,
 underscore-prefixed while already being imported across modules, which was
 only ever a mislabel.
 
+## Two purples
+
+The palette lives once, in `SHARED_STYLE`'s `:root`, and the purple there has
+two shades with separate jobs. `--accent` is the fill behind a selected or
+primary control, with `--on-accent` (white) as its text. Anything purple drawn
+straight onto a dark surface (a link, today's date, the roster outline and
+check mark, a focus ring) takes `--accent-on-dark`, because `--accent` is too
+dark to read as text there. `TestPalette` in `tests/test_web_page.py` keeps
+`var(--accent)` to fills and borders and checks each pairing against WCAG AA,
+so a new shade or a new use fails there before it ships.
+
 ## `pages/profit/` - style, markup and script
 
 The profit dashboard was twice the size of any sibling, so its three parts are
