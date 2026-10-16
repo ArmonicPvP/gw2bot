@@ -1242,6 +1242,12 @@ registration is unavailable.
   attendance lines such as `:Username.1234, Character Name`, then adds one
   manual ticket to each unique current guild member. It requires the
   manual-ticket role `1318357141521825872`.
+
+  Both bulk commands reply privately with who received a ticket, and list
+  separately the members who have already earned their free ticket for the
+  week and the accounts excluded from the raffle, so neither is mistaken for a
+  failure. `/raffle addticket` gives the same "already earned" answer for a
+  single member.
 - `/raffle removetickets username:<account> [amount:<number>]`: requires the
   same officer role as `/raffle draw` and removes only current purchased
   tickets. The amount defaults to one. Free tickets and lifetime deposited gold

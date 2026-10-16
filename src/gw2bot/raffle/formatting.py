@@ -89,7 +89,8 @@ def format_bulk_addtickets_summary(
     added_usernames: list[str],
     invalid_count: int,
     duplicate_usernames: list[str],
-    failed_usernames: list[str],
+    already_ticketed_usernames: list[str],
+    excluded_usernames: list[str],
     audit_failures: int,
 ) -> str:
     summary = [
@@ -107,9 +108,19 @@ def format_bulk_addtickets_summary(
                 duplicate_usernames,
             )
         )
-    if failed_usernames:
+    if already_ticketed_usernames:
         summary.append(
-            _format_bulk_username_sample("Could not add", failed_usernames)
+            _format_bulk_username_sample(
+                "Already earned their free ticket for the week",
+                already_ticketed_usernames,
+            )
+        )
+    if excluded_usernames:
+        summary.append(
+            _format_bulk_username_sample(
+                "Excluded from the raffle",
+                excluded_usernames,
+            )
         )
     if audit_failures:
         summary.append(

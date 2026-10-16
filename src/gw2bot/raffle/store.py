@@ -76,6 +76,8 @@ from gw2bot.raffle.models import (
     GuildJoin,
     GuildLeave,
     GuildRankChange,
+    ManualTicketLimitReached,
+    RaffleAccountExcluded,
     RaffleAudit,
     RaffleAuditDraw,
     RaffleAuditRange,
@@ -1413,7 +1415,7 @@ class RaffleStore:
     ) -> RaffleTotal:
         if username.casefold() in self._exclusion_keys(excluded_usernames):
             LOGGER.debug("Refused a manual raffle ticket; account is excluded")
-            raise ValueError(
+            raise RaffleAccountExcluded(
                 f"{username} is excluded from the raffle. Remove them from "
                 "/settings raffle_excluded_accounts first."
             )
@@ -1421,7 +1423,7 @@ class RaffleStore:
             total = session.get(RaffleTotalRecord, username)
             manual_tickets = total.manual_raffle_tickets if total else 0
             if manual_tickets >= MAX_MANUAL_RAFFLE_TICKETS:
-                raise ValueError(
+                raise ManualTicketLimitReached(
                     f"{username} already has the maximum of "
                     f"{MAX_MANUAL_RAFFLE_TICKETS} manually added ticket"
                 )
@@ -1462,7 +1464,7 @@ class RaffleStore:
             raise ValueError("Ticket purchase amount must be greater than zero")
         if username.casefold() in self._exclusion_keys(excluded_usernames):
             LOGGER.debug("Refused an officer raffle purchase; account is excluded")
-            raise ValueError(
+            raise RaffleAccountExcluded(
                 f"{username} is excluded from the raffle. Remove them from "
                 "/settings raffle_excluded_accounts first."
             )

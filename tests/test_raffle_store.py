@@ -27,6 +27,7 @@ from gw2bot.raffle import (
     RaffleStore,
     TrialForumPost,
 )
+from gw2bot.raffle.models import ManualTicketLimitReached, RaffleAccountExcluded
 
 from factories import (
     feast_deposit,
@@ -1378,7 +1379,10 @@ class TestRaffleStore:
 
             assert total.raffle_tickets == 1
             assert total.manual_raffle_tickets == 1
-            with pytest.raises(ValueError, match="maximum of 1 manually added ticket"):
+            with pytest.raises(
+                ManualTicketLimitReached,
+                match="maximum of 1 manually added ticket",
+            ):
                 store.add_manual_ticket("Member.1234")
 
             store.run_raffle(randbelow=lambda total: 0)
@@ -2021,7 +2025,10 @@ class TestRaffleExclusions:
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(directory)
 
-            with pytest.raises(ValueError, match="excluded from the raffle"):
+            with pytest.raises(
+                RaffleAccountExcluded,
+                match="excluded from the raffle",
+            ):
                 store.add_officer_purchase(
                     "Banned.1234",
                     3,
@@ -2035,7 +2042,10 @@ class TestRaffleExclusions:
         with tempfile.TemporaryDirectory() as directory:
             store = self._store(directory)
 
-            with pytest.raises(ValueError, match="excluded from the raffle"):
+            with pytest.raises(
+                RaffleAccountExcluded,
+                match="excluded from the raffle",
+            ):
                 store.add_manual_ticket(
                     "Banned.1234",
                     excluded_usernames=("Banned.1234",),
