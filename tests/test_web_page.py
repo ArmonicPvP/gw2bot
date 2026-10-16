@@ -91,8 +91,61 @@ class TestCalendarMarkdown:
         assert 'el("div", "md-subtext")' in CALENDAR_PAGE
         assert "#tooltip .desc .md-subtext" in CALENDAR_PAGE
 
+    def test_renders_discord_links_as_anchors_opening_a_new_tab(self) -> None:
+        # A masked [text](address), then an address in angle brackets or bare.
+        assert "address: 2\n" in CALENDAR_PAGE
+        assert CALENDAR_PAGE.count("address: 1,") == 2
+        assert 'node = el("a", "md-link");' in CALENDAR_PAGE
+        assert "node.href = matched.href;" in CALENDAR_PAGE
+        assert 'node.target = "_blank";' in CALENDAR_PAGE
+        assert 'node.rel = "noopener noreferrer";' in CALENDAR_PAGE
+
+    def test_only_web_addresses_become_links(self) -> None:
+        rules = re.findall(r"re: (/\^[^\n]*/),\s*address:", CALENDAR_PAGE)
+        assert len(rules) == 3
+        assert all("(https?:\\/\\/" in rule for rule in rules)
+        # The browser's own parse has the last word on the scheme, and a
+        # rule whose address it refuses leaves the text as typed.
+        assert (
+            'if (parsed.protocol !== "http:" && parsed.protocol !== "https:")'
+            in CALENDAR_PAGE
+        )
+        assert (
+            "var href = m && rule.address ? linkAddress(m[rule.address]) : null;"
+            in CALENDAR_PAGE
+        )
+        assert "if (m && (!rule.address || href)) {" in CALENDAR_PAGE
+
+    def test_link_text_never_nests_a_second_link(self) -> None:
+        assert "if (rule.address && inLink) { continue; }" in CALENDAR_PAGE
+        assert (
+            "appendInline(node, matched.groups[1], inLink || !!matched.href);"
+            in CALENDAR_PAGE
+        )
+
+    def test_event_text_never_becomes_markup(self) -> None:
+        assert "innerHTML" not in CALENDAR_PAGE
+
+    def test_a_long_address_wraps_inside_the_details(self) -> None:
+        assert "#tooltip .desc .md-link { overflow-wrap: anywhere; }" in (
+            CALENDAR_PAGE
+        )
+
 
 class TestCalendarTooltip:
+    def test_only_pinned_details_take_the_pointer(self) -> None:
+        # Hovered details let clicks through to the chips beneath them;
+        # pinned ones must take them, or their links could not be followed.
+        tooltip = re.search(r"#tooltip \{(.*?)\}", CALENDAR_PAGE, re.S)
+        assert tooltip is not None
+        assert "pointer-events: none;" in tooltip.group(1)
+        assert "#tooltip.pinned { pointer-events: auto; }" in CALENDAR_PAGE
+        assert (
+            'tooltip.classList.toggle("pinned", chip === pinnedChip);'
+            in CALENDAR_PAGE
+        )
+        assert 'tooltip.classList.remove("pinned");' in CALENDAR_PAGE
+
     def test_lists_the_seat_kinds_the_server_sends(self) -> None:
         # Which seats an event has is the category's to say, so the tooltip
         # draws the list it is given rather than naming seats of its own.

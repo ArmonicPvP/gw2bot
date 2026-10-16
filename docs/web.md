@@ -37,7 +37,13 @@ interpolated into the HTML.
 Dynamic data reaches a page only through the JSON APIs in `server.py` and is
 inserted client-side with `textContent`. Event descriptions additionally pass
 through a small Discord-markdown renderer that only ever builds DOM nodes and
-text nodes, never HTML strings. The profit page's item names are links built
+text nodes, never HTML strings. Its links - Discord's masked `[text](address)`,
+an address in angle brackets, and a bare one - are the one place event text
+reaches an attribute: an address becomes an `href` only when its rule matched
+`http` or `https` and the browser's `URL` parser agrees, and anything else stays
+the text it was typed as. The calendar's details let the pointer through to the
+chips beneath them while hovered and take it only while pinned, which is what
+lets those links be clicked. The profit page's item names are links built
 the same way: the anchor is a node, its text is still set with `textContent`,
 and the only server value that reaches its `href` is the item's id. A change
 that puts server data into page markup breaks that property and needs a much

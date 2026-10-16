@@ -321,6 +321,8 @@ main {
   border-radius: 3px;
   padding: 0 0.2rem;
 }
+#tooltip .desc .md-link { overflow-wrap: anywhere; }
+#tooltip.pinned { pointer-events: auto; }
 .badge {
   display: inline-block;
   border-radius: 4px;
@@ -557,8 +559,24 @@ main {
   // Renders the Discord markdown subset used in event descriptions by
   // building DOM nodes directly. Event text only ever becomes text nodes,
   // so descriptions cannot inject markup.
+  //
+  // A rule with an `address` is one of Discord's three link forms: a masked
+  // [text](https://...), an address in angle brackets, and a bare one, whose
+  // trailing punctuation stays text as it does in Discord. The group it
+  // names is the only event text that reaches an attribute, and only once
+  // linkAddress has read it as http or https.
   var inlineRules = [
     { re: /^`([^`]+)`/, tag: "code", raw: true },
+    {
+      re: /^\\[([^\\[\\]\\n]+)\\]\\(\\s*<?(https?:\\/\\/(?:[^\\s()<>]|\\([^\\s()<>]*\\))+)>?\\s*\\)/,
+      address: 2
+    },
+    { re: /^<(https?:\\/\\/[^\\s<>]+)>/, address: 1, raw: true },
+    {
+      re: /^(https?:\\/\\/[^\\s<]+[^<.,:;"')\\]\\s])/,
+      address: 1,
+      raw: true
+    },
     { re: /^\\*\\*([\\s\\S]+?)\\*\\*(?!\\*)/, tag: "strong" },
     { re: /^__([\\s\\S]+?)__(?!_)/, tag: "u" },
     { re: /^~~([\\s\\S]+?)~~/, tag: "s" },
@@ -567,15 +585,39 @@ main {
     { re: /^_([^_\\n]+)_/, tag: "em" }
   ];
 
-  function appendInline(parent, text) {
+  // The address a link may open, or null. The rules already ask for http or
+  // https; parsing it again leaves the final word to the browser, so nothing
+  // it would read as another scheme ever becomes an href.
+  function linkAddress(text) {
+    var parsed;
+    try {
+      parsed = new URL(text);
+    } catch (error) {
+      return null;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    return parsed.href;
+  }
+
+  // inLink is set inside a masked link's text, where Discord draws an
+  // address as plain text rather than nesting a second link.
+  function appendInline(parent, text, inLink) {
     var plain = "";
     var i = 0;
     while (i < text.length) {
       var matched = null;
       var rest = text.slice(i);
       for (var r = 0; r < inlineRules.length; r += 1) {
-        var m = inlineRules[r].re.exec(rest);
-        if (m) { matched = { rule: inlineRules[r], groups: m }; break; }
+        var rule = inlineRules[r];
+        if (rule.address && inLink) { continue; }
+        var m = rule.re.exec(rest);
+        var href = m && rule.address ? linkAddress(m[rule.address]) : null;
+        if (m && (!rule.address || href)) {
+          matched = { rule: rule, groups: m, href: href };
+          break;
+        }
       }
       if (!matched) {
         plain += text.charAt(i);
@@ -586,11 +628,19 @@ main {
         parent.appendChild(document.createTextNode(plain));
         plain = "";
       }
-      var node = el(matched.rule.tag, matched.rule.cls || null);
+      var node;
+      if (matched.href) {
+        node = el("a", "md-link");
+        node.href = matched.href;
+        node.target = "_blank";
+        node.rel = "noopener noreferrer";
+      } else {
+        node = el(matched.rule.tag, matched.rule.cls || null);
+      }
       if (matched.rule.raw) {
         node.textContent = matched.groups[1];
       } else {
-        appendInline(node, matched.groups[1]);
+        appendInline(node, matched.groups[1], inLink || !!matched.href);
       }
       parent.appendChild(node);
       i += matched.groups[0].length;
@@ -1125,6 +1175,9 @@ main {
     tooltipChip = chip;
     chip.setAttribute("aria-expanded", "true");
     tooltipContent(entry);
+    // Hovered details let the pointer through to the chips beneath them;
+    // pinned ones take it, so a link in the description can be clicked.
+    tooltip.classList.toggle("pinned", chip === pinnedChip);
     tooltip.style.display = "block";
     var rect = chip.getBoundingClientRect();
     var box = tooltip.getBoundingClientRect();
@@ -1139,6 +1192,7 @@ main {
   }
   function hideTooltip() {
     tooltip.style.display = "none";
+    tooltip.classList.remove("pinned");
     if (tooltipChip) {
       tooltipChip.setAttribute("aria-expanded", "false");
       tooltipChip = null;
