@@ -91,8 +91,128 @@ class TestCalendarMarkdown:
         assert 'el("div", "md-subtext")' in CALENDAR_PAGE
         assert "#tooltip .desc .md-subtext" in CALENDAR_PAGE
 
+    def test_renders_discord_links_as_anchors_opening_a_new_tab(self) -> None:
+        # A masked [text](address), then an address in angle brackets or bare.
+        assert "address: 2\n" in CALENDAR_PAGE
+        assert CALENDAR_PAGE.count("address: 1,") == 2
+        assert 'node = el("a", "md-link");' in CALENDAR_PAGE
+        assert "node.href = matched.href;" in CALENDAR_PAGE
+        assert 'node.target = "_blank";' in CALENDAR_PAGE
+        assert 'node.rel = "noopener noreferrer";' in CALENDAR_PAGE
+
+    def test_only_web_addresses_become_links(self) -> None:
+        # The scheme is read without regard to case, as the browser reads it.
+        rules = re.findall(r"re: (/\^[^\n]*/i),\s*address:", CALENDAR_PAGE)
+        assert len(rules) == 3
+        assert all("(https?:\\/\\/" in rule for rule in rules)
+        # The browser's own parse has the last word on the scheme, and a
+        # rule whose address it refuses leaves the text as typed.
+        assert (
+            'if (parsed.protocol !== "http:" && parsed.protocol !== "https:")'
+            in CALENDAR_PAGE
+        )
+        assert (
+            "var href = m && rule.address ? linkAddress(m[rule.address]) : null;"
+            in CALENDAR_PAGE
+        )
+        assert "if (m && (!rule.address || href)) {" in CALENDAR_PAGE
+
+    def test_link_text_never_nests_a_second_link(self) -> None:
+        assert "if (rule.address && inLink) { continue; }" in CALENDAR_PAGE
+        assert (
+            "appendInline(node, matched.groups[1], inLink || !!matched.href);"
+            in CALENDAR_PAGE
+        )
+
+    def test_event_text_never_becomes_markup(self) -> None:
+        assert "innerHTML" not in CALENDAR_PAGE
+
+    def test_a_bare_address_keeps_its_balanced_parentheses(self) -> None:
+        # A wiki page's "_(mathematics)" stays in the address, while an
+        # unmatched ")" or a closing full stop stays text.
+        assert (
+            r"""re: /^(https?:\/\/(?:[^\s<()]|\([^\s<()]*\))*"""
+            r"""(?:[^\s<().,:;"'\]]|\([^\s<()]*\)))/i,"""
+            in CALENDAR_PAGE
+        )
+
+    def test_a_long_address_wraps_inside_the_details(self) -> None:
+        assert "#tooltip .desc .md-link { overflow-wrap: anywhere; }" in (
+            CALENDAR_PAGE
+        )
+
 
 class TestCalendarTooltip:
+    def test_long_details_scroll_inside_the_viewport(self) -> None:
+        tooltip = re.search(r"#tooltip \{(.*?)\n\}", CALENDAR_PAGE, re.S)
+        assert tooltip is not None
+        assert "max-height: calc(100vh - 16px);" in tooltip.group(1)
+        assert "overflow-y: auto;" in tooltip.group(1)
+        # Every event opens at the top, whatever the last one was scrolled to.
+        # A hidden box has no scroll position to reset, so it is shown first.
+        shown = CALENDAR_PAGE.index('tooltip.style.display = "block";')
+        assert CALENDAR_PAGE.index("tooltip.scrollTop = 0;") > shown
+
+    def test_the_keyboard_reaches_a_pinned_events_links(self) -> None:
+        # Tab from the pinned event steps into its links rather than past
+        # every later event, and back out beside it at either end.
+        assert '} else if (event.key === "Tab" && !event.shiftKey && ' in (
+            CALENDAR_PAGE
+        )
+        assert "stops[0].focus();" in CALENDAR_PAGE
+        # Backwards is steered at every stop, since the box's tabindex of -1
+        # keeps it out of the browser's own order.
+        assert "(at > 0 ? stops[at - 1] : chip).focus();" in CALENDAR_PAGE
+        assert "} else if (at === stops.length - 1) {" in CALENDAR_PAGE
+        assert "var next = focusStopAfter(chip);" in CALENDAR_PAGE
+        # A long description that runs past the box makes the box itself
+        # the first stop, so the arrow keys can scroll it without a link.
+        assert '<div id="tooltip" role="tooltip" tabindex="-1"></div>' in (
+            CALENDAR_PAGE
+        )
+        assert (
+            "if (tooltip.scrollHeight > tooltip.clientHeight) {\n"
+            "      stops.unshift(tooltip);" in CALENDAR_PAGE
+        )
+        # Escape closes the details from the event or from inside them.
+        assert CALENDAR_PAGE.count('event.key === "Escape"') == 2
+        # Focus returns while the event is still pinned, so the grid's
+        # focusin does not show the details again straight after.
+        assert "chip.focus();\n      unpinTooltip();\n      return;" in (
+            CALENDAR_PAGE
+        )
+
+    def test_only_pinned_details_take_the_pointer(self) -> None:
+        # Hovered details let clicks through to the chips beneath them;
+        # pinned ones must take them, or their links could not be followed.
+        tooltip = re.search(r"#tooltip \{(.*?)\}", CALENDAR_PAGE, re.S)
+        assert tooltip is not None
+        assert "pointer-events: none;" in tooltip.group(1)
+        assert "#tooltip.pinned { pointer-events: auto; }" in CALENDAR_PAGE
+        assert "var pinned = chip === pinnedChip;" in CALENDAR_PAGE
+        assert 'tooltip.classList.toggle("pinned", pinned);' in CALENDAR_PAGE
+        assert 'tooltip.classList.remove("pinned");' in CALENDAR_PAGE
+
+    def test_pinned_details_are_a_dialog_named_for_the_event(self) -> None:
+        # Pinned details hold focus and links, which a tooltip must not.
+        assert (
+            'tooltip.setAttribute("role", pinned ? "dialog" : "tooltip");'
+            in CALENDAR_PAGE
+        )
+        assert 'tooltip.setAttribute("aria-label", entry.title);' in (
+            CALENDAR_PAGE
+        )
+        assert 'tooltip.removeAttribute("aria-label");' in CALENDAR_PAGE
+        assert 'chip.setAttribute("aria-haspopup", "dialog");' in CALENDAR_PAGE
+
+    def test_a_click_inside_pinned_details_leaves_them_open(self) -> None:
+        # Enter on a link clicks it, and the click must not reach the
+        # document's close-on-click and hide the focused link.
+        assert (
+            'tooltip.addEventListener("click", function (event) {\n'
+            "    event.stopPropagation();" in CALENDAR_PAGE
+        )
+
     def test_lists_the_seat_kinds_the_server_sends(self) -> None:
         # Which seats an event has is the category's to say, so the tooltip
         # draws the list it is given rather than naming seats of its own.
@@ -1253,7 +1373,11 @@ class TestPalette:
         ring = "outline: 2px solid var(--accent-on-dark);"
         for page in (CALENDAR_PAGE, PROFIT_PAGE, *RANGE_DASHBOARDS):
             assert "button:focus-visible {\n  " + ring in page
-        assert ".chip:focus-visible {\n  " + ring in CALENDAR_PAGE
+        assert (
+            ".chip:focus-visible, #tooltip:focus-visible,\n"
+            "#tooltip .md-link:focus-visible {\n  " + ring
+            in CALENDAR_PAGE
+        )
         assert ".button:focus-visible {\n  " + ring in SIGN_IN_PAGE
 
     def test_todays_week_header_keeps_its_date_readable_on_hover(
