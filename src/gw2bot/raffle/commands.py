@@ -28,6 +28,7 @@ from gw2bot.raffle.formatting import (
     raffle_ticket_table_embed,
     raffle_tier_summary_embed,
 )
+from gw2bot.raffle.models import ManualTicketLimitReached, RaffleAccountExcluded
 from gw2bot.raffle.views import (
     RaffleAccountLinkModal,
     RaffleAuditRangesView,
@@ -209,14 +210,24 @@ class RaffleCommands(app_commands.Group):
             return
 
         added_usernames: list[str] = []
-        failed_usernames: list[str] = []
+        already_ticketed_usernames: list[str] = []
+        excluded_usernames: list[str] = []
         audit_failures = 0
         for canonical_username in canonical_usernames:
             try:
                 self._bot.add_manual_raffle_ticket(canonical_username)
-            except ValueError:
-                failed_usernames.append(canonical_username)
-                LOGGER.debug("Bulk manual raffle ticket addition skipped; added=false")
+            except ManualTicketLimitReached:
+                already_ticketed_usernames.append(canonical_username)
+                LOGGER.debug(
+                    "Bulk manual raffle ticket addition skipped; "
+                    "reason=already_ticketed"
+                )
+                continue
+            except RaffleAccountExcluded:
+                excluded_usernames.append(canonical_username)
+                LOGGER.debug(
+                    "Bulk manual raffle ticket addition skipped; reason=excluded"
+                )
                 continue
 
             added_usernames.append(canonical_username)
@@ -232,13 +243,15 @@ class RaffleCommands(app_commands.Group):
 
         LOGGER.debug(
             "Bulk manual raffle ticket processing completed; requested=%s valid=%s "
-            "added=%s invalid=%s duplicates=%s add_failures=%s audit_failures=%s",
+            "added=%s invalid=%s duplicates=%s already_ticketed=%s excluded=%s "
+            "audit_failures=%s",
             len(requested_usernames),
             len(canonical_usernames),
             len(added_usernames),
             len(invalid_usernames),
             len(duplicate_usernames),
-            len(failed_usernames),
+            len(already_ticketed_usernames),
+            len(excluded_usernames),
             audit_failures,
         )
         await interaction.followup.send(
@@ -246,7 +259,8 @@ class RaffleCommands(app_commands.Group):
                 added_usernames,
                 len(invalid_usernames),
                 duplicate_usernames,
-                failed_usernames,
+                already_ticketed_usernames,
+                excluded_usernames,
                 audit_failures,
             ),
             ephemeral=True,
@@ -436,6 +450,14 @@ class RaffleCommands(app_commands.Group):
 
         try:
             total = self._bot.add_manual_raffle_ticket(canonical_username)
+        except ManualTicketLimitReached:
+            LOGGER.debug("Manual raffle ticket refused; reason=already_ticketed")
+            await interaction.followup.send(
+                f"**{canonical_username}** has already earned their free "
+                "ticket for this raffle.",
+                ephemeral=True,
+            )
+            return
         except ValueError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return

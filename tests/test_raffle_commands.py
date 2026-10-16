@@ -25,6 +25,7 @@ from gw2bot.config import (
     DEFAULT_RAFFLE_OFFICER_ROLE_ID as RAFFLE_OFFICER_ROLE_ID,
 )
 from gw2bot.raffle.commands import RaffleCommands
+from gw2bot.raffle.models import ManualTicketLimitReached, RaffleAccountExcluded
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_FIELD_CHAR_LIMIT,
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
@@ -500,6 +501,36 @@ class TestAddRaffleTicketsCommand:
         bot.add_manual_raffle_ticket.assert_called_once_with("Member.1234")
         assert "Added one raffle ticket" in interaction.followup.send.await_args.args[0]
 
+    async def test_addticket_reports_a_free_ticket_already_earned(self) -> None:
+        bot = configured_bot(
+            authorize_raffle_command=AsyncMock(return_value=True),
+            resolve_guild_member=AsyncMock(return_value="Member.1234"),
+            add_manual_raffle_ticket=MagicMock(
+                side_effect=ManualTicketLimitReached(
+                    "Member.1234 already has the maximum of 1 manually added "
+                    "ticket"
+                )
+            ),
+            send_notification=AsyncMock(return_value=True),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1234),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        group = RaffleCommands(bot)  # type: ignore[arg-type]
+        command = next(
+            command for command in group.commands if command.name == "addticket"
+        )
+
+        await command.callback(group, interaction, "member.1234")  # type: ignore[arg-type]
+
+        interaction.followup.send.assert_awaited_once_with(
+            "**Member.1234** has already earned their free ticket for this raffle.",
+            ephemeral=True,
+        )
+        bot.send_notification.assert_not_awaited()
+
     async def test_officer_amount_records_purchased_ticket_event(self) -> None:
         total = raffle_total("Member.1234", purchased=4, free=1)
         bot = configured_bot(
@@ -741,14 +772,20 @@ class TestAddRaffleTicketsCommand:
                     "Alpha.1234",
                     None,
                     "Existing.5678",
+                    "Banned.3456",
                     "Beta.9012",
                 ]
             ),
             add_manual_raffle_ticket=MagicMock(
                 side_effect=[
                     raffle_total("Alpha.1234", free=1),
-                    ValueError(
-                        "Existing.5678 already has the maximum of 1 manual raffle ticket"
+                    ManualTicketLimitReached(
+                        "Existing.5678 already has the maximum of 1 manually "
+                        "added ticket"
+                    ),
+                    RaffleAccountExcluded(
+                        "Banned.3456 is excluded from the raffle. Remove them "
+                        "from /settings raffle_excluded_accounts first."
                     ),
                     raffle_total("Beta.9012", free=1),
                 ]
@@ -774,14 +811,16 @@ class TestAddRaffleTicketsCommand:
             "ALPHA.1234",
             "outside.3456",
             "existing.5678",
+            "banned.3456",
             "beta.9012",
         )
 
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-        assert bot.resolve_guild_member.await_count == 5
+        assert bot.resolve_guild_member.await_count == 6
         assert bot.add_manual_raffle_ticket.call_args_list == [
             call("Alpha.1234"),
             call("Existing.5678"),
+            call("Banned.3456"),
             call("Beta.9012"),
         ]
         assert bot.send_notification.await_args_list == [
@@ -793,7 +832,12 @@ class TestAddRaffleTicketsCommand:
         assert "Added: **Alpha.1234**, **Beta.9012**" in message
         assert "Not in the configured guild: 1" in message
         assert "Duplicate selections skipped: **Alpha.1234**" in message
-        assert "Could not add: **Existing.5678**" in message
+        assert (
+            "Already earned their free ticket for this raffle: **Existing.5678**"
+            in message
+        )
+        assert "Excluded from the raffle: **Banned.3456**" in message
+        assert "Could not add" not in message
         assert "1 audit delivery failed." in message
         assert interaction.followup.send.await_args.kwargs["ephemeral"]
 
@@ -803,6 +847,7 @@ class TestAddRaffleTicketsCommand:
         message = format_bulk_addtickets_summary(
             [long_name] * 100,
             100,
+            [long_name] * 100,
             [long_name] * 100,
             [long_name] * 100,
             100,

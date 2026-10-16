@@ -9,6 +9,14 @@ OFFICER_RANK = "Officer"
 OFFICER_MAX_TICKET_DEPOSIT_COINS = 10 * COPPER_PER_GOLD
 
 
+class RaffleAccountExcluded(ValueError):
+    """The account is listed in /settings raffle_excluded_accounts."""
+
+
+class ManualTicketLimitReached(ValueError):
+    """The account already holds its free ticket for the current raffle."""
+
+
 def format_gold(coins: int) -> str:
     whole, remainder = divmod(coins, COPPER_PER_GOLD)
     if remainder == 0:
