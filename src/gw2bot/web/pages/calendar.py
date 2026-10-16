@@ -574,12 +574,12 @@ main {
   var inlineRules = [
     { re: /^`([^`]+)`/, tag: "code", raw: true },
     {
-      re: /^\\[([^\\[\\]\\n]+)\\]\\(\\s*<?(https?:\\/\\/(?:[^\\s()<>]|\\([^\\s()<>]*\\))+)>?\\s*\\)/,
+      re: /^\\[([^\\[\\]\\n]+)\\]\\(\\s*<?(https?:\\/\\/(?:[^\\s()<>]|\\([^\\s()<>]*\\))+)>?\\s*\\)/i,
       address: 2
     },
-    { re: /^<(https?:\\/\\/[^\\s<>]+)>/, address: 1, raw: true },
+    { re: /^<(https?:\\/\\/[^\\s<>]+)>/i, address: 1, raw: true },
     {
-      re: /^(https?:\\/\\/(?:[^\\s<()]|\\([^\\s<()]*\\))*(?:[^\\s<().,:;"'\\]]|\\([^\\s<()]*\\)))/,
+      re: /^(https?:\\/\\/(?:[^\\s<()]|\\([^\\s<()]*\\))*(?:[^\\s<().,:;"'\\]]|\\([^\\s<()]*\\)))/i,
       address: 1,
       raw: true
     },
@@ -1185,6 +1185,9 @@ main {
     // pinned ones take it, so a link in the description can be clicked.
     tooltip.classList.toggle("pinned", chip === pinnedChip);
     tooltip.style.display = "block";
+    // The same box shows every event, so a long one scrolled down would
+    // otherwise open the next one partway through.
+    tooltip.scrollTop = 0;
     var rect = chip.getBoundingClientRect();
     var box = tooltip.getBoundingClientRect();
     var left = Math.min(
@@ -1284,8 +1287,10 @@ main {
     if (!chip) { return; }
     if (event.key === "Escape") {
       event.preventDefault();
-      unpinTooltip();
+      // Focus first: on an event still pinned, the grid's focusin leaves the
+      // details alone, where after unpinning it would show them again.
       chip.focus();
+      unpinTooltip();
       return;
     }
     if (event.key !== "Tab") { return; }

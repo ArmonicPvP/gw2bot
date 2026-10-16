@@ -101,7 +101,8 @@ class TestCalendarMarkdown:
         assert 'node.rel = "noopener noreferrer";' in CALENDAR_PAGE
 
     def test_only_web_addresses_become_links(self) -> None:
-        rules = re.findall(r"re: (/\^[^\n]*/),\s*address:", CALENDAR_PAGE)
+        # The scheme is read without regard to case, as the browser reads it.
+        rules = re.findall(r"re: (/\^[^\n]*/i),\s*address:", CALENDAR_PAGE)
         assert len(rules) == 3
         assert all("(https?:\\/\\/" in rule for rule in rules)
         # The browser's own parse has the last word on the scheme, and a
@@ -131,7 +132,7 @@ class TestCalendarMarkdown:
         # unmatched ")" or a closing full stop stays text.
         assert (
             r"""re: /^(https?:\/\/(?:[^\s<()]|\([^\s<()]*\))*"""
-            r"""(?:[^\s<().,:;"'\]]|\([^\s<()]*\)))/,"""
+            r"""(?:[^\s<().,:;"'\]]|\([^\s<()]*\)))/i,"""
             in CALENDAR_PAGE
         )
 
@@ -147,6 +148,10 @@ class TestCalendarTooltip:
         assert tooltip is not None
         assert "max-height: calc(100vh - 16px);" in tooltip.group(1)
         assert "overflow-y: auto;" in tooltip.group(1)
+        # Every event opens at the top, whatever the last one was scrolled to.
+        # A hidden box has no scroll position to reset, so it is shown first.
+        shown = CALENDAR_PAGE.index('tooltip.style.display = "block";')
+        assert CALENDAR_PAGE.index("tooltip.scrollTop = 0;") > shown
 
     def test_the_keyboard_reaches_a_pinned_events_links(self) -> None:
         # Tab from the pinned event steps into its links rather than past
@@ -163,7 +168,11 @@ class TestCalendarTooltip:
         assert "var next = focusStopAfter(chip);" in CALENDAR_PAGE
         # Escape closes the details from the event or from inside them.
         assert CALENDAR_PAGE.count('event.key === "Escape"') == 2
-        assert "chip.focus();\n      return;" in CALENDAR_PAGE
+        # Focus returns while the event is still pinned, so the grid's
+        # focusin does not show the details again straight after.
+        assert "chip.focus();\n      unpinTooltip();\n      return;" in (
+            CALENDAR_PAGE
+        )
 
     def test_only_pinned_details_take_the_pointer(self) -> None:
         # Hovered details let clicks through to the chips beneath them;
