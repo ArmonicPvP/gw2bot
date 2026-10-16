@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: >-
+          The smallest release to cut, even when everything merged since the
+          last one is a chore. A merged pull request that asks for more still
+          gets it.
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    # One release at a time and none cancelled. Each run releases everything
+    # merged since the newest tag, so one that waits starts from the release
+    # the run before it made, and one that never runs is caught up by the
+    # next. It is set on the job rather than the workflow so a run whose CI
+    # failed, which skips this job, never takes a waiting run's place.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      # Creates the vX.Y.Z tag and the GitHub release.
+      contents: write
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      - name: Check out the commit to release
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          # Every tag and the history between them, to find the last release
+          # and the merges since it.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Decide the version
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_BUMP: ${{ inputs.bump || 'none' }}
+        run: >-
+          python scripts/next_release.py plan
+          --head "$HEAD_SHA"
+          --requested "$REQUESTED_BUMP"
+
+      # The image goes first and the tag last. If the push fails there is no
+      # tag yet, so re-running the job numbers the same commit the same way
+      # and tries again; a tag without its image would never be retried.
+      - name: Log in to Docker Hub
+        if: steps.plan.outputs.release == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.plan.outputs.release == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push Docker image
+        if: steps.plan.outputs.release == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: |
+            GW2BOT_VERSION=${{ steps.plan.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/gw2bot:${{ steps.plan.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/gw2bot:${{ steps.plan.outputs.minor }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/gw2bot:${{ steps.plan.outputs.major }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/gw2bot:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/gw2bot:${{ env.HEAD_SHA }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.plan.outputs.version }}
+            org.opencontainers.image.revision=${{ env.HEAD_SHA }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag the release
+        if: steps.plan.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: >-
+          gh release create "$TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --target "$HEAD_SHA"
+          --title "$TAG"
+          --generate-notes

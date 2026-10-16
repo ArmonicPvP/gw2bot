@@ -2505,17 +2505,123 @@ pyright
 The `CI` GitHub Actions workflow runs for pull requests targeting `main`, pushes
 to `main`, and merge-queue groups. It provides these status checks:
 
+- `Branch name`: on pull requests only, fails unless the branch is named
+  `feat/<name>`, `fix/<name>` or `chore/<name>` (see
+  [How A Release Is Cut](#how-a-release-is-cut))
 - `Python checks`: installs dependencies, compiles and type-checks the Python
   source, and runs the pytest suite
 - `Docker build`: builds the production Docker image
 
-To prevent merges when either check fails, configure an active GitHub branch
-ruleset targeting `main`. Require pull requests and require both `Python checks`
-and `Docker build` to pass before merging.
+To prevent merges when a check fails, configure an active GitHub branch
+ruleset targeting `main`. Require pull requests and require `Branch name`,
+`Python checks` and `Docker build` to pass before merging. `Branch name` is
+skipped outside pull requests, which a required check counts as passing.
 
-After `CI` succeeds for a push to `main`, the `Publish Docker image` workflow
-publishes `DOCKERHUB_USERNAME/gw2bot` with `latest` and commit-SHA tags. Configure
-the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets before merging.
+After `CI` succeeds for a push to `main`, the `Release` workflow decides
+whether the push is a new version and, when it is, publishes the image and the
+GitHub release (see [Versioning And Releases](#versioning-and-releases)).
+Configure the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets
+before merging.
+
+## Versioning And Releases
+
+The bot follows [Semantic Versioning 2.0.0](https://semver.org/). A release is
+a `vMAJOR.MINOR.PATCH` tag on `main`, a GitHub release listing the pull
+requests in it, and the Docker image built from that commit.
+
+### What The Version Promises
+
+The number describes what operators and members depend on, which is the bot's
+public API:
+
+- the environment variables and what they mean
+- the `/settings` subcommands and the values they hold
+- the slash commands and their options
+- the database: every release upgrades an existing one in place when it starts
+- the Docker image: the `/app/data` volume, the UID and GID it runs as, and the
+  default port
+- the web site's addresses, including the `/oauth/callback` redirect URI
+  registered with Discord
+- the buttons on messages the bot has already posted, which keep working
+  across restarts
+
+| Part | Goes up when | For example |
+| --- | --- | --- |
+| MAJOR | Something above is removed or renamed, or an upgrade needs an operator to do something first. | Renaming an environment variable, dropping a `/settings` subcommand, moving the data volume. |
+| MINOR | Something is added, or marked deprecated, and everything that worked still works. | A new command, setting, page or notification. |
+| PATCH | A bug is fixed without changing anything above. | A wrong count in a report, a crash on an unexpected API response. |
+
+Upgrading within one major version never asks anything of the operator.
+Releases promise to upgrade a database, not to downgrade one, so back up the
+data volume before an upgrade you may want to undo.
+
+### Image Tags
+
+Each release pushes `DOCKERHUB_USERNAME/gw2bot` under several tags, using
+`1.4.2` as the example:
+
+| Tag | Points at |
+| --- | --- |
+| `latest` | The newest release. |
+| `1` | The newest `1.x.y` release: new features and fixes, never a breaking change. |
+| `1.4` | The newest `1.4.x` release: fixes only. |
+| `1.4.2` | That release, and never anything else. |
+| Commit SHA | The image built from that commit. |
+
+Pinning the container to the major tag, such as `gw2bot:1`, takes every
+feature and fix automatically and leaves the choice of moving to `2` to you.
+Read the GitHub release notes for a new major version before changing the tag.
+
+The bot logs its version when it starts (`Starting gw2bot 1.4.2`), and the
+image carries it in its `org.opencontainers.image.version` label. A build that
+did not come from a release - `docker compose up --build`, a local run, the CI
+image - reports `0.0.0-dev`.
+
+### How A Release Is Cut
+
+Every pull request comes from a branch named for the kind of change it makes,
+which is also what decides the next version:
+
+| Branch | For | Releases |
+| --- | --- | --- |
+| `feat/<name>` | New behaviour a member or operator can use. | MINOR |
+| `fix/<name>` | A bug fix. | PATCH |
+| `chore/<name>` | Tests, documentation, CI, refactoring: nothing a member or operator would notice. | Nothing |
+
+The name after the prefix is lowercase words joined by hyphens, such as
+`feat/profit-page` or `fix/raffle-rounding`. A pull request that breaks
+anything in [What The Version Promises](#what-the-version-promises) also gets
+the `breaking` label (create it once under the repository's labels), which
+makes it a MAJOR release whatever its branch.
+
+After `CI` passes for a push to `main`, the `Release` workflow:
+
+1. Finds the newest `vX.Y.Z` tag and every pull request merged since it.
+2. Takes the largest change any of them asks for. When they are all chores, it
+   stops there and publishes nothing.
+3. Builds and pushes the image with the tags above.
+4. Creates the tag and the GitHub release, with notes generated from the pull
+   requests.
+
+The first run, before any tag exists, releases `1.0.0`. Because each run
+covers everything since the newest tag, a run that was cancelled or failed is
+caught up by the next one, and re-running a failed run retries the same
+version. A pull request merged from a branch without one of the prefixes is
+released as a patch, with a warning on the run.
+
+The version is never committed: the tag is the record. Nothing is pushed to
+`main`, so the branch ruleset needs no bypass for the workflow.
+
+To release something the automatic run would not, such as a dependency update
+merged as a chore, open **Actions > Release > Run workflow** on `main` and
+pick the smallest bump to release; merged pull requests that ask for more
+still get it.
+
+Never create, move or delete a `v` tag by hand. A released version must never
+change once published, and the workflow numbers the next release from the
+newest tag it finds. To enforce that, add a tag ruleset for `v*` that
+restricts updates and deletions; leave creation unrestricted so the workflow
+can still tag.
 
 ## Extending Notifications
 

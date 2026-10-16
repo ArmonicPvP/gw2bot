@@ -16,3 +16,5 @@ settings.key
 tests
 README.md
 LICENSE
+# Written by the image build from GW2BOT_VERSION, never copied in.
+src/gw2bot/VERSION

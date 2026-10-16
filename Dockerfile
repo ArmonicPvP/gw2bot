@@ -19,6 +19,14 @@ RUN python -m pip install --no-cache-dir -r requirements.txt
 
 COPY --chown="${APP_UID}:${APP_GID}" src ./src
 
+# The release workflow passes the version it tagged; any other build leaves
+# this empty and the bot reports itself as unreleased. Declared here, after
+# the dependency install, so a new version does not invalidate that layer.
+ARG GW2BOT_VERSION=
+RUN if [ -n "${GW2BOT_VERSION}" ]; then \
+        printf '%s\n' "${GW2BOT_VERSION}" > src/gw2bot/VERSION; \
+    fi
+
 USER ${APP_UID}:${APP_GID}
 
 # Documents the default web calendar port; only served when WEB_ENABLED=true,

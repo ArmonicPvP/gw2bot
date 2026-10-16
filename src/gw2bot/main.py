@@ -13,6 +13,7 @@ from gw2bot.settings.composition import compose_from_store
 from gw2bot.settings.crypto import ENCRYPTION_KEY_VARIABLE, SettingsCipher
 from gw2bot.settings.migration import import_legacy_environment
 from gw2bot.settings.store import SettingsStore
+from gw2bot.version import __version__
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ def main() -> None:
         secrets,
         log_directory=bootstrap.log_directory,
     )
+    LOGGER.info("Starting gw2bot %s", __version__)
     LOGGER.debug("Debug logging enabled")
 
     try:

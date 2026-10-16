@@ -44,6 +44,7 @@ read them all up front.
 | `docs/events.md` | Changing anything under `src/gw2bot/events/`, especially an import inside `views/` or `posting/`. |
 | `docs/web.md` | Changing a served page, the chrome they share, or how a document is assembled. |
 | `docs/gw2-api.md` | Calling a GW2 API endpoint, for its response shape and quirks. |
+| `docs/versioning.md` | Creating a branch or opening a pull request, changing anything in the public API (a command, setting, environment variable, web address, the database or the image), or touching the release workflow. |
 
 `README.md` documents feature behaviour, every environment variable, and every
 `/settings` subcommand with its default. It is the reference a server operator
@@ -66,6 +67,7 @@ Source lives under `src/gw2bot`:
 | --- | --- |
 | `main.py` | Entrypoint: bootstraps the environment, opens the settings store, composes `Config`, installs the redacting log formatter, starts the bot. |
 | `config.py` | `BootstrapConfig` and `bootstrap_from_env` for the environment-only variables, plus `Config` and every setting's default. |
+| `version.py` | The release version the image build stamped in, or `0.0.0-dev` - see `docs/versioning.md`. |
 | `bot.py` | The `discord.py` client: wires pollers, background tasks, and command groups. |
 | `core/` | The shared layer with no feature knowledge: `database`, `logging_setup`, `discord_utils`, `command_access`, `anchored_series`, `dashboard_ranges`. Nothing in it may import anything else under `gw2bot` - see `docs/core.md`. |
 | `gw2/` | The GW2 API client (`api.py`) and the pollers that turn its responses into decisions: `guild_log`, `guild_storage`, `guild_stash`, `feast_stock`, `guild_members`, `member_count`. |
@@ -94,6 +96,10 @@ covers its feature instead of adding a path per source file.
 `tests/factories.py` holds the shared builders for fake guild-log events,
 Discord errors, raffle totals, settings stores and /settings interactions, and
 the fake bots that answer the optional-configuration guards.
+
+`scripts/next_release.py` is not part of the bot: it is the `Branch name` CI
+check and the `Release` workflow's version decision, tested by
+`tests/test_versioning.py`.
 
 `tests/test_layout.py` asserts the `core/` import boundary.
 `tests/test_agent_docs.py` asserts that this file and `AGENTS.md` stay

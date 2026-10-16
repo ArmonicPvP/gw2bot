@@ -396,6 +396,9 @@ settings.key
 *.db-wal
 *.sqlite
 *.sqlite3
+# The release version, stamped into the image at build time. A release is a
+# tag; the number is never committed.
+/src/gw2bot/VERSION
 
 # Local application configuration
 .env
