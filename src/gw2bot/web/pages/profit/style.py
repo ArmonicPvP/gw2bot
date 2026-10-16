@@ -36,9 +36,6 @@ input {
   border-color: var(--accent);
   color: var(--on-accent);
 }
-/* button:hover outranks .primary and swaps the fill for --border, which the
-   dark accent text would vanish into. */
-.primary:hover { color: var(--text); }
 /* The narrow width above is meant for the paginator's number boxes; a date
    field needs whatever its browser's spelling of a date takes. */
 .custom input[type="date"] { width: auto; }
@@ -154,7 +151,7 @@ main { width: 100%; margin: 0; padding: 1rem; }
   width: 1.5rem;
   height: 1.5rem;
   border: 2px solid var(--border);
-  border-top-color: var(--accent);
+  border-top-color: var(--accent-on-dark);
   border-radius: 50%;
   animation: profit-spin 0.8s linear infinite;
 }
@@ -287,7 +284,10 @@ th:first-child, td:first-child { text-align: left; }
 }
 th:first-child .sort-button { justify-content: flex-start; }
 .sort-button:hover { color: var(--text); background: transparent; }
-.sort-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.sort-button:focus-visible {
+  outline: 2px solid var(--accent-on-dark);
+  outline-offset: 3px;
+}
 .sort-button::after { content: "\\2195"; color: var(--muted); font-size: 0.75rem; }
 th[aria-sort="ascending"] .sort-button::after { content: "\\25B2"; color: var(--text); }
 th[aria-sort="descending"] .sort-button::after { content: "\\25BC"; color: var(--text); }
@@ -300,7 +300,7 @@ td.name { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
 .item-link { color: inherit; text-decoration: none; }
 .item-link:hover { color: inherit; text-decoration: none; }
 .item-link:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-on-dark);
   outline-offset: 2px;
   border-radius: 3px;
 }

@@ -2,12 +2,22 @@ import re
 
 from gw2bot.web.pages import (
     CALENDAR_PAGE,
+    EVENTS_OFFICER_ONLY_PAGE,
     EVENTS_PAGE,
     FOOD_PAGE,
+    GOLD_OFFICER_ONLY_PAGE,
     GOLD_PAGE,
+    LOGIN_FAILED_PAGE,
+    MEMBERS_ONLY_PAGE,
+    OFFICER_ONLY_PAGE,
+    ROSTER_OFFICER_ONLY_PAGE,
     ROSTER_PAGE,
+    SERVICE_UNAVAILABLE_PAGE,
+    SIGN_IN_PAGE,
+    SIGNED_OUT_PAGE,
     sign_in_page,
 )
+from gw2bot.web.pages.shared import SHARED_STYLE
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 from gw2bot.web.pages.profit import (
     PAGE_SIZE_DEFAULT,
@@ -19,6 +29,22 @@ from gw2bot.web.pages.profit import (
 # The dashboards that draw a history over a picked window, and so share the
 # range picker.
 RANGE_DASHBOARDS = (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE, EVENTS_PAGE)
+
+# Every document the site serves.
+ALL_PAGES = (
+    CALENDAR_PAGE,
+    PROFIT_PAGE,
+    *RANGE_DASHBOARDS,
+    SIGN_IN_PAGE,
+    SIGNED_OUT_PAGE,
+    MEMBERS_ONLY_PAGE,
+    LOGIN_FAILED_PAGE,
+    SERVICE_UNAVAILABLE_PAGE,
+    OFFICER_ONLY_PAGE,
+    ROSTER_OFFICER_ONLY_PAGE,
+    GOLD_OFFICER_ONLY_PAGE,
+    EVENTS_OFFICER_ONLY_PAGE,
+)
 
 
 def _call_arguments(source: str, name: str) -> list[list[str]]:
@@ -91,11 +117,11 @@ class TestCalendarSignedUpChips:
         # only the other three sides take the accent.
         assert rule.group(1).split() == [
             "border-top-color:",
-            "var(--accent);",
+            "var(--accent-on-dark);",
             "border-right-color:",
-            "var(--accent);",
+            "var(--accent-on-dark);",
             "border-bottom-color:",
-            "var(--accent);",
+            "var(--accent-on-dark);",
         ]
 
     def test_a_projection_keeps_its_dashes_in_the_accent(self) -> None:
@@ -850,7 +876,7 @@ class TestProfitPage:
             in PROFIT_PAGE
         )
         assert ".item-link:focus-visible {" in PROFIT_PAGE
-        assert "outline: 2px solid var(--accent);" in PROFIT_PAGE
+        assert "outline: 2px solid var(--accent-on-dark);" in PROFIT_PAGE
 
     def test_item_links_follow_the_browsers_language(self) -> None:
         assert 'var BLTC_LANGUAGES = ["en", "de", "es", "fr"];' in PROFIT_PAGE
@@ -1163,6 +1189,82 @@ class TestDashboardHeaders:
             assert '<h1 id="brand">' in page
 
 
+def _relative_luminance(hex_color: str) -> float:
+    channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [
+        c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+        for c in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(first: str, second: str) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(first), _relative_luminance(second)),
+        reverse=True,
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class TestPalette:
+    def _tokens(self) -> dict[str, str]:
+        root = re.search(r":root \{(.*?)\n\}", SHARED_STYLE, re.S)
+        assert root is not None
+        return dict(re.findall(r"--([\w-]+): (#[0-9a-f]{6});", root.group(1)))
+
+    def test_the_purple_is_defined_once_in_the_shared_stylesheet(
+        self,
+    ) -> None:
+        tokens = self._tokens()
+        assert tokens["accent"] == "#964cf0"
+        assert tokens["accent-on-dark"] == "#bc8bec"
+        assert tokens["on-accent"] == "#ffffff"
+        assert tokens["accent-dark"] == "#330d62"
+        assert tokens["accent-light"] == "#edb9ff"
+        # Every page carries the stylesheet once, so a page that spelled a
+        # purple out for itself would show it twice.
+        for page in ALL_PAGES:
+            for value in ("#964cf0", "#bc8bec", "#330d62", "#edb9ff"):
+                assert page.lower().count(value) == 1
+
+    def test_the_fill_shade_never_draws_text_or_lines(self) -> None:
+        # --accent is too dark to read as text or show as an outline on the
+        # panels, so it is only ever the fill and edge of a filled control.
+        for page in ALL_PAGES:
+            properties = re.findall(r"([\w-]+):\s*var\(--accent\)", page)
+            assert properties
+            assert set(properties) <= {"background", "border-color"}
+
+    def test_the_purple_meets_wcag_aa_on_the_panels_it_sits_on(self) -> None:
+        tokens = self._tokens()
+        # Text on a selected range button, Reload, or the sign-in button.
+        assert _contrast(tokens["on-accent"], tokens["accent"]) >= 4.5
+        # Those fills against the header and the card they sit on.
+        assert _contrast(tokens["accent"], tokens["panel"]) >= 3
+        # Links, today's date, the roster check mark and the tooltip line.
+        for surface in ("bg", "panel", "panel-2"):
+            assert _contrast(tokens["accent-on-dark"], tokens[surface]) >= 4.5
+        # A purple edge must still stand apart from an ordinary border.
+        assert _contrast(tokens["accent-on-dark"], tokens["border"]) >= 3
+        # Today's date on a hovered week-view header.
+        assert _contrast(tokens["accent-light"], tokens["border"]) >= 4.5
+
+    def test_keyboard_focus_shows_in_the_purple_on_every_page(self) -> None:
+        ring = "outline: 2px solid var(--accent-on-dark);"
+        for page in (CALENDAR_PAGE, PROFIT_PAGE, *RANGE_DASHBOARDS):
+            assert "button:focus-visible {\n  " + ring in page
+        assert ".chip:focus-visible {\n  " + ring in CALENDAR_PAGE
+        assert ".button:focus-visible {\n  " + ring in SIGN_IN_PAGE
+
+    def test_todays_week_header_keeps_its_date_readable_on_hover(
+        self,
+    ) -> None:
+        assert (
+            ".tg-head.today:hover .tg-dow, .tg-head.today:hover .tg-daynum {\n"
+            "  color: var(--accent-light);" in CALENDAR_PAGE
+        )
+
+
 class TestCalendarTimeGrid:
     def test_day_and_week_render_an_hour_gutter(self) -> None:
         assert (
@@ -1298,8 +1400,9 @@ class TestCalendarInteraction:
         assert ".day-link:hover, .more:hover { background: transparent; }" in (
             CALENDAR_PAGE
         )
-        assert ".day-link:hover .daynum { color: var(--accent); }" in (
-            CALENDAR_PAGE
+        assert (
+            ".day-link:hover .daynum { color: var(--accent-on-dark); }"
+            in CALENDAR_PAGE
         )
 
     def test_event_details_can_be_pinned_and_replaced(self) -> None:

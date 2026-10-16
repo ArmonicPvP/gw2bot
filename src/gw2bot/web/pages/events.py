@@ -146,10 +146,6 @@ table.stats td.unknown { color: var(--muted); }
   font-size: 0.85rem;
 }
 .pager:empty { display: none; }
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
 @media (max-width: 640px) {
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }

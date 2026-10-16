@@ -15,10 +15,21 @@ SHARED_STYLE = """
   --border: #3d4249;
   --text: #e8eaed;
   --muted: #9aa0a6;
-  --accent: #a17bd0;
-  /* Text on an accent fill: white on the purple reads at 3.4:1, short of
-     the 4.5:1 body text needs, and this reads at 5:1. */
-  --on-accent: #1b1e21;
+  /* The purple is spelled twice because no one shade does both jobs on
+     these panels. --accent is the fill behind a selected or primary control:
+     white on it reads at 4.6:1, and it stands out from the header panel at
+     3.1:1.
+     Drawn as text or a thin line it drops to 2.8:1 on --panel-2, so a link,
+     today's date, a roster outline or a focus ring takes --accent-on-dark,
+     which reads at 4.9:1 or better on every panel. */
+  --accent: #964cf0;
+  --accent-on-dark: #bc8bec;
+  --on-accent: #ffffff;
+  /* The brand purple and its light tint. The brand purple sits at 1.1:1
+     against --bg, so it can back light text but never be the text or the
+     edge itself. */
+  --accent-dark: #330d62;
+  --accent-light: #edb9ff;
   --open: #2ecc71;
   --ongoing: #f1c40f;
   --full: #e74c3c;
@@ -35,7 +46,7 @@ body {
   font-family: system-ui, "Segoe UI", sans-serif;
   min-height: 100vh;
 }
-a { color: var(--accent); }
+a { color: var(--accent-on-dark); }
 """
 
 DASHBOARD_HEADER_STYLE = """
@@ -60,6 +71,10 @@ button {
   cursor: pointer;
 }
 button:hover { background: var(--border); }
+button:focus-visible {
+  outline: 2px solid var(--accent-on-dark);
+  outline-offset: 1px;
+}
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
 header a { font-size: 0.85rem; }
@@ -430,6 +445,10 @@ body { display: flex; align-items: center; justify-content: center; }
   padding: 0.6rem 1.4rem;
   border-radius: 8px;
   font-weight: 600;
+}
+.button:focus-visible {
+  outline: 2px solid var(--accent-on-dark);
+  outline-offset: 2px;
 }
 """
 
