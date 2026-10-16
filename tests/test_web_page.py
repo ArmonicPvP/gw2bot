@@ -159,13 +159,22 @@ class TestCalendarTooltip:
         assert '} else if (event.key === "Tab" && !event.shiftKey && ' in (
             CALENDAR_PAGE
         )
-        assert "links[0].focus();" in CALENDAR_PAGE
+        assert "stops[0].focus();" in CALENDAR_PAGE
         assert "if (event.shiftKey && at === 0) {" in CALENDAR_PAGE
         assert (
-            "} else if (!event.shiftKey && at === links.length - 1) {"
+            "} else if (!event.shiftKey && at === stops.length - 1) {"
             in CALENDAR_PAGE
         )
         assert "var next = focusStopAfter(chip);" in CALENDAR_PAGE
+        # A long description that runs past the box makes the box itself
+        # the first stop, so the arrow keys can scroll it without a link.
+        assert '<div id="tooltip" role="tooltip" tabindex="-1"></div>' in (
+            CALENDAR_PAGE
+        )
+        assert (
+            "if (tooltip.scrollHeight > tooltip.clientHeight) {\n"
+            "      stops.unshift(tooltip);" in CALENDAR_PAGE
+        )
         # Escape closes the details from the event or from inside them.
         assert CALENDAR_PAGE.count('event.key === "Escape"') == 2
         # Focus returns while the event is still pinned, so the grid's
@@ -1348,7 +1357,8 @@ class TestPalette:
         for page in (CALENDAR_PAGE, PROFIT_PAGE, *RANGE_DASHBOARDS):
             assert "button:focus-visible {\n  " + ring in page
         assert (
-            ".chip:focus-visible, #tooltip .md-link:focus-visible {\n  " + ring
+            ".chip:focus-visible, #tooltip:focus-visible,\n"
+            "#tooltip .md-link:focus-visible {\n  " + ring
             in CALENDAR_PAGE
         )
         assert ".button:focus-visible {\n  " + ring in SIGN_IN_PAGE

@@ -45,9 +45,11 @@ the text it was typed as. The calendar's details let the pointer through to the
 chips beneath them while hovered and take it only while pinned, which is what
 lets those links be clicked, and a long description scrolls inside them rather
 than past the bottom of the page. The details sit after the whole grid in the
-document, so Tab from a pinned event is steered into its links and stepping
-past either end of them lands beside the event again; without that, a keyboard
-reader would reach them only after every later event. The profit page's item names are links built
+document, so Tab from a pinned event is steered into them - the box itself
+first when a long description runs past it, so the arrow keys can scroll it,
+then each link - and stepping past either end lands beside the event again;
+without that, a keyboard reader would reach them only after every later
+event. The profit page's item names are links built
 the same way: the anchor is a node, its text is still set with `textContent`,
 and the only server value that reaches its `href` is the item's id. A change
 that puts server data into page markup breaks that property and needs a much

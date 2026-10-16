@@ -344,7 +344,8 @@ main {
 .badge.over { background: var(--over); }
 .badge.scheduled { background: var(--scheduled); }
 #status { color: var(--muted); font-size: 0.85rem; padding: 0.5rem 0.2rem; }
-.chip:focus-visible, #tooltip .md-link:focus-visible {
+.chip:focus-visible, #tooltip:focus-visible,
+#tooltip .md-link:focus-visible {
   outline: 2px solid var(--accent-on-dark);
   outline-offset: 1px;
 }
@@ -436,7 +437,7 @@ main {
   <div id="grid" class="month" aria-label="Guild event calendar"></div>
   <div id="status" role="status" aria-live="polite"></div>
 </main>
-<div id="tooltip" role="tooltip"></div>
+<div id="tooltip" role="tooltip" tabindex="-1"></div>
 <script>
 "use strict";
 (function () {
@@ -1257,22 +1258,29 @@ main {
       chip.click();
     }
     if (!chip || chip !== pinnedChip) { return; }
-    var links = tooltipLinks();
+    var stops = tooltipStops();
     if (event.key === "Escape") {
       unpinTooltip();
-    } else if (event.key === "Tab" && !event.shiftKey && links.length) {
+    } else if (event.key === "Tab" && !event.shiftKey && stops.length) {
       event.preventDefault();
-      links[0].focus();
+      stops[0].focus();
     }
   });
 
   // The details sit after the whole grid in the document, so Tab would only
   // reach a pinned event's links after every later event. Tab from the
   // pinned event steps into them instead, stepping past either end of them
-  // lands beside the event again, and Escape closes them back onto it.
-  function tooltipLinks() {
+  // lands beside the event again, and Escape closes them back onto it. When
+  // a long description runs past the box, the box itself is the first stop,
+  // so the arrow keys can scroll it even where it holds no link.
+  function tooltipStops() {
     if (!pinnedChip) { return []; }
-    return Array.prototype.slice.call(tooltip.querySelectorAll("a[href]"));
+    var stops = Array.prototype.slice.call(
+      tooltip.querySelectorAll("a[href]"));
+    if (tooltip.scrollHeight > tooltip.clientHeight) {
+      stops.unshift(tooltip);
+    }
+    return stops;
   }
   function focusStopAfter(node) {
     var stops = Array.prototype.filter.call(
@@ -1294,12 +1302,12 @@ main {
       return;
     }
     if (event.key !== "Tab") { return; }
-    var links = tooltipLinks();
-    var at = links.indexOf(document.activeElement);
+    var stops = tooltipStops();
+    var at = stops.indexOf(document.activeElement);
     if (event.shiftKey && at === 0) {
       event.preventDefault();
       chip.focus();
-    } else if (!event.shiftKey && at === links.length - 1) {
+    } else if (!event.shiftKey && at === stops.length - 1) {
       var next = focusStopAfter(chip);
       if (next) {
         event.preventDefault();
