@@ -77,11 +77,14 @@ async def handle_check_command(
 def create_track_command(bot: Gw2Bot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(
         name="track",
-        description="Toggle a Trial member's 7-day warning tracking",
+        description=(
+            "Toggle 7-day warning tracking for a Trial member past the 14-day "
+            "mark"
+        ),
         extras=access_extras(RoleSetting("raffle_officer_role_id")),
     )
     @app_commands.describe(
-        username="Guild Wars 2 account name, including the four digits",
+        username="Trial member past the 14-day mark, including the four digits",
     )
     @app_commands.guild_only()
     async def track(
@@ -108,12 +111,12 @@ async def track_member_autocomplete(
         LOGGER.debug("Skipped track guild member autocomplete; gw2_api_enabled=false")
         return []
     try:
-        usernames = await bot.search_guild_members(current, limit=25)
+        usernames = await bot.search_track_candidates(current, limit=25)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         LOGGER.error("Could not refresh the guild member cache for autocomplete")
         return []
     LOGGER.debug(
-        "Returning track guild member autocomplete choices; choices=%s",
+        "Returning track candidate autocomplete choices; choices=%s",
         len(usernames),
     )
     return [
@@ -152,6 +155,10 @@ async def handle_track_command(
     await interaction.response.defer(ephemeral=True)
     try:
         canonical_username = await bot.resolve_guild_member(username)
+        overdue = (
+            canonical_username is not None
+            and await bot.is_overdue_trial_member(canonical_username)
+        )
     except (aiohttp.ClientError, asyncio.TimeoutError):
         LOGGER.error("Could not refresh the guild member cache")
         await interaction.followup.send(
@@ -164,6 +171,21 @@ async def handle_track_command(
         LOGGER.debug("Trial member track rejected; guild member was not found")
         await interaction.followup.send(
             f"`{username}` is not a member of the configured guild.",
+            ephemeral=True,
+        )
+        return
+
+    # Only starting a warning needs the 14-day mark. An already tracked member
+    # can always be untracked, so a rank or roster change that lands between
+    # daily reports never leaves an officer unable to clear them.
+    if not overdue and not bot.is_trial_member_tracked(canonical_username):
+        LOGGER.debug(
+            "Trial member track rejected; member is not a Trial member past "
+            "the 14-day mark"
+        )
+        await interaction.followup.send(
+            f"**{canonical_username}** is not a Trial member past the 14-day "
+            "mark, so their warning cannot be tracked.",
             ephemeral=True,
         )
         return

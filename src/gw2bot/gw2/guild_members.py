@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -74,6 +74,7 @@ class GuildMemberCache:
         self._clock = clock
         self._members: dict[str, str] = {}
         self._member_ranks: dict[str, str] = {}
+        self._trial_joined: dict[str, datetime] = {}
         self._expires_at = 0.0
         self._next_background_refresh_at = 0.0
         self._lock = asyncio.Lock()
@@ -109,24 +110,73 @@ class GuildMemberCache:
         )
         return results
 
-    async def search(self, query: str, *, limit: int = 25) -> list[str]:
+    async def is_overdue_trial(
+        self,
+        username: str,
+        now: datetime,
+        *,
+        force_refresh: bool = False,
+    ) -> bool:
+        """Whether the account is a Trial member past the 14-day mark at ``now``."""
+        await self._refresh_if_expired(force=force_refresh)
+        result = self._is_overdue_trial(
+            username.strip().casefold(),
+            now.astimezone(UTC) - TRIAL_PERIOD,
+        )
+        LOGGER.debug(
+            "Guild member overdue Trial lookup completed; overdue=%s",
+            result,
+        )
+        return result
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 25,
+        overdue_trials_at: datetime | None = None,
+        also_include: Collection[str] = (),
+    ) -> list[str]:
+        """Match cached account names without waiting on a refresh.
+
+        ``overdue_trials_at`` narrows the matches to the Trial members who are
+        past the 14-day mark at that moment, the only accounts ``/track`` may
+        start tracking. ``also_include`` names accounts, matched
+        case-insensitively, that pass that narrowing anyway: ``/track`` offers
+        the members it already tracks so they can be untracked. Either way only
+        current guild members are returned.
+        """
         started_at = time.perf_counter()
         query_chars = len(query.strip())
         cache_expired = self._clock() >= self._expires_at
         LOGGER.debug(
             "Guild member cache search started; query_chars=%s limit=%s "
-            "cached_members=%s cache_expired=%s",
+            "cached_members=%s cache_expired=%s overdue_trials_only=%s "
+            "also_included=%s",
             query_chars,
             limit,
             len(self._members),
             cache_expired,
+            overdue_trials_at is not None,
+            len(also_include),
         )
         refresh_started = self.start_background_refresh()
         query_key = query.strip().casefold()
+        cutoff = (
+            None
+            if overdue_trials_at is None
+            else overdue_trials_at.astimezone(UTC) - TRIAL_PERIOD
+        )
+        included_keys = {name.strip().casefold() for name in also_include}
         matches = [
             username
-            for username in self._members.values()
+            for account_key, username in self._members.items()
             if query_key in username.casefold()
+            and (
+                cutoff is None
+                or account_key in included_keys
+                or self._is_overdue_trial(account_key, cutoff)
+            )
         ]
         matches.sort(
             key=lambda username: (
@@ -146,6 +196,10 @@ class GuildMemberCache:
             (time.perf_counter() - started_at) * 1_000,
         )
         return results
+
+    def _is_overdue_trial(self, account_key: str, cutoff: datetime) -> bool:
+        joined = self._trial_joined.get(account_key)
+        return joined is not None and joined <= cutoff
 
     def start_background_refresh(self) -> bool:
         now = self._clock()
@@ -209,6 +263,12 @@ class GuildMemberCache:
                 for member in members
                 if member.get("name")
             }
+            self._trial_joined = {
+                str(member["name"]).casefold(): joined
+                for member in members
+                if member.get("name")
+                and (joined := _trial_joined_at(member)) is not None
+            }
             self._expires_at = self._clock() + self._ttl_seconds
             self._next_background_refresh_at = 0.0
             LOGGER.debug(
@@ -225,10 +285,8 @@ def get_overdue_trial_members(
     cutoff = now.astimezone(UTC) - TRIAL_PERIOD
     overdue: list[str] = []
     for member in members:
-        if str(member.get("rank", "")).casefold() != TRIAL_RANK.casefold():
-            continue
         name = str(member.get("name", "")).strip()
-        joined = _parse_api_datetime(member.get("joined"))
+        joined = _trial_joined_at(member)
         if name and joined is not None and joined <= cutoff:
             overdue.append(name)
     # Case-sensitive sort: uppercase sorts before lowercase ("Z" before "a").
@@ -248,10 +306,8 @@ def get_recent_trial_members(
     cutoff = now.astimezone(UTC) - TRIAL_PERIOD
     recent: list[str] = []
     for member in members:
-        if str(member.get("rank", "")).casefold() != TRIAL_RANK.casefold():
-            continue
         name = str(member.get("name", "")).strip()
-        joined = _parse_api_datetime(member.get("joined"))
+        joined = _trial_joined_at(member)
         if name and joined is not None and joined > cutoff:
             recent.append(name)
     # Case-sensitive sort: uppercase sorts before lowercase ("Z" before "a").
@@ -589,6 +645,17 @@ def seconds_until_trial_report(now: datetime) -> float:
     if next_run <= now_utc:
         next_run += timedelta(days=1)
     return (next_run - now_utc).total_seconds()
+
+
+def _trial_joined_at(member: dict[str, Any]) -> datetime | None:
+    """When a Trial-ranked member joined, or None for any other member.
+
+    The overdue and recent reports and the ``/track`` lookups all decide the
+    14-day mark from this, so they cannot disagree about who is past it.
+    """
+    if str(member.get("rank", "")).casefold() != TRIAL_RANK.casefold():
+        return None
+    return _parse_api_datetime(member.get("joined"))
 
 
 def _parse_api_datetime(value: Any) -> datetime | None:

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Callable, Coroutine, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -836,6 +836,35 @@ class Gw2Bot(discord.Client):
         results = await self._guild_members.search(query, limit=limit)
         LOGGER.debug("Guild member search completed; results=%s", len(results))
         return results
+
+    async def search_track_candidates(
+        self,
+        query: str,
+        *,
+        limit: int = 25,
+    ) -> list[str]:
+        """Guild members /track can act on: past the 14-day mark, or tracked."""
+        if self._guild_members is None:
+            raise RuntimeError("Guild member cache was not initialized")
+        results = await self._guild_members.search(
+            query,
+            limit=limit,
+            overdue_trials_at=datetime.now(UTC),
+            also_include=self.get_tracked_trial_members(),
+        )
+        LOGGER.debug(
+            "Track candidate search completed; results=%s",
+            len(results),
+        )
+        return results
+
+    async def is_overdue_trial_member(self, username: str) -> bool:
+        if self._guild_members is None:
+            raise RuntimeError("Guild member cache was not initialized")
+        return await self._guild_members.is_overdue_trial(
+            username,
+            datetime.now(UTC),
+        )
 
     def get_tracked_trial_members(self) -> set[str]:
         return self._raffle_store.get_tracked_trial_members()
