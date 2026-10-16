@@ -1565,7 +1565,9 @@ details until the next click; clicking a different event switches the pinned
 details to it. Links in a description or its requirements, written as in
 Discord - `[text](https://...)`, `<https://...>` or a bare address - open in a
 new tab from the pinned details; an address that is not `http` or `https`
-stays plain text. Day headings in week view and every date in month view open that
+stays plain text. Details too long for the window scroll once pinned. With a
+keyboard, Enter pins an event's details, Tab from it moves through their
+links, and Escape closes them. Day headings in week view and every date in month view open that
 date's day view.
 When a month cell cannot fit all of its events, it shows a clickable `+N`
 beside the date instead of a scrollbar. Future occurrences of repeating events

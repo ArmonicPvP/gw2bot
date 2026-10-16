@@ -126,6 +126,15 @@ class TestCalendarMarkdown:
     def test_event_text_never_becomes_markup(self) -> None:
         assert "innerHTML" not in CALENDAR_PAGE
 
+    def test_a_bare_address_keeps_its_balanced_parentheses(self) -> None:
+        # A wiki page's "_(mathematics)" stays in the address, while an
+        # unmatched ")" or a closing full stop stays text.
+        assert (
+            r"""re: /^(https?:\/\/(?:[^\s<()]|\([^\s<()]*\))*"""
+            r"""(?:[^\s<().,:;"'\]]|\([^\s<()]*\)))/,"""
+            in CALENDAR_PAGE
+        )
+
     def test_a_long_address_wraps_inside_the_details(self) -> None:
         assert "#tooltip .desc .md-link { overflow-wrap: anywhere; }" in (
             CALENDAR_PAGE
@@ -133,6 +142,29 @@ class TestCalendarMarkdown:
 
 
 class TestCalendarTooltip:
+    def test_long_details_scroll_inside_the_viewport(self) -> None:
+        tooltip = re.search(r"#tooltip \{(.*?)\n\}", CALENDAR_PAGE, re.S)
+        assert tooltip is not None
+        assert "max-height: calc(100vh - 16px);" in tooltip.group(1)
+        assert "overflow-y: auto;" in tooltip.group(1)
+
+    def test_the_keyboard_reaches_a_pinned_events_links(self) -> None:
+        # Tab from the pinned event steps into its links rather than past
+        # every later event, and back out beside it at either end.
+        assert '} else if (event.key === "Tab" && !event.shiftKey && ' in (
+            CALENDAR_PAGE
+        )
+        assert "links[0].focus();" in CALENDAR_PAGE
+        assert "if (event.shiftKey && at === 0) {" in CALENDAR_PAGE
+        assert (
+            "} else if (!event.shiftKey && at === links.length - 1) {"
+            in CALENDAR_PAGE
+        )
+        assert "var next = focusStopAfter(chip);" in CALENDAR_PAGE
+        # Escape closes the details from the event or from inside them.
+        assert CALENDAR_PAGE.count('event.key === "Escape"') == 2
+        assert "chip.focus();\n      return;" in CALENDAR_PAGE
+
     def test_only_pinned_details_take_the_pointer(self) -> None:
         # Hovered details let clicks through to the chips beneath them;
         # pinned ones must take them, or their links could not be followed.
@@ -1306,7 +1338,10 @@ class TestPalette:
         ring = "outline: 2px solid var(--accent-on-dark);"
         for page in (CALENDAR_PAGE, PROFIT_PAGE, *RANGE_DASHBOARDS):
             assert "button:focus-visible {\n  " + ring in page
-        assert ".chip:focus-visible {\n  " + ring in CALENDAR_PAGE
+        assert (
+            ".chip:focus-visible, #tooltip .md-link:focus-visible {\n  " + ring
+            in CALENDAR_PAGE
+        )
         assert ".button:focus-visible {\n  " + ring in SIGN_IN_PAGE
 
     def test_todays_week_header_keeps_its_date_readable_on_hover(

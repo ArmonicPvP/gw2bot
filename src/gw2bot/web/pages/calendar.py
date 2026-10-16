@@ -274,6 +274,11 @@ main {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   pointer-events: none;
   display: none;
+  /* A long description scrolls inside the details once they are pinned,
+     rather than running past the bottom of a page that cannot scroll. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 #tooltip h2 { font-size: 0.95rem; margin-bottom: 0.15rem; }
 #tooltip .meta { color: var(--muted); margin-bottom: 0.35rem; }
@@ -339,7 +344,7 @@ main {
 .badge.over { background: var(--over); }
 .badge.scheduled { background: var(--scheduled); }
 #status { color: var(--muted); font-size: 0.85rem; padding: 0.5rem 0.2rem; }
-.chip:focus-visible {
+.chip:focus-visible, #tooltip .md-link:focus-visible {
   outline: 2px solid var(--accent-on-dark);
   outline-offset: 1px;
 }
@@ -562,9 +567,10 @@ main {
   //
   // A rule with an `address` is one of Discord's three link forms: a masked
   // [text](https://...), an address in angle brackets, and a bare one, whose
-  // trailing punctuation stays text as it does in Discord. The group it
-  // names is the only event text that reaches an attribute, and only once
-  // linkAddress has read it as http or https.
+  // trailing punctuation and unmatched ")" stay text as they do in Discord
+  // while a balanced "(...)" such as a wiki page's stays in the address. The
+  // group it names is the only event text that reaches an attribute, and
+  // only once linkAddress has read it as http or https.
   var inlineRules = [
     { re: /^`([^`]+)`/, tag: "code", raw: true },
     {
@@ -573,7 +579,7 @@ main {
     },
     { re: /^<(https?:\\/\\/[^\\s<>]+)>/, address: 1, raw: true },
     {
-      re: /^(https?:\\/\\/[^\\s<]+[^<.,:;"')\\]\\s])/,
+      re: /^(https?:\\/\\/(?:[^\\s<()]|\\([^\\s<()]*\\))*(?:[^\\s<().,:;"'\\]]|\\([^\\s<()]*\\)))/,
       address: 1,
       raw: true
     },
@@ -1246,6 +1252,54 @@ main {
     if (chip && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       chip.click();
+    }
+    if (!chip || chip !== pinnedChip) { return; }
+    var links = tooltipLinks();
+    if (event.key === "Escape") {
+      unpinTooltip();
+    } else if (event.key === "Tab" && !event.shiftKey && links.length) {
+      event.preventDefault();
+      links[0].focus();
+    }
+  });
+
+  // The details sit after the whole grid in the document, so Tab would only
+  // reach a pinned event's links after every later event. Tab from the
+  // pinned event steps into them instead, stepping past either end of them
+  // lands beside the event again, and Escape closes them back onto it.
+  function tooltipLinks() {
+    if (!pinnedChip) { return []; }
+    return Array.prototype.slice.call(tooltip.querySelectorAll("a[href]"));
+  }
+  function focusStopAfter(node) {
+    var stops = Array.prototype.filter.call(
+      grid.querySelectorAll("button, [tabindex]"),
+      function (stop) {
+        return stop.tabIndex >= 0 && stop.getClientRects().length > 0;
+      });
+    return stops[stops.indexOf(node) + 1] || null;
+  }
+  tooltip.addEventListener("keydown", function (event) {
+    var chip = pinnedChip;
+    if (!chip) { return; }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      unpinTooltip();
+      chip.focus();
+      return;
+    }
+    if (event.key !== "Tab") { return; }
+    var links = tooltipLinks();
+    var at = links.indexOf(document.activeElement);
+    if (event.shiftKey && at === 0) {
+      event.preventDefault();
+      chip.focus();
+    } else if (!event.shiftKey && at === links.length - 1) {
+      var next = focusStopAfter(chip);
+      if (next) {
+        event.preventDefault();
+        next.focus();
+      }
     }
   });
   document.addEventListener("click", function () {
