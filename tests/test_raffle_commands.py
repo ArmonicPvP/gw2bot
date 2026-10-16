@@ -526,7 +526,7 @@ class TestAddRaffleTicketsCommand:
         await command.callback(group, interaction, "member.1234")  # type: ignore[arg-type]
 
         interaction.followup.send.assert_awaited_once_with(
-            "**Member.1234** has already earned their free ticket for the week.",
+            "**Member.1234** has already earned their free ticket for this raffle.",
             ephemeral=True,
         )
         bot.send_notification.assert_not_awaited()
@@ -833,7 +833,7 @@ class TestAddRaffleTicketsCommand:
         assert "Not in the configured guild: 1" in message
         assert "Duplicate selections skipped: **Alpha.1234**" in message
         assert (
-            "Already earned their free ticket for the week: **Existing.5678**"
+            "Already earned their free ticket for this raffle: **Existing.5678**"
             in message
         )
         assert "Excluded from the raffle: **Banned.3456**" in message

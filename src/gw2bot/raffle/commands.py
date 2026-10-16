@@ -454,7 +454,7 @@ class RaffleCommands(app_commands.Group):
             LOGGER.debug("Manual raffle ticket refused; reason=already_ticketed")
             await interaction.followup.send(
                 f"**{canonical_username}** has already earned their free "
-                "ticket for the week.",
+                "ticket for this raffle.",
                 ephemeral=True,
             )
             return

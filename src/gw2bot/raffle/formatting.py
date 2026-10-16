@@ -111,7 +111,7 @@ def format_bulk_addtickets_summary(
     if already_ticketed_usernames:
         summary.append(
             _format_bulk_username_sample(
-                "Already earned their free ticket for the week",
+                "Already earned their free ticket for this raffle",
                 already_ticketed_usernames,
             )
         )
