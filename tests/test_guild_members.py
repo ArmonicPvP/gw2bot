@@ -121,6 +121,30 @@ class TestGuildMemberCache:
         ]
         assert await cache.search("new", overdue_trials_at=now) == []
 
+    async def test_search_includes_named_accounts_past_the_narrowing(
+        self,
+    ) -> None:
+        now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
+        api = FakeGuildApi()
+        api.members = [
+            {"name": "Trial Old.1234", "rank": "Trial", "joined": "2026-05-01T00:00:00Z"},
+            {"name": "Trial New.5678", "rank": "Trial", "joined": "2026-06-01T00:00:00Z"},
+            {"name": "Trial Member.9012", "rank": "Member", "joined": "2026-01-01T00:00:00Z"},
+        ]
+        cache = GuildMemberCache(api, "guild-id", ttl_seconds=60)
+        await cache.resolve("Trial Old.1234")
+
+        assert await cache.search(
+            "trial",
+            overdue_trials_at=now,
+            also_include={"trial member.9012", "Left Guild.0000"},
+        ) == ["Trial Member.9012", "Trial Old.1234"]
+        assert await cache.search(
+            "old",
+            overdue_trials_at=now,
+            also_include={"Trial Member.9012"},
+        ) == ["Trial Old.1234"]
+
     async def test_overdue_trial_lookup_follows_a_refreshed_rank(self) -> None:
         now = datetime(2026, 6, 7, 17, 0, tzinfo=UTC)
         api = FakeGuildApi()
@@ -187,7 +211,8 @@ class TestGuildMemberCache:
         assert secret not in caplog.text
         assert (
             "Guild member cache search started; query_chars=25 limit=25 "
-            "cached_members=2 cache_expired=False overdue_trials_only=False"
+            "cached_members=2 cache_expired=False overdue_trials_only=False "
+            "also_included=0"
             in caplog.text
         )
         assert (

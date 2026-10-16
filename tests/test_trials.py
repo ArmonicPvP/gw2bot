@@ -1007,7 +1007,7 @@ class TestTrackCommand:
     async def test_autocomplete_requires_officer_role(self) -> None:
         bot = SimpleNamespace(
             _config=default_config(),
-            search_overdue_trial_members=AsyncMock(),
+            search_track_candidates=AsyncMock(),
         )
         interaction = SimpleNamespace(user=SimpleNamespace(id=1, roles=[]))
 
@@ -1018,12 +1018,12 @@ class TestTrackCommand:
         )
 
         assert choices == []
-        bot.search_overdue_trial_members.assert_not_awaited()
+        bot.search_track_candidates.assert_not_awaited()
 
     async def test_autocomplete_offers_no_choices_without_gw2_credentials(
         self,
     ) -> None:
-        bot = unconfigured_bot(search_overdue_trial_members=AsyncMock())
+        bot = unconfigured_bot(search_track_candidates=AsyncMock())
         interaction = SimpleNamespace(
             user=SimpleNamespace(
                 id=1,
@@ -1038,11 +1038,11 @@ class TestTrackCommand:
         )
 
         assert choices == []
-        bot.search_overdue_trial_members.assert_not_awaited()
+        bot.search_track_candidates.assert_not_awaited()
 
     async def test_autocomplete_returns_officer_choices(self) -> None:
         bot = configured_bot(
-            search_overdue_trial_members=AsyncMock(return_value=["Username.1234"]),
+            search_track_candidates=AsyncMock(return_value=["Username.1234"]),
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(
@@ -1057,7 +1057,7 @@ class TestTrackCommand:
             "User",
         )
 
-        bot.search_overdue_trial_members.assert_awaited_once_with(
+        bot.search_track_candidates.assert_awaited_once_with(
             "User",
             limit=25,
         )
@@ -1065,7 +1065,7 @@ class TestTrackCommand:
             ("Username.1234", "Username.1234")
         ]
 
-    async def test_bot_lookups_judge_the_fourteen_day_mark_from_now(
+    async def test_bot_lookups_offer_overdue_and_tracked_members(
         self,
     ) -> None:
         now = datetime.now(UTC)
@@ -1099,13 +1099,22 @@ class TestTrackCommand:
                 "guild-id",
                 ttl_seconds=60,
             ),
+            get_tracked_trial_members=MagicMock(return_value=set()),
         )
         await bot._guild_members.resolve("Overdue.1234")
 
-        assert await Gw2Bot.search_overdue_trial_members(
+        assert await Gw2Bot.search_track_candidates(
             cast(Gw2Bot, bot),
             "",
         ) == ["Overdue.1234"]
+
+        # A tracked member is offered whatever their rank or join date, so the
+        # same command can untrack them; one who left the guild is not.
+        bot.get_tracked_trial_members.return_value = {"veteran.9012", "Gone.0000"}
+        assert await Gw2Bot.search_track_candidates(
+            cast(Gw2Bot, bot),
+            "",
+        ) == ["Overdue.1234", "Veteran.9012"]
         assert await Gw2Bot.is_overdue_trial_member(
             cast(Gw2Bot, bot),
             "overdue.1234",

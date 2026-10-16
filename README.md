@@ -1103,13 +1103,14 @@ report has any members.
   member past the 14-day mark and requires GW2 Leadership role
   `1317638909735342201`. Username autocomplete and submission resolve against
   the case-insensitive guild-member cache and reject accounts outside the
-  configured guild. Autocomplete only offers Trial members whose `joined`
-  timestamp is at least 14 days old, the same accounts the past-14-day report
-  lists, and submitting any other account is refused without tracking it.
-  Running it for an untracked member starts tracking them (moving them from the
-  past-14-day report to the 7-day warning report); running it again untracks
-  them. Untracking always works for a member who is already tracked, even one
-  no longer past the 14-day mark in the cache. The ephemeral reply
+  configured guild. Autocomplete offers Trial members whose `joined` timestamp
+  is at least 14 days old, the same accounts the past-14-day report lists, plus
+  every guild member who is already tracked so they can be untracked.
+  Submitting any other account is refused without tracking it. Running it for
+  an untracked member starts tracking them (moving them from the past-14-day
+  report to the 7-day warning report); running it again untracks them.
+  Untracking always works for a member who is already tracked, even one no
+  longer past the 14-day mark in the cache. The ephemeral reply
   confirms the new state to the invoker, and an audit message is posted to the
   notification channel:
 

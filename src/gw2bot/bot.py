@@ -837,21 +837,23 @@ class Gw2Bot(discord.Client):
         LOGGER.debug("Guild member search completed; results=%s", len(results))
         return results
 
-    async def search_overdue_trial_members(
+    async def search_track_candidates(
         self,
         query: str,
         *,
         limit: int = 25,
     ) -> list[str]:
+        """Guild members /track can act on: past the 14-day mark, or tracked."""
         if self._guild_members is None:
             raise RuntimeError("Guild member cache was not initialized")
         results = await self._guild_members.search(
             query,
             limit=limit,
             overdue_trials_at=datetime.now(UTC),
+            also_include=self.get_tracked_trial_members(),
         )
         LOGGER.debug(
-            "Overdue Trial member search completed; results=%s",
+            "Track candidate search completed; results=%s",
             len(results),
         )
         return results

@@ -111,12 +111,12 @@ async def track_member_autocomplete(
         LOGGER.debug("Skipped track guild member autocomplete; gw2_api_enabled=false")
         return []
     try:
-        usernames = await bot.search_overdue_trial_members(current, limit=25)
+        usernames = await bot.search_track_candidates(current, limit=25)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         LOGGER.error("Could not refresh the guild member cache for autocomplete")
         return []
     LOGGER.debug(
-        "Returning track overdue Trial member autocomplete choices; choices=%s",
+        "Returning track candidate autocomplete choices; choices=%s",
         len(usernames),
     )
     return [

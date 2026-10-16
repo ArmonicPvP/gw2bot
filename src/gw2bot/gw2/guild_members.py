@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -135,24 +135,30 @@ class GuildMemberCache:
         *,
         limit: int = 25,
         overdue_trials_at: datetime | None = None,
+        also_include: Collection[str] = (),
     ) -> list[str]:
         """Match cached account names without waiting on a refresh.
 
         ``overdue_trials_at`` narrows the matches to the Trial members who are
         past the 14-day mark at that moment, the only accounts ``/track`` may
-        start tracking.
+        start tracking. ``also_include`` names accounts, matched
+        case-insensitively, that pass that narrowing anyway: ``/track`` offers
+        the members it already tracks so they can be untracked. Either way only
+        current guild members are returned.
         """
         started_at = time.perf_counter()
         query_chars = len(query.strip())
         cache_expired = self._clock() >= self._expires_at
         LOGGER.debug(
             "Guild member cache search started; query_chars=%s limit=%s "
-            "cached_members=%s cache_expired=%s overdue_trials_only=%s",
+            "cached_members=%s cache_expired=%s overdue_trials_only=%s "
+            "also_included=%s",
             query_chars,
             limit,
             len(self._members),
             cache_expired,
             overdue_trials_at is not None,
+            len(also_include),
         )
         refresh_started = self.start_background_refresh()
         query_key = query.strip().casefold()
@@ -161,11 +167,16 @@ class GuildMemberCache:
             if overdue_trials_at is None
             else overdue_trials_at.astimezone(UTC) - TRIAL_PERIOD
         )
+        included_keys = {name.strip().casefold() for name in also_include}
         matches = [
             username
             for account_key, username in self._members.items()
             if query_key in username.casefold()
-            and (cutoff is None or self._is_overdue_trial(account_key, cutoff))
+            and (
+                cutoff is None
+                or account_key in included_keys
+                or self._is_overdue_trial(account_key, cutoff)
+            )
         ]
         matches.sort(
             key=lambda username: (
