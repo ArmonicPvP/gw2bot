@@ -1313,10 +1313,13 @@ main {
     if (event.key !== "Tab") { return; }
     var stops = tooltipStops();
     var at = stops.indexOf(document.activeElement);
-    if (event.shiftKey && at === 0) {
+    if (event.shiftKey) {
+      // Backwards is steered at every stop: the box's tabindex of -1 keeps
+      // it out of the browser's own order, which would skip from the first
+      // link past it to the end of the grid.
       event.preventDefault();
-      chip.focus();
-    } else if (!event.shiftKey && at === stops.length - 1) {
+      (at > 0 ? stops[at - 1] : chip).focus();
+    } else if (at === stops.length - 1) {
       var next = focusStopAfter(chip);
       if (next) {
         event.preventDefault();

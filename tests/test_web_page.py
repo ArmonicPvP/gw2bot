@@ -160,11 +160,10 @@ class TestCalendarTooltip:
             CALENDAR_PAGE
         )
         assert "stops[0].focus();" in CALENDAR_PAGE
-        assert "if (event.shiftKey && at === 0) {" in CALENDAR_PAGE
-        assert (
-            "} else if (!event.shiftKey && at === stops.length - 1) {"
-            in CALENDAR_PAGE
-        )
+        # Backwards is steered at every stop, since the box's tabindex of -1
+        # keeps it out of the browser's own order.
+        assert "(at > 0 ? stops[at - 1] : chip).focus();" in CALENDAR_PAGE
+        assert "} else if (at === stops.length - 1) {" in CALENDAR_PAGE
         assert "var next = focusStopAfter(chip);" in CALENDAR_PAGE
         # A long description that runs past the box makes the box itself
         # the first stop, so the arrow keys can scroll it without a link.
