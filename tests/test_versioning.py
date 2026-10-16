@@ -35,6 +35,7 @@ from next_release import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 
 def _pull(number: int, branch: str, *labels: str) -> MergedPull:
@@ -130,9 +131,7 @@ class TestTheRunningVersion:
         # reads, and every published image would call itself unreleased.
         stamp = VERSION_FILE.relative_to(REPO_ROOT).as_posix()
         dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
         assert f"> {stamp};" in dockerfile
         assert "GW2BOT_VERSION=${{ steps.plan.outputs.version }}" in workflow
@@ -210,6 +209,8 @@ class TestBranchNames:
             "feat/profit-page-",
             "feat/events/mentee-slot",
             "fix/raffle rounding",
+            "feat/profit_page",
+            "fix/profit.page",
         ],
     )
     def test_refuses_anything_else(self, branch: str) -> None:
@@ -365,11 +366,30 @@ class TestPlan:
             version=None, previous=Version(1, 1, 0), already_released=True
         )
 
-    def test_the_tagged_commit_itself_is_already_released(
+    def test_the_newest_tag_on_its_own_commit_is_published_again(
         self, repo: GitRepo
     ) -> None:
+        # The workflow tags before it pushes, so this is a run whose image push
+        # failed being re-run. It keeps the number the tag claimed.
+        repo.tag("v1.0.0")
+        head = repo.merge("feat/x")
+        repo.tag("v1.1.0")
+
+        result = plan(repo.path, head, _no_github)
+
+        assert result == Plan(
+            version=Version(1, 1, 0), previous=Version(1, 1, 0), tagged=True
+        )
+
+    def test_an_older_tagged_commit_is_not_published_again(
+        self, repo: GitRepo
+    ) -> None:
+        # Its image would move `latest` and the major and minor tags back
+        # from the newer release.
         head = repo.merge("feat/x")
         repo.tag("v1.0.0")
+        repo.merge("fix/y")
+        repo.tag("v1.0.1")
 
         assert plan(repo.path, head, _no_github).already_released
 
@@ -398,7 +418,14 @@ class TestWorkflowOutputs:
             "tag": "v1.4.2",
             "major": "1",
             "minor": "1.4",
+            "tagged": "false",
         }
+
+    def test_a_tagged_release_says_the_tag_exists(self) -> None:
+        result = Plan(version=Version(1, 4, 2), previous=Version(1, 4, 2), tagged=True)
+
+        assert outputs(result)["tagged"] == "true"
+        assert "already tagged v1.4.2" in summary(result)
 
     def test_no_release_says_only_that(self) -> None:
         assert outputs(Plan(version=None, previous=Version(1, 0, 0))) == {
@@ -417,6 +444,30 @@ class TestWorkflowOutputs:
         assert "Releasing v2.0.0 (previous v1.4.2)" in text
         assert "| #9 | `fix/drop` | major |" in text
         assert "| #10 | `chore/ci` | none |" in text
+
+
+class TestReleaseWorkflow:
+    """What the workflow must keep that only shows up on a real release.
+
+    Neither breaks a test or CI run before it, which is why they are pinned.
+    """
+
+    def test_the_token_can_read_the_merged_pull_requests(self) -> None:
+        # A job's permissions block sets everything it leaves out to none, and
+        # `plan` asks the pull requests endpoint about every merge after the
+        # first release.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        assert "pull-requests: read" in workflow
+
+    def test_the_tag_is_created_before_the_image_is_pushed(self) -> None:
+        # The tag claims the number. Pushed first, an image whose tag then
+        # failed could be overwritten by newer code under the same version.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        assert workflow.index("gh release create") < workflow.index(
+            "docker/build-push-action"
+        )
 
 
 class TestCommandLine:
@@ -476,6 +527,7 @@ class TestCommandLine:
             "tag=v1.0.1",
             "major=1",
             "minor=1.0",
+            "tagged=false",
         ]
         assert "Releasing v1.0.1" in step_summary
         # The run says why an unprefixed branch became a patch, where the
@@ -492,6 +544,7 @@ class TestCommandLine:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         head = repo.merge("feat/x")
+        repo.merge("fix/y")
         repo.tag("v1.0.0")
 
         code, output, _ = self._run_plan(
@@ -513,6 +566,7 @@ class TestCommandLine:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         head = repo.merge("feat/x")
+        repo.merge("fix/y")
         repo.tag("v1.0.0")
 
         code, output, step_summary = self._run_plan(

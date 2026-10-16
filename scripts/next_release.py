@@ -50,12 +50,10 @@ BRANCH_BUMPS: Final[Mapping[str, Bump]] = {
     "fix": Bump.PATCH,
     "chore": Bump.NONE,
 }
-# Lowercase words joined by single hyphens, dots or underscores, the way
-# `feat/profit-page` is written. One level only, so the prefix is always the
-# whole of the first segment.
-BRANCH_NAME: Final = re.compile(
-    r"(?P<prefix>[a-z]+)/[a-z0-9]+(?:[._-][a-z0-9]+)*"
-)
+# Lowercase words joined by single hyphens, the way `feat/profit-page` is
+# written. One level only, so the prefix is always the whole of the first
+# segment.
+BRANCH_NAME: Final = re.compile(r"(?P<prefix>[a-z]+)/[a-z0-9]+(?:-[a-z0-9]+)*")
 BREAKING_LABEL: Final = "breaking"
 # A merged pull request whose branch has none of the prefixes still changed
 # what ships, so it goes out as the smallest release rather than waiting,
@@ -125,6 +123,9 @@ class Plan:
     previous: Version | None
     pulls: tuple[MergedPull, ...] = ()
     already_released: bool = False
+    # `version` is already tagged on this commit: an earlier run claimed the
+    # number and this one finishes publishing it.
+    tagged: bool = False
 
 
 def branch_bump(branch: str) -> Bump | None:
@@ -246,6 +247,10 @@ def _is_ancestor(repo: Path, commit: str, of: str) -> bool:
     return result.returncode == 0
 
 
+def _commit(repo: Path, revision: str) -> str:
+    return _git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}").strip()
+
+
 def plan(
     repo: Path,
     head: str,
@@ -260,6 +265,11 @@ def plan(
     if found is None:
         return Plan(version=decide(None, (), requested), previous=None)
     tag, previous = found
+    # The workflow tags before it pushes the image, so a run whose push failed
+    # leaves the newest tag on its own commit. Re-running it publishes that
+    # version again rather than numbering the same code twice.
+    if _commit(repo, head) == _commit(repo, tag):
+        return Plan(version=previous, previous=previous, tagged=True)
     # A run can start after a later one has already released past it: the CI
     # for an earlier push finishing last, or a re-run of an old workflow. Its
     # commit is then inside a release already, and numbering it again would
@@ -286,6 +296,11 @@ def summary(result: Plan) -> str:
     previous = result.previous.tag if result.previous else "none"
     if result.already_released:
         heading = f"Nothing to release: this commit is already in {previous}."
+    elif result.tagged:
+        heading = (
+            f"This commit is already tagged {previous}: publishing its image "
+            "if Docker Hub does not have it yet."
+        )
     elif result.version is None and result.pulls:
         heading = f"Nothing to release since {previous}: every merge was a chore."
     elif result.version is None:
@@ -316,6 +331,7 @@ def outputs(result: Plan) -> dict[str, str]:
         # The image's moving tags: the newest of this major, and of this minor.
         "major": f"{version.major}",
         "minor": f"{version.major}.{version.minor}",
+        "tagged": "true" if result.tagged else "false",
     }
 
 
