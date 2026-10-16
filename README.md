@@ -2599,18 +2599,20 @@ After `CI` passes for a push to `main`, the `Release` workflow:
 1. Finds the newest `vX.Y.Z` tag and every pull request merged since it.
 2. Takes the largest change any of them asks for. When they are all chores, it
    stops there and publishes nothing.
-3. Creates the tag and the GitHub release, with notes generated from the pull
+3. Builds the image and pushes it under the commit SHA only, which claims no
+   version.
+4. Creates the tag and the GitHub release, with notes generated from the pull
    requests. The tag claims the number, so no later run can give that version
    to other code.
-4. Builds and pushes the image with the tags above, unless that version is
-   already on Docker Hub: a published version is never rebuilt.
+5. Points the version, minor, major and `latest` tags at the image it pushed.
+   A version's image is never rebuilt.
 
 The first run, before any tag exists, releases `1.0.0`. Because each run
 covers everything since the newest tag, a run that was cancelled, or failed
-before tagging, is caught up by the next one. Re-running a run that failed
-after tagging publishes the image for the version it already tagged. A pull
-request merged from a branch without one of the prefixes is released as a
-patch, with a warning on the run.
+before tagging, is caught up by the next one; it released nothing. Re-running
+a run that failed after tagging finishes pointing the tags at the image it
+already pushed. A pull request merged from a branch without one of the
+prefixes is released as a patch, with a warning on the run.
 
 The version is never committed: the tag is the record. Nothing is pushed to
 `main`, so the branch ruleset needs no bypass for the workflow.

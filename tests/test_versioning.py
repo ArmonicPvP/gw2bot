@@ -369,8 +369,8 @@ class TestPlan:
     def test_the_newest_tag_on_its_own_commit_is_published_again(
         self, repo: GitRepo
     ) -> None:
-        # The workflow tags before it pushes, so this is a run whose image push
-        # failed being re-run. It keeps the number the tag claimed.
+        # A run that failed between creating the tag and pointing the image
+        # tags at it, being re-run. It keeps the number the tag claimed.
         repo.tag("v1.0.0")
         head = repo.merge("feat/x")
         repo.tag("v1.1.0")
@@ -460,14 +460,21 @@ class TestReleaseWorkflow:
 
         assert "pull-requests: read" in workflow
 
-    def test_the_tag_is_created_before_the_image_is_pushed(self) -> None:
-        # The tag claims the number. Pushed first, an image whose tag then
-        # failed could be overwritten by newer code under the same version.
+    def test_a_version_is_claimed_only_between_push_and_publish(self) -> None:
+        # Pushed under the commit SHA first, a failed login or build claims no
+        # number. Tagged next, no later run can give the number to other code.
+        # Pointed at the pushed image last, a re-run repeats it harmlessly.
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        build = workflow.index("docker/build-push-action")
+        build_tags = workflow[build : workflow.index("labels:", build)]
 
+        assert build < workflow.index("gh release create")
         assert workflow.index("gh release create") < workflow.index(
-            "docker/build-push-action"
+            "imagetools create"
         )
+        # The build itself never names a version, only the commit.
+        assert "outputs.version" not in build_tags.split("tags:")[1]
+        assert "latest" not in build_tags
 
 
 class TestCommandLine:

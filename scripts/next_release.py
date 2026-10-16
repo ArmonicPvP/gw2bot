@@ -265,9 +265,10 @@ def plan(
     if found is None:
         return Plan(version=decide(None, (), requested), previous=None)
     tag, previous = found
-    # The workflow tags before it pushes the image, so a run whose push failed
-    # leaves the newest tag on its own commit. Re-running it publishes that
-    # version again rather than numbering the same code twice.
+    # The workflow creates the tag before it points the version's image tags
+    # at the commit's image, so a run that failed in between leaves the newest
+    # tag on its own commit. Re-running it finishes that version rather than
+    # numbering the same code twice.
     if _commit(repo, head) == _commit(repo, tag):
         return Plan(version=previous, previous=previous, tagged=True)
     # A run can start after a later one has already released past it: the CI
@@ -298,8 +299,8 @@ def summary(result: Plan) -> str:
         heading = f"Nothing to release: this commit is already in {previous}."
     elif result.tagged:
         heading = (
-            f"This commit is already tagged {previous}: publishing its image "
-            "if Docker Hub does not have it yet."
+            f"This commit is already tagged {previous}: pointing the image "
+            "tags at its image again."
         )
     elif result.version is None and result.pulls:
         heading = f"Nothing to release since {previous}: every merge was a chore."
