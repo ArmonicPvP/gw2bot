@@ -139,6 +139,27 @@ class TestCommand:
 
     @patch("gw2bot.main.Gw2Bot")
     @patch("gw2bot.main.configure_logging")
+    def test_logs_the_running_version_at_startup(
+        self,
+        configure: MagicMock,
+        bot_class: MagicMock,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Without it nothing says which release a log came from, and an
+        # operator on the `latest` image tag has no other way to tell.
+        with (
+            patch.dict("os.environ", self._environment(tmp_path), clear=True),
+            patch("gw2bot.main.__version__", "1.4.2"),
+            caplog.at_level(logging.INFO, logger="gw2bot.main"),
+        ):
+            run_main()
+        bot_class.call_args.kwargs["settings_store"].close()
+
+        assert "Starting gw2bot 1.4.2" in caplog.messages
+
+    @patch("gw2bot.main.Gw2Bot")
+    @patch("gw2bot.main.configure_logging")
     def test_imports_the_legacy_environment_once(
         self,
         configure: MagicMock,

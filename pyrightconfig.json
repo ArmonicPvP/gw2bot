@@ -1,10 +1,12 @@
 {
   "include": [
     "src",
+    "scripts",
     "tests"
   ],
   "extraPaths": [
     "src",
+    "scripts",
     "tests"
   ],
   "pythonVersion": "3.13",
