@@ -49,7 +49,9 @@ document, so Tab from a pinned event is steered into them - the box itself
 first when a long description runs past it, so the arrow keys can scroll it,
 then each link - and stepping past either end lands beside the event again;
 without that, a keyboard reader would reach them only after every later
-event. The profit page's item names are links built
+event. Pinned, they are a `dialog` named for the event rather than a `tooltip`,
+which assistive tech treats as inert text, and a click inside them is not the
+click elsewhere that closes them. The profit page's item names are links built
 the same way: the anchor is a node, its text is still set with `textContent`,
 and the only server value that reaches its `href` is the item's id. A change
 that puts server data into page markup breaks that property and needs a much

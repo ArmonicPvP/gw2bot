@@ -712,7 +712,7 @@ main {
     chip.setAttribute("data-i", String(index));
     chip.setAttribute("tabindex", "0");
     chip.setAttribute("role", "button");
-    chip.setAttribute("aria-haspopup", "true");
+    chip.setAttribute("aria-haspopup", "dialog");
     chip.setAttribute("aria-expanded", "false");
     if (entry.viewer_signup) {
       chip.classList.add("mine");
@@ -1184,7 +1184,16 @@ main {
     tooltipContent(entry);
     // Hovered details let the pointer through to the chips beneath them;
     // pinned ones take it, so a link in the description can be clicked.
-    tooltip.classList.toggle("pinned", chip === pinnedChip);
+    // Pinned, they also hold focus and links, so they are a dialog named for
+    // the event rather than a tooltip, which assistive tech treats as inert.
+    var pinned = chip === pinnedChip;
+    tooltip.classList.toggle("pinned", pinned);
+    tooltip.setAttribute("role", pinned ? "dialog" : "tooltip");
+    if (pinned) {
+      tooltip.setAttribute("aria-label", entry.title);
+    } else {
+      tooltip.removeAttribute("aria-label");
+    }
     tooltip.style.display = "block";
     // The same box shows every event, so a long one scrolled down would
     // otherwise open the next one partway through.
@@ -1314,6 +1323,12 @@ main {
         next.focus();
       }
     }
+  });
+  // A click inside the pinned details, on a link or the box it scrolls, is
+  // not the click elsewhere that closes them. A link opened with Enter would
+  // otherwise leave focus on a hidden element.
+  tooltip.addEventListener("click", function (event) {
+    event.stopPropagation();
   });
   document.addEventListener("click", function () {
     if (pinnedChip) { unpinTooltip(); }

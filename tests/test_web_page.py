@@ -190,11 +190,29 @@ class TestCalendarTooltip:
         assert tooltip is not None
         assert "pointer-events: none;" in tooltip.group(1)
         assert "#tooltip.pinned { pointer-events: auto; }" in CALENDAR_PAGE
+        assert "var pinned = chip === pinnedChip;" in CALENDAR_PAGE
+        assert 'tooltip.classList.toggle("pinned", pinned);' in CALENDAR_PAGE
+        assert 'tooltip.classList.remove("pinned");' in CALENDAR_PAGE
+
+    def test_pinned_details_are_a_dialog_named_for_the_event(self) -> None:
+        # Pinned details hold focus and links, which a tooltip must not.
         assert (
-            'tooltip.classList.toggle("pinned", chip === pinnedChip);'
+            'tooltip.setAttribute("role", pinned ? "dialog" : "tooltip");'
             in CALENDAR_PAGE
         )
-        assert 'tooltip.classList.remove("pinned");' in CALENDAR_PAGE
+        assert 'tooltip.setAttribute("aria-label", entry.title);' in (
+            CALENDAR_PAGE
+        )
+        assert 'tooltip.removeAttribute("aria-label");' in CALENDAR_PAGE
+        assert 'chip.setAttribute("aria-haspopup", "dialog");' in CALENDAR_PAGE
+
+    def test_a_click_inside_pinned_details_leaves_them_open(self) -> None:
+        # Enter on a link clicks it, and the click must not reach the
+        # document's close-on-click and hide the focused link.
+        assert (
+            'tooltip.addEventListener("click", function (event) {\n'
+            "    event.stopPropagation();" in CALENDAR_PAGE
+        )
 
     def test_lists_the_seat_kinds_the_server_sends(self) -> None:
         # Which seats an event has is the category's to say, so the tooltip
