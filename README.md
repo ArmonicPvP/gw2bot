@@ -241,7 +241,7 @@ can win more than once. Tiers are defined by `RAFFLE_REWARD_TIERS` and
 | --- | --- | --- |
 | `/raffle draw` | `raffle_draw` | Draws the winners, archives the run, and resets everyone's tickets. |
 | `/raffle audit run_id:<run>` | everyone | Shows every entrant's ticket range and each winning number for a past draw. |
-| `/raffle addticket username:<account> [amount:<number>]` | `raffle_addticket` | Gives one free ticket. With `amount` (needs `raffle_officer`), records a gold purchase instead. |
+| `/raffle addticket username:<account> [amount:<number>]` | `raffle_addticket`, or `raffle_officer` with `amount` | Gives one free ticket. With `amount`, records a gold purchase instead. |
 | `/raffle addtickets [username1:<account> ... username10:<account>]` | `raffle_addticket` | Gives one free ticket to each of up to ten members. |
 | `/raffle bulkaddtickets` | `raffle_addticket` | Gives a free ticket to each member in pasted squad attendance lines. |
 | `/raffle removetickets username:<account> [amount:<number>]` | `raffle_draw` | Removes purchased tickets (default one). |
@@ -313,7 +313,8 @@ a signup thread, or into an existing forum post. The bot only ever removes its
 own messages from a forum post, never the post itself.
 
 **Role pings.** An event can ping up to three roles whose names start with
-`[GW2]`. They are pinged once when each run is posted. For events in a forum
+`[GW2]`. They are pinged when each run is posted, and again if it is moved to
+another channel, but never when the post is only edited. For events in a forum
 post, set `/settings channels event_ping` to ping from a text channel instead.
 
 **Reminders.** Seated members are pinged in the signup thread or forum post an
@@ -327,8 +328,9 @@ Members who leave the Discord server are removed from rosters automatically.
 ### Guild History
 
 The bot records the guild's member count and guild bank balance over time,
-along with every membership change and gold movement. These power the roster
-and gold dashboards.
+along with every membership change and gold movement it sees. These power the
+roster and gold dashboards. The guild log only keeps about the last 100 events
+of each type, so changes that drop out of it while the bot is down are lost.
 
 To backfill history from before the bot started recording, run each once
 (`raffle_officer` role, safe to repeat):
