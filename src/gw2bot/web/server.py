@@ -2282,7 +2282,11 @@ class WebServer:
                 for entry in page:
                     user = entry["user"]
                     roles = {int(role) for role in entry["roles"]}
-                    if role_id not in roles:
+                    # @everyone shares the server's id and is left out of
+                    # every member's roles here, though discord.py adds it
+                    # back, so /event new lets everyone through when it is
+                    # the role set.
+                    if role_id != guild_id and role_id not in roles:
                         continue
                     # The order Discord itself shows a member by: their
                     # server nickname, their display name, their username.

@@ -4196,6 +4196,39 @@ class TestEventStatsApi:
             call.args for call in bot.http.get_members.await_args_list
         ] == [(GUILD_ID, size, None), (GUILD_ID, size, 5000)]
 
+    async def test_an_everyone_role_makes_every_member_a_commander(
+        self,
+        bot: FakeBot,
+        guild: FakeGuild,
+    ) -> None:
+        # @everyone's id is the server's own, and Discord leaves it out of
+        # each member's roles in the list.
+        bot.http.get_members.return_value = [
+            member_entry(42, "kitty"),
+            member_entry(43, "pup"),
+        ]
+        server = WebServer(
+            cast(Gw2Bot, bot),
+            replace(make_config(), event_create_role_id=GUILD_ID),
+            cast(aiohttp.ClientSession, None),
+        )
+        test_client = TestClient(await quiet_test_server(server.app))
+        try:
+            response = await test_client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=self._officer_headers(guild),
+            )
+            payload = await response.json()
+        finally:
+            await test_client.close()
+
+        assert payload["commanders"] == [
+            {"commander": "kitty", "runs": 0},
+            {"commander": "pup", "runs": 0},
+        ]
+        assert payload["commanders_complete"] is True
+
     async def test_a_refused_member_list_lists_only_who_led_a_run(
         self,
         bot: FakeBot,
