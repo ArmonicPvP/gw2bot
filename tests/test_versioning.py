@@ -449,7 +449,7 @@ class TestWorkflowOutputs:
 class TestReleaseWorkflow:
     """What the workflow must keep that only shows up on a real release.
 
-    Neither breaks a test or CI run before it, which is why they are pinned.
+    None breaks a test or CI run before it, which is why they are pinned.
     """
 
     def test_the_token_can_read_the_merged_pull_requests(self) -> None:
@@ -459,6 +459,14 @@ class TestReleaseWorkflow:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
         assert "pull-requests: read" in workflow
+
+    def test_the_image_is_pushed_with_the_runs_own_token(self) -> None:
+        # GitHub Packages takes the workflow's token, which the permissions
+        # block has to grant, so a release needs no repository secret.
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        assert "packages: write" in workflow
+        assert "secrets." not in workflow
 
     def test_a_version_is_claimed_only_between_push_and_publish(self) -> None:
         # Pushed under the commit SHA first, a failed login or build claims no
