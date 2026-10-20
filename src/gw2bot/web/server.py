@@ -25,7 +25,11 @@ from gw2bot.core.dashboard_ranges import (
     StoredRange,
     is_servable,
 )
-from gw2bot.core.discord_utils import resolve_display_name, user_has_role
+from gw2bot.core.discord_utils import (
+    discord_failure_signature,
+    resolve_display_name,
+    user_has_role,
+)
 from gw2bot.events.stats import (
     EVENT_STATS_RANGES,
     EventRunGroup,
@@ -131,6 +135,15 @@ MAX_TRANSACTION_ID_LENGTH = 128
 # than a page is reloaded, so the list is cached rather than rebuilt per
 # request.
 PENDING_INVITE_CACHE_TTL_SECONDS = 300
+
+# How long one read of who holds the role /event new needs is served to the
+# events page. Reading it walks the server's whole member list, a request per
+# thousand members, and commanders are appointed far less often than the page
+# is reloaded.
+COMMANDER_ROSTER_CACHE_TTL_SECONDS = 300
+
+# The most members Discord's member list answers with in one request.
+MEMBER_LIST_PAGE_SIZE = 1000
 
 # Where the feast dashboard's replay of the shelf starts: the epoch, so the
 # read covers every count ever recorded and the first of them opens the queue
@@ -250,6 +263,10 @@ class WebServer:
         # as well as the user because three pages are gated by three settings,
         # and an operator may point them at different roles.
         self._role_members: dict[tuple[int, int], tuple[bool, float]] = {}
+        # Who held the event-creation role at the last read, id to display
+        # name (None when Discord would not list the members), and the
+        # monotonic time that answer stops being served. None until read.
+        self._commanders: tuple[dict[int, str] | None, float] | None = None
         # The last built pending-invite payload and the monotonic time it
         # stops being served, or None while none has been built.
         self._pending_invites: tuple[list[dict[str, object]], float] | None = (
@@ -2153,13 +2170,15 @@ class WebServer:
             window.since,
             window.until,
         )
-        stats = build_event_stats(runs)
+        commanders = await self._commander_roster()
+        stats = build_event_stats(runs, commanders or ())
         completions = await self._mentee_completions(
             datetime.now(UTC).timestamp()
         )
         names = await self._display_names(
             {
                 *stats.top_commanders,
+                *(row.discord_user_id for row in stats.commanders),
                 *(point.leader_discord_id for point in stats.points),
                 *(row.discord_user_id for row in stats.mentees),
                 *(
@@ -2171,16 +2190,21 @@ class WebServer:
                 ),
             }
         )
-        payload = self._serialize_event_stats(stats, names, completions)
+        payload = self._serialize_event_stats(
+            stats, names, completions, commanders is not None
+        )
         LOGGER.debug(
             "Served event statistics; range=%s runs=%s minutes=%s "
-            "participants=%s commanders_tied=%s mentees=%s "
-            "without_mentee=%s without_requirements=%s all_time=%s",
+            "participants=%s commanders_tied=%s commanders=%s "
+            "commander_roster=%s mentees=%s without_mentee=%s "
+            "without_requirements=%s all_time=%s",
             window.key,
             stats.runs,
             stats.total_minutes,
             stats.participants,
             len(stats.top_commanders),
+            len(stats.commanders),
+            commanders is not None,
             len(stats.mentees),
             len(stats.without_mentee),
             len(stats.without_requirements),
@@ -2198,6 +2222,111 @@ class WebServer:
                 **payload,
             }
         )
+
+    async def _commander_roster(self) -> dict[int, str] | None:
+        """Everyone holding the role /event new needs, by display name.
+
+        None when Discord would not list the server's members, which the page
+        reads as a table of only the commanders who led a run. A failure is
+        answered with the last list read, if there is one, and re-armed for a
+        short backoff, so neither an outage nor a missing intent costs a
+        request on every page load.
+        """
+        cached = self._commanders
+        if cached is not None and time.monotonic() < cached[1]:
+            return cached[0]
+        roster = await self._list_role_holders(
+            self._config.event_create_role_id
+        )
+        if roster is None:
+            stale = None if cached is None else cached[0]
+            self._commanders = (
+                stale,
+                time.monotonic() + MEMBERSHIP_FAILURE_BACKOFF_SECONDS,
+            )
+            return stale
+        self._commanders = (
+            roster,
+            time.monotonic() + COMMANDER_ROSTER_CACHE_TTL_SECONDS,
+        )
+        # The member list carries every holder's name, so the tables are
+        # named from it rather than with a member lookup apiece.
+        named_at = time.monotonic()
+        for user_id, name in roster.items():
+            self._names[user_id] = (name, named_at)
+        return roster
+
+    async def _list_role_holders(self, role_id: int) -> dict[int, str] | None:
+        """Every member of the server holding ``role_id``, or None.
+
+        The bot connects without the members intent, so discord.py will not
+        page through the member list for it: ``Guild.fetch_members`` refuses
+        outright. The REST endpoint behind it only needs the Server Members
+        Intent switched on for the application in the Developer Portal, so it
+        is called directly. Asking for the intent when connecting instead
+        would stop every deployment without that switch from connecting at
+        all.
+        """
+        guild_id = self._config.discord_command_guild_id
+        holders: dict[int, str] = {}
+        pages = 0
+        scanned = 0
+        after: int | None = None
+        try:
+            while True:
+                page = await self._bot.http.get_members(
+                    guild_id, MEMBER_LIST_PAGE_SIZE, after
+                )
+                pages += 1
+                scanned += len(page)
+                for entry in page:
+                    user = entry["user"]
+                    roles = {int(role) for role in entry["roles"]}
+                    # @everyone shares the server's id and is left out of
+                    # every member's roles here, though discord.py adds it
+                    # back, so /event new lets everyone through when it is
+                    # the role set.
+                    if role_id != guild_id and role_id not in roles:
+                        continue
+                    # The order Discord itself shows a member by: their
+                    # server nickname, their display name, their username.
+                    holders[int(user["id"])] = (
+                        entry.get("nick")
+                        or user.get("global_name")
+                        or user["username"]
+                    )
+                if len(page) < MEMBER_LIST_PAGE_SIZE:
+                    break
+                # The next page starts after the highest id this one held.
+                after = max(int(entry["user"]["id"]) for entry in page)
+        except discord.Forbidden as exc:
+            LOGGER.warning(
+                "Could not list event commanders; Discord refused the member "
+                "list, which needs the Server Members Intent switched on in "
+                "the Discord Developer Portal; failure=%s",
+                discord_failure_signature(exc),
+            )
+            return None
+        except (
+            discord.HTTPException,
+            aiohttp.ClientError,
+            TimeoutError,
+        ) as exc:
+            LOGGER.warning(
+                "Could not list event commanders; pages=%s error_type=%s "
+                "status=%s",
+                pages,
+                type(exc).__name__,
+                getattr(exc, "status", "unknown"),
+            )
+            return None
+        LOGGER.debug(
+            "Listed event commanders; pages=%s members=%s commanders=%s",
+            pages,
+            scanned,
+            len(holders),
+        )
+        return holders
 
     async def _mentee_completions(self, until: float) -> dict[int, int] | None:
         """Every member's mentee runs over the whole history, or None.
@@ -2223,6 +2352,7 @@ class WebServer:
         stats: EventStats,
         names: Mapping[int, str],
         completions: Mapping[int, int] | None,
+        commanders_complete: bool,
     ) -> dict[str, object]:
         def name(user_id: int) -> str:
             return names.get(user_id, UNKNOWN_NAME)
@@ -2238,6 +2368,10 @@ class WebServer:
 
         # Resolved names order the ties, so a table with two members on the
         # same counts reads alphabetically rather than by Discord id.
+        commanders = sorted(
+            stats.commanders,
+            key=lambda row: (-row.runs, name(row.discord_user_id).casefold()),
+        )
         mentees = sorted(
             stats.mentees,
             key=lambda row: (
@@ -2255,6 +2389,13 @@ class WebServer:
                 key=str.casefold,
             ),
             "top_commander_runs": stats.top_commander_runs,
+            "commanders": [
+                {"commander": name(row.discord_user_id), "runs": row.runs}
+                for row in commanders
+            ],
+            # False when Discord would not list the role's holders, so the
+            # table holds only the commanders who led a run and says so.
+            "commanders_complete": commanders_complete,
             # Oldest first, one per run, each carrying the running count the
             # line reaches when that run ended.
             "points": [

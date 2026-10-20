@@ -5,13 +5,14 @@ or asks Discord for a name. Every figure is about that window alone - the
 cumulative line starts from nothing at its opening edge, and the totals and
 the top commander count only the runs that ended inside it. The one number
 that reaches past the window, a mentee's runs over the whole history, is read
-by the store and handed to the server separately.
+by the store and handed to the server separately, and so is who holds the
+commander role, which only Discord knows.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from gw2bot.events.formatting import NO_REQUIREMENTS_TEXT
@@ -52,6 +53,14 @@ class MenteeActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class CommanderRuns:
+    """One commander and how many runs they led that ended in the window."""
+
+    discord_user_id: int
+    runs: int
+
+
+@dataclass(frozen=True, slots=True)
 class EventRunGroup:
     """The runs of one event that match a table's question.
 
@@ -82,6 +91,9 @@ class EventStats:
     # with a count of zero, when the window holds no runs.
     top_commanders: tuple[int, ...]
     top_commander_runs: int
+    # Every commander handed in, with the runs they led, and everyone else who
+    # led a run in the window, so the counts add up to ``runs``.
+    commanders: tuple[CommanderRuns, ...]
     points: tuple[RunPoint, ...]
     mentees: tuple[MenteeActivity, ...]
     without_mentee: tuple[EventRunGroup, ...]
@@ -121,11 +133,18 @@ def _group_runs(runs: Sequence[EventRun]) -> tuple[EventRunGroup, ...]:
     )
 
 
-def build_event_stats(runs: Sequence[EventRun]) -> EventStats:
+def build_event_stats(
+    runs: Sequence[EventRun],
+    commanders: Iterable[int] = (),
+) -> EventStats:
     """Every figure the events statistics page shows for one window's runs.
 
     ``runs`` is what the store read for the window, so every run in it ended
-    inside it; nothing here re-checks the edges.
+    inside it; nothing here re-checks the edges. ``commanders`` is who holds
+    the role /event new is gated behind, which the server asks Discord for:
+    each of them is counted, at zero when they led nothing in the window. A
+    member who led a run but has since lost the role is counted too, because
+    the run still happened.
     """
     ordered = sorted(runs, key=lambda run: (run.ended_at, run.run_id))
     points = tuple(
@@ -145,6 +164,17 @@ def build_event_stats(runs: Sequence[EventRun]) -> EventStats:
             leader_id
             for leader_id, count in leaders.items()
             if count == top_count
+        )
+    )
+    commander_runs = Counter({user_id: 0 for user_id in commanders})
+    commander_runs.update(leaders)
+    commander_rows = tuple(
+        sorted(
+            (
+                CommanderRuns(discord_user_id=user_id, runs=count)
+                for user_id, count in commander_runs.items()
+            ),
+            key=lambda row: (-row.runs, row.discord_user_id),
         )
     )
 
@@ -180,6 +210,7 @@ def build_event_stats(runs: Sequence[EventRun]) -> EventStats:
         participants=len(participants),
         top_commanders=top_commanders,
         top_commander_runs=top_count,
+        commanders=commander_rows,
         points=points,
         mentees=mentees,
         # Whether the run offered the slot, not whether anybody took it.

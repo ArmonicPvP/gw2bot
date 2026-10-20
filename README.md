@@ -172,7 +172,7 @@ that nothing answers to is how a guild silently loses a feature.
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
 | `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, `/pending`, and `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
-| `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. |
+| `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. Its holders are the commanders the event statistics page counts runs for. |
 | `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
 | `/settings roles sunborne` | `1317140660188352584` | Marks a Discord member as a full member in the same reports. |
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
@@ -342,6 +342,12 @@ guild-log poll after permissions are corrected.
 
 Enable the privileged `Message Content Intent` for the bot in the Discord
 Developer Portal so it can respond to the notification-channel `diag` message.
+Enable the privileged `Server Members Intent` there too so the
+[event statistics page](#guild-event-statistics-page) can list the commanders
+who led no runs. It is optional: the bot never asks for it when connecting, so
+leaving it off cannot stop the bot, and the page then lists only the
+commanders who led a run.
+
 The bot also needs `View Channel` and `Read Message History` permissions for
 the Trial application forum — `/settings channels trial_forum`, by default
 `1317206104727621693` — so it can link Trial applications to Discord members.
@@ -2434,6 +2440,16 @@ chosen window alone:
   up to it. Waitlisted members who never got a seat are not counted.
 - **Top commander** — whoever led the most runs, with how many. Commanders tied
   for the most are all named.
+- **Event runs by commander** — a **Commander** and **Count** table of
+  everyone holding `/settings roles event_create`, the role `/event new` needs,
+  with how many runs they led in the window. A commander who led none reads 0.
+  Someone who led a run in the window and has since lost the role is still
+  listed, so the counts add up to **Event runs**. Who holds the role is read
+  from Discord's member list, which needs the `Server Members Intent` enabled
+  in the Discord Developer Portal; without it, or while Discord cannot be
+  reached, the table lists only the commanders who led a run and says so
+  beneath it. The list is re-read at most every five minutes, so a newly
+  appointed commander can take that long to appear.
 - **Cumulative event runs** — a line that starts at zero at the window's
   opening edge and steps up by one as each run ends. Runs that ended in the
   same minute share a dot; hovering it, or tapping it on a phone, names the

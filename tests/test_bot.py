@@ -23,7 +23,7 @@ from gw2bot.help import HelpPageButton
 from gw2bot.core.logging_setup import SecretRegistry
 from gw2bot.main import main as run_main
 from gw2bot.raffle import TrialForumPost
-from gw2bot.settings.definitions import definition_for
+from gw2bot.settings.definitions import ROLES_GROUP, definition_for
 from gw2bot.web.server import WebServer
 from gw2bot.events.models import EventCategory, RepeatFrequency
 from gw2bot.events.views import (
@@ -1327,6 +1327,31 @@ class TestSettingsHotApply:
         assert untouched is not None
         assert not untouched.needs_refresh
         assert not any("footer" in entry for entry in restarted)
+
+        await self._close(bot)
+
+    @patch("gw2bot.bot.GuildMemberCache")
+    async def test_the_event_create_role_rebuilds_the_web_server(
+        self,
+        member_cache: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        # The events page lists the holders of the role /event new needs, read
+        # from the Config the server was built with and cached there.
+        member_cache.return_value.close = AsyncMock()
+        bot = await self._started(self._config(tmp_path))
+        reconcile = AsyncMock(return_value=None)
+
+        bot.settings_store.set_raw(
+            definition_for("event_create", ROLES_GROUP), "4321"
+        )
+        with (
+            self._quiet_bot_patches(),
+            patch.object(Gw2Bot, "_reconcile_web_server", reconcile),
+        ):
+            await bot.apply_settings_change({"event_create_role_id"})
+
+        reconcile.assert_awaited_once_with(True)
 
         await self._close(bot)
 

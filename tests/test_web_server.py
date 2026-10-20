@@ -20,6 +20,7 @@ from factories import (
     feast_deposit,
     forbidden_error,
     not_found_error,
+    unknown_guild_error,
 )
 from gw2bot.bot import Gw2Bot
 from gw2bot.config import Config
@@ -36,6 +37,7 @@ from gw2bot.raffle import RaffleStore
 from gw2bot.web import auth
 from gw2bot.web import server as server_module
 from gw2bot.config import DEFAULT_RAFFLE_DRAW_ROLE_ID as FOOD_PAGE_ROLE_ID
+from gw2bot.config import DEFAULT_EVENT_CREATE_ROLE_ID as EVENT_CREATE_ROLE_ID
 from gw2bot.gold import DEPOSIT, WITHDRAW, GoldLedgerEntry
 from gw2bot.profit import (
     DayProfit,
@@ -198,6 +200,26 @@ def member(display_name: str = "Kitty", *, officer: bool = False) -> object:
     return SimpleNamespace(display_name=display_name, roles=roles)
 
 
+def member_entry(
+    user_id: int,
+    username: str,
+    *,
+    commander: bool = False,
+    nick: str | None = None,
+    global_name: str | None = None,
+) -> dict[str, object]:
+    """One member as Discord's member list answers with it."""
+    return {
+        "user": {
+            "id": str(user_id),
+            "username": username,
+            "global_name": global_name,
+        },
+        "nick": nick,
+        "roles": [str(EVENT_CREATE_ROLE_ID)] if commander else [],
+    }
+
+
 def make_config() -> Config:
     return config_from_env(
         {
@@ -268,6 +290,9 @@ class FakeBot:
         )
         self._guild = guild
         self.fetch_user = AsyncMock(side_effect=not_found_error())
+        # The server's member list, which the events page reads over REST for
+        # the commanders. Nobody holds the role unless a test says so.
+        self.http = SimpleNamespace(get_members=AsyncMock(return_value=[]))
         # The roster page's pending-invite section needs the GW2 API, and the
         # bot answers for it the way every other optional feature does.
         self.gw2_api_enabled = True
@@ -3989,6 +4014,8 @@ class TestEventStatsApi:
             payload["top_commanders"],
             payload["top_commander_runs"],
         ) == (0, 0, 0, [], 0)
+        assert payload["commanders"] == []
+        assert payload["commanders_complete"] is True
         assert payload["points"] == []
         assert payload["mentees"] == []
         assert payload["without_mentee"] == []
@@ -4098,6 +4125,235 @@ class TestEventStatsApi:
         assert payload["top_commanders"] == ["Amy", "Zed"]
         assert payload["top_commander_runs"] == 1
 
+    async def test_every_commander_is_listed_with_their_runs(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        bot.http.get_members.return_value = [
+            member_entry(42, "kitty", commander=True, nick="Commander Kitty"),
+            member_entry(
+                44, "idle", commander=True, global_name="Idle Commander"
+            ),
+            member_entry(45, "bystander", global_name="Not A Commander"),
+            member_entry(46, "plain_username", commander=True),
+        ]
+        # 43 led a run in the window and has lost the role since.
+        guild.members[43] = member("Former Commander")
+        self._run(store, timedelta(hours=3), leader=42)
+        self._run(store, timedelta(hours=2), leader=43)
+        self._run(store, timedelta(hours=1), leader=42)
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        # Most runs first, then by name.
+        assert payload["commanders"] == [
+            {"commander": "Commander Kitty", "runs": 2},
+            {"commander": "Former Commander", "runs": 1},
+            {"commander": "Idle Commander", "runs": 0},
+            {"commander": "plain_username", "runs": 0},
+        ]
+        assert payload["commanders_complete"] is True
+        bot.http.get_members.assert_awaited_once_with(
+            GUILD_ID, server_module.MEMBER_LIST_PAGE_SIZE, None
+        )
+        # The list carried the role holders' names, so none was looked up.
+        guild.fetch_member.assert_not_awaited()
+        bot.fetch_user.assert_not_awaited()
+
+    async def test_the_member_list_is_read_a_page_at_a_time(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        size = server_module.MEMBER_LIST_PAGE_SIZE
+        first = [
+            member_entry(1000 + index, f"member{index}")
+            for index in range(size - 1)
+        ]
+        first.append(member_entry(5000, "first", commander=True))
+        bot.http.get_members.side_effect = [
+            first,
+            [member_entry(6000, "second", commander=True)],
+        ]
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        payload = await response.json()
+        assert payload["commanders"] == [
+            {"commander": "first", "runs": 0},
+            {"commander": "second", "runs": 0},
+        ]
+        assert [
+            call.args for call in bot.http.get_members.await_args_list
+        ] == [(GUILD_ID, size, None), (GUILD_ID, size, 5000)]
+
+    async def test_an_everyone_role_makes_every_member_a_commander(
+        self,
+        bot: FakeBot,
+        guild: FakeGuild,
+    ) -> None:
+        # @everyone's id is the server's own, and Discord leaves it out of
+        # each member's roles in the list.
+        bot.http.get_members.return_value = [
+            member_entry(42, "kitty"),
+            member_entry(43, "pup"),
+        ]
+        server = WebServer(
+            cast(Gw2Bot, bot),
+            replace(make_config(), event_create_role_id=GUILD_ID),
+            cast(aiohttp.ClientSession, None),
+        )
+        test_client = TestClient(await quiet_test_server(server.app))
+        try:
+            response = await test_client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=self._officer_headers(guild),
+            )
+            payload = await response.json()
+        finally:
+            await test_client.close()
+
+        assert payload["commanders"] == [
+            {"commander": "kitty", "runs": 0},
+            {"commander": "pup", "runs": 0},
+        ]
+        assert payload["commanders_complete"] is True
+
+    async def test_a_refused_member_list_lists_only_who_led_a_run(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Discord refuses the member list while the Server Members Intent is
+        # off for the application.
+        bot.http.get_members.side_effect = forbidden_error(50001)
+        guild.members[42] = member("Commander Kitty")
+        self._run(store, timedelta(hours=1), leader=42)
+
+        with caplog.at_level(logging.WARNING, logger="gw2bot"):
+            response = await client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=self._officer_headers(guild),
+            )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["runs"] == 1
+        assert payload["commanders"] == [
+            {"commander": "Commander Kitty", "runs": 1}
+        ]
+        assert payload["commanders_complete"] is False
+        assert "Server Members Intent" in caplog.text
+
+    async def test_an_unreachable_member_list_keeps_the_rest_of_the_page(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+        store: EventStore,
+    ) -> None:
+        bot.http.get_members.side_effect = aiohttp.ClientConnectionError()
+        self._run(store, timedelta(hours=1), leader=42)
+
+        response = await client.get(
+            "/api/admin/events",
+            params={"range": "24h"},
+            headers=self._officer_headers(guild),
+        )
+
+        assert response.status == 200
+        payload = await response.json()
+        assert payload["runs"] == 1
+        assert payload["commanders_complete"] is False
+
+    async def test_the_member_list_is_cached_between_loads(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        bot.http.get_members.return_value = [
+            member_entry(42, "kitty", commander=True)
+        ]
+        headers = self._officer_headers(guild)
+
+        for range_key in ("24h", "7d"):
+            response = await client.get(
+                "/api/admin/events",
+                params={"range": range_key},
+                headers=headers,
+            )
+            assert response.status == 200
+
+        assert bot.http.get_members.await_count == 1
+
+    async def test_a_refusal_is_not_asked_again_on_every_load(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        bot.http.get_members.side_effect = forbidden_error(50001)
+        headers = self._officer_headers(guild)
+
+        for _ in range(2):
+            response = await client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=headers,
+            )
+            assert (await response.json())["commanders_complete"] is False
+
+        assert bot.http.get_members.await_count == 1
+
+    async def test_a_failed_read_rides_the_last_list(
+        self,
+        bot: FakeBot,
+        client: TestClient,
+        guild: FakeGuild,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            server_module, "COMMANDER_ROSTER_CACHE_TTL_SECONDS", -1
+        )
+        bot.http.get_members.side_effect = [
+            [member_entry(42, "kitty", commander=True)],
+            unknown_guild_error(),
+        ]
+        headers = self._officer_headers(guild)
+
+        payloads = []
+        for _ in range(2):
+            response = await client.get(
+                "/api/admin/events",
+                params={"range": "24h"},
+                headers=headers,
+            )
+            payloads.append(await response.json())
+
+        assert bot.http.get_members.await_count == 2
+        assert payloads[1]["commanders"] == [{"commander": "kitty", "runs": 0}]
+        assert payloads[1]["commanders_complete"] is True
+
     async def test_an_unreadable_history_leaves_only_all_time_unknown(
         self,
         client: TestClient,
@@ -4142,12 +4398,21 @@ class TestEventStatsApi:
 
     async def test_titles_and_names_never_reach_the_log(
         self,
+        bot: FakeBot,
         client: TestClient,
         guild: FakeGuild,
         store: EventStore,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         guild.members[42] = member("Secret Commander Name")
+        bot.http.get_members.return_value = [
+            member_entry(
+                44,
+                "secret_username",
+                commander=True,
+                nick="Secret Idle Commander",
+            )
+        ]
         with caplog.at_level(logging.DEBUG, logger="gw2bot"):
             self._run(
                 store,
@@ -4165,18 +4430,25 @@ class TestEventStatsApi:
 
         assert response.status == 200
         assert "Recorded a finished event run" in caplog.text
+        assert "Listed event commanders" in caplog.text
         assert "Served event statistics" in caplog.text
         assert "Secret Event Title" not in caplog.text
         assert "Secret requirements text" not in caplog.text
         assert "Secret Commander Name" not in caplog.text
+        assert "Secret Idle Commander" not in caplog.text
+        assert "secret_username" not in caplog.text
 
     async def test_the_response_carries_no_discord_ids(
         self,
+        bot: FakeBot,
         client: TestClient,
         guild: FakeGuild,
         store: EventStore,
     ) -> None:
         # The page names people; it has no use for their account ids.
+        bot.http.get_members.return_value = [
+            member_entry(555666777, "idle", commander=True)
+        ]
         self._run(
             store,
             timedelta(hours=1),
@@ -4195,6 +4467,7 @@ class TestEventStatsApi:
         body = await response.text()
         assert "987654321" not in body
         assert "123456789" not in body
+        assert "555666777" not in body
 
 
 class TestRememberedDashboardWindows:
