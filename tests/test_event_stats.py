@@ -169,43 +169,48 @@ def test_mentees_count_every_ask_and_every_slot_they_held() -> None:
     ] == [(7, 2, 2), (8, 2, 1), (10, 1, 0)]
 
 
-def test_runs_without_a_mentee_are_grouped_by_event() -> None:
+def test_runs_that_offered_no_mentee_slot_are_grouped_by_event() -> None:
     stats = build_event_stats(
         [
-            run(1, HOUR, event_id=1, title="Old Title", mentee_enabled=True),
+            run(1, HOUR, event_id=1, title="Old Title"),
             run(2, 2 * HOUR, event_id=2, title="Raid"),
-            run(
-                3,
-                3 * HOUR,
-                event_id=1,
-                participants=(seated(7, MenteeStatus.MENTEE),),
-            ),
+            run(3, 3 * HOUR, event_id=1, mentee_enabled=True),
             run(4, 4 * HOUR, event_id=1, title="New Title"),
         ]
     )
 
-    # Newest first, each event once, named and set up as its latest run was.
+    # Newest first, each event once, named as its latest such run was.
     assert [
-        (
-            group.event_id,
-            group.title,
-            group.runs,
-            group.last_ended_at,
-            group.mentee_enabled,
-        )
+        (group.event_id, group.title, group.runs, group.last_ended_at)
         for group in stats.without_mentee
     ] == [
-        (1, "New Title", 2, 4 * HOUR, False),
-        (2, "Raid", 1, 2 * HOUR, False),
+        (1, "New Title", 2, 4 * HOUR),
+        (2, "Raid", 1, 2 * HOUR),
     ]
 
 
-def test_a_mentee_still_waiting_does_not_count_as_having_one() -> None:
+def test_an_offered_mentee_slot_counts_whether_or_not_it_was_taken() -> None:
     stats = build_event_stats(
-        [run(1, HOUR, participants=(waiting(7, MenteeStatus.WAITLISTED),))]
+        [
+            run(1, HOUR, event_id=1, mentee_enabled=True),
+            run(
+                2,
+                2 * HOUR,
+                event_id=2,
+                mentee_enabled=True,
+                participants=(waiting(7, MenteeStatus.WAITLISTED),),
+            ),
+            run(
+                3,
+                3 * HOUR,
+                event_id=3,
+                mentee_enabled=True,
+                participants=(seated(8, MenteeStatus.MENTEE),),
+            ),
+        ]
     )
 
-    assert [group.event_id for group in stats.without_mentee] == [1]
+    assert stats.without_mentee == ()
 
 
 def test_runs_whose_requirements_read_as_none_are_grouped() -> None:

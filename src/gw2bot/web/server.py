@@ -2232,7 +2232,6 @@ class WebServer:
                 "title": entry.title,
                 "category": entry.category,
                 "commander": name(entry.leader_discord_id),
-                "mentee_enabled": entry.mentee_enabled,
                 "runs": entry.runs,
                 "last": entry.last_ended_at,
             }

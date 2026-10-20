@@ -2442,9 +2442,9 @@ chosen window alone:
   runs they asked on, how many they finished holding the slot, and how many
   they have finished holding it over the whole history (**All time**), which
   is the one column not limited to the window.
-- **Events without a mentee** — the events whose runs ended with nobody in the
-  mentee slot, one row per event with how many such runs it had and whether
-  the event offers the slot at all.
+- **Events without a mentee** — the events whose runs did not offer a mentee
+  slot, one row per event with how many such runs it had. A run that offered
+  the slot is left out whether or not anybody took it.
 - **Events with no requirements** — the events whose runs had their
   requirements left blank (shown as "None" on the post), or set to "None".
 
