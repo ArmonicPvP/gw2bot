@@ -1,2501 +1,20 @@
 # GW2 Discord Bot
 
-A Python service for one Guild Wars 2 guild's Discord server. It polls Guild
-Storage and the guild log and posts notifications to a server channel, runs the
-guild's ticket raffle off gold deposits, reports overdue Trial members, manages
-guild events with sign-up rosters, tracks each member's Trading Post flip
-profit, and optionally serves a web calendar and dashboards. The API client
-supports the account, token, and guild endpoints documented in
-[docs/gw2-api.md](docs/gw2-api.md).
+A Discord bot for one Guild Wars 2 guild's server. It watches Guild Storage and
+the guild log, posts notifications to a channel, runs the guild's ticket
+raffle, reports overdue Trial members, manages guild events with sign-up
+rosters, and can serve a web calendar and dashboards.
 
-## Configuration
+## Quick Start
 
-Almost everything the bot uses is a **setting**, changed from Discord with
-`/settings` and stored in the bot's database. The environment keeps only what
-has to be known before the bot can read that database or decide how the
-container starts.
-
-For local development, copy `.env.example` to `.env`.
-
-### Required Environment Variables
-
-| Variable                   | Description                                                               |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `DISCORD_TOKEN`            | Token for the Discord bot application.                                    |
-| `DISCORD_COMMAND_GUILD_ID` | Positive integer ID of the Discord server where commands are registered. |
-
-These two are the only variables the bot refuses to start without.
-
-### Optional Environment Variables
-
-These stay in the environment because each one decides how the container
-itself runs — where it writes, whether it opens a listening socket, and where
-it is allowed to send the API key. Everything else is a `/settings` subcommand.
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `DEBUG` | `false` | Set to `true` to enable detailed `gw2bot` application diagnostics in the console and the [log file](#log-files). |
-| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path. Settings, encrypted member profit keys, and Trading Post caches live here too, and the [log files](#log-files) go in a `log` folder beside it. The Docker image overrides this default with `/app/data/gw2bot.db`. |
-| `WEB_ENABLED` | `false` | Set to `true` to serve the web calendar and dashboards (see [Web Calendar](#web-calendar)). It opens the listening port; the site's four credentials are settings. |
-| `WEB_PORT` | `2222` | Port the web site listens on. |
-| `GW2_API_BASE_URL` | `https://api.guildwars2.com` | Base URL used for Guild Wars 2 API requests. Trailing slashes are removed. It decides where the API key is sent, which is why it is not settable from Discord. |
-| `SETTINGS_ENCRYPTION_KEY` | unset | Fernet key used to encrypt credential settings and member profit API keys. Leave it unset and the bot generates `settings.key` next to the database on first run. See [Encrypted Settings](#encrypted-settings). |
-
-The application loads `.env` automatically. Existing environment variables take
-precedence over `.env`, so an Unraid container can inject the same variables at
-runtime without using or mounting a `.env` file. The `.env` file is excluded
-from Git and the Docker build context.
-
-## Help
-
-`/help` privately lists every command you can run and what it does. The list
-is built for you when you run it: a command gated by a role appears only if you
-hold that role as `/settings` has it configured right now, so changing a role
-setting changes what `/help` shows on the next call.
-
-Commands are grouped by their top-level command, groups in alphabetical order
-and the subcommands in each group alphabetical too, followed by the commands
-that belong to no group. Each is written the way this README writes them, and
-every page opens with the key: `option:<value>` is required, and
-`[option:<value>]` is optional and can be left out. The value names what to
-enter (`text`, `number`) or, for an option with a short list of fixed
-choices, lists them, as in `/raffle leaderboard [sortby:<purchased|free|total>]`.
-
-The reply is one private embed. When the list is too long for one page — the
-`/settings` subcommands alone nearly fill one — arrow buttons under it turn
-the pages in place. The arrows keep working for as long as the reply is on
-screen, including across a bot restart, and each turn rebuilds the list, so a
-role granted or removed since the command was run is already reflected.
-
-An option with a stricter gate than its command is shown only to those who may
-use it. `/raffle addticket` appears for the `raffle_addticket` role, but its
-`amount` option, which records a gold purchase, appears only for the
-`raffle_officer` role. An officer without the `raffle_addticket` role sees
-`amount` as required, since that is the only way the command accepts them.
-
-The settings commands appear for the server owner and administrators as well
-as the officer role, matching who may run them.
-
-A new command has to declare who may run it (see `src/gw2bot/core/command_access.py`):
-`/help` leaves out any command that does not, and a test fails until it does.
-
-## Settings
-
-`/settings` is how the bot is configured. Running a subcommand with no value
-prints what the setting does and what it is currently set to; passing a value
-validates and stores it; passing a space clears it.
-
-Changes take effect immediately. Setting the Guild Wars 2 credentials starts
-the pollers that need them, changing the notification channel redirects the
-next message, and changing a calendar credential restarts the calendar — none
-of it waits for a container restart. The reply says what had to be restarted.
-
-Every reply is private to the person who ran the command.
-
-### Who May Change Settings
-
-Anyone holding the raffle officer role — `/settings roles raffle_officer`, see
-below — plus the server owner and anyone with the `Administrator` permission.
-
-The owner and administrator arms are deliberate: the officer role is itself a
-setting, so if it were the only way in, one wrong value would lock everybody
-out of the command that could fix it, with no environment variable left to
-override it.
-
-### Settings That Replaced Environment Variables
-
-| Subcommand | Default | Description |
-| --- | --- | --- |
-| `/settings discord_notification_channel_id` | unset | Discord text channel that receives all automated notifications. Must belong to `DISCORD_COMMAND_GUILD_ID`. See [Running Without The Optional Credentials](#running-without-the-optional-credentials). |
-| `/settings gw2_api_key` | unset | Guild Wars 2 API key with `account` and `guilds` permissions. Set it together with `gw2_guild_id`. **Encrypted.** |
-| `/settings gw2_guild_id` | unset | Guild ID listed in `/v2/account.guild_leader`. Must be a GUID, and is stored in lower case whatever form you paste. **Set `gw2_api_key` first:** with a valid key the ID is checked against `/v2/account.guild_leader` before being stored. If the API rejects the key the change is refused, and if the API is unreachable or erroring the ID is stored with the reply saying it went unchecked. This matters because the raffle ledger records the first guild ID it is given and refuses a different one afterwards, and that cannot be undone from Discord. |
-| `/settings raffle_excluded_accounts` | unset | Guild Wars 2 account names barred from the raffle, separated by commas (for example `Someone.1234, Another.5678`). Matched case-insensitively, and capped at 1500 characters so `/settings` can always show the list back to you. See [Excluding Someone From The Raffle](#excluding-someone-from-the-raffle). |
-| `/settings feast_notification_user_id` | unset | Discord user who also receives feast stock alerts by private message. |
-| `/settings gw2_poll_interval_seconds` | `300` | Guild Storage and guild stash polling interval in seconds. At least `30`. |
-| `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval in seconds. At least `30`. |
-| `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime in seconds. |
-| `/settings timezone` | `UTC` | IANA timezone name (for example `America/New_York`) used to interpret typed `/event new` times, to name event threads, and to define weekly repeat days. |
-| `/settings web_base_url` | unset | Public base URL of the web calendar and dashboards, for example `https://gw2bot.example.com`. The site serves its pages from that host's root (`/calendar`, `/profit`, and so on), so the value names a host, not a path below one. Trailing slashes are removed. |
-| `/settings discord_oauth_client_id` | unset | OAuth2 client ID of the bot's Discord application. |
-| `/settings discord_oauth_client_secret` | unset | OAuth2 client secret of the bot's Discord application. **Encrypted.** |
-| `/settings web_session_secret` | unset | Random secret of at least 32 characters that signs web session cookies. Changing it signs every calendar user out. **Encrypted.** |
-| `/settings web_session_ttl_seconds` | `604800` | How long a web sign-in stays valid. Guild membership is re-checked periodically regardless, so a departed member loses access without waiting for the session to expire. |
-
-Three subcommands are named differently from the variable they replaced,
-because Discord caps a command name at 32 characters:
-`DISCORD_FEAST_NOTIFICATION_USER_ID` became `feast_notification_user_id`,
-`GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` became `guild_log_poll_interval_seconds`,
-and `TZ` became `timezone`.
-
-### Excluding Someone From The Raffle
-
-`/settings raffle_excluded_accounts` lists the in-game account names that earn
-no raffle tickets. It is a comma-separated list, matched case-insensitively,
-because the guild log and the in-game roster do not always agree on
-capitalisation.
-
-An excluded account is blocked on every route into the raffle:
-
-- Gold they deposit into Guild Storage earns them **no tickets**. The deposit
-  is still recorded and still shows in the contribution reports — the guild has
-  the gold, so the ledger says so; it simply buys nothing.
-- `/raffle addticket <account> <amount>` is refused, so an officer cannot
-  record a gold purchase for them.
-- `/raffle addticket <account>` is refused too, so they cannot be given a free
-  ticket either.
-
-Both refusals name this setting, so whoever hits one knows what to change.
-Clearing the setting lets them earn tickets again from the next deposit
-onwards; it does not retroactively award tickets for gold deposited while they
-were excluded, and it does not remove tickets they already had.
-
-The names are not checked against the guild roster, so somebody who has already
-left can be listed — which is deliberate, since that is a case where you may
-want the exclusion to outlast their membership.
-
-### Role, Channel And Forum Settings
-
-Most of these were fixed IDs in the source until they became settings. They keep
-those values as defaults, so nothing changes until you change one, and clearing
-one restores its default rather than switching the feature off.
-`/settings channels event_ping` is the exception: it is new rather than
-inherited, so it starts unset and clearing it returns events to pinging inside
-their forum post.
-
-Each subcommand suggests the server's roles, matching channels, or the Trial
-forum's tags as you type, and refuses an ID that does not resolve — storing one
-that nothing answers to is how a guild silently loses a feature.
-
-| Subcommand | Default | Gates |
-| --- | --- | --- |
-| `/settings roles raffle_draw` | `1317638909735342201` | `/raffle draw` and `/raffle removetickets`. |
-| `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
-| `/settings roles raffle_officer` | `1317638909735342201` | Recording a gold purchase for someone, `/check`, `/track`, `/pending`, and `/settings`. |
-| `/settings roles guild_roster` | `1317202210152513606` | Who gets in-game account names from the raffle autocompletes. |
-| `/settings roles event_create` | `1318357141521825872` | Creating, editing, moving, cancelling and deleting events, and editing rosters. Its holders are the commanders the event statistics page counts runs for. |
-| `/settings roles trial` | `1450164501696741597` | Marks a Discord member as a Trial in `/check` and the overdue report. |
-| `/settings roles sunborne` | `1317140660188352584` | Marks a Discord member as a full member in the same reports. |
-| `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. While unset it follows `/settings roles raffle_draw`. |
-| `/settings roles roster_page` | `1317638909735342201` | The guild roster history page. Set it to a wider role to open the history to the whole guild. |
-| `/settings roles gold_page` | `1317638909735342201` | The guild bank gold history page. Set it to a wider role to open the history to the whole guild. |
-| `/settings roles events_page` | `1317638909735342201` | The guild event statistics page. Set it to a wider role to open it to event leaders. |
-| `/settings channels event_ping` | unset | Where an event posted inside a forum post pings its roles. While it is unset those events ping inside the post. |
-| `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchase embeds, reward-tier milestones and the six-hourly contribution report. Separate from the notification channel. |
-| `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set this before its two tags, which are checked against whichever forum is configured. |
-| `/settings channels trial_accepted_tag` | `1317349209619562587` | Tag marking an accepted application; only tagged posts are indexed. |
-| `/settings channels trial_in_review_tag` | `1317349421821726790` | Tag the bot applies to a new application post. |
-
-`raffle_addticket` and `event_create` are the same role today but are separate
-settings, because they grant unrelated powers. Changing one no longer changes
-the other.
-
-### Encrypted Settings
-
-The three settings marked **Encrypted** hold operator credentials and are
-encrypted in the database. `/settings` never shows one back: once set, it reports
-`This secret cannot be viewed once set`, and an unset one reports `Not set`.
-There is no command that reveals the value — set it again to change it.
-
-Each member's `/profit setkey` value is protected by the same cipher and key
-file. It lives in its own row keyed by Discord user ID, is never rendered back,
-and is only decrypted server-side for that member's Guild Wars 2 requests.
-
-If the key is lost or replaced, the encrypted rows survive but cannot be read.
-The bot keeps running with those features switched off. `/settings` reports
-each affected operator setting as set but undecryptable rather than as working
-— set it again to recover.
-
-Affected members see the same recovery path on `/profit`: run
-`/profit setkey` again.
-
-The key comes from `SETTINGS_ENCRYPTION_KEY` if you set it, and otherwise from
-`settings.key`, generated beside the database on first run with `0600`
-permissions. If a key file you restored or wrote yourself is readable by
-anyone else, the bot narrows it to `0600` and says so — and refuses to start
-if it cannot, rather than protecting your credentials with a key other local
-users can read.
-
-Back it up with the database: without the key the secrets cannot be read.
-
-- **Replacing the key** is recoverable. The bot reports each secret it can no
-  longer read, treats it as unset, and carries on; set those three values
-  again.
-- **A key file that is corrupt or truncated** — a half-finished restore, say —
-  stops the bot with a message naming the file. It is not overwritten, because
-  that would destroy the one thing that can read your stored secrets. Restore
-  it from a backup, or delete it to start with a new key and set the three
-  values again.
-
-Setting the key yourself is what keeps it off the data volume. Everything else
-about the feature works without it.
-
-### Migrating From Environment Variables
-
-The first time the bot starts after this upgrade it copies every legacy
-variable it finds into the settings, once, and then never reads them again.
-Nothing to do: an existing install comes up with exactly the values it had.
-
-From then on the database is authoritative and a leftover variable is ignored.
-The bot says so on every startup — a console warning, and one message in the
-notification channel naming each stale variable and the `/settings` subcommand
-that replaced it. Remove them from `.env` and the notices stop.
-
-`TZ` is the exception. Its value is imported like the rest, but it is never
-named in either notice and you should **leave it set**: the container reads it
-for its own clock and log timestamps, so removing it changes more than this
-bot. Change the bot's timezone with `/settings timezone`.
-
-Because the import runs only once, a value you later clear with `/settings`
-stays cleared even if the old variable is still in the environment.
-
-Run `/settings list` to see every setting, its value, and whether it came from
-`/settings` or is still the default.
-
-### Running Without The Optional Credentials
-
-The bot starts with only `DISCORD_TOKEN` and `DISCORD_COMMAND_GUILD_ID`. It
-registers its commands, serves guild events, and keeps the raffle ledger it
-already has, while every feature that needs a value you did not set is switched
-off instead of stopping the bot. Each disabled feature is named in a startup
-warning in the console.
-
-Without `/settings gw2_api_key` **and** `/settings gw2_guild_id` — either one
-missing disables all of it, because every Guild Wars 2 request needs both:
-
-- Guild Storage polling stops, so there are no feast stock alerts and no feast
-  count history.
-- Guild log polling stops, so there are no join, leave, invite, rank-change
-  or gold withdrawal messages, no gold deposits are turned into raffle
-  tickets, and the guild bank ledger records nothing.
-- The guild stash poll stops, so the bank's balance is not observed and the
-  gold history has nothing to measure against.
-- The overdue Trial member report and the guild member count channel
-  description stop.
-- `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`,
-  `/raffle removetickets`, `/raffle tickets <username>`, the GW2 account link
-  prompt, `/check` and `/track` answer privately with the commands to run,
-  and their account-name autocompletes offer no choices. `/raffle draw`,
-  `/raffle audit`, `/raffle list`, `/raffle leaderboard`, and `/raffle
-  tickets` for a member who has already linked their account keep working
-  from the recorded ledger.
-
-The raffle database records which guild it belongs to the first time a guild id
-is configured, so a database created without a guild id is claimed by the first
-one you set afterwards. Setting a *different* one later is refused, and
-`/settings` reports why.
-
-Without `/settings discord_notification_channel_id`, nothing is posted to the
-notification channel:
-
-- Guild membership messages, gold withdrawal messages, raffle deposit audit
-  lines, raffle command audit lines, feast stock alerts and Trial member
-  reports are skipped. The bank ledger still records every movement; only the
-  announcements are skipped.
-- The channel description is not updated with the guild member count.
-- The `diag` message is ignored, so the previews in
-  [Automated Message Diagnostics](#automated-message-diagnostics) do not run.
-- Commands that post an audit line still do their work and report that the
-  audit log could not be delivered.
-
-The bot is not silent, though: the raffle contribution channel is a separate
-destination that the notification channel setting does not control. With the
-Guild Wars 2 credentials set, every guild-log poll still posts gold-deposit
-ticket purchase embeds and reward-tier milestone announcements there, and the
-six-hourly contribution report is posted there whether or not those credentials
-are set. Raffle draw announcements and the replies to every `/raffle`, `/check`
-and `/track` command go to the channel the command was run in and are likewise
-unaffected.
-
-`WEB_ENABLED=true` without the site's four settings is not an error: the bot
-names the missing ones in a startup warning and leaves the site off,
-the same way an unset API key disables Guild Wars 2 polling.
-
-Run the missing `/settings` subcommand and the feature switches on; nothing
-else has to be reconfigured and the bot does not have to be restarted.
-
-When `DEBUG=true`, detailed `gw2bot` diagnostics are written to the console
-and the [log file](#log-files). Third-party library debug logging remains
-disabled, and credentials and full notification contents are not included in
-application debug messages. All console and log file records, including
-third-party logs and exception tracebacks, pass through a final
-credential-redacting formatter — including a credential set with `/settings`
-while the bot is running.
-
-The bot must have `View Channel` and `Send Messages` permissions in the
-configured notification channel. Users running raffle commands must have
-`Use Application Commands` permission.
-
-If notification delivery reports Discord HTTP 403, use the logged Discord error
-code to correct the channel configuration:
-
-- Error code `50001` (`missing_access`): verify
-  `/settings discord_notification_channel_id` identifies a channel in
-  `DISCORD_COMMAND_GUILD_ID`, the bot is installed in that server, and the bot
-  can view the channel.
-- Error code `50013` (`missing_permissions`): grant the bot `View Channel` and
-  `Send Messages` in the notification channel, checking category and
-  channel-specific permission overrides. Grant `Manage Channels` there as well
-  so it can update the channel description with the current guild member count.
-
-Failed raffle-deposit audit messages remain pending and are retried during each
-guild-log poll after permissions are corrected.
-
-Enable the privileged `Message Content Intent` for the bot in the Discord
-Developer Portal so it can respond to the notification-channel `diag` message.
-Enable the privileged `Server Members Intent` there too so the
-[event statistics page](#guild-event-statistics-page) can list the commanders
-who led no runs. It is optional: the bot never asks for it when connecting, so
-leaving it off cannot stop the bot, and the page then lists only the
-commanders who led a run.
-
-The bot also needs `View Channel` and `Read Message History` permissions for
-the Trial application forum — `/settings channels trial_forum`, by default
-`1317206104727621693` — so it can link Trial applications to Discord members.
-Grant `Manage Threads` there as well so it can automatically tag new posts as
-`In Review`.
-
-### Log Files
-
-Everything the console shows is also written to `gw2bot.jsonl` in a `log`
-folder beside the database: `data/log/` when run locally and `/app/data/log/`
-in the Docker image. That is `/mnt/user/appdata/gw2bot/log/` with the usual
-Unraid mapping, and part of the `bot-data` volume under Docker Compose, so
-nothing extra has to be mounted. `DEBUG` decides how much is written, the same
-as for the console.
-
-Each line is one JSON object, so the file reads top to bottom like the console
-and any JSON tool can filter it without a custom parser:
-
-```json
-{"time": "2026-10-02T14:03:11.123-04:00", "level": "INFO", "logger": "gw2bot.bot", "message": "Discord bot connected as GW2 Bot#1234"}
-```
-
-| Field | Contents |
-| --- | --- |
-| `time` | When the record was written, in the container's time zone (`TZ`), with its UTC offset. |
-| `level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
-| `logger` | The module that wrote it, such as `gw2bot.gw2.guild_log`. |
-| `message` | The message, redacted the same way as the console. |
-| `exception` | The traceback, when the record carries one. Absent otherwise. |
-
-For example, every warning and error in today's file:
-
-```sh
-jq -r 'select(.level == "WARNING" or .level == "ERROR") | "\(.time) \(.logger): \(.message)"' gw2bot.jsonl
-```
+With Docker:
 
 ```powershell
-Get-Content gw2bot.jsonl | ConvertFrom-Json | Where-Object level -in 'WARNING', 'ERROR'
-```
-
-At midnight the day's file is renamed with its date — `gw2bot.2026-10-01.jsonl`
-— and a new `gw2bot.jsonl` is started. The newest 30 dated files are kept and
-older ones are deleted. If the folder cannot be created or written, the bot
-says so in a console warning at startup and keeps running with console logging
-only.
-
-## Guild Events
-
-`/event` runs guild events end to end: a commander creates one, the bot posts it
-with a live roster embed, members sign themselves up from that post, and a
-one-minute maintenance pass keeps the status, the thread name, the reminders,
-and a repeating series moving without anyone touching it again.
-
-Every `/event` subcommand requires the event role `1318357141521825872`. The
-sign-up buttons on a posted event are open to everyone who can see it.
-
-| Command | What it does |
-| --- | --- |
-| `/event new` | Builds an event through a three-step flow and posts it. |
-| `/event edit` | Reopens that flow for an existing event, and its roster with it. |
-| `/event remind` | Pings the next occurrence's roster on demand (see [Event Reminders](#event-reminders)). |
-| `/event cancel` | Calls off a repeating event's next occurrence (see [Cancelling An Event Occurrence](#cancelling-an-event-occurrence)). |
-| `/event delete` | Ends an event: removes the run still to come and its sign-ups, and keeps the runs it has already put on (see [Deleting An Event](#deleting-an-event)). |
-
-Every subcommand except `/event new` takes an `event_id`, autocompleted from the
-active events as `[Category] Title — id N`. That id is also printed in the footer
-of each event post as `eventID: N`, so it can be read off the message itself.
-
-When the [web calendar](#web-calendar) is enabled, the last field of each event
-post is a **🗓️ Calendar** link to it, shown as `gw2bot.example.com/calendar` and
-pointing at `<web_base_url>/calendar`. It sits in a field rather than the footer
-because Discord does not turn an embed footer into a link. A member reading one
-event can find the rest of the schedule from it. Turning the calendar on or off,
-or moving it to another host, refreshes the link on every event still upcoming
-or running within a maintenance pass; so does upgrading to the release that
-moved the link out of the footer. The address the posts were rendered with is
-remembered, so a change made while the bot is down reaches them too — including
-`WEB_ENABLED`, which only takes effect on a restart — and an ordinary restart
-re-edits nothing.
-
-A run that has finished keeps the link it was last rendered with, because
-nothing edits a finished post again: the maintenance pass reads only the runs
-still to come, and the posts a deletion keeps as history (see [Deleting An
-Event](#deleting-an-event)) are a record of what the guild ran rather than a
-page to keep current. Their `eventID: N` stays readable either way.
-
-### Creating An Event
-
-`/event new` walks three modals:
-
-1. **Details** — category, title, description, destination channel or forum
-   post, and the roles to ping (see [Event Role Pings](#event-role-pings)).
-2. **Schedule** — start as `MM.dd.yyyy HH:mm`, duration as `HH:mm`, whether
-   the event repeats, optional requirements, and whether to offer a mentee
-   slot (see [Mentee Slot](#mentee-slot)). Typed times are read in the
-   timezone set with `/settings timezone` and must be in the future.
-   Requirements are free text of up to 1,024 characters; left blank, the post
-   shows them as "None". Posts already up when requirements were added are
-   re-rendered once on the upgrade, so they show the section too. The mentee
-   slot is off unless the commander turns it on.
-3. **Repeat** — only when the event repeats: frequency, which days, and whether
-   posting the next occurrence should delete the previous one.
-
-A private preview of the finished post follows each step. **Change something**
-reopens any single field — category, title, description, channel, date & time,
-duration, requirements, max participants (on a headcount event; see [Squad Size
-And Roles](#squad-size-and-roles)), mentee slot, repeat settings, leader, or
-roles to ping — without walking the flow again, and **Post event** sends it.
-Nothing is written to the database until the event is posted, so abandoning the
-flow leaves nothing behind.
-
-`/event edit` opens the same preview for an existing event, with **Save changes**
-in place of **Post event**. Changing the channel re-posts the event at the new
-destination and is confirmed first, because it deletes the current message and
-any signup thread the bot opened for it. An event that has already started is
-frozen: its stored details can no longer be changed, and the edit session opens
-with its roster buttons alone. An event that is over cannot be edited at all.
-
-### Squad Size And Roles
-
-The category fixes the squad, and the bot enforces it (a headcount event can
-set a size of its own; see below):
-
-| Category | Squad | Healers | DPS | Quickness | Alacrity |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Raid | 10 | 2 | 8 | 2 | 2 |
-| Strike | 10 | 2 | 8 | 2 | 2 |
-| Fractal | 5 | 1 | 4 | 1 | 1 |
-| Dungeon | 5 | 0 | 5 | 1 | 1 |
-| Story | 5 | — | — | — | — |
-| World vs. World | 50 | — | — | — | — |
-| Player vs. Player | 5 | 1 Support | 4 | 0 | 0 |
-| Open World | 50 | — | — | — | — |
-| General | No limit | — | — | — | — |
-
-Raid, Strike, Fractal, and Dungeon events are role-based: members pick one of
-Just DPS, Quickness DPS, Alacrity DPS, Quickness Heal, or Alacrity Heal, and
-the healer, DPS, quickness, and alacrity caps are all honoured at once. Dungeon
-groups have no healer slot: they require one Quickness DPS, one Alacrity DPS,
-and three Just DPS, and their embeds omit the empty healer section. Player vs.
-Player events are role-based too, but with no boons: members pick Just DPS or
-Support (🩹), a healer with no boon requirement, and a team is four DPS and one
-Support. Support is offered only there, and a PvP embed names its heal seat
-Support and leaves out the boon tally. Story, World vs. World, Open World, and
-General events are a plain headcount with no roles to pick.
-General has no squad size at all: everyone who signs up is seated, so it never
-fills and never waitlists anyone, and its embed shows the participant count on
-its own rather than as a share of a total.
-
-A headcount event's size can be changed through **Change something → Max
-participants**, on `/event new` and `/event edit` alike: any whole number from 1
-to 500, or 0 for no limit, in which case it seats everyone the way General does.
-The modal opens on the current size. Entering -1, or the category's own size,
-resets the event to the category's default, so a later change of category
-brings that category's size along; a size of its own is kept across headcount
-categories and dropped on a move to a role-based one. Role-based events never offer it: their squad is
-fixed by the composition in the table. Saving a new size re-seats the roster
-first come, first served, as a category change does — a smaller one moves the
-latest sign-ups to the waitlist, a larger one promotes from it — and the preview
-shows the roster as the save will leave it.
-
-A role-less squad bigger than ten seats — World vs. World and Open World at
-their own size, and General or any event with no cap at all — lists its
-participants in two side-by-side columns, read down the left column and then
-down the right one, so a long roster does not stretch the event post down the
-channel.
-
-### Signing Up
-
-A posted event carries three buttons: **Sign up**, **Sign out**, and a ⚙️
-settings button. Everything they open is private to the member who clicked.
-
-On a role-based event, **Sign up** asks for a main role and then any flex roles
-— other roles the member is willing to take. The picker marks each role as full,
-or as a waitlist-only pick, before it is chosen. A member is seated in their
-main role when it still fits; otherwise a flex role is used, and the bot fills
-the scarcer seats first, so a flexer lands on an open heal or boon seat before a
-plain DPS one. When no acceptable seat is free the member joins the waitlist,
-marked ⌛️ in the embed.
-
-The last seats of a role-based roster are held for the composition it still
-lacks: two boon healers and two boon DPS in a raid or strike, one of each in a
-fractal, two boon DPS in a dungeon, and the Support in PvP. A member who could
-only take one of those seats without covering it joins the waitlist instead —
-a seventh Just DPS in a raid or a fourth in a fractal, or a boon DPS who would
-use the quickness or alacrity a healer still needs — and the picker marks that
-role full. A seated flexer is moved onto their boon role when that makes room.
-The same rule decides who is promoted off the waitlist, so a roster with every
-seat taken always has its boons covered.
-
-A Story, World vs. World, Open World, or General event
-has no roles to pick, so one click seats the member or waitlists them — and on a
-General event it always seats them.
-
-Seats are re-shuffled on every roster change: signing out promotes waitlisted
-members and can move seated members between their acceptable roles to make room,
-and each mutation posts one batched note in the signup thread naming who moved.
-**Sign out** confirms first, and on a repeating event with automatic sign-up
-still on it offers to switch that off too, so signing out of one occurrence does
-not leave the member seated for the next. A member who has signed up for the
-[mentee slot](#mentee-slot) is asked instead whether they are signing out of the
-**Event** or only of being the **Mentee**.
-
-The ⚙️ button shows the member's settings for that event and offers
-**Edit my signup** (role-based events only), **Enable**/**Disable auto sign-up**,
-and **Reset role memory for this event**, plus **Ask me about the mentee slot
-again** after "never ask again" was the answer to the mentee question. Editing
-a signup is rate limited to three edits back to back, refilling one every three
-hours, so a roster is not churned by one member re-picking repeatedly. Signing
-out and back in resets the allowance but costs the member their queue position.
-An edit that no longer fits the roster asks before dropping the member to the
-waitlist.
-
-### Status
-
-An occurrence's status drives both its embed colour and the name of its signup
-thread, `<status> | MM.dd.yyyy | HH:mm`:
-
-| Status | Meaning |
-| --- | --- |
-| 🟢 open | Seats or boon coverage still missing. |
-| 🔴 full | Every seat taken **and** the required boon coverage present. |
-| 🟡 ongoing | Started, not yet finished. |
-| ⚫️ over | Past its start plus duration. |
-
-A roster that occupies every seat without covering its required boons — only
-possible for one seated before its last seats were held for them — keeps
-reading as open rather than full, because it is still short of a squad.
-
-### Repeating Events
-
-A repeating event recurs daily, weekly on named days, or monthly on numbered
-days; a monthly day past the end of a short month lands on that month's last
-day. The next occurrence is created when the current one ends and posted by the
-maintenance pass, carrying a fresh roster. That roster is checked against the
-server as the post goes out, so a member who has left does not keep a seat their
-automatic sign-up seeded (see
-[Members Who Leave The Server](#members-who-leave-the-server)).
-
-**Delete the previous post on repeat** is asked when the repeat is set up. With
-it on, posting a new occurrence removes the superseded message and its signup
-thread, so the channel holds only the current run; with it off, the old posts
-stay as a record. A forum post the event was only sent into is never removed
-either way.
-
-### Automatic Sign-Up And Role Memory
-
-Both are per event and offered only on repeating events, where signing up more
-than once is the point. After a sign-up the bot offers to remember the roles
-picked and to sign the member up automatically for later occurrences; either
-prompt can be answered with "never ask again for this event". Remembered roles
-are re-applied when a new occurrence is seeded, subject to the same capacity
-rules as a manual sign-up, so a member can still land on the waitlist. Both
-settings are visible and resettable behind the ⚙️ button, and a preference
-stored for an event that is later deleted is dropped with it. Either prompt can
-sit open until it times out, so one answered after the run behind it has been
-called off stores nothing and says so. The ⚙️ panel goes the same way once a
-series has no runs left: it offers neither setting and says why, because a
-deleted event's finished posts keep their button.
-
-### Mentee Slot
-
-A commander can offer a mentee slot on an event, for a member who wants to
-become a commander to co-lead it and train. It is asked in the schedule step
-(**Offer a mentee slot for Commander training?**, defaulting to No) and can be
-turned on or off later through **Change something**. The post then shows a
-**🎓 Mentee** field under the leader: the mentee's name, or "Open" while the
-slot is free, followed by the first five members waiting for it, marked ⌛️,
-and a count of any more.
-
-The slot is not a role. A member still signs up the usual way, with a role on
-a role-based event, and the mentee question comes last, after any role memory
-and automatic sign-up questions:
-
-> *@Leader* is looking for a mentee for this event for Commander training.
-> Would you like to sign up?
-
-**Yes** takes the slot, or joins the mentee waitlist when somebody already
-holds it. **No** declines for now, and **No, never ask again for this event**
-stops the question for that event only — undone from the ⚙️ button. The
-leader is never asked, and a member made the leader gives up any claim on the
-slot, which passes to the next in line. A member already on the roster —
-seated by automatic sign-up, say, or one who answered No — is asked by pressing
-**Sign up** again.
-
-There is one slot per occurrence, and it is held by a member with a seat: a
-member on the event's waitlist who says Yes waits on the mentee waitlist until
-they have one. The mentee waitlist is first come, first served by when each
-member said Yes, and a mentee keeps the slot for as long as they keep their
-seat. When the mentee gives it up, signs out, is removed, or drops to the
-event's waitlist, the slot passes to the next member on the mentee waitlist
-who has a seat, and the signup thread announces it, pinging them, in the same
-roster update that announces moves up from the event's waitlist.
-
-**Sign out** asks a member with a claim on the slot what they are signing out
-of: **Event** signs them out entirely, slot included, and **Mentee** gives up
-only the slot (or their place on its waitlist) and keeps their seat. Nobody is
-ever made a mentee automatically: automatic sign-up seats a member on the next
-occurrence but never carries the slot over, so each run's mentee is asked
-afresh. Turning the slot off hides it and stops the question without clearing
-anybody's claim, so turning it back on restores the same mentee; a member who
-does not want that can still give the claim up from **Sign out**.
-
-### Editing A Roster
-
-The `/event edit` preview also carries **Add sign-ups** and **Remove sign-ups**,
-so a commander can seat a member who cannot click the button themselves and
-remove one who is not coming. Added members are picked from the server and then
-given a role; the reply says who was seated and who went to the waitlist.
-
-A removed member is sent a direct message telling them so, and automatic
-sign-up for that event is switched off for them at the same time — otherwise the
-next occurrence would simply seat them again.
-
-### Members Who Leave The Server
-
-The bot is never told that a member left the server, so a roster is asked about
-again rather than waited on. A member Discord confirms has gone is taken off the
-roster, their seat handed to the waitlist exactly as a commander's own removal
-would hand it over, and their automatic sign-up switched off so the next
-occurrence does not seat them again. The check runs:
-
-- on every roster change — a sign-up, a sign-out, a signup edit, or a commander
-  adding or removing members — so a departed member never holds a seat against
-  somebody who could fill it, and is never promoted off the waitlist into a run
-  they cannot see;
-- as an occurrence is posted, which covers a repeating event's next occurrence
-  (its roster is seeded from the previous run's automatic sign-ups and nothing
-  has looked at it since) and an event moved to another channel (its roster
-  carries over to the new post). The check runs once the post is live rather
-  than before it, so there is a message to correct and a claim on the run to
-  keep; the removal refreshes the embed that has just gone out. Both ask the
-  server again rather than reusing a recent answer;
-- when `/event edit` or the **Remove sign-ups** picker is opened, and again
-  when an **Add sign-ups** or **Remove sign-ups** batch is confirmed — a
-  picker can sit open for minutes, so the seats it hands out are decided
-  against the roster as it stands at that moment.
-
-Only a definite "not a member" costs anyone their seat. A lookup that failed —
-a missing permission, an outage, a Discord the bot could not reach — proves
-nothing, so the roster is left exactly as it stands and the check is made again
-on the next change. A roster checked seconds ago is not re-checked by the
-sign-up behind it either: every member on it is a Discord lookup, so a burst of
-sign-ups on a fifty-seat roster spends one round rather than one per click.
-That only applies to members changing the roster themselves, which comes in
-bursts. Posting an occurrence, moving one to another channel, and a commander
-opening the roster or confirming an edit to it each happen once, so each asks
-the server again — and one answer covers a whole batch rather than a sweep per
-member in it.
-
-## Guild Event Destinations
-
-`/event new` (and **Change something → Channel** on an existing event) can post
-an event to a text channel or into a forum post that already exists:
-
-- **Text channel** — the event is sent as a message and the bot opens a signup
-  thread under it, named `<status> | MM.dd.yyyy | HH:mm` and renamed whenever the
-  status changes or the occurrence is rescheduled.
-- **Existing forum post** — the event is sent as a message inside the post,
-  which stands in for the signup thread, since a forum post cannot hold threads
-  of its own. Roster changes are announced in the post, and members who sign up
-  are added to it. Nobody is ever removed from it, because its members are not
-  one event's roster — the same post can hold several events, and members join
-  it just to read it. Removing someone who signed out of one event would drop
-  them from the others. Members leave the post themselves when they are done
-  with it.
-
-Forum *channels* are not offered, so the bot never opens a forum post of its own.
-Threads under a text channel are not supported either: Discord's picker cannot
-narrow public threads down to forum posts, so a thread picked from a text channel
-is refused on submission and the picker reopens. An archived forum post may not
-appear in the picker at all until someone reopens it.
-
-A post the event was only sent into is never renamed and never deleted:
-`/event delete`, `/event cancel`, a channel move, and a superseded recurring
-occurrence each remove only the event's own message and leave the post (and
-everything else in it) standing. Each event in a shared post therefore manages
-just its own message.
-
-Moving an event between a channel and a post works in both directions. Because
-the roster is keyed to the occurrence rather than to the message, the message is
-re-sent at the new destination and the roster carries over.
-
-Discord archives a quiet post and then refuses messages and message edits in it,
-so a dormant post is reopened before the bot posts an event, announces a roster
-change, or refreshes an embed in it. Reopening needs `Manage Threads`; without it
-the update is logged as a `50013` (`missing_permissions`) failure and retried on
-the next maintenance pass.
-
-Any destination selected for an event needs `View Channel` and `Send Messages`.
-A text channel also needs `Create Public Threads` for the signup thread, and
-`Manage Threads`: moving an event to a new channel, pruning a superseded
-recurring occurrence, cancelling an occurrence, and deleting an event (for the
-run it removes) all delete that occurrence's signup thread explicitly, because
-Discord does not remove a thread on its own when its starter message is
-deleted. Without `Manage Threads` those operations still remove the message
-but log a `50013` (`missing_permissions`) error and leave the orphaned thread
-behind. A forum post destination needs `Send Messages in Threads` instead of `Send Messages`,
-and `Manage Threads` only to reopen it once Discord has archived it.
-
-## Event Role Pings
-
-An event can announce itself to up to three roles. They are asked for on the
-first `/event new` screen, alongside the category, title, description and
-destination, and can be changed later from **Change something → Roles to ping**
-in either `/event new` or `/event edit`.
-
-Only roles whose name starts with `[GW2]` are offered — the brackets are part of
-the marker, and case does not matter, so `[gw2] WvW` is offered too. Everything
-else in the server, `@everyone` included, is unreachable from the picker, and a
-pick that was never offered is refused rather than trusted. The picker lists the
-marked roles alphabetically; a server with none of them simply shows no question,
-and the change flow says so instead of opening an empty picker.
-
-The marker is checked again against the server immediately before each post goes
-out, so it describes the roles actually notified rather than only what the picker
-once offered. An event outlives that pick — a weekly series carries its roles for
-months — so a role that has since been deleted, or renamed and repurposed out of
-`[GW2]`, is skipped and the rest of the post goes up as usual. The role is
-skipped, not forgotten: its id stays on the event, so renaming it back resumes
-its pings.
-
-The mentions are sent as the message text carrying the event, so they appear
-above the embed and actually notify — unless the event went into a forum post
-and [a ping channel](#pinging-from-another-channel) is configured, which sends
-them there instead. Each occurrence is its own announcement: a
-repeating event pings the roles again when the next occurrence is posted, and a
-channel move pings them at the new destination, because that is where the post
-now is. Refreshing an embed — a sign-up, a status change, a rename — never
-re-sends the mentions, so nobody is pinged twice for one post.
-
-The bot needs the `Mention @everyone, @here and All Roles` permission where the
-event is posted to ping a role that members cannot mention themselves. Only the
-event's own roles are ever allowed to be mentioned, so nothing in a title or
-description can widen an event post into an `@everyone`.
-
-Role pings belong to the post alone. Reminders ping the members who signed up,
-never these roles.
-
-### Pinging From Another Channel
-
-A forum post only notifies the members already following it, so mentioning a
-role inside one reaches almost nobody it was meant for. Set
-`/settings channels event_ping` to a text channel and an event posted into a
-forum post announces itself there instead: the mentions go to that channel with
-the event's title, its start as a relative timestamp, its requirements ("None"
-when it has none), and a link straight to the event's message in the post. The
-post itself then carries no mentions, so nobody is pinged twice for one event.
-
-The setting is global — one channel for every event — and answers only for an
-event posted into a forum post. An event posted to a channel keeps pinging its
-roles there, because everyone who can read the channel already sees it.
-
-While the setting is unset, an event in a forum post pings its roles inside the
-post, which is what every event did before this existed. So does an event whose
-configured channel has since been deleted or hidden from the bot: losing the
-channel costs the event its audience, not its ping, and the fallback is logged.
-The bot needs `Send Messages` and `Mention @everyone, @here and All Roles` in
-the ping channel; an announcement Discord refuses is logged and costs that
-occurrence its ping alone — the event stays posted and its buttons keep working.
-
-The announcement repeats the event's title, its start and its requirements,
-so an edit to any of them corrects it in place: it is refreshed on the same
-trigger as the thread name, which carries the date and time for the same
-reason. Its mentions are left exactly as they were sent. Editing a message
-notifies nobody, so re-rendering them from a changed role pick would claim roles
-that were never alerted — the announcement keeps naming who actually heard about
-the event, and changing the roles only takes effect on the next occurrence
-posted. One somebody deleted by hand is forgotten rather than retried, and an
-edit Discord refuses is logged without holding back the event — the post is
-the record, and the announcement is a notice that has already been delivered.
-
-An announcement is only ever a pointer at the event's message, so it is stored
-with the occurrence and removed by the same cleanup: deleting the event,
-cancelling one of its runs, moving it to another channel, or a repeating event
-pruning the run it superseded all take the announcement with the post. A move
-into another forum post removes the old announcement and sends a new one, so
-the ping channel never accumulates links to messages that are gone. Deleting
-the event's message (or its forum post) in Discord by hand retires the
-occurrence, and that takes the announcement too, so a one-off event that leaves
-maintenance does not leave a dead link behind. Because the channel is stored
-alongside the message, changing the setting later does not strand the
-announcements already sent — each one is still removed from wherever it went.
-
-Because every one of those paths reaches the announcement through the
-occurrence, one the row could not record is one none of them can find. If that
-write fails — a database locked for the moment, or the run cancelled while the
-announcement was in flight — the announcement is taken back straight away,
-while it is still in hand. The ping itself cannot be taken back, so the members
-it named keep the notification and lose only the link; that is the smaller cost
-than a link left pointing at a message that is gone for good. The event is
-never affected either way: its post is up and its buttons keep working.
-
-A move sends the replacement before removing what it replaced, so a removal
-Discord refuses would otherwise be forgotten the moment the occurrence starts
-tracking the new announcement. It is kept against the occurrence instead, and
-every maintenance pass tries it again until it is gone — including passes over
-an occurrence that has not otherwise changed, so an event weeks away still has
-its dead links cleared within the minute rather than waiting on a roster or
-status change, and including ones whose event has already finished — a removal
-Discord was still refusing on the pass that ended the event is retried until
-permissions recover, rather than being stranded by the finish. Moving an event again before an earlier removal succeeds keeps
-both: a permission the bot has lost in the ping channel refuses every attempt,
-and each announcement is retried and forgotten on its own. Deleting the event
-makes one final attempt at every one of them before the record goes with it.
-
-## Event Reminders
-
-Members who hold a seat on an event are pinged where the event was posted — its
-signup thread, or the forum post it was sent into — as the start approaches:
-
-- an hour before,
-- fifteen minutes before,
-- and as it starts.
-
-Each ping reads:
-
-```text
-@Member1 @Member2: Kitty Cleanup starts in 15 minutes
-```
-
-The start is a Discord relative timestamp, so every member reads it in their own
-locale and it stays accurate whichever reminder they are looking at. Mentions
-that do not fit one Discord message are split over as many messages as they need,
-so nobody on a large roster is dropped from the ping.
-
-Only seated members are reminded. A waitlisted member has no place in the squad
-yet, so a ping telling them it is starting would invite them to show up for a
-seat they do not have. The roster is read at the moment the reminder goes out, so
-a member who signs up between two reminders is included in the later one.
-
-Each reminder names exactly the members it pings, so mention syntax in an event
-title — `@everyone`, a role, or another user — stays inert text and a reminder
-can only ever notify the roster it is for. An event's ping roles are not
-reminded either: they were told the event exists when it was posted, and a
-reminder is for the people who answered.
-
-Each reminder is recorded once it has been resolved, so a restart, a second
-maintenance pass, or an event that is edited never pings a roster twice. A
-reminder is recorded without being sent when there is nobody seated, when the
-occurrence has no thread or forum post to ping in, or when the occurrence has
-already finished.
-
-Reminders are resolved by the one-minute event maintenance pass, so one can
-arrive up to a minute after its moment. If the bot is down across a reminder, it
-sends only the most imminent reminder that is still due on the way back up and
-records the ones it overtook, rather than delivering a burst of stale pings. A
-reminder whose moment passed more than ten minutes ago is dropped entirely — an
-event that already started is news, not a reminder. That window also bounds
-retries: a reminder Discord refuses is retried on each maintenance pass until it
-leaves the window, then recorded and dropped.
-
-`/event remind event_id:<event>` sends the same ping on demand and requires the
-event role `1318357141521825872`. It pings the roster of the event's earliest
-unfinished occurrence and leaves the automatic reminders untouched, so a manual
-ping never costs the event one of its scheduled ones. It reports back privately
-how many members were pinged, and refuses when the event is over, has nobody
-signed up, or has no thread or forum post yet.
-
-## Cancelling An Event Occurrence
-
-`/event cancel event_id:<event>` calls off a single run of a repeating event
-and requires the event role `1318357141521825872`. It targets the event's
-earliest unfinished occurrence — the same run `/event remind` pings — and
-confirms which date it is about before anything is removed.
-
-Confirming removes that occurrence's message, the signup thread the bot opened
-for it, and everyone's sign-ups for it. A forum post the event was only posted
-into is kept, as everywhere else. The event itself survives: its next
-occurrence is created, seeded with the members who asked to be signed up
-automatically, and posted straight away, so the channel never sits without a
-post for the series.
-
-An event that does not repeat has nothing after the run being cancelled, so
-`/event cancel` offers the `/event delete` confirmation for one instead of
-leaving an event behind that can never be posted again.
-
-Nothing is removed until the next occurrence has been secured, so a
-cancellation that fails leaves the run posted and can simply be retried. If the
-next occurrence cannot be posted afterwards — the bot lost `Send Messages` in
-the channel, say — the cancellation still stands and the reply names the
-channel to check. That posting is then retried by every maintenance pass until
-it goes through, so fixing the permission is enough to bring the series back
-even though the cancellation removed its last post.
-
-## Deleting An Event
-
-`/event delete event_id:<event>` ends an event and requires the event role
-`1318357141521825872`. It confirms first, and names what it is about to keep.
-
-What it removes is every run that has not finished, the one in progress
-included: their messages, the signup threads the bot opened for them, and
-everyone's sign-ups for them. The event's automatic sign-ups and remembered roles go with it, and so
-does any run that never reached a message — there is no post to keep, and a
-pending run left behind would be posted by the next maintenance pass.
-
-The runs the event has already put on are kept. Their posts are left alone,
-their rosters stay stored, and the calendar goes on showing them on the days
-they were run, so deleting a weekly raid ends the series without erasing the
-months behind it. (A run whose message somebody had already deleted keeps its
-row and its roster; there is no post left to leave alone.) A run that finished in the last minute — before the
-maintenance pass caught up with its end — has its post and thread rendered as
-finished on the way out, since nothing looks at it again afterwards.
-
-An event that keeps runs that way is retired rather than removed: it is no
-longer offered by the `/event` autocompletes, cannot be edited, cancelled or
-reminded, projects no further occurrences onto the calendar, and is never
-posted or repeated again. An edit preview or sign-up prompt still open when it
-is deleted saves nothing and says so, rather than writing back into a series
-that will not run. Deleting it a second time therefore removes nothing
-more. An event with nothing to keep — one deleted before any of its runs
-finished — is removed outright, rows and all.
-
-A forum post the event was only posted into is kept, as everywhere else.
-
-## Feast Stock Alerts
-
-The monitor tracks these fixed Guild Storage consumable IDs:
-
-| Guild Storage ID | Feast                                 |
-| ---------------- | ------------------------------------- |
-| `1078`           | Bowl of Fruit Salad with Mint Garnish |
-| `1089`           | Cilantro and Cured Meat Flatbread     |
-| `1102`           | Cilantro Lime Sous-Vide Steak         |
-| `1112`           | Spherified Cilantro Oyster Soup       |
-
-`/v2/guild/:id/storage` reports a genuinely empty consumable as an entry with
-`count: 0`; it does not omit depleted items. A tracked feast missing from the
-response therefore means its count is unknown for that poll (e.g. a partial
-API response), not that it is empty, so missing entries are ignored rather
-than treated as zero. Storage is checked every five minutes. When a feast is
-at or below 10, the configured Discord channel receives:
-
-```text
-Guild Storage is low on **<item>**: <count> left
-```
-
-When `DISCORD_FEAST_NOTIFICATION_USER_ID` is configured, the bot sends the same
-alert to that Discord user by private message after posting it to the channel.
-A private-message failure is logged but does not cause the channel alert to
-repeat early.
-
-While a feast remains at or below 10, its alert repeats once every eight hours.
-When its count rises above 10, the reminder timer is cleared so a later drop
-triggers an immediate alert. Reminder times are persisted across restarts.
-
-### Feast Deposit History
-
-The guild log poller also records who restocks the feast shelves. Placing guild
-consumables into Guild Storage is logged as a completed guild upgrade carrying
-the depositing account and how many were placed, and the ids it names are the
-same Guild Storage ids the feasts above are tracked by. Deposits of the four
-tracked feasts are stored, keyed by the guild log's own event id so a restart
-never records one twice; every other upgrade the log reports is ignored.
-
-That ledger is what fills the **User** column of the feast dashboard's
-Additions table, and it starts empty. The poller reads the guild log from the
-cursor it left off at, so only deposits made after this feature is deployed are
-recorded — a guild that has been running the bot for months begins with a
-ledger holding nothing, even though the log itself still carries its most
-recent events. Stock history recorded before then therefore lists its restocks
-with nobody named against them, and they fill in as new deposits are made.
-There is no one-time import for this the way `/gold import` recovers the bank
-ledger.
-
-### Feast Stock Count History
-
-Each poll also records a per-feast stock history: the on-hand count of each
-tracked feast is written to the database only when it changes from the last
-recorded value, and only the feasts that changed are written. Identical polls
-produce no writes. The last-known count per feast is cached in memory after
-being loaded from the database once (on the first poll, or after a restart),
-so unchanged polls require no database read either. As with the low-stock
-alerts above, a feast missing from a poll response leaves its cached count and
-history untouched rather than logging it as zero.
-
-## Overdue Trial Member Report
-
-After connecting to Discord, the bot checks `/v2/guild/:id/members` for accounts
-whose in-game guild rank is `Trial` and posts up to three reports to the configured
-notification channel:
-
-- **Trial members before the 14-day mark** — Trial accounts whose `joined`
-  timestamp is less than 14 days old, restricted to members who are still `Trial`
-  in-game but have already been given the Sunborne role in Discord (a premature
-  promotion). A copy-and-paste congratulations code block is attached below the
-  list so officers can announce the promotions. This report is omitted when no
-  such member exists.
-- **Trial members past the 14-day mark** — Trial accounts whose `joined`
-  timestamp is at least 14 days old, awaiting confirmation that they can be ranked
-  up to Sunborne. Members are grouped by resolved status (Sunborne in Discord,
-  then Trial in Discord, then a linked Discord account with no resolved rank, then
-  no Discord account resolved) and sorted alphabetically within each group.
-  Accounts that an officer has marked with `/track` are excluded here and appear
-  in the 7-day warning report instead.
-- **Trial members past the 7-day warning mark (to be kicked)** — Trial accounts
-  past the 14-day mark that an officer tracked with `/track` at least 7 days ago.
-  The 7-day countdown starts from the moment `/track` is invoked, so a tracked
-  member only appears here once 7 days have elapsed since they were warned. During
-  that grace window they appear on neither report (they are removed from the
-  past-14-day report when tracked and not yet due for kicking). The report is
-  omitted when no tracked member is past the warning mark. A tracked member is
-  automatically untracked once they are no longer an overdue Trial member (for
-  example after promotion to Sunborne or leaving the guild), so they drop off
-  both reports.
-
-````text
-Trial members before the 14-day mark
-These users are still Trial in-game but already Sunborne in Discord:
-* EarlySunborne.1234 - @DiscordUser
-
-```
-Congratulations to our members who have become Sunborne!
-* EarlySunborne.1234 - @DiscordUser
-```
-
-Trial members past the 14-day mark
-Please confirm whether these users have completed the challenges and can be ranked up to Sunborne:
-* Linked.1234 - @DiscordUser - Sunborne
-* Unresolved.5678
-````
-
-To match each reported account to its application, the bot maintains a
-persistent index of the `Accepted` posts in the Trial application forum
-(`/settings channels trial_forum`, tagged with
-`/settings channels trial_accepted_tag`), stored in the same SQLite database as
-the raffle data. On the first run the bot reads every
-Accepted post's title and message bodies once and stores their normalized text
-and post author. On later runs it only re-reads posts whose most recent activity
-is newer than the last successful run minus a one-hour grace window; unchanged
-posts are served from the index, and posts that lost the Accepted tag are dropped
-from it. Account names are then matched locally against the cached post text, so
-the report no longer issues a Discord message search per member (which previously
-caused heavy `429` rate limiting).
-
-When a post matches, its creator is linked using their Discord user ID, and the
-creator's current Discord roles determine the status: Sunborne role
-`1317140660188352584` or Trial role `1450164501696741597`. Role lookups are
-resolved live each run (cached guild roles, then a member fetch), so a status
-reflects the member's current rank rather than the indexed snapshot. A matched
-post always includes the creator mention; accounts without a matching post remain
-plain usernames. Report entries are grouped with Sunborne first, Trial second,
-and unresolved roles last. Names are sorted within each group by a case-sensitive
-order, so uppercase names come before lowercase ones (for example, `Zebra` before
-`apple`).
-
-The check runs once every day at 17:00 UTC and does not run immediately when
-the bot starts. Each report is split into multiple
-messages when necessary to stay within Discord's message-length limit. A report
-is omitted entirely when it has no members, and nothing is posted when neither
-report has any members.
-
-- `/check`: builds the same before-, past-14-day, and 7-day warning reports on
-  demand and returns them only to the invoker as ephemeral replies, without
-  posting to the notification channel. It requires GW2 Leadershiop role
-  `1317638909735342201`, and replies "No Trial members to report." when no report
-  has any members.
-- `/track username:<account>`: toggles 7-day warning tracking for a Trial
-  member past the 14-day mark and requires GW2 Leadership role
-  `1317638909735342201`. Username autocomplete and submission resolve against
-  the case-insensitive guild-member cache and reject accounts outside the
-  configured guild. Autocomplete offers Trial members whose `joined` timestamp
-  is at least 14 days old, the same accounts the past-14-day report lists, plus
-  every guild member who is already tracked so they can be untracked.
-  Submitting any other account is refused without tracking it. Running it for
-  an untracked member starts tracking them (moving them from the past-14-day
-  report to the 7-day warning report); running it again untracks them.
-  Untracking always works for a member who is already tracked, even one no
-  longer past the 14-day mark in the cache. The ephemeral reply
-  confirms the new state to the invoker, and an audit message is posted to the
-  notification channel:
-
-  ```text
-  Username.1234 warning tracked by @DiscordUser
-  Username.1234 warning untracked by @DiscordUser
-  ```
-
-## Raffle Deposits
-
-Every minute, the bot checks `/v2/guild/:id/log` for new gold deposits into the
-guild vault. One complete gold purchases one raffle ticket. For example:
-
-```text
-Username.1234 deposited 3 gold and purchased 3 raffle tickets
-```
-
-The SQLite ledger stores exact lifetime deposited coins, current raffle tickets,
-gold-purchased tickets, manually added tickets, credited event IDs, pending
-notifications and reward milestones, completed raffle runs, and the last
-processed guild-log event ID. On the first run, the cursor starts at the latest
-existing event so historical deposits are not credited. Deposits made while the
-bot is offline are processed when it starts again.
-
-Gold deposits can purchase at most 10 tickets per user in the current raffle.
-Deposited gold above that limit still contributes to the user's lifetime gold
-total. Accounts with the exact in-game rank `Officer` receive tickets only when
-an individual deposit is 10 gold or less. Larger Officer deposits are ignored
-by the raffle workflow, so they create no purchase record, lifetime-deposit
-total, or deposit notification. The gold-purchased ticket count resets when a
-raffle runs.
-
-On the first startup after upgrading to the one-free-ticket limit, existing
-players with multiple free tickets are reduced to one free ticket. Purchased
-tickets are preserved. The correction is recorded and does not run again.
-
-Deposit notifications are posted to both the raffle contribution channel and
-the notification channel, alongside join and leave logs. Delivery to
-each channel is tracked independently and retried after failures. Every six
-hours at `00:00`, `06:00`, `12:00`, and `18:00` UTC, the bot also posts the
-players who purchased tickets or received free tickets during the preceding
-six-hour window to the raffle contribution channel. The report uses the same
-mobile-friendly layout as `/raffle list`: each bolded account name is followed
-by separate `Purchased`, `Free`, and `Total` lines. It is ordered by total
-tickets descending and then username without regard to case, with page buttons
-when more than ten players contributed. Empty windows do not produce a message.
-If the boundary-time guild-log refresh times out, the bot logs the refresh
-failure and still posts the report from contributions already persisted by the
-one-minute guild-log poller.
-
-Purchased-ticket reward milestones are also posted to the raffle contribution
-channel once per raffle. The defaults are:
-
-| Purchased tickets | Reward tier |
-| ----------------: | ----------- |
-|                50 | Tier 1      |
-|               100 | Tier 2      |
-|               150 | Tier 3      |
-|               200 | Tier 4      |
-
-Modify `RAFFLE_REWARD_TIERS` in `gw2bot.raffle` to add tiers or change their
-thresholds and labels. Pending milestone announcements persist across restarts
-and retry after Discord delivery failures.
-
-The raffle draw count is also data-driven through `RAFFLE_DRAW_TIERS`:
-
-| Current purchased-ticket tier | Winners drawn |
-| ----------------------------- | ------------: |
-| Guaranteed / Tier 0           |             2 |
-| Tier 1                        |             2 |
-| Tier 2                        |             3 |
-| Tier 3                        |             4 |
-| Tier 4                        |             5 |
-
-Each winner is selected from the remaining weighted ticket pool, then exactly
-one of that winner's tickets is removed before the next draw. A player may win
-multiple times while they still have tickets in the pool. If fewer tickets
-remain than the configured winner count, every remaining ticket is drawn once.
-Free tickets participate in the weighted draw but do not increase the current
-purchased-ticket reward tier.
-
-ArenaNet's guild-log API does not identify which guild-vault tab received a
-coin deposit. The bot therefore cannot safely exclude only Officer or Guild
-Master deposits made into a tab named `Treasure Trove`; excluding those ranks
-would necessarily exclude their deposits into every guild-vault tab. The
-Officer deposit-size rule above applies regardless of the destination tab.
-
-## Raffle Commands
-
-The commands are server-only and require the bot application to be installed
-with the `applications.commands` scope. Discord does not support hiding
-individual application commands from arbitrary roles through normal command
-registration, so authorization is enforced when each command runs.
-
-If Discord reports `403 Forbidden (error code: 50001): Missing Access` during
-command registration, verify that `DISCORD_COMMAND_GUILD_ID` is the Discord
-server ID, then reinstall the application into that server with both the `bot`
-and `applications.commands` scopes. The bot continues monitoring while command
-registration is unavailable.
-
-- `/raffle draw`: requires role `1317638909735342201`. Randomly selects the
-  tier-configured number of winners, weighted by each user's current tickets
-  after refreshing the guild log. One winning ticket leaves the pool after
-  each selection, so users with multiple tickets may win multiple times. The
-  ordered winners and participant ticket counts are archived, then every
-  user's current, gold-purchased, and manually added ticket counts reset to
-  zero. A completed draw remains pending until Discord accepts its winner
-  announcement; running the command again retries that announcement before
-  allowing another draw.
-- `/raffle audit run_id:<run>`: publicly shows everything needed to verify a
-  past draw — every entrant's ticket range in the numbered line the winners were
-  picked from, alphabetical by username, and each draw's winning ticket number
-  and range. `run_id` is autocompleted from the recorded runs. After each draw
-  one ticket left that winner and the line was renumbered, so each draw shows
-  the winner's range at that moment. Entrant ranges are paged when more than a
-  screenful of players entered. Runs drawn before entrant snapshots were kept
-  show their recorded results with a note that the snapshot is unavailable.
-- `/raffle addticket username:<account> [amount:<number>]`: without `amount`,
-  adds one manual ticket to a current guild member and requires role
-  `1318357141521825872`. Supplying `amount` requires GW2 Leadership role
-  `1317638909735342201` and records that many gold-purchased tickets as a real
-  deposit event, including lifetime deposited gold, purchase notifications,
-  contribution reports, and reward milestones. The purchase fails without
-  adding tickets if it would exceed the per-user purchased-ticket cap. The
-  command uses a case-insensitive guild-member cache and returns an error for
-  accounts outside the configured guild. Username autocomplete immediately
-  searches the current cached snapshot and refreshes expired data in the
-  background, while command submission still waits for current guild
-  membership validation. Each user may receive at most one manually added
-  ticket per raffle.
-- `/raffle addtickets [username1:<account> ... username10:<account>]`: adds one
-  manual ticket to each of up to ten selected guild members and requires the
-  manual-ticket role `1318357141521825872`.
-- `/raffle bulkaddtickets`: opens a large text field for pasting squad
-  attendance lines such as `:Username.1234, Character Name`, then adds one
-  manual ticket to each unique current guild member. It requires the
-  manual-ticket role `1318357141521825872`.
-
-  Both bulk commands reply privately with who received a ticket, and list
-  separately the members who have already earned their free ticket for this
-  raffle and the accounts excluded from the raffle, so neither is mistaken for
-  a failure. `/raffle addticket` gives the same "already earned" answer for a
-  single member.
-- `/raffle removetickets username:<account> [amount:<number>]`: requires the
-  same officer role as `/raffle draw` and removes only current purchased
-  tickets. The amount defaults to one. Free tickets and lifetime deposited gold
-  are unchanged.
-- `/raffle tickets [username:<account>]`: shows purchased, free, and total
-  current raffle tickets. Without a username, the command uses the caller's
-  linked GW2 account and prompts unlinked users to enter their account name.
-- `/raffle list`: publicly lists players who currently have tickets, with each
-  account name bolded above its purchased, free, and total ticket counts. It
-  shows ten players per page, ordered by total tickets descending and then
-  username without regard to case. Retained lifetime records with zero current
-  tickets are omitted.
-- `/raffle leaderboard`: publicly lists every player's lifetime earned and
-  purchased tickets across all raffles, using the same bolded `Purchased`,
-  `Free`, and `Total` layout as `/raffle list`. Totals are summed from the
-  persisted gold-deposit and free-ticket history, so they are unaffected by the
-  ticket reset performed each `/raffle draw`. Players are ordered by total
-  tickets descending and then username without regard to case, with page buttons
-  when more than ten players have history.
-
-`/raffle draw` announces the ordered winners publicly. Ticket-addition and
-removal confirmations and errors and `/raffle tickets` results are visible only
-to the command user. Successful ticket additions and removals also send audit
-logs through the same destination as guild-leave messages:
-
-```text
-@DiscordUser added 1 raffle ticket to Username.1234.
-```
-
-## Guild Membership Messages
-
-The one-minute guild-log poller also detects new members and voluntary member
-departures. For every `joined` event, the bot posts:
-
-```text
-Username.1234 has joined the guild.
-```
-
-For every voluntary departure event, reported by the GW2 API as a `kick` event
-where `user` and `kicked_by` are the same account, the bot posts:
-
-```text
-Username.1234 has left the guild.
-```
-
-The poller also logs guild invitations and rank changes to the same channel. For
-every `invited` event the bot posts the inviter when the GW2 API reports one:
-
-```text
-Officer.5678 invited Username.1234 to the guild.
-Username.1234 was invited to the guild.
-```
-
-For every `rank_change` event the bot posts the account that changed the rank
-when the GW2 API reports one (an account that changes its own rank, or an
-unattributed change, is reported without an actor):
-
-```text
-Officer.5678 changed Username.1234's guild rank from Trial to Sunborne.
-Username.1234's guild rank changed from Trial to Sunborne.
-```
-
-Invite and rank-change delivery state is persisted like joins and leaves, so each
-message is posted once per event, including across restarts.
-
-The same poller reports gold leaving the guild bank. For every `stash` event
-carrying coins with the operation `withdraw`, the bot posts:
-
-```text
-Officer.5678 withdrew 12.5 gold from the guild bank.
-```
-
-Only withdrawals are announced here. A deposit already has the raffle's own
-purchase embed, so announcing it a second time would say the same thing twice.
-Withdrawal delivery state is persisted like every other membership message, so
-each one is posted once per event, including across restarts. Both directions
-are recorded either way — see [Guild Bank Gold History](#guild-bank-gold-history).
-
-Guild membership messages, gold withdrawal messages, raffle deposit audit
-messages, raffle command audit messages, stock alerts, and
-polling-status messages are posted in the channel named by
-`/settings discord_notification_channel_id`.
-Every minute, the bot updates that channel's description to the current GW2
-guild member count as `x/500 (y pending)`, excluding `invited` records from
-`x` and reporting them in `y`.
-The `y` in that description is a count and nothing more, so `/pending` names
-the accounts behind it.
-
-- `/pending`: privately lists every account that holds the in-game `invited`
-  rank — invited to the guild but not yet accepted — and returns the list only
-  to the invoker as ephemeral replies, without posting to the notification
-  channel. Each account is matched to a Discord account through the same
-  `Accepted` application forum index the
-  [Trial reports](#overdue-trial-member-report) use, so an invitee who applied
-  is named by their mention; one nobody matched is listed by their account name
-  alone. Only the match is looked up: an invited account holds no in-game rank
-  the Trial reports' status label could name, so the member fetch that resolves
-  one is skipped. When the application forum could not be read in full -
-  refused outright, or only part-way through its threads - a mention may be
-  missing only because the post naming it was one of the unread ones, and the
-  report says so rather than letting the absence read as "never applied". It requires GW2 Leadership role `1317638909735342201`, replies
-  "No pending invites to report." when nobody is waiting, and
-  "Could not read the guild's pending invites. Try again later." when the GW2
-  API or the database cannot be reached. A page Discord refuses is logged and
-  skipped, so the pages behind it are still delivered.
-
-  ```text
-  Pending invites
-  These users have been invited in-game but haven't accepted yet:
-  * Applied.1234 - @DiscordUser
-  * Unmatched.5678
-  ```
-
-  The same list is on the [Guild Roster page](#guild-roster-history-page) under
-  **Pending invites**.
-Raffle-deposit notifications are also posted in the raffle contribution
-channel. Join, leave, and deposit delivery state is persisted so each message
-is posted once per destination, including across restarts. Startup status and
-guild-log polling failures and recovery are written only to the application
-console logs.
-
-### Guild Roster History
-
-Every join, leave and kick the poller records is kept, and the one-minute
-member count poll writes a row whenever the count itself changes — only when it
-changes, so a quiet week costs a handful of rows rather than ten thousand
-identical ones. Together they are what the
-[Guild Roster page](#guild-roster-history-page) draws.
-
-The count is what the history is measured from. A change on its own says which
-way the roster moved, not where it stood, so the page walks back from the
-newest recorded count through the changes between. Measuring from the newest
-observation rather than the oldest keeps the right-hand edge of the graph — the
-part you would check against the channel description — true even if an older
-stretch of changes was never recorded.
-
-A poll that sees the count unchanged therefore still moves that newest row's
-moment forward rather than adding a row. This matters after a long outage: the
-guild log only returns about a hundred events of each type, so changes that
-scroll out of it while the bot is down are gone for good. Keeping the anchor at
-the latest observation puts that whole gap behind it, where the changes the bot
-*did* capture cannot be replayed on top of a stale count.
-
-Both need `/settings gw2_api_key` and `/settings gw2_guild_id`, and the count
-poll additionally needs `/settings discord_notification_channel_id`, because it
-is the same poll that writes the channel description.
-
-#### Importing The History From The Log Channel
-
-The bot only started keeping join and leave rows when the guild log poller
-gained them, but it has been *announcing* every one of them in the notification
-channel for far longer. `/roster import` reads those announcements back:
-
-```text
-/roster import
-```
-
-It walks the whole channel newest first and takes only the messages the bot
-itself wrote, and only the three membership notifications among them — joins,
-departures and kicks. Invitations and rank changes are passed over, because
-neither moves the member count; so is everything else in the channel, including
-the `diag` previews, which describe a fictional account and nothing that
-happened. Discord's own timestamp on each message is when the change happened,
-which is within one poll of the truth.
-
-The command is limited to `/settings roles raffle_officer` and answers
-privately with what it read and imported. Three things make it safe to run more
-than once:
-
-- each imported change is keyed by the Discord message it came from, so a
-  second run finds its own rows and adds nothing;
-- changes at or after the first one the guild log poller recorded are skipped,
-  so an event the poller already stored is never counted twice;
-- a run Discord cuts short keeps what it read and says so, and running it again
-  resumes rather than restarts.
-
-An import writes no messages back to the channel: the message being read *was*
-the notification, so imported changes are recorded as already delivered.
-
-Reading years of history takes minutes, not seconds. Run it once after
-upgrading; there is nothing to schedule.
-
-### Guild Bank Gold History
-
-Every coin movement the guild log reports — deposits and withdrawals alike — is
-recorded in a ledger of its own, and a five-minute poll of `/v2/guild/:id/stash`
-writes a row whenever the bank's balance itself changes. Together they are what
-the [Guild Bank page](#guild-bank-gold-history-page) draws.
-
-The ledger is deliberately separate from the raffle's deposit table. That one
-is filtered by the raffle's rules — an oversized Officer deposit buys no
-tickets and is never written there — so a balance derived from it would drift
-away from the guild's real one. This one takes every coin movement, whatever
-the raffle made of it.
-
-The balance reading is what the history is measured from, exactly as the member
-count is for the roster. A movement on its own says how much gold moved, not
-how much there was, so the page walks back from the newest recorded balance
-through the movements between. Measuring from the newest observation rather
-than the oldest keeps the right-hand edge of the graph — the part you would
-check against the vault in game — true even if an older stretch of movements
-was never recorded.
-
-A poll that sees the balance unchanged therefore still moves that newest row's
-moment forward rather than adding a row, for the same reason the roster's count
-poll does: the guild log returns only about a hundred events of each type, so
-movements that scroll out of it while the bot is down are gone for good, and
-keeping the anchor at the latest observation puts that whole gap behind it.
-
-Both need `/settings gw2_api_key` and `/settings gw2_guild_id`. Neither needs a
-notification channel; the withdrawal *messages* do.
-
-#### Importing The History From The Guild Log
-
-The bot only started keeping coin movements when this feature shipped, and the
-guild-log poller sets its cursor to the newest event on its very first pass, so
-everything before that was seen and thrown away. Both halves of the history are
-still recoverable, because the guild log keeps roughly its latest hundred
-events of each type and the stash endpoint says what the bank holds right now.
-`/gold import` reads both:
-
-```text
-/gold import
-```
-
-It asks for the whole log rather than the slice after the poller's cursor —
-reaching behind that cursor is the point — stores every coin movement in it,
-and logs the current stash balance beside them. The reversal that turns those
-two into a history happens when the page is drawn: each movement is subtracted
-from the observed balance in turn to recover the balance that stood before it.
-
-The command is limited to `/settings roles raffle_officer` and answers
-privately with what it read, what it imported and what the bank holds. It is
-safe to run more than once:
-
-- every row is keyed by the guild log's own event id, so a second run finds its
-  own rows and adds nothing;
-- an event the poller has already recorded is left exactly as it stands,
-  including whether its notification was sent, and an event this import writes
-  first is left alone by the poller when its cursor reaches it;
-- imported movements are recorded as already announced, because a withdrawal
-  from months ago is history rather than news.
-
-What the guild log no longer holds cannot be recovered, so the imported history
-reaches back as far as the log does and no further. Run it once after
-upgrading; there is nothing to schedule.
-
-## Automated Message Diagnostics
-
-When a non-bot user sends exactly `diag`, ignoring case and surrounding spaces,
-in the notification channel, the bot posts read-only previews of:
-
-- the next six-hour raffle contribution report using contributions currently
-  recorded in its active interval, including free tickets;
-- a gold-deposit ticket purchase embed, a raffle draw announcement, and a raffle
-  audit;
-- a guild join, guild leave, guild invite, guild rank change, gold-deposit audit
-  log, gold withdrawal, manual ticket audit, purchased-ticket removal audit,
-  and next reward-tier message;
-- a low feast-stock alert, overdue Trial member report, and Trial 7-day warning
-  report;
-- the guild member count channel description as it currently stands.
-
-If the raffle is already at the highest configured reward tier, the highest-tier
-message is shown with a note that it has already been reached. Running `diag`
-does not refresh the guild log, advance either scheduled report, or mark any
-pending notification as sent. Feast alerts can also be sent as a configured
-private message. Startup status and Guild Log poll failure/recovery messages are
-console-only and therefore are not previewed as Discord messages. Every
-diagnostic preview delivery is attempted independently, so one failed preview
-does not prevent later previews from being sent.
-
-Docker Compose stores the database in the persistent `bot-data` volume, along
-with `settings.key` unless you set `SETTINGS_ENCRYPTION_KEY` yourself, and the
-`log` folder. Back the database and key up together: the key is what makes
-the encrypted settings readable. The bot does not make backups itself.
-
-For Unraid, map persistent app data to `/app/data`:
-
-| Host path                  | Container path | Access mode |
-| -------------------------- | -------------- | ----------- |
-| `/mnt/user/appdata/gw2bot` | `/app/data`    | Read/Write  |
-
-Leave `RAFFLE_DB_PATH` unset, or set it to `/app/data/gw2bot.db`. Do not set it
-to the host path. The image runs as UID `99` and GID `100`, matching Unraid's
-usual `nobody:users` appdata ownership. If you are running an older image built
-with UID `10001`, either rebuild the image or set Unraid's extra Docker
-parameters to `--user 99:100`.
-
-## Web Calendar
-
-An optional website shows the guild event calendar in day, week, and month
-views. Events appear as one-line entries on their day, and hovering over an
-entry shows the full details: category, description, requirements, times,
-duration, leader, status, and roster counts. The counts name only the seats
-the event's category has: a Dungeon shows no healers, a Player vs. Player event
-counts its Support and DPS without boons, and a headcount event such as World
-vs. World shows its participants alone. Events you are signed up for, seated
-or on the waitlist, are outlined in the site's accent color with a ✓ before
-the time, and their details say which seat you hold or that you are on the
-waitlist; in the month view on a phone, where an entry has room for only a few
-letters, the outline alone marks them. A projected run that your
-[automatic sign-up](#automatic-sign-up-and-role-memory) will put you on is
-marked the same way, its dashed border turned to the accent color, and its
-details name the role the sign-up will ask for; the same capacity rules as any
-sign-up still apply when it is posted, so you can land on another role or the
-waitlist. Clicking an event pins those details until the next click outside
-them; clicking a different event switches the pinned details to it. Links in a
-description or its requirements, written as in Discord - `[text](https://...)`,
-`<https://...>` or a bare address - open in a new tab from the pinned details;
-an address that is not `http` or `https` stays plain text. Details too long for
-the window scroll once pinned. With a keyboard, Enter pins an event's details,
-Tab from it moves into them, where the arrow keys scroll a long description,
-and on through their links, and Escape closes them. Day headings in week view
-and every date in month view open that date's day view.
-When a month cell cannot fit all of its events, it shows a clickable `+N`
-beside the date instead of a scrollbar. Future occurrences of repeating events
-that the scheduler has not posted yet appear with dashed borders as
-projections, and finished events stay visible dimmed on past days. Deleting an
-event leaves those past days as they are: the runs it has already put on stay
-on the calendar (see [Deleting An Event](#deleting-an-event)).
-
-Access requires signing in with Discord. The site only requests the `identify`
-OAuth scope and then checks with the bot that the signed-in user is a member
-of `DISCORD_COMMAND_GUILD_ID`. Non-members receive a members-only page.
-Sessions last `/settings web_session_ttl_seconds` (seven days by default). Membership is
-re-checked at sign-in and then at most every five minutes for the life of the
-session, so a member who leaves or is banned loses access within minutes rather
-than keeping it until the cookie expires. Calendar and dashboard pages share
-the same compact header and **Sign out** control.
-
-To enable it:
-
-1. Open the bot's application in the
-   [Discord developer portal](https://discord.com/developers/applications),
-   go to OAuth2, and copy the Client ID and Client Secret.
-2. Add `<web_base_url>/oauth/callback` (for example
-   `https://gw2bot.example.com/oauth/callback`) to the application's
-   OAuth2 redirect URIs.
-3. Set `WEB_ENABLED=true` in `.env`, then run `/settings web_base_url`,
-   `/settings discord_oauth_client_id`,
-   `/settings discord_oauth_client_secret` and `/settings web_session_secret`.
-   Generate the session secret with
-   `python -c "import secrets; print(secrets.token_urlsafe(48))"`. The
-   site starts as soon as the fourth one is set.
-4. Publish the port by uncommenting the `ports` block in `compose.yaml`. It
-   follows `WEB_PORT`, so there is nothing to change there if you move the port.
-
-Serve the site behind a reverse proxy that terminates TLS. Discord only
-accepts `https` redirect URIs (localhost excepted), and session cookies are
-marked `Secure` only when `/settings web_base_url` uses `https`. The proxy has
-to pass the whole host root through to `WEB_PORT`: every page, API and sign-in
-path is absolute from the root, so the site cannot be mounted under a path
-prefix such as `/gw2bot/`.
-
-Every posted event links the calendar in its last field once the site is serving
-(see [Guild Events](#guild-events)), so a member who found one event in Discord
-can reach the whole schedule.
-
-Times are shown in each viewer's local timezone. Weekly repeat days are
-defined in the timezone set with `/settings timezone`, so viewers far from it
-may
-correctly see a repeating event land on an adjacent local weekday.
-
-### The site's addresses
-
-| Path | Page |
-| --- | --- |
-| `/` | Redirects to `/calendar`. |
-| `/calendar` | The guild event calendar. |
-| `/profit` | The Trading Post profit dashboard. |
-| `/admin/food` | The feast usage dashboard. |
-| `/admin/roster` | The guild roster history dashboard. |
-| `/admin/gold` | The guild bank gold history dashboard. |
-| `/admin/events` | The guild event statistics dashboard. |
-| `/healthz` | A health check: `200 OK` with `{"status": "ok", "version": "<version>"}` while the site is serving, where `<version>` is the release the bot is running, or `0.0.0-dev` for a build that is not one. It needs the Discord sign-in like every page, but no role, and reads nothing but the version, so it is cheap to poll. |
-
-The dashboards gated behind a role live under `/admin`. They answered at
-`/food`, `/roster` and `/gold` before, and those addresses now redirect to
-their `/admin` pages, so an old bookmark still lands in the right place. Their
-JSON APIs did not move.
-
-The calendar answered on the site root before, which suited a host of its own
-such as `calendar.example.com`. It has its own path now, so the whole site
-reads the same way whichever host it is served from, and the root redirect
-keeps the older bookmarks working. If you are moving the site off a
-calendar-specific host, keep the old name answering with a redirect to the new
-one and add the new `<web_base_url>/oauth/callback` to the Discord application
-before switching `/settings web_base_url`.
-
-### Trading Post Profit Dashboard
-
-Every guild member can keep a separate Guild Wars 2 API key and view only their
-own Trading Post history. The key is unrelated to the guild-wide
-`/settings gw2_api_key`: it needs the `tradingpost` permission and is stored in
-the shared SQLite database encrypted with the same `SETTINGS_ENCRYPTION_KEY` or
-`settings.key` used by encrypted settings.
-
-- `/profit setkey` opens a private modal, checks the key with `/v2/tokeninfo`,
-  and saves it only when the `tradingpost` permission is present. A
-  route-restricted subtoken must allow the history buys, history sells, current
-  sells, current buys, and `/v2/commerce/delivery` endpoints.
-- `/profit view [days]` privately links to the signed-in `/profit` page. The
-  window accepts 1 through 3650 UTC calendar dates, including today, though it
-  can only show what has been collected so far. A `days` of 1 is the **24h**
-  button, so it names the last twenty-four hours rather than today's date.
-  Left empty, the link names no window and the page reopens the one the member
-  last used, defaulting to 30 days until they pick one. If the web session has
-  expired, Discord sign-in returns the member to that same profit window. The
-  page itself offers the 24-hour, 7-day, 30-day and custom windows the other
-  dashboards do; this argument is the way to name a length none of those
-  buttons covers.
-- `/profit deletekey` removes the caller's encrypted key, cached Trading Post
-  data, remembered report window, both lists of hidden items — the Open
-  Orders one and the realized-profit one — and their hidden matched trades.
-  It cannot affect any other member's key, cache, or choices. Replacing a key
-  with `/profit setkey` keeps the window, the hidden items and the hidden
-  trades.
-
-The `/profit` page replaces the former `/profit summary`, `/profit item`,
-`/profit day`, and `/profit unrealized` Discord tables. It presents the realized
-summary, realized profit grouped by item, realized profit grouped by sale date,
-every buy and sell the bot matched, projected profit for held purchases
-currently listed for sale, the items the member is currently buying, and the
-coins and each item awaiting pickup from the Trading Post. The
-realized-profit-by-item, realized-profit-by-day and matched trades tables are
-each paginated with 10 rows by default; the bottom-left control of each accepts
-page sizes from 1 through 90, and a page picker appears above and below all
-three tables. That picker
-is a double arrow to the first or last page, a single arrow to the previous or
-next one, and between them a box holding the current page, which accepts a page
-typed straight into it. An arrow that would move nothing — a previous arrow on
-the first page, a next arrow on the last — is greyed out, and a page outside the
-table is refused and the box put back to the page on screen. Coin amounts
-account for the
-Trading Post's 5%
-listing fee and 10% exchange fee, and sales are matched to purchases FIFO as in
-the original profit bot. Matching runs over a member's whole stored history
-rather than over the chosen window, so a sale of stock bought before the window
-began is costed from the purchase that actually paid for it. It used to be
-dropped for having no match inside the window, which understated short windows
-— by around 13% on a week for a busy trader, and by little or nothing once the
-window covers most of the held history. Every item with a matched sale in the
-window is reported, however few units it cleared; an item a member does not
-want counted is hidden by hand, as described below, rather than dropped by a
-unit threshold. Click any column heading in the detail tables to sort it; click
-the same heading again to reverse the order. The totals remain
-pinned below the sortable rows. Realized and projected ROI are profit divided
-by their corresponding matched cost. Each realized item also shows its
-unit-weighted average time from purchase to sale and its signed percentage of
-total realized profit; the percentage is unavailable when total profit is zero.
-
-Every item name on the page links to that item's page on
-[GW2BLTC](https://www.gw2bltc.com/), in each table and in the summary's best
-and worst item rows alike, and opens it in a new tab. The link is drawn in the
-name's own colour and carries no underline, so the tables read exactly as they
-did; the name's tooltip is what says there is a link to follow. GW2BLTC
-publishes its item pages in English, German, Spanish and French, and a link
-follows the first of those the reader's browser asks for — a browser asking for
-any other language gets the English page.
-
-**Realized Profit by Item** carries a search box and a category menu above its
-rows. Typing narrows the table to the items whose names contain what was typed,
-and the menu narrows it to one kind of item — Ring, Amulet, Crafting Material,
-or whatever kinds the window happens to hold; the menu lists only the
-categories the window actually contains, and the two narrow together. The
-categories are the Guild Wars 2 item endpoint's own, taking the narrower of the
-two names it gives — Ring rather than Trinket, Greatsword rather than Weapon —
-and an item the endpoint says nothing useful about is listed as Uncategorized.
-A narrowed table repages from its first page over the rows that are left, and
-its footer becomes a **Filtered total** added up from those rows, with Profit
-Share still measured against the whole window's realized profit so it reads as
-the share those items account for. Clearing both leaves the table whole again,
-with the window's own totals back in the footer. Neither box changes what is
-stored or what any other section shows: they narrow the one table on screen,
-and hiding an item is what takes it out of the figures.
-
-Each **Realized Profit by Item** row ends with a crossed-out eye button that
-leaves that item out of the member's flipped profit. Hiding one is not a change
-to the item table alone: the item leaves the summary, all three daily charts,
-the **Realized Profit by Day** table and **Your Picks** with it, so every figure
-on the page keeps describing the same trades. Use it for stock that is not a
-flip — a sale out of long-held storage, or an item bought to use rather than to
-resell — whose result would otherwise read as trading profit. The matching
-itself is untouched, so restoring an item brings its whole history back rather
-than re-reading the Trading Post.
-
-Hidden items are remembered against the member's Discord account, so they
-survive a reload, a new sign-in, and a different browser, and hiding an item
-affects only that member's own dashboard. The three dots at the top right of
-the section open a **Hidden items** window listing them in a searchable table,
-each with a **Restore** button; an item with no trades in the window on screen
-is listed there too, so it can always be put back. **Open Orders** keeps its
-own separate list: hiding an item from one table says nothing about the other.
-
-**Matched Trades** lists every sale in the window beside the purchase FIFO
-matched it against: the item, when it was bought and at what unit price, when
-it sold and at what unit price, the units the pair covers, their cost, net
-revenue after both fees, profit and ROI, and how long those units were held. A
-sale that emptied two purchases is two rows, and a purchase sold off in three
-sales is three, so the rows add up to the window's realized figures exactly —
-the footer's **Total** is the summary's matched units, cost, net revenue and
-realized profit. Times are UTC, like every date on the page, and a purchase
-from a year other than the window's says which year it was. A purchase held
-long enough to be merged into the averaged lot described under
-[Precomputed results](#precomputed-results) is no single buy, and hovering its
-Bought time says so.
-
-The list is sorted, searched and paged by the server rather than in the
-browser, because a busy trader matches thousands of pairs a month. It opens on
-the newest sale; click any column heading to sort the whole list by it, and
-again to reverse it. The search box narrows the list to the items whose names
-contain what was typed, and the footer then becomes a **Filtered total** of
-every trade that matches, on every page. Trades of an item hidden from
-**Realized Profit by Item** are not listed, since they are in none of the
-figures.
-
-Each row ends with the same crossed-out eye, and it hides that one trade
-rather than the item: the trade leaves the summary, the charts, both realized
-tables and **Your Picks**, and the item's other trades stay. Use it for the
-single pairing that is not a flip — a sale of stock that was looted or crafted
-and happened to be matched against a purchase, or one wild outlier — where
-hiding the whole item would take its real flips with it. As with hidden
-items, the matching itself is untouched: the purchase is still the one that
-sale used up, so later sales are costed exactly as before, and restoring the
-trade puts its figures back to the copper. The three dots at the top right of
-the section open a **Hidden trades** window listing every hidden trade, from
-any window, with its sale time, units and profit and a **Restore** button.
-
-A hidden trade is remembered against the member's Discord account as the pair
-of Trading Post transactions it matched, so it survives a reload, a new
-sign-in and a different browser. If later history changes which purchase that
-sale is matched against — a backfill reaching further than before — the pair
-no longer exists and hides nothing, and it comes back into force if the pair
-ever does.
-
-The **Your Picks** table revisits items flipped in the selected window using
-their current highest buy order and lowest sell listing. Its columns sort like
-those of the other detail tables, and it shows the ten rows at the top of
-whichever sort is chosen: sorting by ROI, which it opens on, lists the ten
-highest returns after fees, and sorting by profit per unit the ten highest
-profits. Items whose current return after fees is a negative ROI are left out
-entirely.
-
-The **Open Orders** table lists every item the member is currently buying on the
-Trading Post. Each row gives the units on order, the price the member is buying
-at, that order's total cost, the item's current highest buy order and lowest
-sell listing, and the profit per unit, total profit, and ROI of finishing the
-trade — selling the whole order at that lowest listing after the 5% listing and
-10% exchange fees. Those fees round up against the order's gross value, the way
-a realized sale of the same quantity is charged, and the profit per unit is
-derived from that total. The Trading Post splits one purchase into many orders,
-so orders for the same item at the same price are collapsed into one row; an
-item bought at two prices stays two rows, because the price is what decides the
-return. A row whose item has no usable current price shows dashes instead of a
-return and is left out of every total in the footer, so the units, cost, profit
-and ROI below the table always describe the same orders. Unlike **Your Picks**,
-a negative return is shown rather than hidden: it is an order the member is
-holding, not a suggestion.
-
-Each row ends with a crossed-out eye button that hides that item from the table
-— useful for a long-term buy that is not a flip, or an item whose spread is not
-worth reading every visit. Hidden items are remembered against the member's
-Discord account, so they survive a reload, a new sign-in, and a different
-browser, and hiding an item affects only that member's own dashboard.
-
-The three dots at the top right of the section open this table's own **Hidden
-items** window, listing them in a searchable table, each with a **Restore**
-button that puts the item back. A member may accumulate hundreds of them, so the
-list lives behind that button rather than above the table, and the search box
-filters it by name. The window closes with its × button, the Escape key, or a
-click outside it. An
-item hidden while it had an order keeps its entry there after the order fills or
-is cancelled, so it can always be restored. Hiding an item here leaves the
-realized tables alone; the eye in **Realized Profit by Item** is what hides it
-from those.
-
-The **Unclaimed Trading Post** section shows the coins waiting for pickup and
-then one row per item waiting with it, with the totals below them. An item
-delivered as several stacks is added together into a single row.
-
-It reads like **Open Orders** on the market side, with **Highest Buy** and
-**Lowest Sell** for each waiting stack and a projection built from them:
-**Projected Sale** is what selling the whole stack at the current lowest sell
-would return after both fees, **Projected Profit** is that less what the stack
-cost, and **Projected ROI** is the profit over that cost.
-
-**Your Price** and **Cost** come from the member's own purchase history. The
-delivery box holds everything bought since they last collected, and collecting
-empties it in one go, so what is waiting is normally the newest run of their
-purchases — which is what the section prices it from, newest first. Your Price
-is the average across them.
-
-It reads the purchases themselves rather than what the matcher left over. A
-sale of stock that was never bought through the Trading Post — crafted,
-gathered, or held from before the member saved a key — is matched against the
-newest purchase FIFO can reach, and that can be one still sitting uncollected
-in the box. Since an uncollected item cannot have been sold, reading the
-purchases directly keeps such a stack priced by the buys that filled it. Only
-as many purchases as the waiting stacks need are read, so a heavily traded item
-costs the rows the box needs rather than its whole history.
-
-It is a cost basis rather than a receipt, and the distinction matters for one
-case the API cannot report: a stack handed back by a cancelled sell listing
-arrives in the box the same way a filled buy order does, with nothing to tell
-them apart. Stock of one item is interchangeable — the units merge into one
-stack the moment they are collected — so such a stack is priced from the same
-pool of unmatched purchases, which is the same convention the realized report
-already matches sales under. A member holding no unmatched purchases of that
-item gets no cost at all rather than a guess.
-
-The other gap is a stack the purchases only partly cover, usually one bought
-before the member saved a key. It shows its Highest Buy, Lowest Sell and
-Projected Sale but no cost, price, profit or ROI: part of a stack's cost set
-against a sale of all of it is a per-unit price nobody paid. Hovering the
-dashed cost says how far the purchases reached. Those rows, and any with no
-current market price, are left out of the totals so the footer reconciles with
-itself, and a note above the table says so whenever there are any.
-
-Because the basis comes from stored history, a purchase that filled since the
-last sync is not in it yet, and a stack can price from the previous basis until
-the next sync lands.
-
-The cost side is read from the history the daily sync already stores, never
-from a sync of this section's own, so it stays the one-request section it has
-always been. A member whose history has never been read sees the market columns
-and dashes where the cost would be, and the costs appear on their next visit.
-
-#### Choosing the window
-
-The header carries the same four buttons every other dashboard has: **24h**,
-**7d**, **30d** and **Custom**. **24h** is the last twenty-four hours, counted
-back from the moment the page is opened, the way that button works on every
-other dashboard: opened at 09:30 UTC it starts at 09:30 yesterday, not at
-midnight this morning. **7d** and **30d** are the last 7 and 30 whole UTC
-dates, ending at the moment the page is opened. **Custom** opens a pair of
-date fields beside them, and the window they describe is drawn once **Apply**
-is pressed — the preset buttons keep working until then. Those dates are UTC
-calendar dates, because every table and chart below them groups by UTC sale
-date. A pair running past today stops at the present, and one wider than 3650
-days, or ending before it starts, is refused with the reason in the header
-rather than loaded. **Reload** beside the buttons is the only control that
-re-reads the Trading Post; picking a window draws it from what is already
-stored. The summary's **Window** row names **24h** as `Last 24 hours`, another
-preset by its length, and a picked pair by its two dates.
-
-Because **24h** is measured in hours while the tables below it group by UTC
-sale date, it lands on two dates whenever it is opened away from midnight: the
-daily table and the daily charts then show yesterday and today, each holding
-the part of itself that falls inside the window. Its per-day figures divide by
-the one day the window is long. The seven-day trailing average is a daily
-series and is unaffected — it keeps reading whole UTC dates, which is one
-more reason it can sit a little apart from the bars beside it.
-
-That window is also the only one the stored daily results cannot simply be
-added up for, so the trades inside it are matched again on each load, resuming
-from the most recent checkpoint behind it rather than from the start of the
-member's history. The costs it allocates are the ones the stored days hold: a
-sale earlier in the window's opening date is still matched, so the stock it
-took is not handed back to a later sale. That is what keeps a sale worth the
-same under **24h** as under **7d**.
-
-The window is remembered: whenever a member loads a report the window they
-picked is stored against their Discord account, and opening `/profit` without
-one in the URL reopens it instead of the 30-day default. A preset is stored as
-the rolling window it is, so it still means "the last 7 days" tomorrow; a
-picked pair is stored as those two dates. A window named in the URL — the one
-`/profit view 60` links to — still wins and becomes the new remembered window,
-while `/profit view` with no argument links without one and leaves the saved
-window alone. A length that is none of the three presets, such as that 60, is
-shown in the date fields, because there is no button that means it — but it
-stays a length everywhere else, so reloading the page keeps asking for the
-last 60 days rather than freezing on the dates they happened to cover.
-
-The browser keeps a copy of that choice as a repair kit. If the account comes
-back without a stored window — a database restored from before the choice, say
-— the page notices it was served the default rather than a remembered value,
-puts back what that browser last used, and saves it again. It does this at most
-once per load, so a browser that refuses storage cannot put the page in a loop.
-The copy is tied to the API key it was saved under, so `/profit deletekey`
-really does forget the window: a key saved afterwards starts from the default
-again, while replacing a key with `/profit setkey` keeps it.
-
-Dates read as `Jun 13` throughout — the daily table, the summary's best and
-worst trading days, the chart axes and their hover readings. The year is added,
-everywhere at once, only when the selected window crosses one: a window inside
-a single year has nothing to disambiguate, and mixing the two forms in one
-table reads worse than either. The "held since" date in the status line decides
-its own year the same way, against the end of the window, because it can reach
-much further back than the window does.
-
-The summary names the best and worst realized item and UTC sale day in the
-window. The dashboard uses the full available browser width. Three daily charts
-fill dates without matched sales with zero: realized profit with its whole-window
-daily average, the trailing seven-day average, and cumulative realized profit.
-The trailing average has a reading on the window's own first date: the report
-carries a series of its own, covering the six UTC dates before the window as
-well as the window itself, so every date drawn has a whole week behind it
-rather than the line starting six dates in and a seven-day window showing a
-single dot. That series is summed in one pass across the whole stretch it
-covers and leaves out the same hidden items the window does, so hiding an item
-moves the bars, the two averages and the cumulative line together. The six
-dates behind the window are drawn nowhere else — no bar, no cumulative total,
-and no row in the daily table. Because the average is a
-reading of the week behind each of its dates rather than of the window, a
-quiet window that follows a profitable one still draws it, with the other two
-charts reporting no realized profit.
-
-Each chart is drawn on four gridlines: zero and three round steps. The step is
-always a whole number of one coin — 5g, 250s, 40c, never a fraction of one —
-and the largest denomination the chart's own numbers reach is the one it is
-labelled in, so a window that never made a gold reads in silver instead of in
-roundings to zero. The three gaps are shared between what the window made and
-what it lost, with zero always on a line, and the top line is the first round
-step at or above the highest reading, so the padding above it is the rounding
-and nothing more. The gutter beside the labels is measured from the labels
-themselves, so a long reading widens it rather than being drawn off the edge
-and clipped. The same widening applies to the guild bank chart on `/admin/gold`,
-whose labels outgrow their margin once the bank passes six figures of gold.
-
-Hover anywhere in a chart's plot to snap to the nearest date and see its exact
-value, to the copper, along with the daily average where applicable.
-On a touch screen, tap a bar or dot to pin the same reading; it stays open
-until another reading is tapped, the page is tapped elsewhere, the
-page scrolls, the window loses focus, or Escape is pressed.
-
-#### How the dashboard loads
-
-The page asks for its three parts separately and at the same time, and each
-section draws as soon as its own answer arrives rather than waiting for the
-slowest. Until then the section shows its heading over a centred spinner, and
-a section that fails says so in place of its table without taking the rest of
-the page down with it. **Unclaimed Trading Post** needs one request and is
-usually first; **Open Orders** needs one short collection; the realized report
-needs the whole trade history and is last.
-
-**Matched Trades** is asked for once the realized report has landed rather
-than alongside it, because it reads the matches that report's load brings up
-to date, and it waits under its spinner until then. Moving to another page of
-it, sorting it or searching it asks the server for that page and keeps the
-rows on screen, dimmed, until the new ones arrive.
-
-Hiding or restoring a realized item or a matched trade asks for the report
-again, because the summary, the charts, the daily table and **Your Picks** all
-move with it, and every one of them is summed on the server. That redraw is
-quiet: the sections
-keep the numbers already on screen until the new ones are ready to replace
-them, rather than collapsing to spinners and back, which used to shorten the
-page under the reader and carry the row they had just clicked well off screen.
-If the redraw fails, the page says so and leaves the last good figures up — the
-change itself is already saved.
-
-Everything the GW2 API is asked for goes out in parallel wherever one answer
-does not depend on another — the four transaction collections together, then
-prices and item facts together.
-
-#### What is stored, and for how long
-
-Every transaction the bot has ever read is kept, keyed by Discord user ID.
-This matters because GW2 itself only serves about ninety days of history: past
-that point the dashboard is reading from what it collected while the member was
-using it, so a window keeps reaching further back the longer the bot runs. The
-summary line under the header names the oldest trade held.
-
-Refreshes are incremental. History arrives newest first and never changes, so a
-refresh resumes at the newest transaction already stored and stops at the first
-page that reaches behind it — normally one page instead of sixty. Only a first
-sync, or a database written before this was recorded, reads a member's whole
-history, and it reads eight pages at a time rather than one after another. In
-practice a first load takes a few seconds and later ones under a second, where
-walking every page one at a time took over a minute.
-
-#### Precomputed results
-
-Matching a member's history is the expensive half of a report, and it does not
-depend on which window they asked for. It runs once — in the daily pass, or on
-the first load after new trades land — and lands in a table of one row per item
-per UTC sale date. Every table on the page is then addition over those rows:
-the day table sums them across items, the item table across days, and the
-summary across both.
-
-That is what makes a long window cost the same as a short one. Measured on a
-real account, reading and summing a window takes about 16ms whether it asks for
-30 days or ten years, where matching the raw transactions took 131ms for 30
-days and 355ms for 90 and would grow with every month collected.
-
-Each match is also stored on its own, as the sale and the purchase it paired,
-which is what **Matched Trades** lists and what a hidden trade is subtracted
-from those rows by.
-
-The purchases the matching pass never sold are stored alongside, and they are
-the whole of the state a later pass needs. So when new trades land, only the
-new ones are matched — against the stock the member was already holding —
-rather than the years of history that established it. On a real account that
-is 82ms instead of 330ms today, and the gap widens with every month kept,
-because the incremental cost depends on how much is new and the full one on
-how much there is. The same stored lots are what the unrealized projection
-reads, so it needs no transaction reads either.
-
-The pass also pauses at each month boundary to record what is held there,
-keeping the last two years of those. They are places a rematch can start
-from, and what one records is the state the matching after it ran from, so a
-pass resuming at one picks up exactly where the pass that wrote it was.
-
-Trades do occasionally land behind the watermark — a backfill
-reaching further than the last one did — and because the newest transaction
-has not moved, the watermark alone would never notice; the bot looks for
-history stored since the last pass but dated before it. When it finds some,
-it rewinds to the month boundary before the oldest of them, throws away what
-was computed after it, and matches forward again. Only a first pass, or an
-arrival older than every checkpoint kept, matches a whole history.
-
-Lots older than a year are merged, per item, into one lot priced at their
-unit-weighted average and dated at the oldest of them, so it keeps its place
-in the queue and the total cost stays exact. Without this an item bought once
-and never sold is carried by every pass forever. What is given up is the split
-between those old purchases, which only shows in the cost basis of stock held
-longer than a year.
-
-The merge happens at those month boundaries, and a lot counts as old against
-the boundary's own date rather than against the clock at the moment a pass
-runs. That is what makes a sale worth the same however it is arrived at: read
-from the stored days, rematched for the **24h** window, or recomputed by a
-rewind. Measured against the clock instead, the same sale could be costed from
-the averaged lot by one pass and from the cheapest purchase behind it by the
-next.
-
-A database written before that rule was adopted holds results matched the old
-way, which the boundaries it kept no longer describe. Those results — every
-rollup, month boundary, held lot and watermark — are dropped once, the first
-time the bot opens such a database, and the console says how many rows went.
-Nothing a member would have to re-enter goes with them: their key, their
-hidden items and their stored trades are all kept, and the next `/profit`
-report each member opens rematches their history from those trades in one
-pass. That first report is as slow as their first one ever was; every report
-after it is as quick as before.
-
-The release that added **Matched Trades** drops those results once more, for
-the same reason: results matched before it list no trades, and their held
-lots cannot name the purchase a later sale is paired with. A database still
-missing both drops them once, not twice. Hidden trades are choices rather than
-results and are kept.
-
-**Unrealized Profit** covers everything the member still holds that is listed
-for sale, drawn from all their stored history rather than from the selected
-window: a purchase made before the window began is still stock they are holding
-now. The window bounds the realized tables, not this one.
-
-It reads like **Open Orders** on the selling side. Stock listed at two prices
-is two rows rather than one averaged one, because the price is what decides a
-row's projection. **Your Price** is what the member listed at and **Lowest
-Sell** is the cheapest anyone is asking for that item now, so a Your Price
-above it says plainly that someone is undercutting them and the projection
-below is unlikely to be realized at that price. An item with no usable current
-price shows a dash there, as it does in Open Orders.
-
-Once a day the bot reads every member's Trading Post data in the background,
-so a dashboard opened between passes reads the database rather than the GW2
-API. The same pass stores the name of every item in the game — about 74,000 of
-them, in half a minute, and nothing at all on later passes — so no report ever
-waits on a name lookup. Pressing **Reload** still forces a live read for a
-member who wants the last few minutes too.
-
-Market prices are shared: they are public, so the highest buy order for Wool
-Scrap is one lookup for the whole guild rather than one per member. **Open
-Orders** and **Unclaimed Trading Post** follow them on their own, re-reading
-every minute without a page reload, and pause while the tab is in the
-background. That beat is a public price lookup and nothing more: the box
-itself is held for five minutes, the way a transaction snapshot is, so an open
-tab does not ask the member's own account for its delivery box every minute.
-Pressing **Reload** bypasses both caches.
-
-The rest of the caching:
-
-| Data | Held for | Why |
-| --- | --- | --- |
-| Transactions | Forever | The only copy of history older than GW2 serves |
-| Item names and categories | 30 days | Fixed for the life of a game build |
-| Matched rollups | Until new trades land | Matching does not depend on the window |
-| Month-end lot snapshots | 24 months | Where a late arrival rematches from |
-| Transaction snapshots | 5 minutes | How often a refresh is worth making |
-| Delivery box | 5 minutes | Changes only on a trade; its prices move faster |
-| Market prices | 1 minute, shared | Live enough to trade on, cheap to re-read |
-
-The Guild Wars 2 API supports no conditional requests — no `ETag` and no
-`Last-Modified` on any endpoint the dashboard uses — so a cached read cannot be
-revalidated cheaply and every TTL above is a real one. It does declare how long
-each answer is good for, and none of these hold anything longer than it says:
-prices `max-age=120`, items `max-age=3600`, transactions `max-age=60`.
-
-Unclaimed coins and items are read when the delivery section is built, together
-with the current price of every item waiting. Keys
-saved before delivery reporting or Open Orders were added can still load their
-existing reports if a route restriction blocks one of those newer endpoints:
-that section alone is marked unavailable and the page directs the member to run
-`/profit setkey` again. Other API failures fail that one section instead of
-presenting partial data.
-The signed web session supplies that same ID; the API key never appears in the
-page, a URL, or a browser response. Access uses the site's normal Discord OAuth
-guild-membership check and needs the four web settings plus `WEB_ENABLED=true`
-described above.
-
-### Feast Usage Dashboard
-
-The same site serves a **Feast Usage** page at `/admin/food`, built from the per-feast
-stock history described under
-[Feast Stock Count History](#feast-stock-count-history). It charts each tracked
-feast's on-hand count over the last 24 hours, 7 days, or 30 days, and lists the
-removals in that window — when each drop happened, how large it was, and what
-was left afterwards — with one tab per feast.
-
-Clicking a colour in the legend below the chart switches that feast off, and
-clicking it again brings it back — useful when one feast's line sits on top of
-another's. A feast that is off keeps its place in the legend, dimmed with its
-colour reduced to an outline, and its line, points and hover readings are gone
-from the chart until it is switched back on. The choice survives a change of
-range, and the tabbed removals list below is unaffected. On a phone, where the
-legend is a compact row of colours, a switched-off feast shows its name.
-
-Below the removals, an **Additions** section lists the window's restocks the
-same way — one tab per feast, five rows to a page — with a column for when the
-stock rose, who deposited it, how much was added, what was on hand afterwards,
-and what the addition cost. The first count ever recorded for a feast is not a
-restock: the shelf was not seen filling, it was seen for the first time.
-
-The **User** column is read from the guild log: depositing guild consumables is
-logged as a completed upgrade naming the account and the number placed, and a
-deposit logged between the previous stock reading and this one is the one that
-raised the count. Several accounts restocking between two readings are all
-named. An addition the log cannot account for — a deposit older than the window
-being drawn, or one the log no longer carries — names nobody.
-
-Each row carries a pencil under **Edit**. It opens a small box asking what the
-restock cost, as `{gold}g {silver}s {copper}c` on one line. The boxes start
-blank, and a box left blank counts as zero, so five copper is one box rather
-than three. Reopening a priced row fills the boxes in from the recorded cost,
-still leaving the units it does not reach blank. A cost of nothing is a real
-answer and is recorded as one. **Any row with no cost recorded yet is tinted
-light red**, so what still needs pricing is visible at a glance rather than
-found by reading down the column. Recording a cost needs the same role the page
-does, and the cost is kept against the stock reading it was recorded for, so it
-stays with that restock whatever window is drawn later.
-
-The chart starts with straight lines between samples. The icon at the far
-right of its heading switches between that regular `╱` line and a staircase
-`⎿` line; the same control is available on the roster and gold charts.
-
-#### The daily charts
-
-Five more charts sit between the stock graph and the removals, each drawing one
-point per day of the window rather than one per recorded sample:
-
-| Chart | What each point is |
-| --- | --- |
-| **Food usage – 7-day rolling average** | Feasts taken per day, averaged over the seven days ending on that date. One line per feast. |
-| **Food cost – 7-day rolling average** | What the feasts used each day had cost, averaged the same way. One line per feast. |
-| **Food cost by day** | What the feasts used that day had cost, with no averaging. One line per feast. |
-| **Total food cost** | The running total of what the feasts used had cost, across every feast still switched on, to the end of that day. One line. |
-| **Food cost by food** | The same running total, one line per feast. |
-
-The cost charts count what was **eaten**, not what was bought. Each feast's
-stock is kept as a queue of lots, oldest first: every restock adds a lot at the
-price recorded against it, and every feast used is taken from the oldest lot
-still on the shelf, at that lot's price. So a restock of thirty feasts bought
-for thirty gold costs nothing on the day it is deposited; each feast then costs
-one gold as it is used, two a day costing two gold a day. A dearer restock
-waits behind the stock before it and only raises the cost once that stock is
-gone. For example:
-
-| | On the shelf | Cost charged |
-| --- | --- | --- |
-| Ten feasts on hand that nobody priced | 10 at 0g | |
-| Thirty bought for 30g | 10 at 0g, 30 at 1g | |
-| Thirty used | 10 at 1g | 10 × 0g + 20 × 1g = **20g** |
-| Thirty bought for 60g | 10 at 1g, 30 at 2g | |
-| Thirty used | 10 at 2g | 10 × 1g + 20 × 2g = **50g** |
-
-Stock that was on the shelf before anything was bought at a recorded price
-costs nothing and leaves first, and so does a restock nobody has priced yet,
-until an officer records what it cost. The shelf is replayed from the first
-count the bot ever recorded, so a feast eaten this week is priced at the
-restock it came from however long ago that was.
-
-Days are cut in UTC, so two members in two time zones reading the same window
-are shown the same days. A day nothing happened on is still a day: it is drawn
-as zero rather than skipped, so a quiet stretch reads as one. Both edges of the
-window cut a day in half and both are honoured: the newest day is usually still
-running, and the oldest holds only the part of itself the window opened over,
-so these charts count the same activity the removals and additions tables do
-and nothing from the hours either side.
-
-The rolling averages are worked out over the seven days *before* the window as
-well as the days in it, so the average on the window's first day covers a full
-week rather than starting over at the edge. That history is read for the
-averages only; the stock chart, the removals and the additions still show the
-window itself and nothing older.
-
-Cost axes are labelled in the largest coin they reach (`4g`, `30s`, `12c`) and
-the hover reads the full price in coins; the running-total hovers also name
-what the day alone added.
-
-The four cost charts are drawn from figures the server works out, so recording
-a price in the Additions editor re-reads the window to bring them up to date,
-re-costing every feast already eaten from that restock.
-The tab and page being worked down are kept across that, so pricing a run of
-restocks does not send an officer back to the first page each time.
-
-Every one of these charts starts at zero, and each carries the same legend as
-the stock chart above. The legends switch the same feasts: clicking a colour in
-any one of them drops that feast from every chart on the page at once, the
-total included, so the total answers "what did the rest cost?" rather than
-staying put. **Total food cost** has no legend of its own for that reason.
-
-The y axis covers the counts the window actually reached rather than a fixed
-ceiling, so a stock held well above fifty is drawn in full instead of flattened
-along the top of the chart. It always starts at zero, so a feast that has run
-out sits on the floor of the graph, and it never spans fewer than ten counts,
-so a quiet week is not blown up into a cliff. Switching a feast off in the
-legend rescales the axis to the feasts still drawn.
-
-**Custom** opens a pair of date fields beside the preset buttons. The window
-they describe covers whole local days, from midnight on the first through the
-last second of the second, and it is drawn once **Apply** is pressed — the
-preset buttons keep working until then. A range that runs past today stops at
-the present, because nothing has been recorded for a day that has not happened,
-and a range wider than 366 days or ending before it starts is refused with the
-reason in the header rather than loaded.
-
-Whichever window a member picks is remembered, the way the profit dashboard's
-is: it is stored against their Discord account rather than in the browser, so
-the page reopens on it from wherever they sign in next. A preset is kept as the
-rolling window it is, so **7d** still means the last seven days tomorrow, while
-a picked pair is kept as those two dates. A member who has never picked one
-opens on **24h**. Each dashboard remembers its own window, and each member
-theirs.
-
-Access is narrower than the calendar's: on top of being a signed-in guild
-member, the viewer must hold role `1317638909735342201`, the role that also
-gates `/raffle draw` and `/raffle removetickets`. Everyone else gets an
-officers-only page. Membership and the role are re-checked on the same schedule
-as calendar access, so a member who loses the role loses the page within
-minutes. The page is not linked from the calendar; browse to `/admin/food`
-directly.
-
-### Guild Roster History Page
-
-The same site serves a **Guild Roster** page at `/admin/roster`, built from the
-membership history described under
-[Guild Roster History](#guild-roster-history). It charts the guild's member
-count over the last 24 hours, 7 days, or 30 days, with one dot per change,
-green for a join, amber for a departure and red for a kick. Hovering a dot, or tapping it
-on a phone, names the account and shows the count it left the roster at. Below
-the chart every change in the window is listed newest first, with who did the
-kicking where the guild log named them.
-
-**Custom** opens the same pair of date fields the feast dashboard has, with the
-same whole-day window, the same **Apply**, the same limits, and the same
-remembering. A window that
-closes in the past is counted back from the last member count the bot observed,
-so its right-hand edge reads the roster as it stood then rather than as it
-stands now; the count beside the heading says "at the end" instead of "now"
-to match.
-
-The y axis covers the counts the window actually reached rather than the whole
-500-member ceiling, so a handful of departures is visible rather than a flat
-line near the top. It never reaches above 500 or below 0, the most and fewest
-members a guild can have.
-
-Below the changes, a **Pending invites** section lists the accounts that have
-been invited in-game and have not accepted yet — the `y` of the `x/500 (y
-pending)` channel description, named rather than counted. Each row carries the
-account name and the display name of the Discord account whose `Accepted`
-application post matched it, or "No application matched" when none did. An
-**Invite sent** column dates each one as a short date such as `Jun 17`.
-Hovering it with a mouse, tapping it on a phone, or reaching it by keyboard
-and pressing Enter opens the moment in full with how long ago it was — `Sep
-20, 9:30 PM | 7 days ago`, `Mar 9, 12:16 AM | 3 minutes ago`. The box stays
-while it is read and closes on the next thing the reader does: another tap on
-the date, a tap or click anywhere else, a scroll, a keypress or a resize. The
-date is the moment the guild log recorded the invitation, which is the only
-place an invitation is dated — the member list gives an invited account no
-date of its own. The log reaches back about a hundred events per type, so an
-invitation sent before the bot first read it was never recorded, and that row
-reads "Unknown" rather than being given a date. So does a row whose account
-joined or left after the last invitation the bot recorded: that invitation was
-answered, and the one the account holds now is one the bot never saw. If the application forum could
-not be read in full, the rows without
-a name say "Could not be checked" instead - a name that is shown was matched
-either way - and that answer is not cached, because an unread post is not
-evidence that
-nobody applied. A Discord name the API could not answer for is not cached
-either, so it is retried rather than held at "Unknown" for the rest of the
-window. The
-list is the guild as it stands now rather than a window of history, so it is
-loaded once with the page and the range buttons do not change it. It is built
-from the GW2 API and the application forum index, which is why one build is
-served to every reader for five minutes rather than rebuilt per page load - a
-change to `/settings gw2_api_key`, `/settings gw2_guild_id`,
-`/settings channels trial_forum` or `/settings channels trial_accepted_tag`
-drops that cache rather than waiting it out. With the GW2 API unset the
-section names the `/settings` subcommands that turn it on instead of listing
-anything.
-
-A long account name wraps inside its column rather than widening the table, and
-on a phone each row's change is the coloured dot alone — the word beside it says
-nothing the colour does not, and the account column needs the width. The word
-stays in the table for a screen reader to read out.
-
-Access is gated by `/settings roles roster_page`, which starts as the role that
-draws the raffle, because the page names who was kicked and by whom. Point it
-at a wider role to open the history to the whole guild. Membership and the role
-are re-checked on the same schedule as calendar access. The page is not linked
-from the calendar; browse to `/admin/roster` directly.
-
-Until the member count poll has written its first row there is no count to
-measure against, so the page says so and lists the changes without a line. That
-resolves itself within a minute of the bot starting with the Guild Wars 2
-settings in place.
-
-### Guild Bank Gold History Page
-
-The same site serves a **Guild Bank** page at `/admin/gold`, built from the ledger
-described under [Guild Bank Gold History](#guild-bank-gold-history). It charts
-the bank's balance over the last 24 hours, 7 days, or 30 days. Movements in the
-same minute share one dot and one line segment at their cumulative ending
-balance. Both are green when that balance increases, red when it decreases,
-and gray-white when its net change is zero. Hovering the dot, or tapping it on a
-phone, lists every transaction from the minute and says what the bank held afterwards.
-Below the chart every movement in the
-window is listed newest first, like a bank statement, with the running balance
-beside each one. Above it are the window's totals: deposited, withdrawn, and
-the net between them.
-
-**Custom** opens the same pair of date fields the other two dashboards have,
-with the same whole-day window, the same **Apply**, the same limits, and the
-same remembering. A
-window that closes in the past is measured back from the last balance the bot
-observed, so its right-hand edge reads the bank as it stood then rather than as
-it stands now; the figure beside the heading says "at the end" instead of "now"
-to match.
-
-Amounts use the same spaced gold, silver, and copper notation as `/profit`
-(for example, `1g 1s 0c`, `1g 0s 1c`, or `10c`). Table movements are a bare
-`+` deposit or `-` withdrawal followed by that amount.
-The y axis covers the balances the window actually
-reached rather than starting at zero, and its gridlines round to 1, 2 or 5
-times a power of ten, so a week of small movements is visible rather than a
-flat line at the top of an axis scaled to the whole treasury. Axis labels use
-compact denominations so large balances remain visible inside the chart.
-
-A long account name wraps inside its column rather than widening the table, and
-on a phone the running balance column gives way — the amount and its sign are
-what a reader is scanning for, and the line above already shows where the
-balance went.
-
-Access is gated by `/settings roles gold_page`, which starts as the role that
-draws the raffle, because the page names who took gold out. Point it at a wider
-role to open the history to the whole guild. Membership and the role are
-re-checked on the same schedule as calendar access. The page is not linked from
-the calendar; browse to `/admin/gold` directly.
-
-Until the stash poll has written its first balance there is no reading to
-measure against, so the page says so and lists the movements without a line.
-That resolves itself within one poll interval of the bot starting with the
-Guild Wars 2 settings in place.
-
-### Guild Event Statistics Page
-
-The same site serves an **Event Statistics** page at `/admin/events`, built
-from the guild's finished event runs. It uses the same **24h**, **7d**, **30d**
-and **Custom** range bar as the other dashboards, with the same whole-day
-custom window, limits and remembering, and every figure on it is about the
-chosen window alone:
-
-- **Event runs** — how many runs ended in the window.
-- **Time run** — their scheduled durations added up, in hours and minutes.
-- **Participants** — how many different people took part: every member seated
-  on a run's roster, plus the commander who led it whether or not they signed
-  up to it. Waitlisted members who never got a seat are not counted.
-- **Top commander** — whoever led the most runs, with how many. Commanders tied
-  for the most are all named.
-- **Event runs by commander** — a **Commander** and **Count** table of
-  everyone holding `/settings roles event_create`, the role `/event new` needs,
-  with how many runs they led in the window. A commander who led none reads 0.
-  Someone who led a run in the window and has since lost the role is still
-  listed, so the counts add up to **Event runs**. Who holds the role is read
-  from Discord's member list, which needs the `Server Members Intent` enabled
-  in the Discord Developer Portal; without it, or while Discord cannot be
-  reached, the table lists only the commanders who led a run and says so
-  beneath it. The list is re-read at most every five minutes, so a newly
-  appointed commander can take that long to appear.
-- **Cumulative event runs** — a line that starts at zero at the window's
-  opening edge and steps up by one as each run ends. Runs that ended in the
-  same minute share a dot; hovering it, or tapping it on a phone, names the
-  runs and their commanders and gives the running count.
-- **Mentees** — every member who asked for a run's mentee slot, with how many
-  runs they asked on, how many they finished holding the slot, and how many
-  they have finished holding it over the whole history (**All time**), which
-  is the one column not limited to the window.
-- **Events without a mentee** — the events whose runs did not offer a mentee
-  slot, one row per event with how many such runs it had. A run that offered
-  the slot is left out whether or not anybody took it.
-- **Events with no requirements** — the events whose runs had their
-  requirements left blank (shown as "None" on the post), or set to "None".
-
-A run counts as run when it is over: the moment the bot marks its post
-finished, it keeps a copy of the run — its title, category, commander,
-requirements, whether it offered a mentee slot, and its roster with everyone's
-claim on that slot. The copy is what the page reads, so editing, retiring or
-deleting an event later, or a repeating event deleting its previous post, does
-not change what the page says about runs already finished. A run cancelled
-with `/event cancel` was skipped and never counts, and neither does a run whose
-post was deleted before it started. Runs are placed in a window by their
-scheduled end. Only runs that finish after this page was added are recorded;
-there is no import of older runs.
-
-Access is gated by `/settings roles events_page`, which starts as the role that
-draws the raffle, because the page names who led and who mentored. Point it at
-a wider role to open it to event leaders. Membership and the role are
-re-checked on the same schedule as calendar access. The page is not linked from
-the calendar; browse to `/admin/events` directly.
-
-## Run With Docker
-
-```powershell
-Copy-Item .env.example .env
-docker compose up --build
-```
-
-Stop the bot with `Ctrl+C`, or run it in the background with:
-
-```powershell
+Copy-Item .env.example .env   # then fill in DISCORD_TOKEN and DISCORD_COMMAND_GUILD_ID
 docker compose up --build -d
 ```
 
-## Run Locally
+Locally:
 
 ```powershell
 python -m venv .venv
@@ -2505,176 +24,445 @@ $env:PYTHONPATH = "$PWD\src"
 python -m gw2bot
 ```
 
-Run the tests:
+Then configure the rest from Discord with `/settings` (see [Settings](#settings)).
 
-```powershell
-python -m pytest
+Docker Compose keeps the database, `settings.key` and the `log` folder in the
+`bot-data` volume. The bot does not make backups; back the database and key up
+together.
+
+For Unraid, map `/mnt/user/appdata/gw2bot` to `/app/data` (read/write) and
+leave `RAFFLE_DB_PATH` unset. The image runs as UID `99` and GID `100`.
+
+## Environment Variables
+
+Only what the bot needs before it can open its database stays in the
+environment. `.env` is loaded automatically; variables already set in the
+environment take precedence.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | **required** | Discord bot token. |
+| `DISCORD_COMMAND_GUILD_ID` | **required** | ID of the Discord server where commands are registered. |
+| `DEBUG` | `false` | `true` for detailed `gw2bot` diagnostics in the console and [log file](#log-files). Credentials are always redacted. |
+| `RAFFLE_DB_PATH` | `data/gw2bot.db` | SQLite database path (`/app/data/gw2bot.db` in the Docker image). Logs go in a `log` folder beside it. |
+| `WEB_ENABLED` | `false` | `true` to serve the [web site](#web-site). |
+| `WEB_PORT` | `2222` | Port the web site listens on. |
+| `GW2_API_BASE_URL` | `https://api.guildwars2.com` | GW2 API base URL. Not settable from Discord because it decides where the API key is sent. |
+| `SETTINGS_ENCRYPTION_KEY` | unset | Fernet key for encrypted settings and member profit keys. Unset, the bot generates `settings.key` beside the database. |
+
+## Settings
+
+Everything else is configured with `/settings` and stored in the database.
+Run a subcommand with no value to see its description and current value, pass
+a value to set it, or pass a space to clear it. Changes take effect
+immediately, and `/settings list` shows every setting. Replies are private.
+
+`/settings` can be run by the `raffle_officer` role, the server owner, and
+anyone with `Administrator` (so a bad role value can never lock everyone out).
+
+### General Settings
+
+| Subcommand | Default | Description |
+| --- | --- | --- |
+| `/settings discord_notification_channel_id` | unset | Channel for automated notifications. Must be in `DISCORD_COMMAND_GUILD_ID`. |
+| `/settings gw2_api_key` | unset | GW2 API key with `account` and `guilds` permissions. **Encrypted.** |
+| `/settings gw2_guild_id` | unset | Guild ID from `/v2/account.guild_leader`. Set `gw2_api_key` first so the ID can be checked. The raffle ledger locks to the first guild ID it sees and refuses a different one later. |
+| `/settings raffle_excluded_accounts` | unset | Comma-separated GW2 account names that earn no raffle tickets (case-insensitive). |
+| `/settings feast_notification_user_id` | unset | Discord user who also gets feast stock alerts by DM. |
+| `/settings gw2_poll_interval_seconds` | `300` | Guild Storage and stash polling interval (minimum `30`). |
+| `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval (minimum `30`). |
+| `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime. |
+| `/settings timezone` | `UTC` | IANA timezone for typed event times, thread names and weekly repeat days. |
+| `/settings web_base_url` | unset | Public base URL of the web site, such as `https://gw2bot.example.com`. Must be a host root, not a path. |
+| `/settings discord_oauth_client_id` | unset | OAuth2 client ID of the bot's Discord application. |
+| `/settings discord_oauth_client_secret` | unset | OAuth2 client secret. **Encrypted.** |
+| `/settings web_session_secret` | unset | Random secret (32+ characters) that signs web session cookies. Changing it signs everyone out. **Encrypted.** |
+| `/settings web_session_ttl_seconds` | `604800` | How long a web sign-in lasts. Guild membership is re-checked every few minutes regardless. |
+
+An excluded raffle account still has its deposits recorded, but earns no
+tickets and cannot be given any with `/raffle addticket`. Removing the
+exclusion does not award tickets retroactively.
+
+### Roles And Channels
+
+Each suggests matching roles, channels or tags as you type and refuses IDs that
+do not resolve. Clearing one restores its default.
+
+| Subcommand | Default | Controls |
+| --- | --- | --- |
+| `/settings roles raffle_draw` | `1317638909735342201` | `/raffle draw`, `/raffle removetickets`. |
+| `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording gold purchases, `/check`, `/track`, `/pending`, `/roster import`, `/gold import`, `/settings`. |
+| `/settings roles guild_roster` | `1317202210152513606` | Who gets account names in the raffle autocompletes. |
+| `/settings roles event_create` | `1318357141521825872` | All `/event` commands and roster editing. |
+| `/settings roles trial` | `1450164501696741597` | Marks a member as a Trial in the Trial reports. |
+| `/settings roles sunborne` | `1317140660188352584` | Marks a member as a full member in the Trial reports. |
+| `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. |
+| `/settings roles roster_page` | `1317638909735342201` | The roster history dashboard. |
+| `/settings roles gold_page` | `1317638909735342201` | The guild bank dashboard. |
+| `/settings roles events_page` | `1317638909735342201` | The event statistics dashboard. |
+| `/settings channels event_ping` | unset | Text channel where events posted into a forum post ping their roles. Unset, they ping inside the post. |
+| `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchases, reward milestones and the six-hourly contribution report. |
+| `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set before its tags. |
+| `/settings channels trial_accepted_tag` | `1317349209619562587` | Tag marking an accepted application. |
+| `/settings channels trial_in_review_tag` | `1317349421821726790` | Tag applied to new application posts. |
+
+### Encrypted Settings
+
+Encrypted settings and members' `/profit` API keys are never shown back; set
+them again to change them. The key comes from `SETTINGS_ENCRYPTION_KEY` or the
+generated `settings.key` (kept at `0600`). Back it up with the database.
+
+- If the key is lost or replaced, the bot keeps running with the affected
+  features off; set those values (and `/profit setkey`) again.
+- If `settings.key` is corrupt, the bot refuses to start rather than overwrite
+  it. Restore it, or delete it and set the encrypted values again.
+
+### Migrating From Environment Variables
+
+Older releases read every setting from the environment. On the first start
+after upgrading, the bot imports those variables into `/settings` once and
+then ignores them, warning about each leftover until you remove it. Keep `TZ`
+set, since the container uses it for its own clock; change the bot's timezone
+with `/settings timezone`.
+
+Three were renamed: `DISCORD_FEAST_NOTIFICATION_USER_ID` →
+`feast_notification_user_id`, `GW2_GUILD_LOG_POLL_INTERVAL_SECONDS` →
+`guild_log_poll_interval_seconds`, and `TZ` → `timezone`.
+
+### Running Without Optional Settings
+
+The bot starts with just the two required variables. Anything missing
+configuration is switched off (and named in a startup warning) rather than
+stopping the bot, and turns on as soon as you set it:
+
+- **No `gw2_api_key` or `gw2_guild_id`:** no polling, so no guild log messages,
+  feast alerts, raffle deposits, history, Trial reports or member count.
+  Commands that need the API reply with what to set. Existing raffle data still
+  works for `/raffle draw`, `audit`, `list` and `leaderboard`.
+- **No `discord_notification_channel_id`:** notification-channel messages and
+  `diag` are skipped. The raffle contribution channel is separate and still
+  receives posts.
+- **`WEB_ENABLED=true` without the four web settings:** the site stays off.
+
+## Discord Setup
+
+Install the application with the `bot` and `applications.commands` scopes. If
+command registration fails with `50001 Missing Access`, check
+`DISCORD_COMMAND_GUILD_ID` and reinstall with both scopes.
+
+In the Developer Portal, enable the **Message Content Intent** (for `diag`).
+The **Server Members Intent** is optional; it lets the event statistics page
+list commanders who led no runs.
+
+Permissions the bot needs:
+
+| Where | Permissions |
+| --- | --- |
+| Notification channel | View Channel, Send Messages, Manage Channels (for the member count description) |
+| Trial application forum | View Channel, Read Message History, Manage Threads (to tag new posts) |
+| Event text channels | View Channel, Send Messages, Create Public Threads, Manage Threads (to delete signup threads) |
+| Event forum posts | View Channel, Send Messages in Threads, Manage Threads (to reopen archived posts) |
+| Event channels and ping channel | Mention @everyone, @here and All Roles (to ping roles) |
+
+A `50013 missing_permissions` error in the log means one of these is missing;
+`50001 missing_access` means the bot cannot see the channel at all. Failed
+deliveries are retried.
+
+## Log Files
+
+The console output is also written as JSON lines to `log/gw2bot.jsonl` beside
+the database (`/app/data/log/` in Docker), with `time`, `level`, `logger`,
+`message` and, when present, `exception`. Files rotate at midnight and the
+newest 30 are kept. For example, every warning and error:
+
+```sh
+jq -r 'select(.level == "WARNING" or .level == "ERROR") | "\(.time) \(.logger): \(.message)"' gw2bot.jsonl
 ```
 
-Run the same Pylance/Pyright type checking used by CI:
+## Features
+
+### Help
+
+`/help` privately lists the commands you can run, based on your roles right
+now. In this README and in `/help`, `option:<value>` is required and
+`[option:<value>]` is optional.
+
+### Notifications
+
+Posted to the notification channel:
+
+- **Guild log:** joins, leaves, kicks, invites, rank changes, and gold
+  withdrawals from the guild bank. Each is posted once, even across restarts.
+- **Member count:** the channel description is kept at `x/500 (y pending)`,
+  where `y` is accounts invited but not yet joined.
+- **Feast stock:** an alert when any of the four tracked feasts (Guild Storage
+  IDs `1078`, `1089`, `1102`, `1112`) is at 10 or fewer, repeated every eight
+  hours while it stays low. Also sent by DM to `feast_notification_user_id`.
+- **Trial reports:** daily at 17:00 UTC (see [Trial Members](#trial-members)).
+- **Audit lines** for raffle deposits and raffle commands.
+
+Send `diag` in the notification channel to preview every automated message
+without changing any state.
+
+### Raffle
+
+Every whole gold deposited into the guild bank buys one raffle ticket.
+
+- Each member can buy at most 10 tickets per raffle, and can receive at most one
+  free ticket from officers.
+- Accounts with the in-game `Officer` rank only earn tickets from deposits of
+  10 gold or less; larger Officer deposits are ignored.
+- Purchases, reward milestones, and a six-hourly report (00:00, 06:00, 12:00,
+  18:00 UTC) go to the raffle contribution channel.
+- Purchased tickets unlock reward tiers, which set the number of winners:
+
+| Purchased tickets | Tier | Winners |
+| ---: | --- | ---: |
+| 0 | Guaranteed | 2 |
+| 50 | Tier 1 | 2 |
+| 100 | Tier 2 | 3 |
+| 150 | Tier 3 | 4 |
+| 200 | Tier 4 | 5 |
+
+Winners are drawn weighted by tickets, removing one ticket per win, so a member
+can win more than once. Tiers are defined by `RAFFLE_REWARD_TIERS` and
+`RAFFLE_DRAW_TIERS` in `gw2bot.raffle`.
+
+| Command | Role | What it does |
+| --- | --- | --- |
+| `/raffle draw` | `raffle_draw` | Draws the winners, archives the run, and resets everyone's tickets. |
+| `/raffle audit run_id:<run>` | everyone | Shows every entrant's ticket range and each winning number for a past draw. |
+| `/raffle addticket username:<account> [amount:<number>]` | `raffle_addticket` | Gives one free ticket. With `amount` (needs `raffle_officer`), records a gold purchase instead. |
+| `/raffle addtickets [username1:<account> ... username10:<account>]` | `raffle_addticket` | Gives one free ticket to each of up to ten members. |
+| `/raffle bulkaddtickets` | `raffle_addticket` | Gives a free ticket to each member in pasted squad attendance lines. |
+| `/raffle removetickets username:<account> [amount:<number>]` | `raffle_draw` | Removes purchased tickets (default one). |
+| `/raffle tickets [username:<account>]` | everyone | Shows a member's tickets, defaulting to your linked account. |
+| `/raffle list` | everyone | Lists current ticket holders. |
+| `/raffle leaderboard [sortby:<purchased\|free\|total>]` | everyone | Lists lifetime tickets across all raffles. |
+
+### Trial Members
+
+The bot compares in-game `Trial` members against their Discord roles, matching
+accounts to members through `Accepted` posts in the Trial application forum. It
+posts up to three reports daily:
+
+- **Before the 14-day mark:** still Trial in-game but already Sunborne in
+  Discord, with a congratulations message to copy.
+- **Past the 14-day mark:** ready to be reviewed for promotion.
+- **Past the 7-day warning:** members tracked with `/track` at least 7 days ago.
+
+| Command | Role | What it does |
+| --- | --- | --- |
+| `/check` | `raffle_officer` | Shows the same reports privately. |
+| `/track username:<account>` | `raffle_officer` | Starts or stops the 7-day warning for a member past 14 days. |
+| `/pending` | `raffle_officer` | Lists accounts invited in-game that have not accepted, with their Discord member if matched. |
+
+### Guild Events
+
+| Command | What it does |
+| --- | --- |
+| `/event new` | Creates and posts an event through three short forms: details, schedule, and repeat. |
+| `/event edit event_id:<event>` | Edits an event and its roster. Events that have started can only have their roster edited. |
+| `/event remind event_id:<event>` | Pings the next run's signed-up members now. |
+| `/event cancel event_id:<event>` | Cancels the next run of a repeating event and posts the one after. |
+| `/event delete event_id:<event>` | Ends an event. Past runs stay on the calendar and in statistics. |
+
+All `/event` commands need the `event_create` role. The `event_id` is shown in
+each post's footer.
+
+**Squads.** The category sets the squad size and roles:
+
+| Category | Size | Healers | DPS | Quickness | Alacrity |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Raid, Strike | 10 | 2 | 8 | 2 | 2 |
+| Fractal | 5 | 1 | 4 | 1 | 1 |
+| Dungeon | 5 | 0 | 5 | 1 | 1 |
+| Player vs. Player | 5 | 1 Support | 4 | 0 | 0 |
+| Story | 5 | — | — | — | — |
+| World vs. World, Open World | 50 | — | — | — | — |
+| General | no limit | — | — | — | — |
+
+Headcount events (no roles) can set their own size from 1 to 500, or 0 for no
+limit.
+
+**Signing up.** Members use the **Sign up**, **Sign out** and ⚙️ buttons on the
+post. On role-based events they pick a main role and any flex roles; the bot
+seats them where they fit, keeps the last seats for missing boons and healers,
+and otherwise puts them on the waitlist (⌛️). Signing out promotes from the
+waitlist. On repeating events, members can opt into automatic sign-up and
+remembered roles from the ⚙️ menu.
+
+**Mentee slot.** An event can offer one mentee slot for commander training.
+Members who sign up are asked if they want it; extra takers go on a mentee
+waitlist.
+
+**Status.** The embed color and signup thread name (`<status> | MM.dd.yyyy |
+HH:mm`) show 🟢 open, 🔴 full, 🟡 ongoing, or ⚫️ over.
+
+**Destinations.** An event can be posted to a text channel, where the bot opens
+a signup thread, or into an existing forum post. The bot only ever removes its
+own messages from a forum post, never the post itself.
+
+**Role pings.** An event can ping up to three roles whose names start with
+`[GW2]`. They are pinged once when each run is posted. For events in a forum
+post, set `/settings channels event_ping` to ping from a text channel instead.
+
+**Reminders.** Seated members are pinged in the signup thread or forum post an
+hour before, 15 minutes before, and at the start.
+
+**Repeating events** run daily, weekly or monthly. Each new run is posted when
+the previous one ends, and the previous post can be deleted automatically.
+
+Members who leave the Discord server are removed from rosters automatically.
+
+### Guild History
+
+The bot records the guild's member count and guild bank balance over time,
+along with every membership change and gold movement. These power the roster
+and gold dashboards.
+
+To backfill history from before the bot started recording, run each once
+(`raffle_officer` role, safe to repeat):
+
+- `/roster import` reads past join and leave messages from the notification
+  channel.
+- `/gold import` reads the guild log (about the last 100 events) and the
+  current bank balance.
+
+## Web Site
+
+An optional site with the event calendar and dashboards. Members sign in with
+Discord, and only members of the guild's server can view it.
+
+To enable it:
+
+1. In the [Discord developer portal](https://discord.com/developers/applications),
+   copy the bot's OAuth2 Client ID and Client Secret.
+2. Add `<web_base_url>/oauth/callback` to the application's OAuth2 redirects.
+3. Set `WEB_ENABLED=true`, then set `/settings web_base_url`,
+   `discord_oauth_client_id`, `discord_oauth_client_secret` and
+   `web_session_secret` (generate one with
+   `python -c "import secrets; print(secrets.token_urlsafe(48))"`).
+4. Uncomment the `ports` block in `compose.yaml`.
+
+Serve it behind an HTTPS reverse proxy at the root of a host; it cannot be
+mounted under a path such as `/gw2bot/`.
+
+| Path | Page | Access |
+| --- | --- | --- |
+| `/calendar` | Event calendar (`/` redirects here) | any member |
+| `/profit` | Your Trading Post profit | any member |
+| `/admin/food` | Feast usage | `food_page` role |
+| `/admin/roster` | Guild roster history and pending invites | `roster_page` role |
+| `/admin/gold` | Guild bank history | `gold_page` role |
+| `/admin/events` | Event statistics | `events_page` role |
+| `/healthz` | Returns `{"status": "ok", "version": "..."}` | any member |
+
+The old `/food`, `/roster` and `/gold` addresses redirect to their `/admin`
+pages.
+
+**Calendar.** Day, week and month views of every event, including upcoming runs
+of repeating events. Events you are signed up for are highlighted. Every event
+post in Discord links to it.
+
+**Profit.** Each member can save their own GW2 API key (with the `tradingpost`
+permission) to see their Trading Post flipping profit. Sales are matched to
+purchases first-in-first-out, after the 5% listing and 10% exchange fees. The
+page shows realized profit by item and by day, matched trades, open orders,
+unsold listings, and items waiting for pickup. Items or single trades that are
+not flips can be hidden. The bot keeps every transaction it reads, so history
+reaches back further than GW2's own ~90 days the longer the bot runs.
+
+| Command | What it does |
+| --- | --- |
+| `/profit setkey` | Saves your API key (encrypted). |
+| `/profit view [days:<number>]` | Links to your profit page, optionally for the last N days (1–3650). |
+| `/profit deletekey` | Deletes your key and all your stored profit data. |
+
+**Feast usage.** Feast stock over time, with removals, restocks and who made
+them. Officers can record what each restock cost to chart how much feasts cost
+the guild.
+
+**Roster history.** The member count over time with every join, leave and
+kick, plus a list of pending invites.
+
+**Guild bank.** The bank balance over time, with every deposit and withdrawal.
+
+**Event statistics.** Runs, hours, participants, runs per commander, and mentee
+activity for any time range.
+
+Dashboards offer 24h, 7d, 30d and custom ranges, and remember your choice.
+
+## Development
 
 ```powershell
-pyright
+python -m pytest   # tests
+pyright            # type checking
 ```
 
-## Continuous Integration
-
-The `CI` GitHub Actions workflow runs for pull requests targeting `main`, pushes
-to `main`, and merge-queue groups. It provides these status checks:
-
-- `Branch name`: on pull requests only, fails unless the branch is named
-  `feat/<name>`, `fix/<name>` or `chore/<name>` (see
-  [How A Release Is Cut](#how-a-release-is-cut))
-- `Python checks`: installs dependencies, compiles and type-checks the Python
-  source, and runs the pytest suite
-- `Docker build`: builds the production Docker image
-
-To prevent merges when a check fails, configure an active GitHub branch
-ruleset targeting `main`. Require pull requests and require `Branch name`,
-`Python checks` and `Docker build` to pass before merging. `Branch name` is
-skipped outside pull requests, which a required check counts as passing.
-
-After `CI` succeeds for a push to `main`, the `Release` workflow decides
-whether the push is a new version and, when it is, publishes the image and the
-GitHub release (see [Versioning And Releases](#versioning-and-releases)).
-It pushes the image to GitHub Packages with the workflow's own token, so it
-needs no repository secrets. The first release creates the `gw2bot` package;
-if its settings show it as private, make it public there once, or pulling it
-needs a login.
+The `CI` workflow runs on pull requests to `main`, pushes to `main`, and merge
+groups, with three checks: `Branch name` (pull requests only), `Python checks`
+(type checking and tests), and `Docker build`. Require all three in a branch
+ruleset on `main`.
 
 ## Versioning And Releases
 
-The bot follows [Semantic Versioning 2.0.0](https://semver.org/). A release is
-a `vMAJOR.MINOR.PATCH` tag on `main`, a GitHub release listing the pull
-requests in it, and the Docker image built from that commit.
+The bot follows [Semantic Versioning](https://semver.org/). A release is a
+`vX.Y.Z` tag on `main`, a GitHub release, and a Docker image.
 
-### What The Version Promises
+The version covers the bot's public API:
 
-The number describes what operators and members depend on, which is the bot's
-public API:
+- environment variables
+- `/settings` subcommands and their values
+- slash commands and their options
+- the database (every release upgrades an existing one in place)
+- the Docker image: the `/app/data` volume, UID and GID, and default port
+- web addresses, including the `/oauth/callback` redirect
+- buttons on messages the bot has already posted
 
-- the environment variables and what they mean
-- the `/settings` subcommands and the values they hold
-- the slash commands and their options
-- the database: every release upgrades an existing one in place when it starts
-- the Docker image: the `/app/data` volume, the UID and GID it runs as, and the
-  default port
-- the web site's addresses, including the `/oauth/callback` redirect URI
-  registered with Discord
-- the buttons on messages the bot has already posted, which keep working
-  across restarts
+| Part | Goes up when |
+| --- | --- |
+| MAJOR | Something above is removed or renamed, or an upgrade needs operator action. |
+| MINOR | Something is added or deprecated, and everything still works. |
+| PATCH | A bug is fixed. |
 
-| Part | Goes up when | For example |
-| --- | --- | --- |
-| MAJOR | Something above is removed or renamed, or an upgrade needs an operator to do something first. | Renaming an environment variable, dropping a `/settings` subcommand, moving the data volume. |
-| MINOR | Something is added, or marked deprecated, and everything that worked still works. | A new command, setting, page or notification. |
-| PATCH | A bug is fixed without changing anything above. | A wrong count in a report, a crash on an unexpected API response. |
-
-Upgrading within one major version never asks anything of the operator.
-Releases promise to upgrade a database, not to downgrade one, so back up the
-data volume before an upgrade you may want to undo.
+Upgrades within a major version never need operator action. Databases are not
+downgraded, so back up the data volume before an upgrade you may want to undo.
 
 ### Image Tags
 
-Each release pushes `ghcr.io/armonicpvp/gw2bot` to GitHub Packages under
-several tags, using `1.4.2` as the example:
+Images are published to `ghcr.io/armonicpvp/gw2bot` (no longer Docker Hub).
+For release `1.4.2`:
 
 | Tag | Points at |
 | --- | --- |
 | `latest` | The newest release. |
-| `1` | The newest `1.x.y` release: new features and fixes, never a breaking change. |
-| `1.4` | The newest `1.4.x` release: fixes only. |
-| `1.4.2` | That release, and never anything else. |
-| Commit SHA | The image built from that commit. |
+| `1` | The newest `1.x.y`: features and fixes, never breaking. |
+| `1.4` | The newest `1.4.x`: fixes only. |
+| `1.4.2` | Exactly that release. |
 
-Pinning the container to the major tag, such as
-`ghcr.io/armonicpvp/gw2bot:1`, takes every feature and fix automatically and
-leaves the choice of moving to `2` to you.
-Read the GitHub release notes for a new major version before changing the tag.
-
-The bot logs its version when it starts (`Starting gw2bot 1.4.2`), and the
-image carries it in its `org.opencontainers.image.version` label. A build that
-did not come from a release - `docker compose up --build`, a local run, the CI
-image - reports `0.0.0-dev`.
-
-### Docker Hub Is Retired
-
-Releases used to be published to Docker Hub, and are now published only to
-GitHub Packages. The images already on Docker Hub stay there, but nothing new
-is pushed to them, so a container still pulling from Docker Hub keeps the
-version it has and never updates. To keep receiving releases, change the
-container's image to `ghcr.io/armonicpvp/gw2bot` with a tag from
-[Image Tags](#image-tags); in Unraid that is the container's **Repository**
-field. The image is built the same way, so the data volume, the settings and
-the UID and GID carry over unchanged.
+Pin to the major tag (`:1`) to get updates without breaking changes. The bot
+logs its version at startup; builds that are not releases report `0.0.0-dev`.
 
 ### How A Release Is Cut
 
-Every pull request comes from a branch named for the kind of change it makes,
-which is also what decides the next version:
+The pull request's branch name decides the next version:
 
-| Branch | For | Releases |
+| Branch | For | Release |
 | --- | --- | --- |
-| `feat/<name>` | New behaviour a member or operator can use. | MINOR |
-| `fix/<name>` | A bug fix. | PATCH |
-| `chore/<name>` | Tests, documentation, CI, refactoring: nothing a member or operator would notice. | Nothing |
+| `feat/<name>` | New behaviour members or operators can use | MINOR |
+| `fix/<name>` | A bug fix | PATCH |
+| `chore/<name>` | Tests, docs, CI, refactoring | none |
 
-The name after the prefix is lowercase words joined by hyphens, such as
-`feat/profit-page` or `fix/raffle-rounding`. A pull request that breaks
-anything in [What The Version Promises](#what-the-version-promises) also gets
-the `breaking` label (create it once under the repository's labels), which
-makes it a MAJOR release whatever its branch.
+`<name>` is lowercase words joined by hyphens, such as `feat/profit-page`. A
+breaking change also gets the `breaking` label, which makes it MAJOR.
 
-After `CI` passes for a push to `main`, the `Release` workflow:
+After `CI` passes on `main`, the `Release` workflow takes the largest change
+merged since the last tag, then builds and pushes the image, creates the tag
+and GitHub release, and updates the image tags. If everything merged is a
+chore, nothing is released. To release anyway, run **Actions > Release > Run
+workflow** on `main`.
 
-1. Finds the newest `vX.Y.Z` tag and every pull request merged since it.
-2. Takes the largest change any of them asks for. When they are all chores, it
-   stops there and publishes nothing.
-3. Builds the image and pushes it under the commit SHA only, which claims no
-   version.
-4. Creates the tag and the GitHub release, with notes generated from the pull
-   requests. The tag claims the number, so no later run can give that version
-   to other code.
-5. Points the version, minor, major and `latest` tags at the image it pushed.
-   A version's image is never rebuilt.
-
-The first run, before any tag exists, releases `1.0.0`. Because each run
-covers everything since the newest tag, a run that was cancelled, or failed
-before tagging, is caught up by the next one; it released nothing. Re-running
-a run that failed after tagging finishes pointing the tags at the image it
-already pushed. A pull request merged from a branch without one of the
-prefixes is released as a patch, with a warning on the run.
-
-The version is never committed: the tag is the record. Nothing is pushed to
-`main`, so the branch ruleset needs no bypass for the workflow.
-
-To release something the automatic run would not, such as a dependency update
-merged as a chore, open **Actions > Release > Run workflow** on `main` and
-pick the smallest bump to release; merged pull requests that ask for more
-still get it.
-
-Never create, move or delete a `v` tag by hand. A released version must never
-change once published, and the workflow numbers the next release from the
-newest tag it finds. To enforce that, add a tag ruleset for `v*` that
-restricts updates and deletions; leave creation unrestricted so the workflow
-can still tag.
-
-## Extending Notifications
-
-Add GW2 API methods in `src/gw2bot/gw2/api.py` and notification decisions in
-the matching feature module: `src/gw2bot/gw2/guild_log.py` for guild-log
-events, `src/gw2bot/gw2/guild_storage.py` and `src/gw2bot/gw2/feast_stock.py`
-for feast stock alerts and history, `src/gw2bot/raffle/` for raffle reports and
-commands, `src/gw2bot/trials/` for Trial member tracking, `src/gw2bot/events/`
-for guild events, `src/gw2bot/web/` for the calendar and feast usage site, and
-`src/gw2bot/notifications/` for delivery to the notification channel and the
-`diag` previews. `src/gw2bot/core/` holds what every feature shares and nothing
-feature-specific: `database.py` owns the SQLite schema and its migrations,
-`logging_setup.py` the redacting formatter, and `discord_utils.py` the role
-checks and failure logging. `src/gw2bot/bot.py` wires the pollers and commands
-together, and `src/gw2bot/main.py` is the entrypoint that loads configuration
-and installs the redacting log formatter. `src/gw2bot/settings/` owns `/settings`: the
-definitions every subcommand is generated from, the store behind them, the
-encryption for the credential-bearing ones, and the one-time import from the
-environment. Secrets are read only from `/settings` and the bootstrap
-variables, and `.env` is excluded from both Git and the Docker build context.
+Never create, move or delete `v` tags by hand. A tag ruleset on `v*` that
+restricts updates and deletions enforces this.
