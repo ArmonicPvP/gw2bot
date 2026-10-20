@@ -58,16 +58,15 @@ class EventRunGroup:
     Grouped by event rather than listed per run, so a weekly raid reads as one
     row with a count instead of four identical ones. An event is its id and
     its creation time together: SQLite hands a deleted event's id to the next
-    one created, and the history outlives the deletion. The title, commander,
-    category and mentee setting are the latest matching run's, which is what
-    the event looked like most recently.
+    one created, and the history outlives the deletion. The title, commander
+    and category are the latest matching run's, which is what the event looked
+    like most recently.
     """
 
     event_id: int
     title: str
     category: str
     leader_discord_id: int
-    mentee_enabled: bool
     runs: int
     last_ended_at: float
 
@@ -99,14 +98,6 @@ def has_no_requirements(requirements: str) -> bool:
     return not stripped or stripped == NO_REQUIREMENTS_TEXT.casefold()
 
 
-def run_had_mentee(run: EventRun) -> bool:
-    """Whether somebody held the run's mentee slot when it ended."""
-    return any(
-        participant.mentee is MenteeStatus.MENTEE
-        for participant in run.participants
-    )
-
-
 def _group_runs(runs: Sequence[EventRun]) -> tuple[EventRunGroup, ...]:
     groups: dict[tuple[int, str], EventRunGroup] = {}
     for run in sorted(runs, key=lambda run: (run.ended_at, run.run_id)):
@@ -117,7 +108,6 @@ def _group_runs(runs: Sequence[EventRun]) -> tuple[EventRunGroup, ...]:
             title=run.title,
             category=run.category,
             leader_discord_id=run.leader_discord_id,
-            mentee_enabled=run.mentee_enabled,
             runs=1 if previous is None else previous.runs + 1,
             last_ended_at=run.ended_at,
         )
@@ -192,8 +182,9 @@ def build_event_stats(runs: Sequence[EventRun]) -> EventStats:
         top_commander_runs=top_count,
         points=points,
         mentees=mentees,
+        # Whether the run offered the slot, not whether anybody took it.
         without_mentee=_group_runs(
-            [run for run in ordered if not run_had_mentee(run)]
+            [run for run in ordered if not run.mentee_enabled]
         ),
         without_requirements=_group_runs(
             [run for run in ordered if has_no_requirements(run.requirements)]

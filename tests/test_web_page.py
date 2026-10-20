@@ -2924,5 +2924,6 @@ class TestEventsPage:
         )[0]
         assert "var noRuns = !data.runs;" in tables
         assert (
-            'noRuns ? NO_RUNS_TEXT : "Every run in this period had a mentee."'
+            "noRuns\n        ? NO_RUNS_TEXT\n"
+            '        : "Every run in this period offered a mentee slot.",'
         ) in tables

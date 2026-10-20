@@ -4020,12 +4020,14 @@ class TestEventStatsApi:
             seated=(7, 8),
             mentee=7,
         )
+        # Offers the mentee slot nobody took.
         self._run(
             store,
             timedelta(hours=3),
             title="Open World",
             leader=43,
             requirements="None",
+            mentee_enabled=True,
             seated=(8, 9),
         )
         self._run(store, timedelta(hours=1), title="Raid Night")
@@ -4060,13 +4062,16 @@ class TestEventStatsApi:
                 "completed_all_time": 2,
             }
         ]
-        # Each of the three runs is its own event here, newest first.
-        assert [
-            (row["title"], row["commander"], row["runs"])
-            for row in payload["without_mentee"]
-        ] == [
-            ("Raid Night", "Commander Kitty", 1),
-            ("Open World", "Commander Pup", 1),
+        # Each of the three runs is its own event here, and only the last
+        # one did not offer the mentee slot.
+        assert payload["without_mentee"] == [
+            {
+                "title": "Raid Night",
+                "category": "Fractal",
+                "commander": "Commander Kitty",
+                "runs": 1,
+                "last": payload["without_mentee"][0]["last"],
+            }
         ]
         assert [
             row["title"] for row in payload["without_requirements"]

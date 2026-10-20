@@ -849,19 +849,10 @@ table.stats td.unknown { color: var(--muted); }
       "members");
     renderTable("noMentee", "no-mentee-table", "no-mentee-pager",
       data.without_mentee || [],
-      [
-        EVENT_COLUMN,
-        COMMANDER_COLUMN,
-        {
-          heading: "Mentee slot",
-          fill: text(function (row) {
-            return row.mentee_enabled ? "Offered" : "Not offered";
-          })
-        },
-        RUNS_COLUMN,
-        LAST_COLUMN
-      ],
-      noRuns ? NO_RUNS_TEXT : "Every run in this period had a mentee.",
+      [EVENT_COLUMN, COMMANDER_COLUMN, RUNS_COLUMN, LAST_COLUMN],
+      noRuns
+        ? NO_RUNS_TEXT
+        : "Every run in this period offered a mentee slot.",
       "events");
     renderTable("noRequirements", "no-requirements-table",
       "no-requirements-pager",
