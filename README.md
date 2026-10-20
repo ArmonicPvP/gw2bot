@@ -7,10 +7,16 @@ rosters, and can serve a web calendar and dashboards.
 
 ## Quick Start
 
+Either way, start by copying `.env.example` to `.env` and filling in
+`DISCORD_TOKEN` and `DISCORD_COMMAND_GUILD_ID`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
 With Docker:
 
 ```powershell
-Copy-Item .env.example .env   # then fill in DISCORD_TOKEN and DISCORD_COMMAND_GUILD_ID
 docker compose up --build -d
 ```
 
@@ -28,7 +34,8 @@ Then configure the rest from Discord with `/settings` (see [Settings](#settings)
 
 Docker Compose keeps the database, `settings.key` and the `log` folder in the
 `bot-data` volume. The bot does not make backups; back the database and key up
-together.
+together. If you set `SETTINGS_ENCRYPTION_KEY`, no `settings.key` is written,
+so back that value up instead.
 
 For Unraid, map `/mnt/user/appdata/gw2bot` to `/app/data` (read/write) and
 leave `RAFFLE_DB_PATH` unset. The image runs as UID `99` and GID `100`.
@@ -166,8 +173,9 @@ Permissions the bot needs:
 | Event channels and ping channel | Mention @everyone, @here and All Roles (to ping roles) |
 
 A `50013 missing_permissions` error in the log means one of these is missing;
-`50001 missing_access` means the bot cannot see the channel at all. Failed
-deliveries are retried.
+`50001 missing_access` means the bot cannot see the channel at all. Guild log
+and raffle notifications are retried once the permission is fixed; an event's
+role ping that Discord refuses is not, and that run goes without its ping.
 
 ## Log Files
 
@@ -264,7 +272,7 @@ posts up to three reports daily:
 | --- | --- |
 | `/event new` | Creates and posts an event through three short forms: details, schedule, and repeat. |
 | `/event edit event_id:<event>` | Edits an event and its roster. Events that have started can only have their roster edited. |
-| `/event remind event_id:<event>` | Pings the next run's signed-up members now. |
+| `/event remind event_id:<event>` | Pings the next run's seated members now. |
 | `/event cancel event_id:<event>` | Cancels the next run of a repeating event and posts the one after. |
 | `/event delete event_id:<event>` | Ends an event. Past runs stay on the calendar and in statistics. |
 
@@ -390,9 +398,10 @@ kick, plus a list of pending invites.
 **Guild bank.** The bank balance over time, with every deposit and withdrawal.
 
 **Event statistics.** Runs, hours, participants, runs per commander, and mentee
-activity for any time range.
+activity.
 
-Dashboards offer 24h, 7d, 30d and custom ranges, and remember your choice.
+Dashboards offer 24h, 7d, 30d and custom ranges (up to 366 days, or 3650 for
+profit), and remember your choice.
 
 ## Development
 
