@@ -138,6 +138,9 @@ class TestStateToken:
     def test_accepts_the_calendar_page(self) -> None:
         assert sanitize_return_target("/calendar") == "/calendar"
 
+    def test_accepts_the_health_check(self) -> None:
+        assert sanitize_return_target("/healthz") == "/healthz"
+
     @pytest.mark.parametrize(
         "target",
         ["/admin/food", "/admin/roster", "/admin/gold", "/admin/events"],

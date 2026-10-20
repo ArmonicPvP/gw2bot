@@ -653,6 +653,50 @@ class TestAuthGate:
         assert response.status == 200
 
 
+class TestHealthCheck:
+    async def test_a_signed_in_member_gets_the_version(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The default session holds no officer role: the sign-in alone is
+        # enough to ask.
+        monkeypatch.setattr(server_module, "__version__", "1.4.2")
+
+        response = await client.get(
+            "/healthz",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 200
+        assert await response.json() == {"status": "ok", "version": "1.4.2"}
+        assert "no-store" in response.headers["Cache-Control"]
+
+    async def test_a_sign_in_returns_to_the_health_check(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = await client.get("/healthz")
+
+        assert response.status == 401
+        assert 'href="/login?next=%2Fhealthz"' in await response.text()
+
+    async def test_a_departed_member_is_turned_away(
+        self,
+        client: TestClient,
+        guild: FakeGuild,
+    ) -> None:
+        guild.members.clear()
+
+        response = await client.get(
+            "/healthz",
+            headers={"Cookie": f"{auth.SESSION_COOKIE}={session_cookie()}"},
+        )
+
+        assert response.status == 403
+        assert "Members only" in await response.text()
+
+
 class TestServerLifecycle:
     async def test_failed_bind_releases_the_runner(
         self,
