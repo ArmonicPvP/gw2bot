@@ -468,7 +468,8 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         default=DEFAULT_EVENT_CREATE_ROLE_ID,
         description=(
             "Role allowed to create, edit, move, cancel and delete guild "
-            "events and to change their rosters."
+            "events and to change their rosters. Its holders are the "
+            "commanders the event statistics page counts runs for."
         ),
         parse=_parse_discord_id("event_create"),
         validates=ValidationTarget.ROLE,

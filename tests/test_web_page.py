@@ -2853,6 +2853,7 @@ class TestEventsPage:
             'id="tile-participants"',
             'id="tile-commander"',
             'id="chart"',
+            'id="commanders-table"',
             'id="mentees-table"',
             'id="no-mentee-table"',
             'id="no-requirements-table"',
@@ -2860,6 +2861,7 @@ class TestEventsPage:
             assert element in EVENTS_PAGE
         for heading in (
             "Cumulative event runs",
+            "Event runs by commander",
             "Mentees",
             "Events without a mentee",
             "Events with no requirements",
@@ -2917,6 +2919,23 @@ class TestEventsPage:
     def test_dynamic_values_never_become_markup(self) -> None:
         assert "innerHTML" not in EVENTS_PAGE
         assert "insertAdjacentHTML" not in EVENTS_PAGE
+
+    def test_the_commander_table_is_just_commander_and_count(self) -> None:
+        tables = EVENTS_PAGE.split("function renderTables()", 1)[1].split(
+            "function render()", 1
+        )[0]
+        commanders = tables.split('renderTable("commanders"', 1)[1].split(
+            "renderTable(", 1
+        )[0]
+        assert re.findall(r"heading: \"(\w+)\"", commanders) == ["Count"]
+        assert "COMMANDER_COLUMN," in commanders
+        assert "formatCount(row.runs)" in commanders
+
+    def test_a_partial_commander_list_says_so(self) -> None:
+        # Commanders who led nothing can only be listed from Discord's member
+        # list, so a table without them must not read as if they had none.
+        assert "data.commanders_complete === false" in EVENTS_PAGE
+        assert 'id="commanders-note"' in EVENTS_PAGE
 
     def test_an_empty_window_does_not_claim_every_run_passed(self) -> None:
         tables = EVENTS_PAGE.split("function renderTables()", 1)[1].split(

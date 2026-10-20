@@ -146,6 +146,8 @@ table.stats td.unknown { color: var(--muted); }
   font-size: 0.85rem;
 }
 .pager:empty { display: none; }
+.table-note { color: var(--muted); font-size: 0.85rem; margin-top: 0.6rem; }
+.table-note:empty { display: none; }
 @media (max-width: 640px) {
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
@@ -208,6 +210,12 @@ table.stats td.unknown { color: var(--muted); }
     <div id="chart-status" role="status" aria-live="polite"></div>
   </section>
   <section class="card">
+    <h2>Event runs by commander</h2>
+    <div id="commanders-table"></div>
+    <div id="commanders-pager" class="pager"></div>
+    <div id="commanders-note" class="table-note"></div>
+  </section>
+  <section class="card">
     <h2>Mentees</h2>
     <div id="mentees-table"></div>
     <div id="mentees-pager" class="pager"></div>
@@ -257,7 +265,7 @@ table.stats td.unknown { color: var(--muted); }
     // No range until the server answers: the first load asks for the window
     // this member last picked rather than naming one over the top of it.
     range: null, data: null, scale: null,
-    pages: { mentees: 0, noMentee: 0, noRequirements: 0 }
+    pages: { commanders: 0, mentees: 0, noMentee: 0, noRequirements: 0 }
   };
 
   // A pinned touch selection listens on the whole page, so the chart it
@@ -811,6 +819,25 @@ table.stats td.unknown { color: var(--muted); }
     // run had what it asks about.
     var noRuns = !data.runs;
     var NO_RUNS_TEXT = "No event runs ended in this period.";
+    renderTable("commanders", "commanders-table", "commanders-pager",
+      data.commanders || [],
+      [
+        COMMANDER_COLUMN,
+        {
+          heading: "Count",
+          className: "num",
+          fill: text(function (row) { return formatCount(row.runs); })
+        }
+      ],
+      NO_RUNS_TEXT,
+      "commanders");
+    // False when Discord would not list who holds the commander role, so
+    // only the commanders who led a run could be counted.
+    document.getElementById("commanders-note").textContent =
+      data.commanders_complete === false
+        ? "Only commanders who led a run are listed: Discord did not " +
+          "share the server's member list."
+        : "";
     renderTable("mentees", "mentees-table", "mentees-pager",
       data.mentees || [],
       [
@@ -896,7 +923,9 @@ table.stats td.unknown { color: var(--muted); }
       .then(function (payload) {
         state.data = payload;
         adoptRange(payload.range, payload.since, payload.now);
-        state.pages = { mentees: 0, noMentee: 0, noRequirements: 0 };
+        state.pages = {
+          commanders: 0, mentees: 0, noMentee: 0, noRequirements: 0
+        };
         render();
       })
       .catch(function (error) {

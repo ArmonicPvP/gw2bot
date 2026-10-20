@@ -84,7 +84,7 @@ at once would add the same sales twice.
 | `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
 | `roster.py` | The guild roster history dashboard. |
 | `gold.py` | The guild bank gold history dashboard. |
-| `events.py` | The guild event statistics dashboard: four headline tiles, the cumulative runs line, and three paginated tables. |
+| `events.py` | The guild event statistics dashboard: four headline tiles, the cumulative runs line, and four paginated tables. |
 | `profit/` | The Trading Post profit dashboard, split further - see below. |
 
 `pages/__init__.py` re-exports every document, so `server.py` imports them all
@@ -107,6 +107,20 @@ check mark, a focus ring) takes `--accent-on-dark`, because `--accent` is too
 dark to read as text there. `TestPalette` in `tests/test_web_page.py` keeps
 `var(--accent)` to fills and borders and checks each pairing against WCAG AA,
 so a new shade or a new use fails there before it ships.
+
+## The events page reads the member list
+
+The events page's commander table counts everyone holding the role
+`/event new` needs, and only Discord knows who that is. The bot connects
+without the members intent, so discord.py's `Guild.fetch_members` refuses;
+`server.py` pages through the REST member list behind it with
+`bot.http.get_members` instead, which only needs the Server Members Intent
+switched on for the application in the Developer Portal. Do not ask for the
+intent in `bot.py` to get at the list: a deployment without the switch would
+then fail to connect at all, and `TestBotIntent` holds it off. When the list
+is refused the table falls back to the commanders who led a run, and the page
+says so. The holders are cached for five minutes, and the names the list
+carries seed the display-name cache so the tables need no lookup apiece.
 
 ## `pages/profit/` - style, markup and script
 

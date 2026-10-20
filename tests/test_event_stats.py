@@ -1,6 +1,7 @@
 from gw2bot.events.models import EventRun, EventRunParticipant, MenteeStatus
 from gw2bot.events.stats import (
     EVENT_STATS_RANGES,
+    CommanderRuns,
     build_event_stats,
     has_no_requirements,
 )
@@ -66,6 +67,7 @@ def test_an_empty_window_is_all_zeroes() -> None:
     assert (stats.runs, stats.total_minutes, stats.participants) == (0, 0, 0)
     assert stats.top_commanders == ()
     assert stats.top_commander_runs == 0
+    assert stats.commanders == ()
     assert stats.points == ()
     assert stats.mentees == ()
     assert stats.without_mentee == ()
@@ -122,6 +124,43 @@ def test_tied_commanders_are_all_named() -> None:
 
     assert stats.top_commanders == (42, 43)
     assert stats.top_commander_runs == 1
+
+
+def test_every_commander_is_counted_including_those_who_led_nothing() -> None:
+    stats = build_event_stats(
+        [
+            run(1, HOUR, leader=42),
+            run(2, 2 * HOUR, leader=43),
+            run(3, 3 * HOUR, leader=42),
+        ],
+        commanders=(42, 43, 44),
+    )
+
+    assert stats.commanders == (
+        CommanderRuns(42, 2),
+        CommanderRuns(43, 1),
+        CommanderRuns(44, 0),
+    )
+
+
+def test_a_leader_without_the_role_still_counts_their_runs() -> None:
+    # 43 led a run in the window and has lost the role since; dropping them
+    # would leave the table short of the window's total.
+    stats = build_event_stats(
+        [run(1, HOUR, leader=42), run(2, 2 * HOUR, leader=43)],
+        commanders=(42,),
+    )
+
+    assert stats.commanders == (CommanderRuns(42, 1), CommanderRuns(43, 1))
+    assert sum(row.runs for row in stats.commanders) == stats.runs
+
+
+def test_commanders_with_no_runs_in_an_empty_window_read_as_zero() -> None:
+    stats = build_event_stats([], commanders=(43, 42))
+
+    assert stats.commanders == (CommanderRuns(42, 0), CommanderRuns(43, 0))
+    # Nobody led anything, so nobody tops the window.
+    assert stats.top_commanders == ()
 
 
 def test_the_line_climbs_by_one_at_each_run_end_in_order() -> None:

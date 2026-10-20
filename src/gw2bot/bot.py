@@ -512,7 +512,8 @@ class Gw2Bot(discord.Client):
 
         # The calendar captures its credentials and caches per-user role
         # answers, so both a credential change and a role change need it
-        # rebuilt rather than merely reconfigured.
+        # rebuilt rather than merely reconfigured. The events page also caches
+        # who holds the event-creation role, to list them as commanders.
         web_fields = {
             "web_base_url",
             "discord_oauth_client_id",
@@ -524,6 +525,7 @@ class Gw2Bot(discord.Client):
             "gold_page_role_id",
             "events_page_role_id",
             "raffle_draw_role_id",
+            "event_create_role_id",
         }
         web_outcome = await self._reconcile_web_server(bool(changed & web_fields))
         if web_outcome is not None:
