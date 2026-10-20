@@ -2537,8 +2537,10 @@ skipped outside pull requests, which a required check counts as passing.
 After `CI` succeeds for a push to `main`, the `Release` workflow decides
 whether the push is a new version and, when it is, publishes the image and the
 GitHub release (see [Versioning And Releases](#versioning-and-releases)).
-Configure the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets
-before merging.
+It pushes the image to GitHub Packages with the workflow's own token, so it
+needs no repository secrets. The first release creates the `gw2bot` package;
+if its settings show it as private, make it public there once, or pulling it
+needs a login.
 
 ## Versioning And Releases
 
@@ -2574,8 +2576,8 @@ data volume before an upgrade you may want to undo.
 
 ### Image Tags
 
-Each release pushes `DOCKERHUB_USERNAME/gw2bot` under several tags, using
-`1.4.2` as the example:
+Each release pushes `ghcr.io/armonicpvp/gw2bot` to GitHub Packages under
+several tags, using `1.4.2` as the example:
 
 | Tag | Points at |
 | --- | --- |
@@ -2585,14 +2587,26 @@ Each release pushes `DOCKERHUB_USERNAME/gw2bot` under several tags, using
 | `1.4.2` | That release, and never anything else. |
 | Commit SHA | The image built from that commit. |
 
-Pinning the container to the major tag, such as `gw2bot:1`, takes every
-feature and fix automatically and leaves the choice of moving to `2` to you.
+Pinning the container to the major tag, such as
+`ghcr.io/armonicpvp/gw2bot:1`, takes every feature and fix automatically and
+leaves the choice of moving to `2` to you.
 Read the GitHub release notes for a new major version before changing the tag.
 
 The bot logs its version when it starts (`Starting gw2bot 1.4.2`), and the
 image carries it in its `org.opencontainers.image.version` label. A build that
 did not come from a release - `docker compose up --build`, a local run, the CI
 image - reports `0.0.0-dev`.
+
+### Docker Hub Is Retired
+
+Releases used to be published to Docker Hub, and are now published only to
+GitHub Packages. The images already on Docker Hub stay there, but nothing new
+is pushed to them, so a container still pulling from Docker Hub keeps the
+version it has and never updates. To keep receiving releases, change the
+container's image to `ghcr.io/armonicpvp/gw2bot` with a tag from
+[Image Tags](#image-tags); in Unraid that is the container's **Repository**
+field. The image is built the same way, so the data volume, the settings and
+the UID and GID carry over unchanged.
 
 ### How A Release Is Cut
 
