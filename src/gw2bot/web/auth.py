@@ -33,6 +33,7 @@ _MAX_RETURN_TARGET_LENGTH = 1024
 _RETURN_TARGET_PATHS = frozenset(
     {
         "/calendar",
+        "/healthz",
         "/profit",
         "/admin/food",
         "/admin/roster",

@@ -69,6 +69,7 @@ from gw2bot.profit.service import (
     serialize_trades,
 )
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
+from gw2bot.version import __version__
 from gw2bot.web import auth
 from gw2bot.web.calendar import CalendarEntry, calendar_entries
 from gw2bot.web.pages import (
@@ -287,6 +288,7 @@ class WebServer:
                 # triggered from off-site.
                 web.post("/logout", self._logout),
                 web.get("/api/me", self._me),
+                web.get("/healthz", self._healthz),
                 web.get("/api/events", self._events),
                 web.get("/admin/food", self._food),
                 web.get("/api/food", self._food_data),
@@ -866,6 +868,12 @@ class WebServer:
     async def _me(self, request: web.Request) -> web.StreamResponse:
         session = request[SESSION_KEY]
         return self._json({"name": session.name})
+
+    async def _healthz(self, request: web.Request) -> web.StreamResponse:
+        # Any signed-in member may ask, with no role behind it. Answering at
+        # all is the health: it reads neither the database nor Discord, and
+        # the version was read from its stamp once at import.
+        return self._json({"status": "ok", "version": __version__})
 
     async def _profit(self, request: web.Request) -> web.StreamResponse:
         LOGGER.debug("Serving profit dashboard page")
