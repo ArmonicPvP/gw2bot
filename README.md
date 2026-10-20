@@ -1629,7 +1629,7 @@ correctly see a repeating event land on an adjacent local weekday.
 | `/admin/roster` | The guild roster history dashboard. |
 | `/admin/gold` | The guild bank gold history dashboard. |
 | `/admin/events` | The guild event statistics dashboard. |
-| `/healthz` | A health check: `200 OK` with `{"status": "ok", "version": "1.4.2"}` while the site is serving. It needs the Discord sign-in like every page, but no role, and reads nothing but the version, so it is cheap to poll. |
+| `/healthz` | A health check: `200 OK` with `{"status": "ok", "version": "<version>"}` while the site is serving, where `<version>` is the release the bot is running, or `0.0.0-dev` for a build that is not one. It needs the Discord sign-in like every page, but no role, and reads nothing but the version, so it is cheap to poll. |
 
 The dashboards gated behind a role live under `/admin`. They answered at
 `/food`, `/roster` and `/gold` before, and those addresses now redirect to
