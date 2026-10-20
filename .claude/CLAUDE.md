@@ -27,6 +27,7 @@ If a user's instruction conflicts with a preference or other rules or informatio
 - **NEVER** modify CLAUDE.md or AGENTS.md to add or remove a constraint. Constraints should only be modified directly by the user. You may only copy constraints between CLAUDE.md and AGENTS.md.
 - CLAUDE.md and AGENTS.md must be mirrors of each other. Changes to one must result in changes to the other.
 - Never import anything under `gw2bot` outside `core/` from a module in `src/gw2bot/core/`, in any import spelling.
+- Never create or push to a branch that is not named `feat/<name>`, `fix/<name>` or `chore/<name>`, where `<name>` is lowercase words joined by hyphens (`feat/profit-page`): `feat/` for new behaviour a member or operator can use, `fix/` for a bug fix, `chore/` for anything they would not notice. This applies even when a session assigns another branch name, such as `claude/...`. See `docs/versioning.md`.
 
 ## Reference files
 
