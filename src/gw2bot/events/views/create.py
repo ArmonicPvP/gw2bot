@@ -1,7 +1,9 @@
 """Creating an event, and confirming the details of one being edited.
 
 Three modals collect the draft a step at a time, each retryable on its own,
-and the confirm views are where a finished draft is written.
+and the confirm views are where a finished draft is written. The leader is
+signed up for the event as it is posted, so a role-based one asks for their
+roles first.
 """
 
 from __future__ import annotations
@@ -22,10 +24,15 @@ from gw2bot.events.formatting import (
     parse_repeat_days,
 )
 from gw2bot.events.models import (
+    CategoryCapacity,
     Event,
     EventCategory,
+    EventRole,
+    EventSignup,
     MAX_PING_ROLES,
+    ROLE_EMOJI,
     RepeatFrequency,
+    supported_roles,
 )
 from gw2bot.events.views.lifecycle import (
     ChannelMoveConfirmView,
@@ -69,6 +76,12 @@ if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
+
+
+LEADER_ROLE_PROMPT = (
+    "You lead this event, so you are signed up for it when it posts. Pick "
+    "your role for it."
+)
 
 
 class RetryScheduleView(_ModalOpenView):
@@ -478,8 +491,49 @@ class EventConfirmView(_PreviewConfirmView):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventConfirmView],
     ) -> None:
-        from gw2bot.events.posting import delete_event_posts, post_occurrence
+        if not await self._ready_to_post(interaction):
+            return
+        # The leader is signed up for their own event, so a role-based one
+        # asks for their roles first; the post goes out once they answer.
+        if self._posted_by_leader(interaction) and (
+            self._draft.to_event().capacity.has_roles
+        ):
+            await self._ask_leader_roles(interaction)
+            return
+        await self.post_with_leader(interaction, None, ())
 
+    def _posted_by_leader(self, interaction: discord.Interaction) -> bool:
+        # Only the leader can say which roles they will play, so a commander
+        # who handed the draft to somebody else from "Change something" posts
+        # it without signing anybody up.
+        return self._draft.leader_discord_id == interaction.user.id
+
+    async def _ask_leader_roles(
+        self,
+        interaction: discord.Interaction,
+        content: str = LEADER_ROLE_PROMPT,
+    ) -> None:
+        LOGGER.debug(
+            "Asking the leader for their roles before posting; user_id=%s "
+            "category=%s",
+            interaction.user.id,
+            self._draft.category.value
+            if self._draft.category is not None
+            else None,
+        )
+        # Only the controls change: the preview stays above them, so the
+        # leader still sees what they are about to post.
+        await interaction.response.edit_message(
+            content=content,
+            view=LeaderRolePickView(self),
+        )
+
+    async def _ready_to_post(self, interaction: discord.Interaction) -> bool:
+        """Whether the draft may be posted now, answering the click if not.
+
+        Asked when Post event is pressed and again when the leader's roles
+        come back, because those pickers can sit open as long as the preview.
+        """
         # The preview can sit open for minutes; the creator role may have
         # been revoked since /event new, so recheck before the irreversible
         # save/post path.
@@ -496,20 +550,20 @@ class EventConfirmView(_PreviewConfirmView):
                 "You do not have the required role to create events.",
                 ephemeral=True,
             )
-            return
+            return False
         if self._draft.posted:
             await interaction.response.send_message(
                 "This event was already posted.",
                 ephemeral=True,
             )
-            return
+            return False
         if not self._draft.is_complete():
             await interaction.response.send_message(
                 "The event is missing required details. Use "
                 "**Change something** to fill them in.",
                 ephemeral=True,
             )
-            return
+            return False
         start_time = self._draft.start_time
         if start_time is not None and start_time <= datetime.now(UTC):
             await interaction.response.send_message(
@@ -517,9 +571,42 @@ class EventConfirmView(_PreviewConfirmView):
                 "**Change something** to update the date and time.",
                 ephemeral=True,
             )
+            return False
+        return True
+
+    async def post_with_leader(
+        self,
+        interaction: discord.Interaction,
+        role: EventRole | None,
+        flex_roles: tuple[EventRole, ...],
+    ) -> None:
+        """Save and post the draft with its leader already signed up."""
+        from gw2bot.events.posting import (
+            delete_event_posts,
+            post_occurrence,
+            seat_event_leader,
+            update_thread_membership,
+        )
+
+        if not await self._ready_to_post(interaction):
+            return
+        signs_up_leader = self._posted_by_leader(interaction)
+        if (
+            signs_up_leader
+            and self._draft.to_event().capacity.has_roles
+            and role is None
+        ):
+            # The category was changed to a role-based one from the preview
+            # while the leader had the post on its way without roles.
+            await self._ask_leader_roles(
+                interaction,
+                "This event now has roles. " + LEADER_ROLE_PROMPT,
+            )
             return
         self._draft.posted = True
-        await interaction.response.edit_message(view=None)
+        # Clears the role prompt as well as the controls, so a failure below
+        # puts the preview back exactly as Post event left it.
+        await interaction.response.edit_message(content=None, view=None)
         draft_event = self._draft.to_event()
         event: Event | None = None
         try:
@@ -544,6 +631,19 @@ class EventConfirmView(_PreviewConfirmView):
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,
                 event.start_time,
+            )
+            # Before the post, so the first render already lists the leader
+            # and nobody sees a roster without them.
+            leader_signup = (
+                seat_event_leader(
+                    self._bot,
+                    event,
+                    occurrence,
+                    role,
+                    flex_roles,
+                )
+                if signs_up_leader
+                else None
             )
         except SQLAlchemyError as exc:
             self._draft.posted = False
@@ -572,7 +672,7 @@ class EventConfirmView(_PreviewConfirmView):
             )
             return
         try:
-            await post_occurrence(self._bot, event, occurrence)
+            posted = await post_occurrence(self._bot, event, occurrence)
         except (discord.HTTPException, SQLAlchemyError, ValueError) as exc:
             # A ValueError means this event's rows went away while the message
             # was in flight, because someone deleted or cancelled it in that
@@ -611,16 +711,27 @@ class EventConfirmView(_PreviewConfirmView):
                 ephemeral=True,
             )
             return
+        if leader_signup is not None:
+            # The thread was opened by the post, so the leader is subscribed
+            # to it now, the way a member pressing Sign up would be.
+            await update_thread_membership(
+                self._bot,
+                posted,
+                event.leader_discord_id,
+                add=True,
+            )
         LOGGER.debug(
             "Event posted from preview; event_id=%s occurrence_id=%s "
-            "user_id=%s",
+            "user_id=%s leader_signed_up=%s",
             event.event_id,
             occurrence.occurrence_id,
             interaction.user.id,
+            leader_signup is not None,
         )
         await interaction.followup.send(
             f"Event **{event.event_id}** was posted in "
-            f"<#{event.channel_id}>.",
+            f"<#{event.channel_id}>. "
+            f"{_leader_signup_note(event, leader_signup)}",
             ephemeral=True,
         )
 
@@ -640,6 +751,152 @@ class EventConfirmView(_PreviewConfirmView):
                 interaction.user.id,
                 type(exc).__name__,
             )
+
+
+def _leader_signup_note(event: Event, signup: EventSignup | None) -> str:
+    if signup is None:
+        return (
+            f"<@{event.leader_discord_id}> leads it and was not signed up "
+            "for it, since only they can pick their roles. They can sign up "
+            "with **Sign up** on the post."
+        )
+    if signup.assigned_role is not None:
+        note = (
+            "You lead it, so you are signed up for it as "
+            f"**{signup.assigned_role.value}**."
+        )
+    else:
+        note = "You lead it, so you are signed up for it."
+    if event.repeat_frequency is RepeatFrequency.NONE:
+        return note
+    return (
+        f"{note} You will be signed up for every run of it automatically; "
+        "the ⚙️ button on the event message turns that off."
+    )
+
+
+class LeaderRoleSelect(discord.ui.Select["LeaderRolePickView"]):
+    def __init__(self, capacity: CategoryCapacity):
+        # The roster is empty until the post, so every role the category
+        # seats is open and none needs the "(full)" labels a sign-up shows.
+        supported = supported_roles(capacity)
+        super().__init__(
+            placeholder="Pick your role",
+            options=[
+                discord.SelectOption(
+                    label=role.value,
+                    value=role.value,
+                    emoji=ROLE_EMOJI[role],
+                )
+                for role in EventRole
+                if role in supported
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is not None:
+            await view.pick(interaction, EventRole(self.values[0]))
+
+
+class LeaderRolePickView(discord.ui.View):
+    """The leader's role for a new event, asked before it is posted."""
+
+    def __init__(self, confirm: EventConfirmView):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._confirm = confirm
+        self.add_item(LeaderRoleSelect(confirm._draft.to_event().capacity))
+
+    async def pick(
+        self,
+        interaction: discord.Interaction,
+        role: EventRole,
+    ) -> None:
+        LOGGER.debug(
+            "Leader role picked before posting; user_id=%s role=%s",
+            interaction.user.id,
+            role.value,
+        )
+        capacity = self._confirm._draft.to_event().capacity
+        if not _flex_role_options(capacity, role):
+            # Nothing else to flex to, and Discord refuses an empty select.
+            await self._confirm.post_with_leader(interaction, role, ())
+            return
+        await interaction.response.edit_message(
+            content="Select flex roles",
+            view=LeaderFlexRolesView(self._confirm, capacity, role),
+        )
+
+
+def _flex_role_options(
+    capacity: CategoryCapacity,
+    role: EventRole,
+) -> list[discord.SelectOption]:
+    supported = supported_roles(capacity)
+    return [
+        discord.SelectOption(
+            label=flex.value,
+            value=flex.value,
+            emoji=ROLE_EMOJI[flex],
+        )
+        for flex in EventRole
+        if flex != role and flex in supported
+    ]
+
+
+class LeaderFlexRolesSelect(discord.ui.Select["LeaderFlexRolesView"]):
+    def __init__(self, options: list[discord.SelectOption]):
+        super().__init__(
+            placeholder="Pick any flex roles",
+            options=options,
+            min_values=1,
+            max_values=len(options),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is not None:
+            await view.pick(
+                interaction,
+                tuple(EventRole(value) for value in self.values),
+            )
+
+
+class LeaderFlexRolesView(discord.ui.View):
+    def __init__(
+        self,
+        confirm: EventConfirmView,
+        capacity: CategoryCapacity,
+        role: EventRole,
+    ):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._confirm = confirm
+        self._role = role
+        self.add_item(LeaderFlexRolesSelect(_flex_role_options(capacity, role)))
+
+    async def pick(
+        self,
+        interaction: discord.Interaction,
+        flex_roles: tuple[EventRole, ...],
+    ) -> None:
+        LOGGER.debug(
+            "Leader flex roles picked before posting; user_id=%s "
+            "flex_count=%s",
+            interaction.user.id,
+            len(flex_roles),
+        )
+        await self._confirm.post_with_leader(interaction, self._role, flex_roles)
+
+    @discord.ui.button(
+        label="Skip selecting flex roles",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def skip(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[LeaderFlexRolesView],
+    ) -> None:
+        await self._confirm.post_with_leader(interaction, self._role, ())
 
 
 class EventEditConfirmView(_PreviewConfirmView):

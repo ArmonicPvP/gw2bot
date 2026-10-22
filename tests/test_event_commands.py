@@ -71,6 +71,10 @@ from gw2bot.events.views import (
     EventSignOutButton,
     EventSignUpButton,
     FlexRolesSelect,
+    LeaderFlexRolesView,
+    LeaderHandoverView,
+    LeaderRolePickView,
+    LeaderSignOutConfirmView,
     MenteeChoiceView,
     MenteeSlotPickView,
     ADD_SELECT_MAX_MEMBERS,
@@ -1381,6 +1385,21 @@ def make_complete_draft() -> EventDraft:
     )
 
 
+async def press_post(
+    view: EventConfirmView,
+    interaction: Any,
+    role: EventRole = EventRole.DPS,
+) -> None:
+    """Press Post event, answering the leader's role question when asked."""
+    await view.post_event.callback(interaction)
+    asked = interaction.response.edit_message.await_args
+    if asked is not None and isinstance(
+        asked.kwargs.get("view"),
+        LeaderRolePickView,
+    ):
+        await view.post_with_leader(interaction, role, ())
+
+
 class TestPostEventButton:
     async def test_failed_post_cleans_up_and_a_retry_posts_once(
         self,
@@ -1398,7 +1417,7 @@ class TestPostEventButton:
         interaction.followup.send = AsyncMock()
         interaction.edit_original_response = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         assert not draft.posted
         assert channel.sent == []
@@ -1420,7 +1439,7 @@ class TestPostEventButton:
         retry_interaction.followup.send = AsyncMock()
         retry_interaction.edit_original_response = AsyncMock()
 
-        await view.post_event.callback(retry_interaction)
+        await press_post(view, retry_interaction)
 
         assert draft.posted
         assert len(channel.sent) == 1
@@ -1467,7 +1486,7 @@ class TestPostEventButton:
         # type: ignore[method-assign] - the fake channel stands in for Discord.
         channel.send = cancel_while_the_message_is_in_flight  # type: ignore
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         # The event is torn down, and every message that went out with it -
         # the one this post sent and the successor the cancellation posted -
@@ -1499,7 +1518,7 @@ class TestPostEventButton:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         assert draft.posted
         assert len(channel.sent) == 1
@@ -1522,7 +1541,7 @@ class TestPostEventButton:
         interaction.followup.send = AsyncMock()
         interaction.edit_original_response = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         assert not draft.posted
         interaction.followup.send.assert_awaited_once()
@@ -1544,7 +1563,7 @@ class TestPostEventButton:
         # The preview was opened earlier, but the creator role is gone now.
         interaction = make_interaction(message=ephemeral_message())
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         assert not draft.posted
         assert channel.sent == []
@@ -1555,6 +1574,254 @@ class TestPostEventButton:
             "required role"
             in interaction.response.send_message.await_args.args[0]
         )
+
+
+class TestLeaderSignedUpOnPost:
+    def make_post_interaction(self) -> Any:
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def test_a_role_event_asks_the_leader_before_posting(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        interaction = self.make_post_interaction()
+
+        await view.post_event.callback(interaction)
+
+        # Nothing is saved or sent until the leader has answered.
+        assert not draft.posted
+        assert channel.sent == []
+        assert store.get_event(1) is None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], LeaderRolePickView)
+        assert "You lead this event" in kwargs["content"]
+        # The preview stays above the pickers.
+        assert "embeds" not in kwargs
+
+    async def test_picked_roles_seat_the_leader_on_the_first_post(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        await view.post_event.callback(self.make_post_interaction())
+        picker = LeaderRolePickView(view)
+
+        pick = self.make_post_interaction()
+        await picker.pick(pick, EventRole.ALACRITY_HEAL)
+        flex = pick.response.edit_message.await_args.kwargs["view"]
+        assert isinstance(flex, LeaderFlexRolesView)
+        assert channel.sent == []
+        answer = self.make_post_interaction()
+        await flex.pick(answer, (EventRole.DPS,))
+
+        assert draft.posted
+        assert len(channel.sent) == 1
+        occurrence = store.get_posted_unfinished_occurrences()[0]
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert signup.role is EventRole.ALACRITY_HEAL
+        assert signup.flex_roles == (EventRole.DPS,)
+        assert signup.assigned_role is EventRole.ALACRITY_HEAL
+        assert not signup.waitlisted
+        # The leader is listed on the post from the start, and subscribed to
+        # the thread it opened.
+        embed = channel.sent[0]["embed"]
+        assert any("<@42>" in str(field.value) for field in embed.fields)
+        channel.thread.add_user.assert_awaited_once()
+        assert channel.thread.add_user.await_args is not None
+        assert channel.thread.add_user.await_args.args[0].id == 42
+        message = answer.followup.send.await_args.args[0]
+        assert "signed up for it as **Alacrity Heal**" in message
+        # A one-off event has no later runs to sign the leader up for.
+        assert store.get_auto_signup(1, 42) is None
+
+    async def test_skipping_flex_roles_still_posts(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        flex = LeaderFlexRolesView(
+            view,
+            draft.to_event().capacity,
+            EventRole.DPS,
+        )
+
+        await flex.skip.callback(self.make_post_interaction())
+
+        occurrence = store.get_posted_unfinished_occurrences()[0]
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert signup.role is EventRole.DPS
+        assert signup.flex_roles == ()
+
+    async def test_a_headcount_event_posts_with_the_leader_without_asking(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = replace(make_complete_draft(), category=EventCategory.WVW)
+        view = EventConfirmView(fake_bot, draft)
+        interaction = self.make_post_interaction()
+
+        await view.post_event.callback(interaction)
+
+        assert len(channel.sent) == 1
+        occurrence = store.get_posted_unfinished_occurrences()[0]
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert signup.role is None
+        assert not signup.waitlisted
+        message = interaction.followup.send.await_args.args[0]
+        assert "You lead it, so you are signed up for it." in message
+
+    async def test_a_repeating_event_signs_the_leader_up_for_every_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        draft = replace(
+            make_complete_draft(),
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        view = EventConfirmView(fake_bot, draft)
+        interaction = self.make_post_interaction()
+
+        await view.post_with_leader(
+            interaction,
+            EventRole.QUICKNESS_DPS,
+            (EventRole.DPS,),
+        )
+
+        auto = store.get_auto_signup(1, 42)
+        assert auto is not None
+        assert auto.choice is AutoSignupChoice.YES
+        assert auto.role is EventRole.QUICKNESS_DPS
+        assert auto.flex_roles == (EventRole.DPS,)
+        message = interaction.followup.send.await_args.args[0]
+        assert "every run of it automatically" in message
+
+    async def test_a_category_given_roles_meanwhile_asks_for_them(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # Post event was pressed on a headcount event, and the category was
+        # changed to a role-based one from the preview before it went out.
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        interaction = self.make_post_interaction()
+
+        await view.post_with_leader(interaction, None, ())
+
+        assert channel.sent == []
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], LeaderRolePickView)
+        assert "now has roles" in kwargs["content"]
+
+    async def test_roles_the_category_cannot_seat_are_settled_on_post(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Picked for a fractal, posted as a dungeon, which seats no heals.
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        draft.category = EventCategory.DUNGEON
+
+        await view.post_with_leader(
+            self.make_post_interaction(),
+            EventRole.ALACRITY_HEAL,
+            (EventRole.ALACRITY_DPS,),
+        )
+
+        occurrence = store.get_posted_unfinished_occurrences()[0]
+        signup = store.get_signup(occurrence.occurrence_id, 42)
+        assert signup is not None
+        assert signup.role is EventRole.ALACRITY_DPS
+        assert signup.assigned_role is EventRole.ALACRITY_DPS
+
+    async def test_a_draft_led_by_somebody_else_posts_without_a_signup(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The commander handed the draft to member 55 from "Change something",
+        # and only 55 can say which roles they will play.
+        draft = replace(make_complete_draft(), leader_discord_id=55)
+        view = EventConfirmView(fake_bot, draft)
+        interaction = self.make_post_interaction()
+
+        await view.post_event.callback(interaction)
+
+        assert len(channel.sent) == 1
+        occurrence = store.get_posted_unfinished_occurrences()[0]
+        assert store.get_signups(occurrence.occurrence_id) == []
+        channel.thread.add_user.assert_not_awaited()
+        message = interaction.followup.send.await_args.args[0]
+        assert "<@55> leads it and was not signed up" in message
+
+    async def test_a_picker_answered_after_the_post_does_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        await view.post_with_leader(
+            self.make_post_interaction(),
+            EventRole.DPS,
+            (),
+        )
+        late = self.make_post_interaction()
+
+        await view.post_with_leader(late, EventRole.DPS, ())
+
+        assert len(channel.sent) == 1
+        assert "already posted" in (
+            late.response.send_message.await_args.args[0]
+        )
+
+    async def test_a_failed_seat_cleans_up_and_restores_the_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        store.add_signup = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        interaction = self.make_post_interaction()
+
+        await view.post_with_leader(interaction, EventRole.DPS, ())
+
+        assert not draft.posted
+        assert channel.sent == []
+        assert store.get_event(1) is None
+        assert "could not be saved" in (
+            interaction.followup.send.await_args.args[0]
+        )
+        interaction.edit_original_response.assert_awaited_once_with(view=view)
 
 
 class TestRolePickSelect:
@@ -2339,6 +2606,353 @@ class TestSignOutFlow:
         assert stored.choice is AutoSignupChoice.YES
         content = interaction.response.edit_message.await_args.kwargs["content"]
         assert "stays on" in content
+
+
+class TestLeaderSignOut:
+    def make_led_event(
+        self,
+        store: EventStore,
+        *,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.NONE,
+        start_time: datetime | None = None,
+    ) -> Any:
+        event = store.create_event(
+            category=EventCategory.WVW,
+            title="Border skirmish",
+            description="Bring siege.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=start_time if start_time is not None else FAR_FUTURE,
+            duration_minutes=90,
+            repeat_frequency=repeat_frequency,
+            repeat_days=(),
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=42,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        stored = store.get_occurrence(occurrence.occurrence_id)
+        assert stored is not None
+        return event, stored
+
+    def make_leader_interaction(self, *, role: bool = True) -> Any:
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,) if role else (),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def confirmed_sign_out(
+        self,
+        fake_bot: Any,
+        event: Any,
+        occurrence: Any,
+        *,
+        role: bool = True,
+    ) -> Any:
+        interaction = self.make_leader_interaction(role=role)
+        await LeaderSignOutConfirmView(
+            fake_bot,
+            event,
+            occurrence,
+        ).sign_out.callback(interaction)
+        return interaction
+
+    async def test_removing_the_leader_asks_once_more(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+        interaction = self.make_leader_interaction()
+
+        await SignOutConfirmView(
+            fake_bot,
+            event,
+            occurrence,
+        ).remove_me.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], LeaderSignOutConfirmView)
+        assert kwargs["content"] == (
+            "You are the leader of this event. Are you sure you want to sign "
+            "out?"
+        )
+
+    async def test_the_mentee_choice_asks_the_leader_once_more_too(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+        interaction = self.make_leader_interaction()
+
+        await SignOutChoiceView(
+            fake_bot,
+            event,
+            occurrence,
+        ).sign_out_event.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], LeaderSignOutConfirmView)
+
+    async def test_keeping_the_signup_changes_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+        interaction = self.make_leader_interaction()
+
+        await LeaderSignOutConfirmView(
+            fake_bot,
+            event,
+            occurrence,
+        ).keep_me.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        interaction.response.edit_message.assert_awaited_once_with(
+            content="You are still signed up for the event.",
+            view=None,
+        )
+
+    async def test_signing_out_then_offers_a_new_leader(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+
+        interaction = await self.confirmed_sign_out(
+            fake_bot,
+            event,
+            occurrence,
+        )
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert "You were removed from the event." in kwargs["content"]
+        assert "hand it to somebody else" in kwargs["content"]
+        view = kwargs["view"]
+        assert isinstance(view, LeaderHandoverView)
+        placeholders = [
+            getattr(child, "placeholder", None) for child in view.children
+        ]
+        assert "(Optional) Set a new leader for the event" in placeholders
+        # Signing out does not give the event away by itself.
+        stored = store.get_event(event.event_id)
+        assert stored is not None
+        assert stored.leader_discord_id == 42
+
+    async def test_no_handover_without_the_role_to_edit_events(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+
+        interaction = await self.confirmed_sign_out(
+            fake_bot,
+            event,
+            occurrence,
+            role=False,
+        )
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+        assert kwargs["content"] == "You were removed from the event."
+
+    async def test_no_handover_once_the_event_has_started(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # A running event's details are frozen, its leader among them.
+        event, occurrence = self.make_led_event(
+            store,
+            start_time=datetime.now(UTC) - timedelta(minutes=10),
+        )
+
+        interaction = await self.confirmed_sign_out(
+            fake_bot,
+            event,
+            occurrence,
+        )
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+
+    async def test_the_handover_follows_the_auto_signup_question(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.set_auto_signup(
+            event.event_id,
+            42,
+            AutoSignupChoice.YES,
+            None,
+            (),
+        )
+
+        interaction = await self.confirmed_sign_out(
+            fake_bot,
+            event,
+            occurrence,
+        )
+
+        prompt = interaction.edit_original_response.await_args.kwargs["view"]
+        assert isinstance(prompt, DisableAutoSignupView)
+        answer = self.make_leader_interaction()
+        await prompt.disable_auto.callback(answer)
+
+        kwargs = answer.response.edit_message.await_args.kwargs
+        assert "Automatic sign-up is off" in kwargs["content"]
+        assert isinstance(kwargs["view"], LeaderHandoverView)
+
+        keep = self.make_leader_interaction()
+        await prompt.keep_auto.callback(keep)
+        kwargs = keep.response.edit_message.await_args.kwargs
+        assert "Automatic sign-up stays on" in kwargs["content"]
+        assert isinstance(kwargs["view"], LeaderHandoverView)
+
+    async def test_a_member_signing_out_is_not_offered_the_auto_handover(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        prompt = DisableAutoSignupView(fake_bot, event, occurrence, 42)
+        answer = self.make_leader_interaction()
+
+        await prompt.keep_auto.callback(answer)
+
+        assert answer.response.edit_message.await_args.kwargs["view"] is None
+
+    async def test_picking_a_new_leader_opens_the_edit_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_led_event(store)
+        view = LeaderHandoverView(fake_bot, event.event_id)
+        interaction = self.make_leader_interaction()
+        candidate = SimpleNamespace(
+            id=55,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+
+        await view.pick(interaction, cast(Any, candidate))
+
+        preview = preview_kwargs(interaction)
+        editor = preview["view"]
+        assert isinstance(editor, EventEditConfirmView)
+        assert editor._draft.leader_discord_id == 55
+        assert editor._draft.editing_event_id == event.event_id
+        assert "<@55> is set as the new leader" in preview["content"]
+        # The click was answered before the editor opened, so it is not
+        # deferred a second time.
+        interaction.response.defer.assert_not_awaited()
+        final = interaction.edit_original_response.await_args.kwargs
+        assert "Save changes" in final["content"]
+        # Nothing changes until the edit is saved.
+        stored = store.get_event(event.event_id)
+        assert stored is not None
+        assert stored.leader_discord_id == 42
+
+        await editor.save_changes.callback(self.make_leader_interaction())
+
+        stored = store.get_event(event.event_id)
+        assert stored is not None
+        assert stored.leader_discord_id == 55
+
+    async def test_a_new_leader_needs_the_role_to_lead(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_led_event(store)
+        view = LeaderHandoverView(fake_bot, event.event_id)
+        interaction = self.make_leader_interaction()
+
+        await view.pick(interaction, cast(Any, SimpleNamespace(id=55, roles=[])))
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "required role to lead events" in kwargs["content"]
+        assert isinstance(kwargs["view"], LeaderHandoverView)
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_the_leader_cannot_hand_the_event_to_themselves(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_led_event(store)
+        view = LeaderHandoverView(fake_bot, event.event_id)
+        interaction = self.make_leader_interaction()
+
+        await view.pick(interaction, interaction.user)
+
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert "already the leader" in kwargs["content"]
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_a_handover_to_an_event_that_started_is_refused(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_led_event(
+            store,
+            start_time=datetime.now(UTC) - timedelta(minutes=10),
+        )
+        view = LeaderHandoverView(fake_bot, event.event_id)
+        interaction = self.make_leader_interaction()
+        candidate = SimpleNamespace(
+            id=55,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+
+        await view.pick(interaction, cast(Any, candidate))
+
+        assert "already started" in interaction.followup.send.await_args.args[0]
+        final = interaction.edit_original_response.await_args.kwargs
+        assert final["content"] == "The event was not handed over."
+
+    async def test_keeping_the_event_ends_the_flow(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_led_event(store)
+        interaction = self.make_leader_interaction()
+
+        await LeaderHandoverView(fake_bot, event.event_id).keep.callback(
+            interaction
+        )
+
+        interaction.response.edit_message.assert_awaited_once_with(
+            content="You are still the leader of this event.",
+            view=None,
+        )
 
 
 class TestAutoSignupPrompt:
@@ -4513,7 +5127,7 @@ class TestPingRolesEndToEnd:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         stored = store.get_event(1)
         assert stored is not None
@@ -4567,7 +5181,7 @@ class TestRequirementsEndToEnd:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         stored = store.get_event(1)
         assert stored is not None
@@ -4614,7 +5228,7 @@ class TestRequirementsEndToEnd:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         # The post carries the section, and no mentions of its own.
         assert post.sent[0]["content"] is None
@@ -4647,7 +5261,7 @@ class TestRequirementsEndToEnd:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         assert channel.sent[0]["content"] == "<@&10>"
 
@@ -4846,13 +5460,15 @@ class TestMaxParticipantsOption:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         stored = store.get_event(1)
         assert stored is not None
         assert stored.max_participants == 120
+        # The leader is signed up for their own event, so the first post
+        # already counts them.
         assert any(
-            field.name == "👥 Participants (0/120)"
+            field.name == "👥 Participants (1/120)"
             for field in channel.sent[0]["embed"].fields
         )
 
@@ -5007,7 +5623,7 @@ class TestMenteeSlotOption:
         )
         interaction.followup.send = AsyncMock()
 
-        await view.post_event.callback(interaction)
+        await press_post(view, interaction)
 
         stored = store.get_event(1)
         assert stored is not None

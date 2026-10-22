@@ -270,7 +270,7 @@ posts up to three reports daily:
 
 | Command | What it does |
 | --- | --- |
-| `/event new` | Creates and posts an event through three short forms: details, schedule, and repeat. |
+| `/event new` | Creates and posts an event through three short forms: details, schedule, and repeat. You are signed up for it as its leader. |
 | `/event edit event_id:<event>` | Edits an event and its roster. Events that have started can only have their roster edited. |
 | `/event remind event_id:<event>` | Pings the next run's seated members now. |
 | `/event cancel event_id:<event>` | Cancels the next run of a repeating event and posts the one after. |
@@ -300,6 +300,16 @@ seats them where they fit, keeps the last seats for missing boons and healers,
 and otherwise puts them on the waitlist (⌛️). Signing out promotes from the
 waitlist. On repeating events, members can opt into automatic sign-up and
 remembered roles from the ⚙️ menu.
+
+**Leaders.** An event's leader is signed up for it when they post it. On a
+role-based event, `/event new` asks for the leader's main and flex roles before
+posting. If the leader was changed to someone else before posting, nobody is
+signed up, since only the leader can pick their roles. On a repeating event the leader is signed up for every run
+automatically, which they can turn off from the ⚙️ menu. A leader can still sign
+out, after one extra confirmation. They are then offered a member picker to
+hand the event to a new leader, which opens the `/event edit` preview with that
+member as leader, to review and save. The new leader needs the `event_create`
+role, and the leader of an event that has started cannot be changed.
 
 **Mentee slot.** An event can offer one mentee slot for commander training.
 Members who sign up are asked if they want it; extra takers go on a mentee

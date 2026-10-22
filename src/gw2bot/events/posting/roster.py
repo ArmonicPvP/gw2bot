@@ -34,6 +34,7 @@ from gw2bot.events.models import (
     EventSignup,
     EventStatus,
     MenteeStatus,
+    RepeatFrequency,
     RoleChange,
     RosterAssignment,
     RosterCandidate,
@@ -2157,7 +2158,6 @@ def apply_auto_signups(
             for signup in signups
         ):
             continue
-        assigned_role: EventRole | None = None
         signup_role = entry.role
         signup_flex_roles = entry.flex_roles
         if event.capacity.has_roles:
@@ -2195,47 +2195,14 @@ def apply_auto_signups(
                     signup_role.value,
                     len(signup_flex_roles),
                 )
-            # Same admission as a live signup: earlier entries may be flexed
-            # aside to fit this one, but are never unseated, and the seats
-            # the missing boons or heals need are held for them. The roster
-            # is freshly seeded and unseen, so the reshuffle happens silently.
-            candidates = seated_candidates(signups)
-            candidates.append(
-                RosterCandidate(
-                    discord_user_id=entry.discord_user_id,
-                    preferences=preferred_role_order(
-                        signup_role,
-                        signup_flex_roles,
-                    ),
-                )
-            )
-            solution = (
-                solve_roster(event.capacity, candidates)
-                if can_admit(
-                    event.capacity,
-                    signups,
-                    signup_role,
-                    signup_flex_roles,
-                )
-                else None
-            )
-            waitlisted = solution is None
-            if solution is not None:
-                assigned_role = solution[entry.discord_user_id]
-                assignments, _ = _seated_reassignments(signups, solution)
-                bot.event_store.apply_roster_assignments(
-                    occurrence.occurrence_id,
-                    assignments,
-                )
-        else:
-            waitlisted = is_roster_full(event.capacity, signups)
-        bot.event_store.add_signup(
-            occurrence_id=occurrence.occurrence_id,
-            discord_user_id=entry.discord_user_id,
-            role=signup_role,
-            assigned_role=assigned_role,
-            flex_roles=signup_flex_roles,
-            waitlisted=waitlisted,
+        _seat_on_unseen_roster(
+            bot,
+            event,
+            occurrence,
+            signups,
+            entry.discord_user_id,
+            signup_role,
+            signup_flex_roles,
         )
         applied += 1
     LOGGER.debug(
@@ -2245,6 +2212,122 @@ def apply_auto_signups(
         applied,
     )
     return applied
+
+
+def _seat_on_unseen_roster(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    signups: list[EventSignup],
+    discord_user_id: int,
+    role: EventRole | None,
+    flex_roles: tuple[EventRole, ...],
+) -> EventSignup:
+    """Seat one member on a roster nobody has seen yet, without a word.
+
+    Same admission as a live signup: earlier entries may be flexed aside to
+    fit this one, but are never unseated, and the seats the missing boons or
+    heals need are held for them. The roster is freshly seeded or not posted
+    at all, so the reshuffle happens silently and no membership check runs.
+    The roles are expected settled against the event's category already.
+    """
+    assigned_role: EventRole | None = None
+    if event.capacity.has_roles and role is not None:
+        candidates = seated_candidates(signups)
+        candidates.append(
+            RosterCandidate(
+                discord_user_id=discord_user_id,
+                preferences=preferred_role_order(role, flex_roles),
+            )
+        )
+        solution = (
+            solve_roster(event.capacity, candidates)
+            if can_admit(event.capacity, signups, role, flex_roles)
+            else None
+        )
+        waitlisted = solution is None
+        if solution is not None:
+            assigned_role = solution[discord_user_id]
+            assignments, _ = _seated_reassignments(signups, solution)
+            bot.event_store.apply_roster_assignments(
+                occurrence.occurrence_id,
+                assignments,
+            )
+    else:
+        waitlisted = is_roster_full(event.capacity, signups)
+    return bot.event_store.add_signup(
+        occurrence_id=occurrence.occurrence_id,
+        discord_user_id=discord_user_id,
+        role=role,
+        assigned_role=assigned_role,
+        flex_roles=flex_roles,
+        waitlisted=waitlisted,
+    )
+
+
+def seat_event_leader(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    role: EventRole | None,
+    flex_roles: tuple[EventRole, ...],
+) -> EventSignup:
+    """Sign a new event's leader up for it, before its first run is posted.
+
+    A leader is on their own roster without pressing Sign up, so this is the
+    quiet seating an automatic sign-up gets rather than the announced one a
+    member's click does: the roster is empty and nobody has seen it. On a
+    repeating event the leader is signed up automatically for every later
+    run too, with the same roles, which they can switch off like anyone else.
+
+    The roles were picked before the post, against the draft's category, so
+    they are settled against the stored event here. A role-based event needs
+    one; a headcount event drops whatever was picked. Raises SQLAlchemyError
+    for the caller's cleanup, like the writes that created the event.
+    """
+    if not event.capacity.has_roles:
+        role, flex_roles = None, ()
+    elif role is None:
+        raise ValueError("This event requires picking a role.")
+    else:
+        role, flex_roles = normalize_stored_roles(
+            event.capacity,
+            role,
+            flex_roles,
+        )
+    signup = _seat_on_unseen_roster(
+        bot,
+        event,
+        occurrence,
+        bot.event_store.get_signups(occurrence.occurrence_id),
+        event.leader_discord_id,
+        role,
+        flex_roles,
+    )
+    repeats = event.repeat_frequency is not RepeatFrequency.NONE
+    if repeats:
+        bot.event_store.set_auto_signup(
+            event.event_id,
+            event.leader_discord_id,
+            AutoSignupChoice.YES,
+            role,
+            flex_roles,
+        )
+    LOGGER.debug(
+        "Seated the leader of a new event; event_id=%s occurrence_id=%s "
+        "user_id=%s assigned_role=%s waitlisted=%s auto_signup=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        event.leader_discord_id,
+        (
+            signup.assigned_role.value
+            if signup.assigned_role is not None
+            else None
+        ),
+        signup.waitlisted,
+        repeats,
+    )
+    return signup
 
 
 @dataclass(frozen=True, slots=True)
