@@ -528,12 +528,39 @@ class EventConfirmView(_PreviewConfirmView):
             view=LeaderRolePickView(self),
         )
 
-    async def _ready_to_post(self, interaction: discord.Interaction) -> bool:
+    async def _ready_to_post(
+        self,
+        interaction: discord.Interaction,
+        *,
+        from_picker: bool = False,
+    ) -> bool:
         """Whether the draft may be posted now, answering the click if not.
 
         Asked when Post event is pressed and again when the leader's roles
         come back, because those pickers can sit open as long as the preview.
+        A picker has taken the preview's own controls, so a refusal answered
+        from one puts them back where the commander can still put it right.
         """
+
+        async def refuse(content: str, *, correctable: bool) -> bool:
+            if not from_picker:
+                await interaction.response.send_message(
+                    content,
+                    ephemeral=True,
+                )
+                return False
+            LOGGER.debug(
+                "Refused a post from the leader's role picker; user_id=%s "
+                "controls_restored=%s",
+                interaction.user.id,
+                correctable,
+            )
+            await interaction.response.edit_message(
+                content=content,
+                view=self if correctable else None,
+            )
+            return False
+
         # The preview can sit open for minutes; the creator role may have
         # been revoked since /event new, so recheck before the irreversible
         # save/post path.
@@ -546,32 +573,28 @@ class EventConfirmView(_PreviewConfirmView):
                 interaction.user.id,
                 self._bot._config.event_create_role_id,
             )
-            await interaction.response.send_message(
+            return await refuse(
                 "You do not have the required role to create events.",
-                ephemeral=True,
+                correctable=False,
             )
-            return False
         if self._draft.posted:
-            await interaction.response.send_message(
+            return await refuse(
                 "This event was already posted.",
-                ephemeral=True,
+                correctable=False,
             )
-            return False
         if not self._draft.is_complete():
-            await interaction.response.send_message(
+            return await refuse(
                 "The event is missing required details. Use "
                 "**Change something** to fill them in.",
-                ephemeral=True,
+                correctable=True,
             )
-            return False
         start_time = self._draft.start_time
         if start_time is not None and start_time <= datetime.now(UTC):
-            await interaction.response.send_message(
+            return await refuse(
                 "The event start is no longer in the future. Use "
                 "**Change something** to update the date and time.",
-                ephemeral=True,
+                correctable=True,
             )
-            return False
         return True
 
     async def post_with_leader(
@@ -579,6 +602,8 @@ class EventConfirmView(_PreviewConfirmView):
         interaction: discord.Interaction,
         role: EventRole | None,
         flex_roles: tuple[EventRole, ...],
+        *,
+        from_picker: bool = False,
     ) -> None:
         """Save and post the draft with its leader already signed up."""
         from gw2bot.events.posting import (
@@ -588,7 +613,7 @@ class EventConfirmView(_PreviewConfirmView):
             update_thread_membership,
         )
 
-        if not await self._ready_to_post(interaction):
+        if not await self._ready_to_post(interaction, from_picker=from_picker):
             return
         signs_up_leader = self._posted_by_leader(interaction)
         if (
@@ -820,7 +845,12 @@ class LeaderRolePickView(discord.ui.View):
         capacity = self._confirm._draft.to_event().capacity
         if not _flex_role_options(capacity, role):
             # Nothing else to flex to, and Discord refuses an empty select.
-            await self._confirm.post_with_leader(interaction, role, ())
+            await self._confirm.post_with_leader(
+                interaction,
+                role,
+                (),
+                from_picker=True,
+            )
             return
         await interaction.response.edit_message(
             content="Select flex roles",
@@ -885,7 +915,12 @@ class LeaderFlexRolesView(discord.ui.View):
             interaction.user.id,
             len(flex_roles),
         )
-        await self._confirm.post_with_leader(interaction, self._role, flex_roles)
+        await self._confirm.post_with_leader(
+            interaction,
+            self._role,
+            flex_roles,
+            from_picker=True,
+        )
 
     @discord.ui.button(
         label="Skip selecting flex roles",
@@ -896,7 +931,12 @@ class LeaderFlexRolesView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[LeaderFlexRolesView],
     ) -> None:
-        await self._confirm.post_with_leader(interaction, self._role, ())
+        await self._confirm.post_with_leader(
+            interaction,
+            self._role,
+            (),
+            from_picker=True,
+        )
 
 
 class EventEditConfirmView(_PreviewConfirmView):

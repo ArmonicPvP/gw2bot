@@ -993,6 +993,22 @@ async def _confirm_sign_out(
     is allowed - but it is rarely meant, and the post goes on naming them as
     its leader either way, so it takes a second confirmation.
     """
+    # The confirmation can sit open while an edit hands the event to this
+    # member, or away from them, so who leads it is read now rather than
+    # taken from the click that opened it. An event gone meanwhile is the
+    # sign-out's to report.
+    try:
+        current = bot.event_store.get_event(event.event_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the event to check its leader before a sign "
+            "out; event_id=%s error_type=%s",
+            event.event_id,
+            type(exc).__name__,
+        )
+        current = None
+    if current is not None:
+        event = current
     # An event that has ended is reported as such by the sign-out itself,
     # with no warning first about a roster that can no longer change.
     if interaction.user.id != event.leader_discord_id or occurrence_has_ended(

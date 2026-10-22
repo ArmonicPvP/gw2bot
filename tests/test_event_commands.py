@@ -1385,6 +1385,31 @@ def make_complete_draft() -> EventDraft:
     )
 
 
+async def capture_console(
+    capsys: pytest.CaptureFixture[str],
+    secret: str,
+    workflow: Any,
+) -> str:
+    """Run a workflow under the bot's redacting logging; return the console."""
+    root_logger = logging.getLogger()
+    app_logger = logging.getLogger("gw2bot")
+    previous_handlers = list(root_logger.handlers)
+    previous_root_level = root_logger.level
+    previous_app_level = app_logger.level
+    try:
+        configure_logging(True, SecretRegistry((secret,)))
+        await workflow
+        return capsys.readouterr().err
+    finally:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            handler.close()
+        for handler in previous_handlers:
+            root_logger.addHandler(handler)
+        root_logger.setLevel(previous_root_level)
+        app_logger.setLevel(previous_app_level)
+
+
 async def press_post(
     view: EventConfirmView,
     interaction: Any,
@@ -1799,6 +1824,104 @@ class TestLeaderSignedUpOnPost:
         assert "already posted" in (
             late.response.send_message.await_args.args[0]
         )
+
+    async def test_a_picker_answered_after_the_start_restores_the_preview(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        # The event was minutes away when Post event was pressed, and the
+        # leader answered the pickers after it should have started. The
+        # pickers took the preview's controls, so the refusal hands them
+        # back: Change something is the way to a new date.
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        flex = LeaderFlexRolesView(
+            view,
+            draft.to_event().capacity,
+            EventRole.DPS,
+        )
+        draft.start_time = datetime.now(UTC) - timedelta(minutes=1)
+        interaction = self.make_post_interaction()
+
+        await flex.skip.callback(interaction)
+
+        assert channel.sent == []
+        assert store.get_event(1) is None
+        interaction.response.send_message.assert_not_awaited()
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert kwargs["view"] is view
+        assert "no longer in the future" in kwargs["content"]
+
+    async def test_a_picker_answered_after_the_post_drops_its_controls(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        flex = LeaderFlexRolesView(
+            view,
+            draft.to_event().capacity,
+            EventRole.DPS,
+        )
+        await view.post_with_leader(
+            self.make_post_interaction(),
+            EventRole.DPS,
+            (),
+        )
+        late = self.make_post_interaction()
+
+        await flex.skip.callback(late)
+
+        assert len(channel.sent) == 1
+        kwargs = late.response.edit_message.await_args.kwargs
+        assert kwargs["view"] is None
+        assert kwargs["content"] == "This event was already posted."
+
+    async def test_posting_logs_the_leader_seat_without_the_event(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        secret = str(EVENT_LOG_USER_ID)
+        draft = replace(
+            make_complete_draft(),
+            leader_discord_id=EVENT_LOG_USER_ID,
+            title="SECRET EVENT TITLE",
+            description="SECRET EVENT DESCRIPTION",
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        view = EventConfirmView(fake_bot, draft)
+        interaction = self.make_post_interaction()
+        interaction.user = SimpleNamespace(
+            id=EVENT_LOG_USER_ID,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+
+        async def post() -> None:
+            await view.post_event.callback(interaction)
+            picker = interaction.response.edit_message.await_args.kwargs[
+                "view"
+            ]
+            await picker.pick(interaction, EventRole.ALACRITY_HEAL)
+            flex = interaction.response.edit_message.await_args.kwargs["view"]
+            await flex.skip.callback(interaction)
+
+        console = await capture_console(capsys, secret, post())
+
+        assert store.get_auto_signup(1, EVENT_LOG_USER_ID) is not None
+        assert "Asking the leader for their roles before posting" in console
+        assert "Leader role picked before posting" in console
+        assert "Seated the leader of a new event" in console
+        assert "leader_signed_up=True" in console
+        assert "user_id=[REDACTED]" in console
+        assert secret not in console
+        assert "SECRET EVENT TITLE" not in console
+        assert "SECRET EVENT DESCRIPTION" not in console
 
     async def test_a_failed_seat_cleans_up_and_restores_the_preview(
         self,
@@ -2330,9 +2453,10 @@ class TestSignOutFlow:
         def refuse_the_removals_read(event_id: int) -> Any:
             # Only the read inside remove_signup fails; every read this view
             # makes afterwards succeeds, which is what made the old answer
-            # indistinguishable from never having signed up.
+            # indistinguishable from never having signed up. The first read
+            # is the view's own check of who leads the event.
             calls["count"] += 1
-            if calls["count"] == 2:
+            if calls["count"] == 3:
                 raise SQLAlchemyError("boom")
             return real_get_event(event_id)
 
@@ -2704,6 +2828,129 @@ class TestLeaderSignOut:
         assert store.get_signup(occurrence.occurrence_id, 42) is not None
         kwargs = interaction.response.edit_message.await_args.kwargs
         assert isinstance(kwargs["view"], LeaderSignOutConfirmView)
+
+    async def test_a_member_made_leader_meanwhile_is_asked_too(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The confirmation was opened while 7 led the event, and an edit
+        # handed it to 42 before 42 answered it.
+        event, occurrence = self.make_led_event(store)
+        snapshot = replace(event, leader_discord_id=7)
+        interaction = self.make_leader_interaction()
+
+        await SignOutConfirmView(
+            fake_bot,
+            snapshot,
+            occurrence,
+        ).remove_me.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        assert isinstance(kwargs["view"], LeaderSignOutConfirmView)
+
+    async def test_a_leader_replaced_meanwhile_signs_out_directly(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+        replaced = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title=event.title,
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=7,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        assert replaced.leader_discord_id == 7
+        interaction = self.make_leader_interaction()
+
+        await SignOutConfirmView(
+            fake_bot,
+            event,
+            occurrence,
+        ).remove_me.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is None
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        assert kwargs["view"] is None
+
+    async def test_the_sign_out_and_handover_log_no_event_content(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        secret = str(EVENT_LOG_USER_ID)
+        event, occurrence = self.make_led_event(store)
+        event = store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title="SECRET EVENT TITLE",
+            description="SECRET EVENT DESCRIPTION",
+            channel_id=event.channel_id,
+            leader_discord_id=EVENT_LOG_USER_ID,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=EVENT_LOG_USER_ID,
+            role=None,
+            assigned_role=None,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        interaction = self.make_leader_interaction()
+        interaction.user = SimpleNamespace(
+            id=EVENT_LOG_USER_ID,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+        candidate = SimpleNamespace(
+            id=55,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+
+        async def sign_out_and_hand_over() -> None:
+            await SignOutConfirmView(
+                fake_bot,
+                event,
+                occurrence,
+            ).remove_me.callback(interaction)
+            await LeaderSignOutConfirmView(
+                fake_bot,
+                event,
+                occurrence,
+            ).sign_out.callback(interaction)
+            handover = interaction.edit_original_response.await_args.kwargs[
+                "view"
+            ]
+            await handover.pick(interaction, cast(Any, candidate))
+
+        console = await capture_console(
+            capsys,
+            secret,
+            sign_out_and_hand_over(),
+        )
+
+        assert isinstance(preview_kwargs(interaction)["view"], EventEditConfirmView)
+        assert "Asked the leader to confirm signing out" in console
+        assert "Leader confirmed signing out of their own event" in console
+        assert "Decided whether to offer a leader handover" in console
+        assert "Opening the event editor for a leader handover" in console
+        assert "leader_handover=True" in console
+        assert "user_id=[REDACTED]" in console
+        assert secret not in console
+        assert "SECRET EVENT TITLE" not in console
+        assert "SECRET EVENT DESCRIPTION" not in console
 
     async def test_keeping_the_signup_changes_nothing(
         self,
