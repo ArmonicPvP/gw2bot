@@ -996,7 +996,8 @@ async def _confirm_sign_out(
     # The confirmation can sit open while an edit hands the event to this
     # member, or away from them, so who leads it is read now rather than
     # taken from the click that opened it. An event gone meanwhile is the
-    # sign-out's to report.
+    # sign-out's to report. A store that will not say is not evidence that
+    # the member does not lead it, so nothing is removed on a guess.
     try:
         current = bot.event_store.get_event(event.event_id)
     except SQLAlchemyError as exc:
@@ -1006,7 +1007,14 @@ async def _confirm_sign_out(
             event.event_id,
             type(exc).__name__,
         )
-        current = None
+        await interaction.response.edit_message(
+            content=(
+                "The event could not be read just now. Try again in a "
+                "moment."
+            ),
+            view=None,
+        )
+        return
     if current is not None:
         event = current
     # An event that has ended is reported as such by the sign-out itself,

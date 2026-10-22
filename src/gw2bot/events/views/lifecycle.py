@@ -1269,6 +1269,8 @@ async def open_event_edit(
             primary.occurrence_id if roster_only else None
         ),
     )
+    # Kept apart from the departed note, which the log reports on its own.
+    content = departed_note
     if leader_discord_id is not None:
         if roster_only:
             # A running event's details are frozen, the leader among them.
@@ -1289,10 +1291,10 @@ async def open_event_edit(
             f"<@{leader_discord_id}> is set as the new leader below. Press "
             "**Save changes** to hand the event over."
         )
-        departed_note = (
+        content = (
             handover_note
-            if departed_note is None
-            else f"{departed_note}\n\n{handover_note}"
+            if content is None
+            else f"{content}\n\n{handover_note}"
         )
     await send_event_preview(
         bot,
@@ -1300,7 +1302,7 @@ async def open_event_edit(
         draft,
         primary=primary,
         deferred=True,
-        content=departed_note,
+        content=content,
     )
     LOGGER.debug(
         "Event edit preview opened; user_id=%s event_id=%s "

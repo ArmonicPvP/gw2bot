@@ -2881,6 +2881,57 @@ class TestLeaderSignOut:
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert kwargs["view"] is None
 
+    async def test_an_unreadable_leader_check_removes_nobody(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = self.make_led_event(store)
+        snapshot = replace(event, leader_discord_id=7)
+        store.get_event = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        interaction = self.make_leader_interaction()
+
+        await SignOutConfirmView(
+            fake_bot,
+            snapshot,
+            occurrence,
+        ).remove_me.callback(interaction)
+
+        assert store.get_signup(occurrence.occurrence_id, 42) is not None
+        interaction.response.edit_message.assert_awaited_once_with(
+            content=(
+                "The event could not be read just now. Try again in a moment."
+            ),
+            view=None,
+        )
+
+    async def test_a_handover_logs_no_departures_it_did_not_make(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        event, _ = self.make_led_event(store)
+        view = LeaderHandoverView(fake_bot, event.event_id)
+        interaction = self.make_leader_interaction()
+        candidate = SimpleNamespace(
+            id=55,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+
+        console = await capture_console(
+            capsys,
+            "unused secret",
+            view.pick(interaction, cast(Any, candidate)),
+        )
+
+        assert "<@55> is set as the new leader" in (
+            preview_kwargs(interaction)["content"]
+        )
+        assert "departed_removed=False leader_handover=True" in console
+
     async def test_the_sign_out_and_handover_log_no_event_content(
         self,
         fake_bot: Any,
