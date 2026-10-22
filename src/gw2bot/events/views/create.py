@@ -557,7 +557,7 @@ class EventConfirmView(_PreviewConfirmView):
             )
             await interaction.response.edit_message(
                 content=content,
-                view=self if correctable else None,
+                view=self._live_controls() if correctable else None,
             )
             return False
 
@@ -760,6 +760,23 @@ class EventConfirmView(_PreviewConfirmView):
             ephemeral=True,
         )
 
+    def _live_controls(self) -> EventConfirmView:
+        """This view, or a fresh one over the same draft once it timed out.
+
+        The leader's pickers carry their own timeout, so the preview they
+        replaced can expire while they are open, and discord.py never routes
+        a click to a view that has. Putting that one back would show buttons
+        that do nothing.
+        """
+        if not self.is_finished():
+            return self
+        LOGGER.debug(
+            "Rebuilt the post controls after their view timed out; "
+            "user_id=%s",
+            self._draft.leader_discord_id,
+        )
+        return EventConfirmView(self._bot, self._draft)
+
     async def _restore_post_controls(
         self,
         interaction: discord.Interaction,
@@ -769,7 +786,9 @@ class EventConfirmView(_PreviewConfirmView):
         # of restarting /event new. A failure here is logged but must not
         # mask the original error being reported to the user.
         try:
-            await interaction.edit_original_response(view=self)
+            await interaction.edit_original_response(
+                view=self._live_controls()
+            )
         except discord.HTTPException as exc:
             LOGGER.error(
                 "Could not restore post controls; user_id=%s error_type=%s",

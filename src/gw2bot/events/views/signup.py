@@ -1218,13 +1218,32 @@ class LeaderHandoverView(discord.ui.View):
             content=f"Opening the event editor with <@{user.id}> as leader…",
             view=None,
         )
-        opened = await open_event_edit(
-            self._bot,
-            interaction,
-            self._event_id,
-            leader_discord_id=user.id,
-            acknowledged=True,
-        )
+        try:
+            opened = await open_event_edit(
+                self._bot,
+                interaction,
+                self._event_id,
+                leader_discord_id=user.id,
+                acknowledged=True,
+            )
+        except SQLAlchemyError as exc:
+            # This click is answered already, so a failure left to escape
+            # would strand the message on "Opening the event editor".
+            LOGGER.error(
+                "Could not open the event editor for a leader handover; "
+                "event_id=%s error_type=%s",
+                self._event_id,
+                type(exc).__name__,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "The event could not be opened for editing. Nothing was "
+                    "changed; you are still its leader. Run `/event edit` "
+                    "to hand it over later."
+                ),
+                view=None,
+            )
+            return
         await interaction.edit_original_response(
             content=(
                 f"The event editor is open below with <@{user.id}> as "

@@ -1854,6 +1854,32 @@ class TestLeaderSignedUpOnPost:
         assert kwargs["view"] is view
         assert "no longer in the future" in kwargs["content"]
 
+    async def test_a_preview_that_timed_out_is_restored_as_a_fresh_one(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The preview's own timeout ran out while the leader sat in the
+        # pickers, and a view that has timed out no longer answers clicks.
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+        flex = LeaderFlexRolesView(
+            view,
+            draft.to_event().capacity,
+            EventRole.DPS,
+        )
+        view.stop()
+        draft.start_time = datetime.now(UTC) - timedelta(minutes=1)
+        interaction = self.make_post_interaction()
+
+        await flex.skip.callback(interaction)
+
+        restored = interaction.response.edit_message.await_args.kwargs["view"]
+        assert isinstance(restored, EventConfirmView)
+        assert restored is not view
+        assert not restored.is_finished()
+        assert restored._draft is draft
+
     async def test_a_picker_answered_after_the_post_drops_its_controls(
         self,
         fake_bot: Any,
@@ -3181,6 +3207,28 @@ class TestLeaderSignOut:
         stored = store.get_event(event.event_id)
         assert stored is not None
         assert stored.leader_discord_id == 55
+
+    async def test_a_store_failure_opening_the_editor_is_reported(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = self.make_led_event(store)
+        view = LeaderHandoverView(fake_bot, event.event_id)
+        store.get_event = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        interaction = self.make_leader_interaction()
+        candidate = SimpleNamespace(
+            id=55,
+            roles=[SimpleNamespace(id=EVENT_CREATE_ROLE_ID)],
+        )
+
+        await view.pick(interaction, cast(Any, candidate))
+
+        final = interaction.edit_original_response.await_args.kwargs
+        assert "could not be opened for editing" in final["content"]
+        assert final["view"] is None
 
     async def test_a_new_leader_needs_the_role_to_lead(
         self,
