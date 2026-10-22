@@ -21,11 +21,11 @@ One module per flow, in dependency order:
 | --- | --- |
 | `shared.py` | The leaf. The draft a flow carries, the option builders its selects are filled from, the base views its modals subclass, and Discord's limits. It never imports a flow back. |
 | `preview.py` | The preview a commander answers, and the confirmation attached to it. |
-| `create.py` | Creating an event: three modals collecting the draft a step at a time, each retryable, and the confirm views that write it. |
+| `create.py` | Creating an event: three modals collecting the draft a step at a time, each retryable, the leader's role pickers, and the confirm views that write it. |
 | `field_edit.py` | The "Change something" flow: pick a field, then edit or re-pick it. |
 | `roster.py` | Editing a posted event's roster: taking members off and putting them on. |
-| `lifecycle.py` | Applying an edit, moving an event's channel, deleting and cancelling. |
-| `signup.py` | What a member does with a posted message: signing up, out, and the settings behind it. |
+| `lifecycle.py` | Opening and applying an edit (`open_event_edit` is `/event edit` itself), moving an event's channel, deleting and cancelling. |
+| `signup.py` | What a member does with a posted message: signing up, out, and the settings behind it, and a leader handing their event over. |
 
 The cycle is that previews open flows and flows re-render previews. So
 `preview.py` imports `EventDetailsConfirmView`, `EventConfirmView`,

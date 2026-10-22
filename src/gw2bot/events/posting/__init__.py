@@ -46,6 +46,7 @@ from gw2bot.events.posting.roster import (
     prune_departed_signups as prune_departed_signups,
     rebalance_occurrence_roster as rebalance_occurrence_roster,
     remove_signup as remove_signup,
+    seat_event_leader as seat_event_leader,
     seat_signup as seat_signup,
     set_mentee_request as set_mentee_request,
 )

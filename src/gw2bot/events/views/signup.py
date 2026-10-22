@@ -2,7 +2,9 @@
 
 The buttons on the posted message, the sign-up flow behind them, the
 remembered-role and auto-sign-up choices that flow offers, and the mentee
-question it ends with.
+question it ends with. A leader is signed up for their own event when it is
+posted, so signing out of it asks them once more, and offers to hand the
+event to somebody else.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Any, TYPE_CHECKING, cast
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.discord_utils import user_has_role
 from gw2bot.events.formatting import signup_edit_limit_message
 from gw2bot.events.models import (
     AutoSignupChoice,
@@ -32,11 +35,13 @@ from gw2bot.events.models import (
     normalize_stored_roles,
     supported_roles,
 )
+from gw2bot.events.views.lifecycle import open_event_edit
 from gw2bot.events.views.shared import (
     FLOW_TIMEOUT_SECONDS,
     _auto_signup_enabled,
     _is_ephemeral_component_interaction,
     _load_event_context,
+    _primary_live_occurrence,
     _role_pick_label,
     _still_seated_note,
     occurrence_has_ended,
@@ -683,12 +688,17 @@ class DisableAutoSignupView(discord.ui.View):
         event: Event,
         occurrence: EventOccurrence,
         discord_user_id: int,
+        *,
+        offer_handover: bool = False,
     ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._event = event
         self._occurrence = occurrence
         self._discord_user_id = discord_user_id
+        # Set when the member signing out leads the event: handing it over is
+        # the last thing they are asked, so it follows this answer.
+        self._offer_handover = offer_handover
 
     @discord.ui.button(
         label="Yes, turn it off",
@@ -752,10 +762,14 @@ class DisableAutoSignupView(discord.ui.View):
         seated = _still_seated_note(result.still_seated)
         if seated is not None:
             lines.append(seated)
-        await interaction.response.edit_message(
-            content="\n\n".join(lines),
-            view=None,
+        content, view = _with_leader_handover(
+            self._bot,
+            self._event,
+            interaction,
+            "\n\n".join(lines),
+            offer=self._offer_handover,
         )
+        await interaction.response.edit_message(content=content, view=view)
 
     @discord.ui.button(
         label="No, keep it on",
@@ -790,13 +804,15 @@ class DisableAutoSignupView(discord.ui.View):
             self._event.event_id,
             self._discord_user_id,
         )
-        await interaction.response.edit_message(
-            content=(
-                "Automatic sign-up stays on, so you will be signed up again "
-                "for the next occurrence of this event."
-            ),
-            view=None,
+        content, view = _with_leader_handover(
+            self._bot,
+            self._event,
+            interaction,
+            "Automatic sign-up stays on, so you will be signed up again for "
+            "the next occurrence of this event.",
+            offer=self._offer_handover,
         )
+        await interaction.response.edit_message(content=content, view=view)
 
 
 async def _sign_out_of_event(
@@ -804,13 +820,16 @@ async def _sign_out_of_event(
     event: Event,
     occurrence: EventOccurrence,
     interaction: discord.Interaction,
+    *,
+    offer_handover: bool = False,
 ) -> None:
     """Take the member off the event, answering on the prompt they clicked.
 
     Shared by the plain sign-out confirmation and the choice offered to a
     member with a claim on the mentee slot, whose "Event" answer is the same
     sign-out: the claim lives on the signup row, so it goes with it and the
-    slot passes to whoever is next.
+    slot passes to whoever is next. A leader who confirmed signing out of
+    their own event is offered to hand it over once the rest is answered.
     """
     from gw2bot.events.posting import (
         RosterUnreadable,
@@ -915,7 +934,7 @@ async def _sign_out_of_event(
     # Signing out only clears this occurrence. Leaving automatic sign-up on
     # would quietly re-seat the member on the next one, so offer to switch
     # it off while they are still looking at the confirmation.
-    prompt: DisableAutoSignupView | None = None
+    prompt: discord.ui.View | None = None
     if removed is not None and _auto_signup_enabled(
         bot,
         event,
@@ -926,6 +945,7 @@ async def _sign_out_of_event(
             event,
             occurrence,
             interaction.user.id,
+            offer_handover=offer_handover,
         )
         content += (
             "\n\nAutomatic sign-up is still on for this event, so you "
@@ -939,7 +959,320 @@ async def _sign_out_of_event(
             occurrence.occurrence_id,
             interaction.user.id,
         )
+    elif removed is not None:
+        content, prompt = _with_leader_handover(
+            bot,
+            event,
+            interaction,
+            content,
+            offer=offer_handover,
+        )
     await interaction.edit_original_response(content=content, view=prompt)
+
+
+LEADER_SIGN_OUT_WARNING = (
+    "You are the leader of this event. Are you sure you want to sign out?"
+)
+
+
+LEADER_HANDOVER_PROMPT = (
+    "You are still the leader of this event. You can hand it to somebody "
+    "else below, or keep leading it."
+)
+
+
+async def _confirm_sign_out(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    interaction: discord.Interaction,
+) -> None:
+    """Sign the member out, asking once more first if they lead the event.
+
+    A leader is signed up for their own event without asking, so leaving it
+    is allowed - but it is rarely meant, and the post goes on naming them as
+    its leader either way, so it takes a second confirmation.
+    """
+    # The confirmation can sit open while an edit hands the event to this
+    # member, or away from them, so who leads it is read now rather than
+    # taken from the click that opened it. An event gone meanwhile is the
+    # sign-out's to report. A store that will not say is not evidence that
+    # the member does not lead it, so nothing is removed on a guess.
+    try:
+        current = bot.event_store.get_event(event.event_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the event to check its leader before a sign "
+            "out; event_id=%s error_type=%s",
+            event.event_id,
+            type(exc).__name__,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "The event could not be read just now. Try again in a "
+                "moment."
+            ),
+            view=None,
+        )
+        return
+    if current is not None:
+        event = current
+    # An event that has ended is reported as such by the sign-out itself,
+    # with no warning first about a roster that can no longer change.
+    if interaction.user.id != event.leader_discord_id or occurrence_has_ended(
+        event,
+        occurrence,
+        datetime.now(UTC),
+    ):
+        await _sign_out_of_event(bot, event, occurrence, interaction)
+        return
+    LOGGER.debug(
+        "Asked the leader to confirm signing out of their own event; "
+        "event_id=%s occurrence_id=%s user_id=%s",
+        event.event_id,
+        occurrence.occurrence_id,
+        interaction.user.id,
+    )
+    await interaction.response.edit_message(
+        content=LEADER_SIGN_OUT_WARNING,
+        view=LeaderSignOutConfirmView(bot, event, occurrence),
+    )
+
+
+class LeaderSignOutConfirmView(discord.ui.View):
+    """The extra step a leader takes to sign out of their own event."""
+
+    def __init__(self, bot: Gw2Bot, event: Event, occurrence: EventOccurrence):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event = event
+        self._occurrence = occurrence
+
+    @discord.ui.button(
+        label="Yes, sign me out",
+        style=discord.ButtonStyle.danger,
+    )
+    async def sign_out(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[LeaderSignOutConfirmView],
+    ) -> None:
+        LOGGER.debug(
+            "Leader confirmed signing out of their own event; event_id=%s "
+            "occurrence_id=%s user_id=%s",
+            self._event.event_id,
+            self._occurrence.occurrence_id,
+            interaction.user.id,
+        )
+        await _sign_out_of_event(
+            self._bot,
+            self._event,
+            self._occurrence,
+            interaction,
+            offer_handover=True,
+        )
+
+    @discord.ui.button(
+        label="Keep me signed up",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep_me(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[LeaderSignOutConfirmView],
+    ) -> None:
+        LOGGER.debug(
+            "Leader kept their signup for their own event; event_id=%s "
+            "user_id=%s",
+            self._event.event_id,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content="You are still signed up for the event.",
+            view=None,
+        )
+
+
+def _with_leader_handover(
+    bot: Gw2Bot,
+    event: Event,
+    interaction: discord.Interaction,
+    content: str,
+    *,
+    offer: bool,
+) -> tuple[str, discord.ui.View | None]:
+    """The last answer of a sign-out, with the leader handover under it.
+
+    Only offered where the handover can land: by a member who still leads
+    the event and may edit events, on an event whose next run has not
+    started, since a running event's details - its leader among them - are
+    frozen. Anywhere else the sign-out simply ends here.
+    """
+    if not offer:
+        return content, None
+    try:
+        current = bot.event_store.get_event(event.event_id)
+        upcoming = _primary_live_occurrence(bot, event.event_id)
+    except SQLAlchemyError as exc:
+        # The sign-out is done and only the optional question is lost.
+        LOGGER.error(
+            "Could not read the event to offer a leader handover; "
+            "event_id=%s error_type=%s",
+            event.event_id,
+            type(exc).__name__,
+        )
+        return content, None
+    offered = (
+        current is not None
+        and not current.cancelled
+        and current.leader_discord_id == interaction.user.id
+        and user_has_role(
+            interaction.user,
+            bot._config.event_create_role_id,
+        )
+        and upcoming is not None
+        and upcoming.start_time > datetime.now(UTC)
+    )
+    LOGGER.debug(
+        "Decided whether to offer a leader handover after a sign out; "
+        "event_id=%s user_id=%s offered=%s",
+        event.event_id,
+        interaction.user.id,
+        offered,
+    )
+    if not offered:
+        return content, None
+    return (
+        f"{content}\n\n{LEADER_HANDOVER_PROMPT}",
+        LeaderHandoverView(bot, event.event_id),
+    )
+
+
+class LeaderHandoverSelect(discord.ui.UserSelect["LeaderHandoverView"]):
+    def __init__(self):
+        super().__init__(placeholder="(Optional) Set a new leader for the event")
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is not None:
+            await view.pick(interaction, self.values[0])
+
+
+class LeaderHandoverView(discord.ui.View):
+    """Offered to a leader who has just signed out of their own event.
+
+    Picking somebody opens the `/event edit` preview with them as its leader,
+    to be saved like any other edit; nothing changes until it is.
+    """
+
+    def __init__(self, bot: Gw2Bot, event_id: int):
+        super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
+        self._bot = bot
+        self._event_id = event_id
+        self.add_item(LeaderHandoverSelect())
+
+    async def pick(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | discord.User,
+    ) -> None:
+        role_id = self._bot._config.event_create_role_id
+        rejection: str | None = None
+        if not user_has_role(interaction.user, role_id):
+            rejection = "You no longer have the required role to edit events."
+        elif user.id == interaction.user.id:
+            rejection = (
+                "You are already the leader of this event. Pick someone "
+                "else, or keep leading it."
+            )
+        elif not user_has_role(user, role_id):
+            rejection = (
+                "That member does not have the required role to lead "
+                "events. Pick someone else."
+            )
+        if rejection is not None:
+            LOGGER.debug(
+                "Rejected a leader handover pick; event_id=%s user_id=%s "
+                "candidate_id=%s",
+                self._event_id,
+                interaction.user.id,
+                user.id,
+            )
+            await interaction.response.edit_message(
+                content=rejection,
+                view=(
+                    LeaderHandoverView(self._bot, self._event_id)
+                    if user_has_role(interaction.user, role_id)
+                    else None
+                ),
+            )
+            return
+        LOGGER.debug(
+            "Opening the event editor for a leader handover; event_id=%s "
+            "user_id=%s candidate_id=%s",
+            self._event_id,
+            interaction.user.id,
+            user.id,
+        )
+        await interaction.response.edit_message(
+            content=f"Opening the event editor with <@{user.id}> as leader…",
+            view=None,
+        )
+        try:
+            opened = await open_event_edit(
+                self._bot,
+                interaction,
+                self._event_id,
+                leader_discord_id=user.id,
+                acknowledged=True,
+            )
+        except SQLAlchemyError as exc:
+            # This click is answered already, so a failure left to escape
+            # would strand the message on "Opening the event editor".
+            LOGGER.error(
+                "Could not open the event editor for a leader handover; "
+                "event_id=%s error_type=%s",
+                self._event_id,
+                type(exc).__name__,
+            )
+            await interaction.edit_original_response(
+                content=(
+                    "The event could not be opened for editing. Nothing was "
+                    "changed; you are still its leader. Run `/event edit` "
+                    "to hand it over later."
+                ),
+                view=None,
+            )
+            return
+        await interaction.edit_original_response(
+            content=(
+                f"The event editor is open below with <@{user.id}> as "
+                "leader. Nothing changes until you press **Save changes**."
+                if opened
+                else "The event was not handed over."
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="Keep leading it",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[LeaderHandoverView],
+    ) -> None:
+        LOGGER.debug(
+            "Leader kept their event after signing out; event_id=%s "
+            "user_id=%s",
+            self._event_id,
+            interaction.user.id,
+        )
+        await interaction.response.edit_message(
+            content="You are still the leader of this event.",
+            view=None,
+        )
 
 
 class SignOutConfirmView(discord.ui.View):
@@ -955,7 +1288,7 @@ class SignOutConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[SignOutConfirmView],
     ) -> None:
-        await _sign_out_of_event(
+        await _confirm_sign_out(
             self._bot,
             self._event,
             self._occurrence,
@@ -996,7 +1329,8 @@ class SignOutChoiceView(discord.ui.View):
     """What a member with a claim on the mentee slot is signing out of.
 
     Picking one is already a second, deliberate click after **Sign out**, so
-    neither answer asks again.
+    neither answer asks again - unless the member leads the event, whom
+    signing out of it asks once more like the plain confirmation does.
     """
 
     def __init__(self, bot: Gw2Bot, event: Event, occurrence: EventOccurrence):
@@ -1011,7 +1345,7 @@ class SignOutChoiceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[SignOutChoiceView],
     ) -> None:
-        await _sign_out_of_event(
+        await _confirm_sign_out(
             self._bot,
             self._event,
             self._occurrence,
