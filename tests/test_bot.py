@@ -794,6 +794,7 @@ class TestStartupStatus:
             user="Test Bot",
             _ready_announced=False,
             _config=SimpleNamespace(
+                discord_command_guild_id=1,
                 poll_interval_seconds=300,
                 guild_log_poll_interval_seconds=60,
                 gw2_api_enabled=True,
@@ -802,6 +803,9 @@ class TestStartupStatus:
             _startup_status=lambda: Gw2Bot._startup_status(cast(Gw2Bot, bot)),
             _try_send_notification=AsyncMock(),
             _announce_legacy_variables=AsyncMock(),
+            # No server cached, so the ping role seed waits for a later
+            # connection and touches nothing.
+            get_guild=lambda guild_id: None,
         )
 
         with caplog.at_level(logging.INFO, logger="gw2bot"):

@@ -916,6 +916,21 @@ class EventMenteeOptOutRecord(Base):
     discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
 
+class EventPingRoleRecord(Base):
+    """One Discord role an officer has allowed events to ping.
+
+    The list is the whole answer to which roles a commander may pick and which
+    an event's post may notify: a role is never offered or pinged for what it
+    happens to be called. ``added_at`` keeps the order officers added them in,
+    which nothing reads beyond a stable listing.
+    """
+
+    __tablename__ = "gw2_event_ping_roles"
+
+    role_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    added_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class EventRunRecord(Base):
     """One run of a guild event, written once, when it is over.
 

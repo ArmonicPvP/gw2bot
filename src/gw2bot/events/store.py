@@ -11,6 +11,7 @@ from gw2bot.core.database import (
     EventAutoSignupRecord,
     EventMenteeOptOutRecord,
     EventOccurrenceRecord,
+    EventPingRoleRecord,
     EventRecord,
     EventReminderRecord,
     EventRunParticipantRecord,
@@ -59,6 +60,11 @@ NO_POSTED_FOOTER_CALENDAR = ""
 # database with no row has never been re-rendered for any of them.
 POSTED_RENDER_REVISION_KEY = "event_post_render_revision"
 POSTED_RENDER_REVISION = "1"
+# Set once the pingable role list has been seeded from the roles that were
+# pingable by name before officers chose them, in the same `metadata` table.
+# Its presence is what stops a role an officer removed from coming back on the
+# next start.
+PING_ROLES_SEEDED_KEY = "event_ping_roles_seeded"
 
 
 def _serialize_time(value: datetime) -> str:
@@ -1862,3 +1868,75 @@ class EventStore:
             len(entries),
         )
         return entries
+
+    def get_ping_role_ids(self) -> tuple[int, ...]:
+        """The roles events may ping, in the order officers added them."""
+        with self._sessions() as session:
+            role_ids = tuple(
+                session.scalars(
+                    select(EventPingRoleRecord.role_id).order_by(
+                        EventPingRoleRecord.added_at,
+                        EventPingRoleRecord.role_id,
+                    )
+                ).all()
+            )
+        LOGGER.debug("Loaded pingable event roles; roles=%s", len(role_ids))
+        return role_ids
+
+    def add_ping_role(self, role_id: int) -> bool:
+        """Allow events to ping a role. False when it already could."""
+        with self._sessions.begin() as session:
+            if session.get(EventPingRoleRecord, role_id) is not None:
+                LOGGER.debug("Event ping role was already pingable")
+                return False
+            session.add(
+                EventPingRoleRecord(
+                    role_id=role_id,
+                    added_at=_serialize_time(datetime.now(UTC)),
+                )
+            )
+        LOGGER.debug("Added a pingable event role")
+        return True
+
+    def remove_ping_role(self, role_id: int) -> bool:
+        """Stop events pinging a role. False when it was not pingable.
+
+        The events that already carry the role keep its id: the posting path
+        skips a role that is not on this list, so adding it back resumes their
+        pings rather than leaving every one of them to be edited again.
+        """
+        with self._sessions.begin() as session:
+            record = session.get(EventPingRoleRecord, role_id)
+            if record is None:
+                LOGGER.debug("Event ping role to remove was not pingable")
+                return False
+            session.delete(record)
+        LOGGER.debug("Removed a pingable event role")
+        return True
+
+    def seed_ping_roles(self, role_ids: Sequence[int]) -> bool:
+        """Start the pingable list from the given roles, once per database.
+
+        Upgrading from the release that picked roles by name must not silence
+        the events already pinging them, so the roles that qualified then are
+        added on the first start. The marker is written in the same
+        transaction, so an officer's later removals are never undone and a
+        list that was seeded empty stays the officers' to fill. False means it
+        had already been seeded and nothing changed.
+        """
+        with self._sessions.begin() as session:
+            if session.get(SettingRecord, PING_ROLES_SEEDED_KEY) is not None:
+                LOGGER.debug("Pingable event roles were already seeded")
+                return False
+            added_at = _serialize_time(datetime.now(UTC))
+            added = 0
+            for role_id in dict.fromkeys(role_ids):
+                if session.get(EventPingRoleRecord, role_id) is not None:
+                    continue
+                session.add(
+                    EventPingRoleRecord(role_id=role_id, added_at=added_at)
+                )
+                added += 1
+            session.add(SettingRecord(key=PING_ROLES_SEEDED_KEY, value="1"))
+        LOGGER.info("Seeded the pingable event roles; roles=%s", added)
+        return True

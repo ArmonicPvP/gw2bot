@@ -40,11 +40,11 @@ from gw2bot.events.models import (
     EventStatus,
     MAX_PARTICIPANTS_LIMIT,
     MAX_PING_ROLES,
-    PING_ROLE_PREFIX,
+    MAX_PINGABLE_ROLES,
     RepeatFrequency,
-    is_pingable_role_name,
     is_roster_full,
 )
+from gw2bot.events.ping_roles import pingable_role_ids
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -147,11 +147,11 @@ EVENT_CHANNEL_REJECTION = (
 REMOVE_SELECT_PAGE_SIZE = 25
 
 
-# The same cap applied to the ping-role picker. Every offered role is opt-in
-# and named for a kind of run, so a server is not expected to hold more than
-# a handful; a server that somehow does gets the first page of them rather
-# than a picker Discord would refuse outright.
-PING_ROLE_OPTION_LIMIT = 25
+# The same cap applied to the ping-role picker. Officers can make no more roles
+# pingable than this, but a role an event already pings is offered beside them
+# after it has been taken off the list, so the picker is still cut to the first
+# page rather than becoming one Discord would refuse outright.
+PING_ROLE_OPTION_LIMIT = MAX_PINGABLE_ROLES
 
 
 PING_ROLE_PROMPT = "Which roles should the post ping?"
@@ -160,13 +160,13 @@ PING_ROLE_PROMPT = "Which roles should the post ping?"
 # Discord caps a Label's text at 45 characters, so the details ride along in
 # the Label description, as the channel picker's hint does.
 PING_ROLE_HINT = (
-    f"Optional. Up to {MAX_PING_ROLES} roles named {PING_ROLE_PREFIX}…"
+    f"Optional. Up to {MAX_PING_ROLES} of the roles officers made pingable."
 )
 
 
 PING_ROLE_NONE_AVAILABLE = (
-    f"No roles in this server start with `{PING_ROLE_PREFIX}`, so there is "
-    "nothing to ping. Ask an admin to create one, then try again."
+    "No roles can be pinged by events yet, so there is nothing to ping. Ask "
+    "an officer to add one with `/event pingroles add`, then try again."
 )
 
 
@@ -401,32 +401,44 @@ def _frequency_options(
     ]
 
 
-def pingable_roles(guild: discord.Guild | None) -> list[discord.Role]:
-    """The server's opt-in ping roles, in the order the picker offers them.
+def pingable_roles(
+    guild: discord.Guild | None,
+    role_ids: Sequence[int],
+) -> list[discord.Role]:
+    """The server's pingable roles, in the order the picker offers them.
 
-    Only roles whose name carries the marker are offered, so a commander cannot
-    aim an event post at an admin role or at @everyone. Sorting by name keeps
-    the picker stable as the server's role hierarchy is rearranged.
+    Only the roles officers put on the list are offered, so a commander cannot
+    aim an event post at an admin role or at @everyone. A listed role the
+    server no longer has is left out, and sorting by name keeps the picker
+    stable as the server's role hierarchy is rearranged.
     """
     if guild is None:
         return []
-    roles = [role for role in guild.roles if is_pingable_role_name(role.name)]
+    roles = [
+        role
+        for role_id in dict.fromkeys(role_ids)
+        if (role := guild.get_role(role_id)) is not None
+    ]
     roles.sort(key=lambda role: (role.name.casefold(), role.id))
     return roles
 
 
 def _ping_role_options(
+    bot: Gw2Bot,
     guild: discord.Guild | None,
     selected: Sequence[int],
 ) -> list[discord.SelectOption]:
     """Options for the ping-role picker, with the draft's roles pre-selected.
 
-    A role already on the draft is offered even when it no longer carries the
-    marker, because it was a valid choice when it was picked and an unrelated
-    edit must not quietly drop it. One that no longer exists in the server is
-    dropped: Discord would refuse a mention of it anyway.
+    A role already on the draft is offered even when it has since been taken
+    off the pingable list, because it was a valid choice when it was picked
+    and an unrelated edit must not quietly drop it. One that no longer exists
+    in the server is dropped: Discord would refuse a mention of it anyway.
     """
-    roles = pingable_roles(guild)
+    if guild is None:
+        # Nothing could be offered, so the list is not worth reading.
+        return []
+    roles = pingable_roles(guild, pingable_role_ids(bot))
     known = {role.id for role in roles}
     # A retained role is listed first so the truncation below can never be what
     # drops one of the event's own roles.
@@ -466,9 +478,9 @@ def _picked_ping_role_ids(
     else is a payload the bot did not build - a submission is a client-supplied
     message, and this is the boundary that decides which roles an event may
     carry rather than trusting what came back. The check is against the offered
-    options, not the marker: a role that was retained because the event already
-    pings it stays pickable here, and whether it may still be *notified* is
-    settled against the server at send time.
+    options, not the pingable list: a role that was retained because the event
+    already pings it stays pickable here, and whether it may still be
+    *notified* is settled against the list at send time.
     """
     offered = {option.value for option in options}
     picked: list[int] = []

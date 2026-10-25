@@ -115,7 +115,7 @@ async def post_occurrence(
     # roles are checked against the server the event is going to, which is the
     # one whose roles the mentions would notify.
     guild = getattr(channel, "guild", None)
-    ping_role_ids = verified_ping_role_ids(guild, event)
+    ping_role_ids = verified_ping_role_ids(bot, guild, event)
     # An event sent into a forum post announces itself somewhere the roles will
     # actually see it, when a channel is configured for that. The post then
     # carries no mentions of its own, so nobody is pinged twice for one event.

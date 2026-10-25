@@ -100,9 +100,9 @@ class FakeThread:
 class FakePingGuild:
     """Answers the role lookups the ping check makes before a post goes out.
 
-    Permissive by default: every id resolves to a role carrying the marker,
-    which is what the ordinary posting tests want. Pass explicit roles to
-    exercise one that is gone or no longer marked.
+    Permissive by default: every id resolves to a role, which is what the
+    ordinary posting tests want. Pass explicit roles to exercise one that is
+    gone.
     """
 
     def __init__(self, roles: dict[int, str] | None = None):
@@ -113,7 +113,7 @@ class FakePingGuild:
 
     def get_role(self, role_id: int) -> Any:
         if self._roles is None:
-            return SimpleNamespace(id=role_id, name=f"[GW2] Role {role_id}")
+            return SimpleNamespace(id=role_id, name=f"Role {role_id}")
         name = self._roles.get(role_id)
         if name is None:
             return None
@@ -334,6 +334,11 @@ def create_event(
     requirements: str = "",
     max_participants: int | None = None,
 ):
+    # An event only ever carries roles the picker offered, which are the ones
+    # officers made pingable, so they are put on the list with it. A test of a
+    # role taken off the list since removes it afterwards.
+    for role_id in ping_role_ids:
+        store.add_ping_role(role_id)
     return store.create_event(
         category=category,
         title="Kitty Cleanup",
@@ -661,19 +666,19 @@ class TestPostOccurrence:
         assert mentions.everyone is False
         assert mentions.users is False
 
-    async def test_a_role_renamed_off_the_marker_is_no_longer_pinged(
+    async def test_a_role_taken_off_the_list_is_no_longer_pinged(
         self,
         store: EventStore,
     ) -> None:
         # The stored ids are a snapshot of what the picker offered months
-        # earlier. A role renamed and repurposed since then would otherwise be
-        # notified by every occurrence, which is exactly what the marker is
-        # supposed to prevent.
+        # earlier. A role an officer has since taken off the list would
+        # otherwise still be notified by every occurrence.
         channel = FakeChannel(
-            guild=FakePingGuild({11: "[GW2] Raiders", 22: "Moderators"})
+            guild=FakePingGuild({11: "Raiders", 22: "Moderators"})
         )
         bot = cast(Any, FakeBot(store, channel))
         event = create_event(store, ping_role_ids=(11, 22))
+        store.remove_ping_role(22)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
 
         await post_occurrence(bot, event, occurrence, BEFORE_START)
@@ -686,7 +691,7 @@ class TestPostOccurrence:
         self,
         store: EventStore,
     ) -> None:
-        channel = FakeChannel(guild=FakePingGuild({11: "[GW2] Raiders"}))
+        channel = FakeChannel(guild=FakePingGuild({11: "Raiders"}))
         bot = cast(Any, FakeBot(store, channel))
         event = create_event(store, ping_role_ids=(11, 22))
         occurrence = store.create_occurrence(event.event_id, event.start_time)
@@ -700,19 +705,64 @@ class TestPostOccurrence:
         store: EventStore,
     ) -> None:
         # Losing the ping must not cost the event its post.
-        channel = FakeChannel(guild=FakePingGuild({}))
+        channel = FakeChannel()
         bot = cast(Any, FakeBot(store, channel))
         event = create_event(store, ping_role_ids=(11,))
+        store.remove_ping_role(11)
         occurrence = store.create_occurrence(event.event_id, event.start_time)
 
         posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
 
         assert posted.message_id == 555
         assert channel.sent[0]["content"] is None
-        # The ids stay on the event, so renaming the role back resumes it.
+        # The ids stay on the event, so adding the role back resumes it.
         stored = store.get_event(event.event_id)
         assert stored is not None
         assert stored.ping_role_ids == (11,)
+
+    async def test_adding_a_role_back_resumes_its_pings(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            ping_role_ids=(11,),
+        )
+        store.remove_ping_role(11)
+        first = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, first, BEFORE_START)
+        store.add_ping_role(11)
+        second = store.create_occurrence(
+            event.event_id,
+            event.start_time + timedelta(days=1),
+        )
+
+        await post_occurrence(bot, event, second, BEFORE_START)
+
+        # Nobody had to edit the event: it kept the role all along.
+        assert [sent["content"] for sent in channel.sent] == [None, "<@&11>"]
+
+    async def test_an_unreadable_list_pings_nobody_and_still_posts(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event = create_event(store, ping_role_ids=(11,))
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        bot.event_store = MagicMock(wraps=store)
+        bot.event_store.get_ping_role_ids.side_effect = SQLAlchemyError("locked")
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot.events.ping_roles"):
+            posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+
+        assert posted.message_id == 555
+        assert channel.sent[0]["content"] is None
+        assert "Could not read the pingable event roles" in caplog.text
 
     async def test_an_unresolvable_guild_pings_nobody(
         self,
@@ -2177,6 +2227,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
             side_effect=SQLAlchemyError("database is locked")
         )
         title = "SECRET EVENT TITLE"
+        store.add_ping_role(11)
         event = store.create_event(
             category=EventCategory.FRACTAL,
             title=title,

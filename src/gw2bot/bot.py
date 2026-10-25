@@ -29,6 +29,7 @@ from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
 from gw2bot.events import scheduler as event_scheduler
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.formatting import calendar_link
+from gw2bot.events.ping_roles import seed_legacy_ping_roles
 from gw2bot.events.store import EventStore
 from gw2bot.events.views import (
     EventSettingsButton,
@@ -672,6 +673,11 @@ class Gw2Bot(discord.Client):
 
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot connected as %s", self.user)
+        # Ahead of the once-per-start gate below: it needs the server's roles,
+        # which are only certain to be cached once the bot is ready, and a
+        # seed that had to wait for them is retried on the next connection.
+        # The store makes every call after the first a no-op.
+        seed_legacy_ping_roles(self)
         if self._ready_announced:
             return
         LOGGER.info("GW2 bot connected to Discord. %s", self._startup_status())

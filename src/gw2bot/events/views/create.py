@@ -168,10 +168,10 @@ class EventDetailsModal(discord.ui.Modal, title="Create new event"):
         )
         # The fifth and last component Discord allows a modal, which is what
         # lets the ping roles be asked here rather than behind
-        # "Change something". A server with no ping roles gets no picker at
+        # "Change something". With no pingable roles there is no picker at
         # all: Discord refuses a select with no options, and there is nothing
         # to choose from anyway.
-        options = _ping_role_options(guild, draft.ping_role_ids)
+        options = _ping_role_options(bot, guild, draft.ping_role_ids)
         self.ping_roles: discord.ui.Select[EventDetailsModal] | None = None
         if options:
             self.ping_roles = discord.ui.Select["EventDetailsModal"](

@@ -257,6 +257,23 @@ class TestVisibleCommands:
 
         for name in ("new", "edit", "remind", "cancel", "delete"):
             assert f"`/event {name}" in text
+        # Commanders pick from the pingable roles, so they may see them, but
+        # only officers change them.
+        assert "`/event pingroles list`" in text
+        assert "/event pingroles add" not in text
+        assert "/event pingroles remove" not in text
+
+    def test_officers_change_the_pingable_roles_without_seeing_them(
+        self,
+        bot: Gw2Bot,
+        config: Config,
+    ) -> None:
+        text = _help_text(bot, _caller(config.raffle_officer_role_id))
+
+        assert "`/event pingroles add role:<text>`" in text
+        assert "`/event pingroles remove role:<text>`" in text
+        assert "/event pingroles list" not in text
+        assert "/event new" not in text
 
     @pytest.mark.parametrize(
         ("owner", "administrator"),
