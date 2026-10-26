@@ -12947,6 +12947,14 @@ class TestUndoEventEdit:
         channel.partial_message.edit.assert_awaited()
         # Only one edit can be undone, so the undo leaves nothing behind.
         assert store.get_snapshot(event.event_id) is None
+        # Recorded as an undo, not as an edit somebody typed.
+        content, (before, after) = fake_bot.notifications[-1]
+        assert content == (
+            f"<@42> undid the last edit to event **{event.event_id}**. "
+            "Changed: Title, Date & Time."
+        )
+        assert "Edited Title" in (before.title or "")
+        assert "Original Title" in (after.title or "")
 
     async def test_undo_puts_a_moved_series_run_back_by_the_edit(
         self,
@@ -13108,6 +13116,12 @@ class TestRestoreDeletedEvent:
         ] == [11]
         assert len(channel.sent) == 1
         assert store.get_snapshot(event.event_id) is None
+        content, (embed,) = fake_bot.notifications[-1]
+        assert content == (
+            f"<@42> restored deleted event **{event.event_id}**."
+        )
+        assert embed.author.name == "Restored"
+        assert "Original Title" in (embed.title or "")
 
     async def test_a_restored_run_the_bot_cannot_post_is_left_for_the_pass(
         self,
@@ -13123,6 +13137,10 @@ class TestRestoreDeletedEvent:
         result = await press_restore(view)
 
         assert "could not be posted yet" in result
+        # The event is back even though its post is not, so it is recorded.
+        assert fake_bot.notifications[-1][0] == (
+            f"<@42> restored deleted event **{event.event_id}**."
+        )
         [restored] = store.get_event_occurrences(event.event_id)
         assert restored.message_id is None
         assert restored.needs_refresh is True

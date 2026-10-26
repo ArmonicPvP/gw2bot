@@ -12,6 +12,7 @@ import discord
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.discord_utils import user_has_role
+from gw2bot.events.audit import event_restored_audit, send_event_audit
 from gw2bot.events.formatting import calendar_link, event_embed
 from gw2bot.events.models import (
     Event,
@@ -511,6 +512,20 @@ class EventRestoreConfirmView(discord.ui.View):
             restored.event,
             occurrences,
             now,
+        )
+        # The event is back whatever became of its posts, so it is recorded,
+        # before the reply, as a deletion is.
+        await send_event_audit(
+            self._bot,
+            event_restored_audit(
+                interaction.user.id,
+                restored.event,
+                (
+                    occurrences[0].start_time
+                    if occurrences
+                    else restored.event.start_time
+                ),
+            ),
         )
         LOGGER.debug(
             "Restored a deleted event; user_id=%s event_id=%s runs=%s "

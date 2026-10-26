@@ -562,6 +562,7 @@ async def apply_event_edit(
             primary.start_time if primary is not None else edited.start_time,
             updated,
             edited.start_time,
+            undone=undoing,
         ),
     )
     await interaction.edit_original_response(content=content, view=None)

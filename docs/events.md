@@ -111,12 +111,14 @@ post of its own unless the run is flagged.
 
 ## Audit lines
 
-`audit.py` records who created, edited or deleted an event in the notification
-channel, with the event as embeds: as posted, before and after an edit, or as
-it stood when it was deleted. The three call sites are `post_with_leader` in
-`views/create.py`, and `apply_event_edit` and `EventDeleteConfirmView.delete`
-in `views/lifecycle.py`. A leader handover saves through `apply_event_edit`, so
-it is recorded as an edit. Each line is sent only once the change is stored,
+`audit.py` records who created, edited, deleted or restored an event in the
+notification channel, with the event as embeds: as posted, before and after an
+edit, as it stood when it was deleted, or as it came back. The call sites are
+`post_with_leader` in `views/create.py`, `apply_event_edit` and
+`EventDeleteConfirmView.delete` in `views/lifecycle.py`, and the restore of a
+deleted event in `views/restore.py`. A leader handover saves through
+`apply_event_edit`, so it is recorded as an edit; so is undoing an edit, whose
+line says it was undone. Each line is sent only once the change is stored,
 and before the reply to the commander, so a reply Discord refuses cannot lose
 the record. A line that fails to send never undoes the change.
 

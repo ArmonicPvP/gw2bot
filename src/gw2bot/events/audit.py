@@ -1,9 +1,10 @@
-"""Audit lines for events: who created, edited or deleted one, and what it was.
+"""Audit lines for events: who created, edited, deleted or restored one, and
+what it was.
 
 Posted to the notification channel beside the guild log's joins and leaves.
 Each line carries the event itself - as it was posted, before and after an
-edit, or as it stood when it was deleted - so the channel answers what changed
-without anybody having seen the post.
+edit, as it stood when it was deleted, or as it came back - so the channel
+answers what changed without anybody having seen the post.
 
 A line is a record of a change that has already been made, never a condition
 on it: a notification channel that is unset or unreachable costs the line and
@@ -41,6 +42,7 @@ CREATED_COLOR = 0x2ECC71
 BEFORE_COLOR = 0x95A5A6
 AFTER_COLOR = 0x3498DB
 DELETED_COLOR = 0xE74C3C
+RESTORED_COLOR = 0x1ABC9C
 
 NO_PING_ROLES_TEXT = "None"
 UNCAPPED_SQUAD_TEXT = "No limit"
@@ -189,20 +191,30 @@ def event_edited_audit(
     before_start: datetime,
     after: Event,
     after_start: datetime,
+    *,
+    undone: bool = False,
 ) -> EventAudit:
     """The line for a saved edit, with the event before and after it.
 
     The starts are the run the commander edited rather than the events' own:
     a repeating event stores when its series began, which an edit only moves
-    by as much as it moved that run.
+    by as much as it moved that run. ``undone`` is `/event restore` putting
+    back the details the last edit replaced, which saves as an edit too but
+    is not one anybody typed.
     """
+    action = "edit undone" if undone else "edited"
+    verb = (
+        f"undid the last edit to event **{after.event_id}**"
+        if undone
+        else f"edited event **{after.event_id}**"
+    )
     if before is None:
         # The edit saved over a row it could not read first. There is nothing
         # to compare against, so the line shows what was saved.
         return EventAudit(
-            action="edited",
+            action=action,
             event_id=after.event_id,
-            content=f"<@{user_id}> edited event **{after.event_id}**.",
+            content=f"<@{user_id}> {verb}.",
             embeds=(
                 event_audit_embed(
                     after,
@@ -214,15 +226,14 @@ def event_edited_audit(
         )
     changed = _changed_labels(before, before_start, after, after_start)
     content = (
-        f"<@{user_id}> edited event **{after.event_id}**. "
-        f"Changed: {', '.join(changed)}."
+        f"<@{user_id}> {verb}. Changed: {', '.join(changed)}."
         if changed
         else f"<@{user_id}> saved event **{after.event_id}** without "
         "changing anything."
     )
     budget = EMBED_TOTAL_LIMIT // 2
     return EventAudit(
-        action="edited",
+        action=action,
         event_id=after.event_id,
         content=content,
         embeds=(
@@ -265,6 +276,31 @@ def event_deleted_audit(
                 start_time,
                 heading="Deleted",
                 color=DELETED_COLOR,
+            ),
+        ),
+    )
+
+
+def event_restored_audit(
+    user_id: int,
+    event: Event,
+    start_time: datetime,
+) -> EventAudit:
+    """The line for a deleted event `/event restore` put back, as it came back.
+
+    The start is the soonest run the restore brought back or seeded, for the
+    reason an edit's line shows a run's start rather than the event's own.
+    """
+    return EventAudit(
+        action="restored",
+        event_id=event.event_id,
+        content=f"<@{user_id}> restored deleted event **{event.event_id}**.",
+        embeds=(
+            event_audit_embed(
+                event,
+                start_time,
+                heading="Restored",
+                color=RESTORED_COLOR,
             ),
         ),
     )

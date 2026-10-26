@@ -212,9 +212,10 @@ Posted to the notification channel:
   hours while it stays low. Also sent by DM to `feast_notification_user_id`.
 - **Trial reports:** daily at 17:00 UTC (see [Trial Members](#trial-members)).
 - **Audit lines** for raffle deposits and raffle commands.
-- **Event changes:** a line naming who created, edited or deleted an event,
-  with the event's details: as posted, before and after an edit (listing what
-  changed), or as it was just before it was deleted. Mentions in these lines
+- **Event changes:** a line naming who created, edited, deleted or restored
+  an event, with the event's details: as posted, before and after an edit
+  (listing what changed), as it was just before it was deleted, or as it came
+  back. An edit undone with `/event restore` says so. Mentions in these lines
   never ping anyone.
 
 Send `diag` in the notification channel to preview every automated message

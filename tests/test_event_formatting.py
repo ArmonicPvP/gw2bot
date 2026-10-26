@@ -10,6 +10,7 @@ from gw2bot.events.audit import (
     event_created_audit,
     event_deleted_audit,
     event_edited_audit,
+    event_restored_audit,
 )
 from gw2bot.events.formatting import (
     CALENDAR_FIELD_NAME,
@@ -1453,6 +1454,50 @@ class TestEventAudit:
 
         assert audit.content == "<@99> edited event **7**."
         assert [embed.author.name for embed in audit.embeds] == ["After"]
+
+    def test_an_undone_edit_says_it_was_undone(self) -> None:
+        # `/event restore` saves the old details as an edit, which nobody
+        # reading the channel should take for a change somebody typed.
+        before = make_event()
+        after = replace(before, title="Renamed")
+
+        audit = event_edited_audit(
+            99,
+            before,
+            self.START,
+            after,
+            self.START,
+            undone=True,
+        )
+
+        assert audit.content == (
+            "<@99> undid the last edit to event **7**. Changed: Title."
+        )
+        assert [embed.author.name for embed in audit.embeds] == [
+            "Before",
+            "After",
+        ]
+        assert event_edited_audit(
+            99,
+            None,
+            self.START,
+            after,
+            self.START,
+            undone=True,
+        ).content == "<@99> undid the last edit to event **7**."
+
+    def test_restored_line_shows_the_event_as_it_came_back(self) -> None:
+        event = make_event()
+
+        audit = event_restored_audit(99, event, self.START)
+
+        assert audit.content == "<@99> restored deleted event **7**."
+        (embed,) = audit.embeds
+        assert embed.author.name == "Restored"
+        assert "Kitty Cleanup" in (embed.title or "")
+        assert _audit_fields(embed)["Date & Time"] == (
+            f"<t:{int(self.START.timestamp())}:f>"
+        )
 
     def test_before_and_after_fit_one_message_together(self) -> None:
         # Discord caps every embed on a message together, so two long
