@@ -2095,6 +2095,40 @@ class TestEventPingRolesSetting:
         assert "is now `22, 11`" in reply
         assert "Events can ping: WvW, Raiders." in reply
 
+    async def test_long_role_names_still_fit_one_confirmation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The change is stored before the reply goes out, so a reply Discord
+        # refuses would leave the officer not knowing it took.
+        commands, bot = _commands(tmp_path)
+        role_ids = [10**18 + index for index in range(MAX_EVENT_PING_ROLES)]
+        guild = _guild(
+            roles={
+                role_id: f"{index:02d}" + "R" * 98
+                for index, role_id in enumerate(role_ids)
+            }
+        )
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=guild,
+        )
+
+        await _run(
+            commands,
+            "event_ping",
+            interaction,
+            ", ".join(str(role_id) for role_id in role_ids),
+            ROLES_GROUP,
+        )
+        stored = bot.settings_store.is_set(self.definition())
+        bot.settings_store.close()
+
+        assert stored
+        reply = settings_reply(interaction)
+        assert len(reply) <= 2000
+        assert reply.endswith("and 16 more.")
+
     async def test_every_unknown_id_is_named_and_nothing_is_stored(
         self,
         tmp_path: Path,

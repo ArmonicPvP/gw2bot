@@ -49,6 +49,11 @@ DESCRIPTION_LIMIT = 100
 # Discord rejects a message over 2000 characters outright, which would make
 # /settings list fail as a whole rather than print a little less.
 MESSAGE_LIMIT = 1900
+# How much of a confirmation the names of newly pingable roles may take. The
+# same message already carries up to 25 role ids, and 25 role names of up to
+# 100 characters each would push it past what Discord accepts - losing the
+# reply to a change that was already stored.
+ROLE_NAMES_NOTE_LIMIT = 1000
 
 # Anything that is only whitespace clears the setting, which is how the
 # request describes it: "a space or nothing means unset".
@@ -895,7 +900,20 @@ def _validate_role_list(
             + ". Turn on Developer Mode and copy each role's id. Nothing was "
             "changed."
         )
-    return _Validation(note="\nEvents can ping: " + ", ".join(names) + ".")
+    return _Validation(note=_role_names_note(names))
+
+
+def _role_names_note(names: list[str]) -> str:
+    """The names of the roles events can now ping, cut to fit the reply."""
+    shown: list[str] = []
+    length = 0
+    for index, name in enumerate(names):
+        length += len(name) + len(", ")
+        if length > ROLE_NAMES_NOTE_LIMIT:
+            shown.append(f"and {len(names) - index} more")
+            break
+        shown.append(name)
+    return "\nEvents can ping: " + ", ".join(shown) + "."
 
 
 def _is_rejected_key(status: int) -> bool:
