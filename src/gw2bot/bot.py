@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import discord
 from discord import app_commands
+from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot import notifications
 from gw2bot.gw2 import (
@@ -72,7 +73,10 @@ from gw2bot.settings.commands import SettingsCommands
 from gw2bot.settings.composition import compose_from_store
 from gw2bot.settings.crypto import SettingsCipher
 from gw2bot.settings.definitions import SettingDefinition, setting_key
-from gw2bot.settings.migration import legacy_variables_present
+from gw2bot.settings.migration import (
+    legacy_variables_present,
+    seed_event_ping_roles,
+)
 from gw2bot.settings.store import SettingsStore
 from gw2bot.trials.commands import (
     create_check_command,
@@ -672,11 +676,53 @@ class Gw2Bot(discord.Client):
 
     async def on_ready(self) -> None:
         LOGGER.info("Discord bot connected as %s", self.user)
+        # Ahead of the once-per-start gate below, so a seed that had to wait
+        # for the server is retried on the next connection. Its marker makes
+        # every call after the first a no-op.
+        await self._seed_event_ping_roles()
         if self._ready_announced:
             return
         LOGGER.info("GW2 bot connected to Discord. %s", self._startup_status())
         self._ready_announced = True
         await self._announce_legacy_variables()
+
+    async def _seed_event_ping_roles(self) -> None:
+        """Carry the roles events pinged by name over to /settings, once.
+
+        It needs the server's roles, which are only certain to be cached once
+        the bot is ready. A server that is not cached yet is left for the next
+        connection rather than seeded empty, which would record the seed as
+        done and lose every role it should have carried over.
+        """
+        guild = self.get_guild(self._config.discord_command_guild_id)
+        if guild is None:
+            LOGGER.debug(
+                "Cannot seed /settings roles event_ping without the command "
+                "server; retrying on the next connection"
+            )
+            return
+        try:
+            seeded = seed_event_ping_roles(self._settings_store, guild)
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not seed /settings roles event_ping; retrying on the "
+                "next connection; error_type=%s",
+                type(exc).__name__,
+            )
+            return
+        if not seeded:
+            return
+        try:
+            await self.apply_settings_change({"event_ping_role_ids"})
+        except Exception as exc:
+            # As broad as /settings' own apply: the value is stored either way
+            # and is picked up by the next change or restart, so a failure here
+            # must not stop the rest of the ready handler.
+            LOGGER.error(
+                "Could not apply the seeded event ping roles; they take effect "
+                "on the next settings change or restart; error_type=%s",
+                type(exc).__name__,
+            )
 
     async def _announce_legacy_variables(self) -> None:
         """Tell the notification channel about variables /settings replaced.
@@ -809,8 +855,12 @@ class Gw2Bot(discord.Client):
         )
         return False
 
-    async def send_notification(self, message: str) -> bool:
-        return await self._try_send_notification(message)
+    async def send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> bool:
+        return await self._try_send_notification(message, embeds)
 
     async def resolve_guild_member(
         self,
@@ -1194,8 +1244,12 @@ class Gw2Bot(discord.Client):
     async def _send_pending_rank_change_notifications(self) -> None:
         await guild_log.send_pending_rank_change_notifications(self)
 
-    async def _try_send_notification(self, message: str) -> bool:
-        return await notifications.try_send_notification(self, message)
+    async def _try_send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> bool:
+        return await notifications.try_send_notification(self, message, embeds)
 
     async def _try_send_raffle_contribution_message(self, message: str) -> bool:
         return await raffle_reports.try_send_raffle_contribution_message(self, message)
@@ -1206,8 +1260,12 @@ class Gw2Bot(discord.Client):
     ) -> bool:
         return await raffle_reports.try_send_raffle_contribution_embed(self, embed)
 
-    async def _send_notification(self, message: str) -> None:
-        await notifications.send_notification(self, message)
+    async def _send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> None:
+        await notifications.send_notification(self, message, embeds)
 
     async def _get_notification_channel(self) -> Any:
         return await notifications.get_notification_channel(self)

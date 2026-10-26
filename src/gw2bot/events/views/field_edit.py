@@ -135,6 +135,7 @@ class ChangeFieldView(discord.ui.View):
             return
         if choice == "ping_roles":
             options = _ping_role_options(
+                self._bot,
                 interaction.guild,
                 self._draft.ping_role_ids,
             )

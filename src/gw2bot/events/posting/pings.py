@@ -25,7 +25,7 @@ from gw2bot.events.formatting import (
     message_link,
     ping_announcement_content,
 )
-from gw2bot.events.models import Event, EventOccurrence, is_pingable_role_name
+from gw2bot.events.models import Event, EventOccurrence
 from gw2bot.events.posting.channels import resolve_channel
 from gw2bot.events.posting.state import occurrence_channel_id
 
@@ -36,6 +36,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def verified_ping_role_ids(
+    bot: Gw2Bot,
     guild: Any,
     event: Event,
 ) -> tuple[int, ...]:
@@ -43,14 +44,13 @@ def verified_ping_role_ids(
 
     The stored ids are a snapshot of what the picker offered, and an event
     outlives that snapshot: a weekly series keeps its roles for months, during
-    which one can be deleted, or renamed and repurposed into something the
-    picker would never have offered - an admin role that then gets pinged by
-    every occurrence. The marker is re-checked here, immediately before the
-    send, so it is a property of the roles actually notified rather than of
-    the picker alone.
+    which one can be deleted, or taken off /settings roles event_ping by an
+    officer who no longer wants events reaching it. The setting is re-read
+    here, immediately before the send, so it is a property of the roles
+    actually notified rather than of the picker alone.
 
     A role that stops qualifying is skipped rather than erased: the id stays on
-    the event, so renaming the role back resumes its pings. A guild that cannot
+    the event, so adding the role back resumes its pings. A guild that cannot
     be resolved pings nothing, because nothing can be checked.
     """
     if not event.ping_role_ids:
@@ -63,6 +63,7 @@ def verified_ping_role_ids(
             len(event.ping_role_ids),
         )
         return ()
+    pingable = set(bot._config.event_ping_role_ids)
     verified: list[int] = []
     for role_id in event.ping_role_ids:
         role = guild.get_role(role_id)
@@ -73,10 +74,10 @@ def verified_ping_role_ids(
                 event.event_id,
             )
             continue
-        if not is_pingable_role_name(role.name):
+        if role_id not in pingable:
             LOGGER.warning(
-                "Skipping an event ping role that no longer carries the "
-                "marker; event_id=%s",
+                "Skipping an event ping role that is no longer pingable; "
+                "event_id=%s",
                 event.event_id,
             )
             continue
@@ -495,7 +496,11 @@ async def refresh_occurrence_announcement(
     # announcement predates that being recorded has nothing better to offer
     # than the event's own roles, which is what the announcement was rendered
     # from at the time.
-    role_ids = occurrence.ping_role_ids or verified_ping_role_ids(guild, event)
+    role_ids = occurrence.ping_role_ids or verified_ping_role_ids(
+        bot,
+        guild,
+        event,
+    )
     content = ping_announcement_content(
         event.title,
         occurrence.start_time,

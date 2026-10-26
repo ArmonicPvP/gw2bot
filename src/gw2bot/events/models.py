@@ -80,12 +80,6 @@ ROLE_EMOJI: dict[EventRole, str] = {
 }
 
 
-# Roles a commander may have the event post ping. Only roles whose name starts
-# with this marker are offered, so the picker shows the handful of opt-in
-# "ping me for this" roles rather than every role in the server. The brackets
-# are part of the marker; the comparison is case-insensitive so a role named
-# "[gw2] Raiders" is not silently left out of the picker.
-PING_ROLE_PREFIX = "[GW2]"
 # How many roles one event may ping. Kept small on purpose: an event post is an
 # announcement, and a post that pings half the server stops being one.
 MAX_PING_ROLES = 3
@@ -93,10 +87,6 @@ MAX_PING_ROLES = 3
 # The largest participant cap a commander may give a headcount event. Zero is
 # the other end of the range and means no cap at all.
 MAX_PARTICIPANTS_LIMIT = 500
-
-
-def is_pingable_role_name(name: str) -> bool:
-    return name.casefold().startswith(PING_ROLE_PREFIX.casefold())
 
 
 class EventStatus(StrEnum):

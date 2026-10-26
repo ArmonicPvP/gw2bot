@@ -28,6 +28,7 @@ from gw2bot.config import (
     bootstrap_from_env,
 )
 from gw2bot.core.logging_setup import RedactingFormatter, SecretRegistry
+from gw2bot.events.views import PING_ROLE_OPTION_LIMIT
 from gw2bot.raffle import RaffleStore
 from gw2bot.settings.commands import (
     SettingsCommands,
@@ -45,6 +46,7 @@ from gw2bot.settings.definitions import (
     COMMAND_NAME_LIMIT,
     GROUP_OPTION_LIMIT,
     LEGACY_SETTINGS,
+    MAX_EVENT_PING_ROLES,
     ROLES_GROUP,
     SECRET_PLACEHOLDER,
     SETTING_DEFINITIONS,
@@ -55,6 +57,7 @@ from gw2bot.settings.definitions import (
 from gw2bot.settings.migration import (
     import_legacy_environment,
     legacy_variables_present,
+    seed_event_ping_roles,
 )
 from gw2bot.settings.store import SettingsStore
 
@@ -2037,6 +2040,303 @@ class TestRaffleExclusionSetting:
         assert config.raffle_excluded_accounts == (
             "Banned.1234",
             "Another.5678",
+        )
+
+
+class TestEventPingRolesSetting:
+    """/settings roles event_ping: the only roles events may ping."""
+
+    def definition(self) -> Any:
+        return definition_for("event_ping", ROLES_GROUP)
+
+    def ping_guild(self) -> Any:
+        return _guild(roles={11: "Raiders", 22: "WvW", 33: "Fractals"})
+
+    def test_ids_are_read_in_order_with_any_separator(self) -> None:
+        # Commas, spaces and pasted mentions all arrive here, and one role
+        # listed twice can only be pinged once.
+        assert self.definition().parse("22, 11 <@&33>,,22") == (22, 11, 33)
+
+    def test_an_entry_that_is_not_an_id_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError, match="has to be a role id"):
+            self.definition().parse("11, Raiders")
+
+    def test_a_list_of_only_separators_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError, match="Pass a space"):
+            self.definition().parse(" , ,")
+
+    def test_no_more_roles_than_the_picker_can_show(self) -> None:
+        too_many = ", ".join(str(100 + index) for index in range(26))
+
+        with pytest.raises(ConfigurationError, match="at most 25"):
+            self.definition().parse(too_many)
+
+    def test_the_cap_is_the_pickers_own_limit(self) -> None:
+        assert MAX_EVENT_PING_ROLES == PING_ROLE_OPTION_LIMIT
+
+    async def test_an_officer_sets_the_list_and_sees_the_role_names(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=self.ping_guild(),
+        )
+
+        await _run(commands, "event_ping", interaction, "22 11", ROLES_GROUP)
+        stored = bot.settings_store.get_raw(self.definition())
+        bot.settings_store.close()
+
+        # Stored in a form the parser reads back, and confirmed by name
+        # because a list of ids alone says nothing about what was set.
+        assert stored == "22, 11"
+        reply = settings_reply(interaction)
+        assert "is now `22, 11`" in reply
+        assert "Events can ping: WvW, Raiders." in reply
+
+    async def test_long_role_names_still_fit_one_confirmation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The change is stored before the reply goes out, so a reply Discord
+        # refuses would leave the officer not knowing it took.
+        commands, bot = _commands(tmp_path)
+        role_ids = [10**18 + index for index in range(MAX_EVENT_PING_ROLES)]
+        guild = _guild(
+            roles={
+                role_id: f"{index:02d}" + "R" * 98
+                for index, role_id in enumerate(role_ids)
+            }
+        )
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=guild,
+        )
+
+        await _run(
+            commands,
+            "event_ping",
+            interaction,
+            ", ".join(str(role_id) for role_id in role_ids),
+            ROLES_GROUP,
+        )
+        stored = bot.settings_store.is_set(self.definition())
+        bot.settings_store.close()
+
+        assert stored
+        reply = settings_reply(interaction)
+        assert len(reply) <= 2000
+        assert reply.endswith("and 16 more.")
+
+    async def test_every_unknown_id_is_named_and_nothing_is_stored(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=self.ping_guild(),
+        )
+
+        await _run(
+            commands,
+            "event_ping",
+            interaction,
+            "11, 44, 55",
+            ROLES_GROUP,
+        )
+        stored = bot.settings_store.is_set(self.definition())
+        bot.settings_store.close()
+
+        assert not stored
+        assert "`44`, `55`" in settings_reply(interaction)
+
+    async def test_everyone_is_refused(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        guild = self.ping_guild()
+        guild.get_role = lambda role_id: SimpleNamespace(
+            id=role_id,
+            name="@everyone" if role_id == guild.id else "Raiders",
+        )
+        interaction = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=guild,
+        )
+
+        await _run(
+            commands,
+            "event_ping",
+            interaction,
+            f"11, {guild.id}",
+            ROLES_GROUP,
+        )
+        stored = bot.settings_store.is_set(self.definition())
+        bot.settings_store.close()
+
+        assert not stored
+        assert "@everyone cannot be pinged" in settings_reply(interaction)
+
+    async def test_a_commander_cannot_change_it(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(
+            role_ids=(default_config().event_create_role_id,),
+            guild=self.ping_guild(),
+        )
+
+        await _run(commands, "event_ping", interaction, "11", ROLES_GROUP)
+        stored = bot.settings_store.is_set(self.definition())
+        bot.settings_store.close()
+
+        assert not stored
+        assert "do not have the required role" in settings_reply(interaction)
+
+    async def test_an_unset_list_reads_as_not_set(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        interaction = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+
+        await _run(commands, "event_ping", interaction, None, ROLES_GROUP)
+        bot.settings_store.close()
+
+        assert UNSET_DISPLAY in settings_reply(interaction)
+
+    async def test_clearing_it_leaves_no_roles(self, tmp_path: Path) -> None:
+        commands, bot = _commands(tmp_path)
+        setting = settings_interaction(
+            role_ids=(OFFICER_ROLE_ID,),
+            guild=self.ping_guild(),
+        )
+        await _run(commands, "event_ping", setting, "11", ROLES_GROUP)
+
+        clearing = settings_interaction(role_ids=(OFFICER_ROLE_ID,))
+        await _run(commands, "event_ping", clearing, " ", ROLES_GROUP)
+        still_set = bot.settings_store.is_set(self.definition())
+        bot.settings_store.close()
+
+        assert not still_set
+        # The default is no roles, so there is nothing to fall back to.
+        assert "falls back" not in settings_reply(clearing)
+
+    def test_it_offers_no_suggestions(self, tmp_path: Path) -> None:
+        # A suggestion's value is capped at 100 characters, which holds only
+        # about five role ids, so the list is typed rather than suggested.
+        commands, bot = _commands(tmp_path)
+        bot.settings_store.close()
+        roles = cast(app_commands.Group, commands.get_command(ROLES_GROUP))
+        command = cast(
+            app_commands.Command[Any, ..., Any],
+            roles.get_command("event_ping"),
+        )
+
+        assert command._params["value"].autocomplete is None
+
+    def test_it_composes_onto_the_config_as_role_ids(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        store.set_raw(self.definition(), "22, 11")
+
+        config = compose_config(BOOTSTRAP, store.raw_values())
+
+        assert config.event_ping_role_ids == (22, 11)
+
+    def test_the_channel_setting_of_the_same_name_is_separate(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        store.set_raw(self.definition(), "11")
+
+        config = compose_config(BOOTSTRAP, store.raw_values())
+
+        assert config.event_ping_channel_id is None
+
+
+class TestEventPingRoleSeed:
+    """The roles pingable by name are carried over to the setting, once."""
+
+    def definition(self) -> Any:
+        return definition_for("event_ping", ROLES_GROUP)
+
+    def guild(self, *roles: tuple[int, str]) -> Any:
+        return SimpleNamespace(
+            id=5678,
+            roles=[
+                SimpleNamespace(id=5678, name="@everyone"),
+                *(
+                    SimpleNamespace(id=role_id, name=name)
+                    for role_id, name in roles
+                ),
+            ],
+        )
+
+    def test_the_prefixed_roles_become_the_setting(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        guild = self.guild(
+            (11, "[GW2] Raiders"),
+            (22, "[gw2] WvW"),
+            (33, "Officers"),
+            (44, "Raiders [GW2]"),
+        )
+
+        assert seed_event_ping_roles(store, guild) is True
+
+        # Exactly the roles that were pingable before: the prefix starts the
+        # name, in any case.
+        assert store.get_raw(self.definition()) == "11, 22"
+
+    def test_it_only_ever_runs_once(self, store: SettingsStore) -> None:
+        seed_event_ping_roles(store, self.guild((11, "[GW2] Raiders")))
+        store.unset(self.definition())
+
+        seeded = seed_event_ping_roles(
+            store,
+            self.guild((11, "[GW2] Raiders"), (22, "[GW2] WvW")),
+        )
+
+        # Clearing the setting means no roles, and a role named like the old
+        # prefix afterwards earns nothing for its name.
+        assert seeded is False
+        assert not store.is_set(self.definition())
+
+    def test_a_server_without_prefixed_roles_is_still_marked(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        seeded = seed_event_ping_roles(store, self.guild((33, "Officers")))
+
+        assert seeded is False
+        assert not store.is_set(self.definition())
+        assert store.event_ping_seed_completed()
+
+    def test_a_value_an_officer_set_first_is_kept(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        store.set_raw(self.definition(), "33")
+
+        seeded = seed_event_ping_roles(store, self.guild((11, "[GW2] Raiders")))
+
+        assert seeded is False
+        assert store.get_raw(self.definition()) == "33"
+
+    def test_more_prefixed_roles_than_the_cap_keep_the_first(
+        self,
+        store: SettingsStore,
+    ) -> None:
+        guild = self.guild(
+            *((100 + index, f"[GW2] Squad {index}") for index in range(30))
+        )
+
+        seed_event_ping_roles(store, guild)
+
+        # Stored past the cap, the value would read back as unusable, which
+        # is no roles at all.
+        stored = store.get_raw(self.definition())
+        assert stored is not None
+        assert self.definition().parse(stored) == tuple(
+            100 + index for index in range(MAX_EVENT_PING_ROLES)
         )
 
 
