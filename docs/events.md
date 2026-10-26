@@ -62,16 +62,6 @@ with the code that reads them. That is what turned the roster and message
 layers from mutually recursive into ordered - they only ever wanted the
 predicate, not the module it used to sit in.
 
-## Pingable roles
-
-`ping_roles.py` holds the officers' list of roles events may ping and the
-`/event pingroles` commands that change it. `views/shared.py` reads it to build
-the role picker and `posting/pings.py` re-reads it before every ping, both
-through `pingable_role_ids`, so `ping_roles.py` must never import `views/` or
-`posting/` back. A role is pingable only for being on the list, never for its
-name: the `[GW2]` prefix that used to decide it is read once, by the seed that
-carries those roles over on the first start, and nowhere else.
-
 ## Run history
 
 `store.py` copies a run into `gw2_event_runs` and its roster into

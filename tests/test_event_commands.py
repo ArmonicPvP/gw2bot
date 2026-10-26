@@ -9,17 +9,10 @@ from zoneinfo import ZoneInfo
 
 import discord
 import pytest
-from discord import app_commands
 from discord.utils import MISSING
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.core.command_access import RoleSetting, declared_access
 from gw2bot.events.commands import EventCommands
-from gw2bot.events.ping_roles import (
-    EventPingRoleCommands,
-    role_choice_name,
-    seed_legacy_ping_roles,
-)
 from gw2bot.events.posting import (
     OccurrenceCancellation,
     cancel_occurrence,
@@ -35,7 +28,6 @@ from gw2bot.events.scheduler import run_event_maintenance
 from gw2bot.events.models import (
     AutoSignupChoice,
     MAX_PING_ROLES,
-    MAX_PINGABLE_ROLES,
     STATUS_COLORS,
     EventCategory,
     EventRole,
@@ -187,14 +179,7 @@ class TestEventCommandGroup:
 
         assert group.name == "event"
         assert group.guild_only
-        assert commands == {
-            "new",
-            "edit",
-            "remind",
-            "cancel",
-            "delete",
-            "pingroles",
-        }
+        assert commands == {"new", "edit", "remind", "cancel", "delete"}
 
     async def test_new_rejects_users_without_the_create_role(self) -> None:
         group = EventCommands(make_bot())
@@ -221,7 +206,7 @@ class TestEventCommandGroup:
         modal = interaction.response.send_modal.await_args.args[0]
         assert isinstance(modal, EventDetailsModal)
 
-    async def test_new_builds_the_ping_picker_from_the_list(self) -> None:
+    async def test_new_builds_the_ping_picker_from_the_setting(self) -> None:
         group = EventCommands(ping_bot())
         interaction = make_interaction(
             role_ids=(EVENT_CREATE_ROLE_ID,),
@@ -450,34 +435,21 @@ def ping_guild() -> Any:
             FakeRole(30, "WvW"),
             FakeRole(40, "Officers"),
             # Named the way a role had to be named to be pingable before
-            # officers chose them, and not on the list: the name alone must
-            # never make it pingable.
+            # officers listed them, and not listed: the name alone must never
+            # make it pingable.
             FakeRole(50, "[GW2] Strikes"),
         ),
     )
 
 
-# The roles officers made pingable in ping_guild(), in the order they were
-# added.
+# The roles /settings roles event_ping lists for ping_guild(), in the order an
+# officer typed them.
 PINGABLE_ROLE_IDS = (20, 10, 30)
-
-
-class FakePingRoleStore:
-    """Answers the pingable role list the picker reads, and nothing else."""
-
-    def __init__(self, *role_ids: int, error: Exception | None = None):
-        self.role_ids = role_ids
-        self.error = error
-
-    def get_ping_role_ids(self) -> tuple[int, ...]:
-        if self.error is not None:
-            raise self.error
-        return self.role_ids
 
 
 def make_ping_bot(*role_ids: int) -> Any:
     bot = make_bot()
-    bot.event_store = FakePingRoleStore(*role_ids)
+    bot._config = default_config(event_ping_role_ids=role_ids)
     return bot
 
 
@@ -497,8 +469,8 @@ class TestPingRoleOptions:
     def test_only_listed_roles_are_offered_sorted_by_name(self) -> None:
         roles = pingable_roles(ping_guild(), PINGABLE_ROLE_IDS)
 
-        # The officer role and "[GW2] Strikes" are not on the list, so they
-        # are out, and @everyone can never be reached from here.
+        # The officer role and "[GW2] Strikes" are not listed, so they are
+        # out, and @everyone can never be reached from here.
         assert [role.id for role in roles] == [10, 20, 30]
 
     def test_a_name_never_makes_a_role_pingable(self) -> None:
@@ -514,10 +486,6 @@ class TestPingRoleOptions:
 
     def test_no_guild_offers_nothing(self) -> None:
         assert pingable_roles(None, PINGABLE_ROLE_IDS) == []
-
-    def test_no_guild_does_not_read_the_list(self) -> None:
-        # make_bot has no store at all, so reading the list would raise.
-        assert _ping_role_options(make_bot(), None, (20,)) == []
 
     def test_the_drafts_roles_are_preselected(self) -> None:
         options = _ping_role_options(ping_bot(), ping_guild(), (20,))
@@ -557,19 +525,6 @@ class TestPingRoleOptions:
         assert len(options) == PING_ROLE_OPTION_LIMIT
         # The event's own roles come first, so the cut never drops them.
         assert values_of(options)[:2] == ["138", "139"]
-
-    def test_an_unreadable_list_offers_nothing(
-        self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        bot = make_bot()
-        bot.event_store = FakePingRoleStore(error=SQLAlchemyError("locked"))
-
-        with caplog.at_level(logging.ERROR, logger="gw2bot.events.ping_roles"):
-            options = _ping_role_options(bot, ping_guild(), ())
-
-        assert options == []
-        assert "Could not read the pingable event roles" in caplog.text
 
 
 class TestPingRolesInTheDetailsModal:
@@ -690,7 +645,7 @@ class TestPingRolesInTheDetailsModal:
         draft = EventDraft(leader_discord_id=42)
         guild = ping_guild()
         bot = make_destination_bot()
-        bot.event_store = FakePingRoleStore(*PINGABLE_ROLE_IDS)
+        bot._config = default_config(event_ping_role_ids=PINGABLE_ROLE_IDS)
         modal = EventDetailsModal(bot, draft, guild)
         modal.category._values = ["Raid"]
         modal.title_input._value = "Kitty Cleanup"
@@ -765,7 +720,7 @@ class TestPingRolesInTheChangeFlow:
         # A picker with no options is a payload Discord refuses, so the
         # commander is told why, and who can fix it, and put back on the
         # preview.
-        assert "/event pingroles add" in kwargs["content"]
+        assert "/settings roles event_ping" in kwargs["content"]
         assert isinstance(kwargs["view"], EventConfirmView)
 
     async def test_picking_roles_returns_to_the_preview(self) -> None:
@@ -5543,8 +5498,7 @@ class TestPingRolesEndToEnd:
         store: EventStore,
         channel: FakeChannel,
     ) -> None:
-        store.add_ping_role(10)
-        store.add_ping_role(20)
+        fake_bot._config = default_config(event_ping_role_ids=(10, 20))
         draft = replace(make_complete_draft(), ping_role_ids=(10, 20))
         view = EventConfirmView(fake_bot, draft)
         interaction = make_interaction(
@@ -5592,451 +5546,6 @@ class TestPingRolesEndToEnd:
         assert "content" not in edit.kwargs
 
 
-OFFICER_ROLE_ID = default_config().raffle_officer_role_id
-
-
-def pingroles_group(bot: Any) -> EventPingRoleCommands:
-    group = EventCommands(bot)
-    return next(
-        command
-        for command in group.commands
-        if isinstance(command, EventPingRoleCommands)
-    )
-
-
-def pingroles_bot(store: EventStore) -> Any:
-    return cast(
-        Any,
-        SimpleNamespace(
-            _config=default_config(),
-            event_store=store,
-            event_timezone=ZoneInfo("UTC"),
-        ),
-    )
-
-
-def pingroles_interaction(
-    *role_ids: int,
-    guild: Any = None,
-) -> Any:
-    interaction = make_interaction(
-        role_ids=role_ids,
-        guild=guild if guild is not None else ping_guild(),
-    )
-    # Every reply here answers the command directly rather than a deferral.
-    interaction.response.is_done = MagicMock(return_value=False)
-    return interaction
-
-
-def reply_text(interaction: Any) -> str:
-    assert interaction.response.send_message.await_args is not None
-    return interaction.response.send_message.await_args.args[0]
-
-
-async def run_pingroles(
-    store: EventStore,
-    name: str,
-    interaction: Any,
-    *args: Any,
-) -> None:
-    group = pingroles_group(pingroles_bot(store))
-    command = group.get_command(name)
-    assert isinstance(command, app_commands.Command)
-    await cast(Any, command.callback)(group, interaction, *args)
-
-
-class TestPingRoleCommandGroup:
-    def test_the_group_sits_under_event_with_its_three_commands(
-        self,
-    ) -> None:
-        group = pingroles_group(make_bot())
-
-        assert group.qualified_name == "event pingroles"
-        assert {command.name for command in group.commands} == {
-            "add",
-            "remove",
-            "list",
-        }
-
-    def test_officers_change_the_list_and_commanders_read_it(self) -> None:
-        group = pingroles_group(make_bot())
-
-        assert declared_access(group.get_command("add")) == RoleSetting(
-            "raffle_officer_role_id"
-        )
-        assert declared_access(group.get_command("remove")) == RoleSetting(
-            "raffle_officer_role_id"
-        )
-        assert declared_access(group.get_command("list")) == RoleSetting(
-            "event_create_role_id"
-        )
-
-
-class TestPingRoleAdd:
-    @pytest.mark.parametrize(
-        "typed",
-        ["20", "raiders", "  Raiders  ", "Raiders - 20", "<@&20>"],
-    )
-    async def test_a_role_is_found_by_id_name_or_suggestion(
-        self,
-        store: EventStore,
-        typed: str,
-    ) -> None:
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, typed)
-
-        assert store.get_ping_role_ids() == (20,)
-        assert "**Raiders** can now be pinged by events" in reply_text(
-            interaction
-        )
-
-    async def test_a_commander_who_is_not_an_officer_is_refused(
-        self,
-        store: EventStore,
-    ) -> None:
-        interaction = pingroles_interaction(EVENT_CREATE_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, "20")
-
-        assert store.get_ping_role_ids() == ()
-        assert "required role" in reply_text(interaction)
-
-    async def test_a_role_already_on_the_list_is_left_as_it_is(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role(20)
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, "Raiders")
-
-        assert store.get_ping_role_ids() == (20,)
-        assert "already" in reply_text(interaction)
-
-    async def test_a_role_the_server_does_not_have_is_refused(
-        self,
-        store: EventStore,
-    ) -> None:
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, "999")
-
-        assert store.get_ping_role_ids() == ()
-        assert "No role in this server" in reply_text(interaction)
-
-    async def test_a_name_two_roles_share_asks_for_the_id(
-        self,
-        store: EventStore,
-    ) -> None:
-        guild = cast(
-            Any,
-            FakeRoleGuild(FakeRole(20, "Raiders"), FakeRole(21, "raiders")),
-        )
-        interaction = pingroles_interaction(OFFICER_ROLE_ID, guild=guild)
-
-        await run_pingroles(store, "add", interaction, "Raiders")
-
-        assert store.get_ping_role_ids() == ()
-        assert "2 roles have that name" in reply_text(interaction)
-
-    async def test_a_name_made_of_digits_is_still_found(
-        self,
-        store: EventStore,
-    ) -> None:
-        # Not an id the server has, so it is read as the role's name.
-        guild = cast(Any, FakeRoleGuild(FakeRole(70, "2024")))
-        interaction = pingroles_interaction(OFFICER_ROLE_ID, guild=guild)
-
-        await run_pingroles(store, "add", interaction, "2024")
-
-        assert store.get_ping_role_ids() == (70,)
-
-    @pytest.mark.parametrize("typed", ["1", "@everyone"])
-    async def test_everyone_is_refused(
-        self,
-        store: EventStore,
-        typed: str,
-    ) -> None:
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, typed)
-
-        assert store.get_ping_role_ids() == ()
-        assert "@everyone cannot be pinged" in reply_text(interaction)
-
-    async def test_the_list_stops_at_what_the_picker_can_show(
-        self,
-        store: EventStore,
-    ) -> None:
-        for role_id in range(100, 100 + MAX_PINGABLE_ROLES):
-            store.add_ping_role(role_id)
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, "20")
-
-        assert 20 not in store.get_ping_role_ids()
-        assert f"already ping {MAX_PINGABLE_ROLES} roles" in reply_text(
-            interaction
-        )
-
-    async def test_a_failed_write_says_nothing_changed(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role = MagicMock(  # type: ignore[method-assign]
-            side_effect=SQLAlchemyError("database is locked")
-        )
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "add", interaction, "20")
-
-        assert "Nothing was changed" in reply_text(interaction)
-
-
-class TestPingRoleRemove:
-    @pytest.mark.parametrize("typed", ["20", "RAIDERS", "Raiders - 20"])
-    async def test_a_listed_role_is_removed_by_id_or_name(
-        self,
-        store: EventStore,
-        typed: str,
-    ) -> None:
-        store.add_ping_role(20)
-        store.add_ping_role(10)
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "remove", interaction, typed)
-
-        assert store.get_ping_role_ids() == (10,)
-        assert "**Raiders** can no longer be pinged" in reply_text(interaction)
-
-    async def test_a_commander_who_is_not_an_officer_is_refused(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role(20)
-        interaction = pingroles_interaction(EVENT_CREATE_ROLE_ID)
-
-        await run_pingroles(store, "remove", interaction, "20")
-
-        assert store.get_ping_role_ids() == (20,)
-        assert "required role" in reply_text(interaction)
-
-    @pytest.mark.parametrize("typed", ["10", "Fractals"])
-    async def test_a_role_that_is_not_listed_is_refused(
-        self,
-        store: EventStore,
-        typed: str,
-    ) -> None:
-        # Fractals is a role in the server, but only listed roles can be
-        # matched, by name or by id.
-        store.add_ping_role(20)
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "remove", interaction, typed)
-
-        assert store.get_ping_role_ids() == (20,)
-        assert "not one of the roles events can ping" in reply_text(
-            interaction
-        )
-
-    async def test_a_role_deleted_from_the_server_is_removed_by_its_id(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role(999)
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "remove", interaction, "999")
-
-        assert store.get_ping_role_ids() == ()
-        assert "deleted role with ID `999`" in reply_text(interaction)
-
-
-class TestPingRoleList:
-    async def test_commanders_see_the_listed_roles_by_name(
-        self,
-        store: EventStore,
-    ) -> None:
-        for role_id in (30, 20, 999, 10):
-            store.add_ping_role(role_id)
-        interaction = pingroles_interaction(EVENT_CREATE_ROLE_ID)
-
-        await run_pingroles(store, "list", interaction)
-
-        kwargs = interaction.response.send_message.await_args.kwargs
-        assert kwargs["ephemeral"] is True
-        # Sorted by name, with a role the server no longer has last so an
-        # officer can see it needs taking off.
-        assert kwargs["embed"].description == (
-            "• Fractals\n• Raiders\n• WvW\n• Deleted role (ID `999`)"
-        )
-
-    async def test_an_officer_who_is_not_a_commander_is_refused(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role(20)
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        await run_pingroles(store, "list", interaction)
-
-        assert "required role" in reply_text(interaction)
-
-    async def test_an_empty_list_says_who_can_fill_it(
-        self,
-        store: EventStore,
-    ) -> None:
-        interaction = pingroles_interaction(EVENT_CREATE_ROLE_ID)
-
-        await run_pingroles(store, "list", interaction)
-
-        assert "/event pingroles add" in reply_text(interaction)
-
-
-class TestPingRoleAutocomplete:
-    async def test_add_suggests_every_server_role_as_name_and_id(
-        self,
-        store: EventStore,
-    ) -> None:
-        group = pingroles_group(pingroles_bot(store))
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        choices = await group.server_role_autocomplete(interaction, "")
-
-        # Every role but @everyone, by name, whether or not it is listed.
-        assert [(choice.name, choice.value) for choice in choices] == [
-            ("[GW2] Strikes - 50", "50"),
-            ("Fractals - 10", "10"),
-            ("Officers - 40", "40"),
-            ("Raiders - 20", "20"),
-            ("WvW - 30", "30"),
-        ]
-
-    @pytest.mark.parametrize(("typed", "expected"), [("raid", "20"), ("3", "30")])
-    async def test_add_narrows_by_name_or_id(
-        self,
-        store: EventStore,
-        typed: str,
-        expected: str,
-    ) -> None:
-        group = pingroles_group(pingroles_bot(store))
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        choices = await group.server_role_autocomplete(interaction, typed)
-
-        assert [choice.value for choice in choices] == [expected]
-
-    async def test_remove_suggests_only_the_listed_roles(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role(20)
-        store.add_ping_role(999)
-        group = pingroles_group(pingroles_bot(store))
-        interaction = pingroles_interaction(OFFICER_ROLE_ID)
-
-        choices = await group.pingable_role_autocomplete(interaction, "")
-
-        # The names are looked up from the stored ids, and a role the server
-        # no longer has can still be picked to take it off.
-        assert [(choice.name, choice.value) for choice in choices] == [
-            ("Deleted role - 999", "999"),
-            ("Raiders - 20", "20"),
-        ]
-
-    async def test_neither_suggests_anything_to_a_non_officer(
-        self,
-        store: EventStore,
-    ) -> None:
-        store.add_ping_role(20)
-        group = pingroles_group(pingroles_bot(store))
-        interaction = pingroles_interaction(EVENT_CREATE_ROLE_ID)
-
-        assert await group.server_role_autocomplete(interaction, "") == []
-        assert await group.pingable_role_autocomplete(interaction, "") == []
-
-    async def test_suggestions_stay_within_what_discord_accepts(
-        self,
-        store: EventStore,
-    ) -> None:
-        guild = cast(
-            Any,
-            FakeRoleGuild(
-                *(FakeRole(100 + index, "R" * 100) for index in range(30))
-            ),
-        )
-        group = pingroles_group(pingroles_bot(store))
-        interaction = pingroles_interaction(OFFICER_ROLE_ID, guild=guild)
-
-        choices = await group.server_role_autocomplete(interaction, "")
-
-        assert len(choices) == 25
-        # A long name is shortened, never the id it is really picking.
-        assert all(len(choice.name) <= 100 for choice in choices)
-        assert choices[0].name.endswith("… - 100")
-
-    def test_a_short_name_is_shown_whole(self) -> None:
-        assert role_choice_name("Raiders", 20) == "Raiders - 20"
-
-
-class TestLegacyPingRoleSeed:
-    def seed_bot(self, store: EventStore, guild: Any) -> Any:
-        bot = pingroles_bot(store)
-        bot.get_guild = lambda guild_id: (
-            guild if guild_id == bot._config.discord_command_guild_id else None
-        )
-        return bot
-
-    def test_the_prefixed_roles_are_carried_over(
-        self,
-        store: EventStore,
-    ) -> None:
-        guild = cast(
-            Any,
-            FakeRoleGuild(
-                FakeRole(20, "[GW2] Raiders"),
-                FakeRole(30, "[gw2] WvW"),
-                FakeRole(40, "Officers"),
-                FakeRole(50, "Raiders [GW2]"),
-            ),
-        )
-
-        seed_legacy_ping_roles(self.seed_bot(store, guild))
-
-        # Exactly the roles that were pingable before: the prefix starts the
-        # name, in any case.
-        assert sorted(store.get_ping_role_ids()) == [20, 30]
-
-    def test_the_seed_only_ever_runs_once(self, store: EventStore) -> None:
-        guild = cast(Any, FakeRoleGuild(FakeRole(20, "[GW2] Raiders")))
-        bot = self.seed_bot(store, guild)
-        seed_legacy_ping_roles(bot)
-        store.remove_ping_role(20)
-        guild.roles.append(FakeRole(30, "[GW2] WvW"))
-
-        seed_legacy_ping_roles(bot)
-
-        # The officer's removal stands, and a role named like the old prefix
-        # afterwards is not picked up for its name.
-        assert store.get_ping_role_ids() == ()
-
-    def test_an_uncached_server_waits_for_the_next_connection(
-        self,
-        store: EventStore,
-    ) -> None:
-        guild = cast(Any, FakeRoleGuild(FakeRole(20, "[GW2] Raiders")))
-        bot = self.seed_bot(store, guild)
-        bot.get_guild = lambda guild_id: None
-
-        seed_legacy_ping_roles(bot)
-        bot.get_guild = lambda guild_id: guild
-        seed_legacy_ping_roles(bot)
-
-        # Nothing was marked seeded while the server was missing.
-        assert store.get_ping_role_ids() == (20,)
-
-
 class TestRequirementsEndToEnd:
     async def test_posting_stores_the_requirements_and_shows_them(
         self,
@@ -6076,8 +5585,8 @@ class TestRequirementsEndToEnd:
         bot._config = replace(
             bot._config,
             event_create_role_id=EVENT_CREATE_ROLE_ID,
+            event_ping_role_ids=(11,),
         )
-        store.add_ping_role(11)
         draft = EventDraft(
             leader_discord_id=42,
             category=EventCategory.STORY,
@@ -6121,7 +5630,7 @@ class TestRequirementsEndToEnd:
     ) -> None:
         # In a channel the mentions ride above the embed, which already shows
         # the section, so the ping line itself stays just the mentions.
-        store.add_ping_role(10)
+        fake_bot._config = default_config(event_ping_role_ids=(10,))
         draft = replace(
             make_complete_draft(),
             ping_role_ids=(10,),

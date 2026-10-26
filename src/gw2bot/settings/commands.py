@@ -74,9 +74,10 @@ class _Validation:
     """What a pre-store check decided.
 
     A refusal stops the write. A note is appended to the confirmation of a
-    write that went ahead but could not be fully checked - the two are not
-    alternatives, and returning only a refusal string meant a value stored
-    without verification looked identical to one that passed.
+    write that went ahead: a caveat when it could not be fully checked, or
+    what the check found. The two are not alternatives, and returning only a
+    refusal string meant a value stored without verification looked identical
+    to one that passed.
     """
 
     refusal: str | None = None
@@ -125,7 +126,10 @@ class SettingsCommands(app_commands.Group):
         self._groups: dict[str, app_commands.Group] = {
             ROLES_GROUP: app_commands.Group(
                 name=ROLES_GROUP,
-                description="Roles that gate the bot's commands and pages",
+                description=(
+                    "Roles that gate the bot's commands and pages, and the "
+                    "roles events may ping"
+                ),
                 parent=self,
             ),
             CHANNELS_GROUP: app_commands.Group(
@@ -206,7 +210,9 @@ class SettingsCommands(app_commands.Group):
                 "current one."
             )
         )(command)
-        if definition.validates is not None:
+        # A list of role ids gets no suggestions: Discord caps a suggestion's
+        # value at 100 characters, which holds about five of them.
+        if definition.validates not in (None, ValidationTarget.ROLE_LIST):
             app_commands.autocomplete(
                 value=_autocomplete_for(self, definition)
             )(command)
@@ -599,6 +605,12 @@ class SettingsCommands(app_commands.Group):
         """
         if definition.field == "gw2_guild_id" and isinstance(parsed, str):
             return await self._validate_guild_id(parsed)
+        if definition.validates == ValidationTarget.ROLE_LIST and isinstance(
+            parsed, tuple
+        ):
+            if interaction.guild is None:
+                return _Validation("This command has to be run in the server.")
+            return _validate_role_list(interaction.guild, parsed)
         if definition.validates is None or not isinstance(parsed, int):
             return _Validation()
         guild = interaction.guild
@@ -848,6 +860,42 @@ def _unverified_note(reason: str) -> str:
         f"{reason}. The raffle ledger now belongs to this guild id and cannot "
         "be pointed at another one from Discord, so check it is right."
     )
+
+
+def _validate_role_list(
+    guild: Any,
+    role_ids: tuple[object, ...],
+) -> _Validation:
+    """Refuse a list holding anything but the server's own roles.
+
+    Every id nobody answers to is refused together, so one reply names all of
+    them. @everyone is refused too: it is a role in the server's list, but a
+    post that pinged it would reach the whole server rather than the members
+    who opted in. The names of the roles that pass are returned as a note,
+    because a list of ids alone does not let an officer see what they set.
+    """
+    names: list[str] = []
+    unknown: list[str] = []
+    for role_id in role_ids:
+        role = guild.get_role(role_id)
+        if role is None:
+            unknown.append(f"`{role_id}`")
+            continue
+        if role_id == getattr(guild, "id", None):
+            # Discord gives @everyone the server's own id.
+            return _Validation(
+                "@everyone cannot be pinged by events. List the roles members "
+                "opt into instead."
+            )
+        names.append(role.name)
+    if unknown:
+        return _Validation(
+            "No role in this server has the id "
+            + ", ".join(unknown)
+            + ". Turn on Developer Mode and copy each role's id. Nothing was "
+            "changed."
+        )
+    return _Validation(note="\nEvents can ping: " + ", ".join(names) + ".")
 
 
 def _is_rejected_key(status: int) -> bool:

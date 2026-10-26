@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 from gw2bot.config import same_guild_id
 
 from gw2bot.settings.definitions import (
     LEGACY_SETTINGS,
+    MAX_EVENT_PING_ROLES,
+    ROLES_GROUP,
     SettingDefinition,
+    definition_for,
     setting_key,
+    setting_text,
 )
 from gw2bot.settings.store import SettingsStore
 
 LOGGER = logging.getLogger(__name__)
+
+# The name prefix that made a role pingable by events before officers listed
+# the roles in /settings roles event_ping. Read once, by
+# seed_event_ping_roles, and never again.
+LEGACY_EVENT_PING_ROLE_PREFIX = "[GW2]"
 
 
 def import_legacy_environment(
@@ -126,6 +136,59 @@ def _importable(
         )
         return False
     return True
+
+
+def seed_event_ping_roles(store: SettingsStore, guild: Any) -> bool:
+    """Start /settings roles event_ping from the roles pingable by name.
+
+    Until officers listed them, any role whose name started with the legacy
+    prefix could be picked and pinged. Storing those roles as the setting's
+    first value is what keeps the events already pinging them doing so across
+    the upgrade, with nothing for an officer to do first. Like the environment
+    import it runs once: after the marker is written, clearing the setting
+    means no roles, and a role named like the old prefix earns nothing.
+
+    Returns whether it stored a value, which the caller has to apply.
+    """
+    if store.event_ping_seed_completed():
+        LOGGER.debug("Skipped the event ping role seed; already recorded")
+        return False
+    definition = definition_for("event_ping", ROLES_GROUP)
+    stored = False
+    if store.is_set(definition):
+        # Somebody set it with /settings before the seed could run. Their
+        # choice is the newer one and wins.
+        LOGGER.debug("Skipped the event ping role seed; the setting is set")
+    else:
+        prefix = LEGACY_EVENT_PING_ROLE_PREFIX.casefold()
+        role_ids = tuple(
+            role.id
+            for role in guild.roles
+            # Discord gives @everyone the server's own id.
+            if role.id != getattr(guild, "id", None)
+            and role.name.casefold().startswith(prefix)
+        )
+        if len(role_ids) > MAX_EVENT_PING_ROLES:
+            # More than the parser accepts would be stored as a value that
+            # reads back as unusable, which is no roles at all.
+            LOGGER.warning(
+                "More roles carry the legacy event ping prefix than events "
+                "may ping; keeping the first %s of %s. Check /settings roles "
+                "event_ping.",
+                MAX_EVENT_PING_ROLES,
+                len(role_ids),
+            )
+            role_ids = role_ids[:MAX_EVENT_PING_ROLES]
+        if role_ids:
+            store.set_raw(definition, setting_text(definition, role_ids))
+            stored = True
+        LOGGER.info(
+            "Seeded /settings roles event_ping from the roles named for "
+            "pinging; roles=%s",
+            len(role_ids),
+        )
+    store.mark_event_ping_seed_completed()
+    return stored
 
 
 def legacy_variables_present(env: Mapping[str, str]) -> tuple[str, ...]:

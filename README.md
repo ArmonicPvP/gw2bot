@@ -93,21 +93,24 @@ exclusion does not award tickets retroactively.
 ### Roles And Channels
 
 Each suggests matching roles, channels or tags as you type and refuses IDs that
-do not resolve. Clearing one restores its default.
+do not resolve. `roles event_ping` is the exception: it takes a typed list of
+role IDs, because a suggestion holds too few of them. Clearing one restores its
+default.
 
 | Subcommand | Default | Controls |
 | --- | --- | --- |
 | `/settings roles raffle_draw` | `1317638909735342201` | `/raffle draw`, `/raffle removetickets`. |
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
-| `/settings roles raffle_officer` | `1317638909735342201` | Recording gold purchases, `/check`, `/track`, `/pending`, `/roster import`, `/gold import`, `/event pingroles add` and `remove`, `/settings`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording gold purchases, `/check`, `/track`, `/pending`, `/roster import`, `/gold import`, `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets account names in the raffle autocompletes. |
-| `/settings roles event_create` | `1318357141521825872` | `/event` commands (except `/event pingroles add` and `remove`) and roster editing. |
+| `/settings roles event_create` | `1318357141521825872` | All `/event` commands and roster editing. |
 | `/settings roles trial` | `1450164501696741597` | Marks a member as a Trial in the Trial reports. |
 | `/settings roles sunborne` | `1317140660188352584` | Marks a member as a full member in the Trial reports. |
 | `/settings roles food_page` | follows `raffle_draw` | The feast usage dashboard. |
 | `/settings roles roster_page` | `1317638909735342201` | The roster history dashboard. |
 | `/settings roles gold_page` | `1317638909735342201` | The guild bank dashboard. |
 | `/settings roles events_page` | `1317638909735342201` | The event statistics dashboard. |
+| `/settings roles event_ping` | unset | Roles events may ping: up to 25 role IDs separated by commas, such as `123456789012345678, 234567890123456789`. Unset, no event pings anyone. |
 | `/settings channels event_ping` | unset | Text channel where events posted into a forum post ping their roles. Unset, they ping inside the post. |
 | `/settings channels raffle_contribution` | `856343628984746014` | Ticket purchases, reward milestones and the six-hourly contribution report. |
 | `/settings channels trial_forum` | `1317206104727621693` | Forum holding Trial applications. Set before its tags. |
@@ -275,12 +278,8 @@ posts up to three reports daily:
 | `/event remind event_id:<event>` | Pings the next run's seated members now. |
 | `/event cancel event_id:<event>` | Cancels the next run of a repeating event and posts the one after. |
 | `/event delete event_id:<event>` | Ends an event. Past runs stay on the calendar and in statistics. |
-| `/event pingroles list` | Shows the roles events can ping. |
-| `/event pingroles add role:<role>` | Lets events ping a role. `raffle_officer` only. |
-| `/event pingroles remove role:<role>` | Stops events pinging a role. `raffle_officer` only. |
 
-`/event` commands need the `event_create` role, except `/event pingroles add`
-and `remove`, which need `raffle_officer` instead. The `event_id` is shown in
+All `/event` commands need the `event_create` role. The `event_id` is shown in
 each post's footer.
 
 **Squads.** The category sets the squad size and roles:
@@ -326,17 +325,18 @@ HH:mm`) show 🟢 open, 🔴 full, 🟡 ongoing, or ⚫️ over.
 a signup thread, or into an existing forum post. The bot only ever removes its
 own messages from a forum post, never the post itself.
 
-**Role pings.** An event can ping up to three of the roles officers have made
-pingable, up to 25 in all. `/event pingroles add` and `remove` suggest roles as
-`name - ID` as you type, and accept a role's name or ID. They are pinged when
-each run is posted, and again if it is moved to another channel, but never when
-the post is only edited. Removing a role stops every event pinging it from its
-next post, and adding it back resumes them. For events in a forum post, set
-`/settings channels event_ping` to ping from a text channel instead.
+**Role pings.** An event can ping up to three of the roles listed in
+`/settings roles event_ping`, which commanders pick from when they create or
+edit it. They are pinged when each run is posted, and again if it is moved to
+another channel, but never when the post is only edited. A role taken off the
+list stops being pinged by the events that carry it, and listing it again
+resumes them. For events in a forum post, set `/settings channels event_ping`
+to ping from a text channel instead.
 
 When upgrading from a release that picked roles by name, the roles whose names
-start with `[GW2]` are made pingable once, on the first start, so existing
-events keep pinging them. After that, a role's name makes no difference.
+start with `[GW2]` are stored in `/settings roles event_ping` once, on the first
+start, so existing events keep pinging them. After that, a role's name makes no
+difference.
 
 **Reminders.** Seated members are pinged in the signup thread or forum post an
 hour before, 15 minutes before, and at the start.

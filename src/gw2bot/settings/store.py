@@ -23,6 +23,9 @@ LOGGER = logging.getLogger(__name__)
 # Marker in the bot's own bookkeeping table recording that the environment has
 # already been read once. See gw2bot.settings.migration.
 ENV_IMPORT_MARKER_KEY = "settings_env_import_v1"
+# The same for the one-time carry-over of the roles events pinged by name into
+# /settings roles event_ping.
+EVENT_PING_SEED_MARKER_KEY = "settings_event_ping_seed_v1"
 # The raffle ledger's own record of which guild it belongs to. Owned by
 # RaffleStore; read here so the environment import cannot store a guild id
 # that would stop the bot from starting.
@@ -187,3 +190,18 @@ class SettingsStore:
                     SettingRecord(key=ENV_IMPORT_MARKER_KEY, value="1")
                 )
         LOGGER.debug("Recorded the one-time environment import marker")
+
+    def event_ping_seed_completed(self) -> bool:
+        with self._sessions() as session:
+            return (
+                session.get(SettingRecord, EVENT_PING_SEED_MARKER_KEY)
+                is not None
+            )
+
+    def mark_event_ping_seed_completed(self) -> None:
+        with self._sessions.begin() as session:
+            if session.get(SettingRecord, EVENT_PING_SEED_MARKER_KEY) is None:
+                session.add(
+                    SettingRecord(key=EVENT_PING_SEED_MARKER_KEY, value="1")
+                )
+        LOGGER.debug("Recorded the one-time event ping role seed marker")

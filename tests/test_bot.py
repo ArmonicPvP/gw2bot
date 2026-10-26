@@ -794,7 +794,6 @@ class TestStartupStatus:
             user="Test Bot",
             _ready_announced=False,
             _config=SimpleNamespace(
-                discord_command_guild_id=1,
                 poll_interval_seconds=300,
                 guild_log_poll_interval_seconds=60,
                 gw2_api_enabled=True,
@@ -803,9 +802,7 @@ class TestStartupStatus:
             _startup_status=lambda: Gw2Bot._startup_status(cast(Gw2Bot, bot)),
             _try_send_notification=AsyncMock(),
             _announce_legacy_variables=AsyncMock(),
-            # No server cached, so the ping role seed waits for a later
-            # connection and touches nothing.
-            get_guild=lambda guild_id: None,
+            _seed_event_ping_roles=AsyncMock(),
         )
 
         with caplog.at_level(logging.INFO, logger="gw2bot"):
@@ -813,6 +810,9 @@ class TestStartupStatus:
             await Gw2Bot.on_ready(cast(Gw2Bot, bot))
 
         bot._try_send_notification.assert_not_awaited()
+        # The seed runs on every connection, so one that had to wait for the
+        # server is retried; its own marker stops it repeating.
+        assert bot._seed_event_ping_roles.await_count == 2
         assert (
             sum(
                 "GW2 bot connected to Discord. Storage polling every 300 seconds; "
@@ -1479,6 +1479,47 @@ class TestSettingsHotApply:
             with pytest.raises(ValueError, match="belongs to a different guild"):
                 await bot.apply_settings_change({"gw2_guild_id"})
 
+        await self._close(bot)
+
+    @staticmethod
+    def _ping_guild() -> Any:
+        roles = [
+            SimpleNamespace(id=5678, name="@everyone"),
+            SimpleNamespace(id=11, name="[GW2] Raiders"),
+            SimpleNamespace(id=12, name="Officers"),
+        ]
+        return SimpleNamespace(id=5678, roles=roles)
+
+    async def test_the_seeded_event_ping_roles_take_effect_at_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # Existing events have to keep pinging their roles from the first
+        # post after the upgrade, not from the next restart.
+        bot = await self._started(self._config(tmp_path))
+        guild = self._ping_guild()
+
+        with patch.object(Gw2Bot, "get_guild", return_value=guild):
+            with self._quiet_bot_patches():
+                await bot._seed_event_ping_roles()
+
+        assert bot._config.event_ping_role_ids == (11,)
+        await self._close(bot)
+
+    async def test_an_uncached_server_leaves_the_seed_for_later(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        bot = await self._started(self._config(tmp_path))
+
+        with patch.object(Gw2Bot, "get_guild", return_value=None):
+            await bot._seed_event_ping_roles()
+        assert not bot.settings_store.event_ping_seed_completed()
+        with patch.object(Gw2Bot, "get_guild", return_value=self._ping_guild()):
+            with self._quiet_bot_patches():
+                await bot._seed_event_ping_roles()
+
+        assert bot._config.event_ping_role_ids == (11,)
         await self._close(bot)
 
 

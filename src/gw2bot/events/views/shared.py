@@ -40,11 +40,9 @@ from gw2bot.events.models import (
     EventStatus,
     MAX_PARTICIPANTS_LIMIT,
     MAX_PING_ROLES,
-    MAX_PINGABLE_ROLES,
     RepeatFrequency,
     is_roster_full,
 )
-from gw2bot.events.ping_roles import pingable_role_ids
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -147,11 +145,11 @@ EVENT_CHANNEL_REJECTION = (
 REMOVE_SELECT_PAGE_SIZE = 25
 
 
-# The same cap applied to the ping-role picker. Officers can make no more roles
-# pingable than this, but a role an event already pings is offered beside them
-# after it has been taken off the list, so the picker is still cut to the first
-# page rather than becoming one Discord would refuse outright.
-PING_ROLE_OPTION_LIMIT = MAX_PINGABLE_ROLES
+# The same cap applied to the ping-role picker. /settings roles event_ping holds
+# no more roles than this, but a role an event already pings is offered beside
+# them after it has been taken off the list, so the picker is still cut to the
+# first page rather than becoming one Discord would refuse outright.
+PING_ROLE_OPTION_LIMIT = 25
 
 
 PING_ROLE_PROMPT = "Which roles should the post ping?"
@@ -166,7 +164,7 @@ PING_ROLE_HINT = (
 
 PING_ROLE_NONE_AVAILABLE = (
     "No roles can be pinged by events yet, so there is nothing to ping. Ask "
-    "an officer to add one with `/event pingroles add`, then try again."
+    "an officer to add some with `/settings roles event_ping`, then try again."
 )
 
 
@@ -407,9 +405,9 @@ def pingable_roles(
 ) -> list[discord.Role]:
     """The server's pingable roles, in the order the picker offers them.
 
-    Only the roles officers put on the list are offered, so a commander cannot
-    aim an event post at an admin role or at @everyone. A listed role the
-    server no longer has is left out, and sorting by name keeps the picker
+    Only the roles in /settings roles event_ping are offered, so a commander
+    cannot aim an event post at an admin role or at @everyone. A listed role
+    the server no longer has is left out, and sorting by name keeps the picker
     stable as the server's role hierarchy is rearranged.
     """
     if guild is None:
@@ -435,10 +433,7 @@ def _ping_role_options(
     and an unrelated edit must not quietly drop it. One that no longer exists
     in the server is dropped: Discord would refuse a mention of it anyway.
     """
-    if guild is None:
-        # Nothing could be offered, so the list is not worth reading.
-        return []
-    roles = pingable_roles(guild, pingable_role_ids(bot))
+    roles = pingable_roles(guild, bot._config.event_ping_role_ids)
     known = {role.id for role in roles}
     # A retained role is listed first so the truncation below can never be what
     # drops one of the event's own roles.

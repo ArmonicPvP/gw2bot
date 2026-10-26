@@ -16,7 +16,6 @@ from gw2bot.events.models import (
     EventStatus,
     RepeatFrequency,
 )
-from gw2bot.events.ping_roles import EventPingRoleCommands
 from gw2bot.events.posting import split_event_history
 from gw2bot.events.reminders import (
     occurrence_finished,
@@ -85,13 +84,10 @@ class EventCommands(app_commands.Group):
             name="event",
             description="Manage guild events",
             guild_only=True,
-            # Every subcommand checks this role before doing anything, apart
-            # from the pingroles group, whose commands declare their own.
+            # Every subcommand checks this role before doing anything.
             extras=access_extras(RoleSetting("event_create_role_id")),
         )
         self._bot = bot
-        # Constructing it with this group as its parent is what adds it.
-        EventPingRoleCommands(bot, parent=self)
 
     @app_commands.command(name="new", description="Create a new guild event")
     async def new(self, interaction: discord.Interaction) -> None:

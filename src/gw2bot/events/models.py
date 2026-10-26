@@ -83,10 +83,6 @@ ROLE_EMOJI: dict[EventRole, str] = {
 # How many roles one event may ping. Kept small on purpose: an event post is an
 # announcement, and a post that pings half the server stops being one.
 MAX_PING_ROLES = 3
-# How many roles officers may make pingable at all. The roles a commander
-# picks from are one select, and Discord caps a select at 25 options, so a
-# role added past that would be on the list and never offered.
-MAX_PINGABLE_ROLES = 25
 
 # The largest participant cap a commander may give a headcount event. Zero is
 # the other end of the range and means no cap at all.

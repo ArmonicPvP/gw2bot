@@ -26,7 +26,6 @@ from gw2bot.events.formatting import (
     ping_announcement_content,
 )
 from gw2bot.events.models import Event, EventOccurrence
-from gw2bot.events.ping_roles import pingable_role_ids
 from gw2bot.events.posting.channels import resolve_channel
 from gw2bot.events.posting.state import occurrence_channel_id
 
@@ -45,15 +44,14 @@ def verified_ping_role_ids(
 
     The stored ids are a snapshot of what the picker offered, and an event
     outlives that snapshot: a weekly series keeps its roles for months, during
-    which one can be deleted, or taken off the pingable list by an officer who
-    no longer wants events reaching it. The list is re-read here, immediately
-    before the send, so it is a property of the roles actually notified rather
-    than of the picker alone.
+    which one can be deleted, or taken off /settings roles event_ping by an
+    officer who no longer wants events reaching it. The setting is re-read
+    here, immediately before the send, so it is a property of the roles
+    actually notified rather than of the picker alone.
 
     A role that stops qualifying is skipped rather than erased: the id stays on
     the event, so adding the role back resumes its pings. A guild that cannot
-    be resolved pings nothing, because nothing can be checked, and neither does
-    a list that cannot be read.
+    be resolved pings nothing, because nothing can be checked.
     """
     if not event.ping_role_ids:
         return ()
@@ -65,7 +63,7 @@ def verified_ping_role_ids(
             len(event.ping_role_ids),
         )
         return ()
-    pingable = set(pingable_role_ids(bot))
+    pingable = set(bot._config.event_ping_role_ids)
     verified: list[int] = []
     for role_id in event.ping_role_ids:
         role = guild.get_role(role_id)
