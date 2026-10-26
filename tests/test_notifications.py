@@ -277,6 +277,43 @@ class TestAutomatedMessageDiagnostics:
             "Tier 2 rewards have been reached!"
         ) in output
 
+    async def test_previews_each_event_audit_line_without_pinging(
+        self,
+    ) -> None:
+        channel = SimpleNamespace(send=AsyncMock())
+        bot = SimpleNamespace(
+            get_raffle_contributions=MagicMock(return_value=[]),
+            get_raffle_totals=MagicMock(return_value=[]),
+            _last_guild_member_count=None,
+            _last_pending_guild_invite_count=None,
+        )
+
+        await Gw2Bot._send_automated_message_diagnostics(
+            cast(Gw2Bot, bot),
+            channel,
+            datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
+        )
+
+        audits = {
+            call_.args[0].partition("\n")[0]: call_
+            for call_ in channel.send.await_args_list
+            if "embeds" in call_.kwargs
+        }
+        assert list(audits) == [
+            "**Event created audit log (test)**",
+            "**Event edited audit log (test)**",
+            "**Event deleted audit log (test)**",
+        ]
+        for call_ in audits.values():
+            mentions = call_.kwargs["allowed_mentions"]
+            assert not mentions.users and not mentions.roles
+            assert not mentions.everyone
+        edited = audits["**Event edited audit log (test)**"]
+        assert "Changed: Title, Date & Time, Duration." in edited.args[0]
+        assert [
+            embed.author.name for embed in edited.kwargs["embeds"]
+        ] == ["Before", "After"]
+
     async def test_preview_logging_does_not_include_contributor_content(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -303,10 +340,10 @@ class TestAutomatedMessageDiagnostics:
             "Prepared automated message diagnostics; messages=14 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 18
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 18
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 21
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 21
         assert (
-            "Automated message diagnostics completed; attempted=18 delivered=18 "
+            "Automated message diagnostics completed; attempted=21 delivered=21 "
             "failed=0"
             in caplog.text
         )
@@ -318,7 +355,7 @@ class TestAutomatedMessageDiagnostics:
         secret = "diagnostic-failure-secret"
         channel = SimpleNamespace(
             send=AsyncMock(
-                side_effect=[None, RuntimeError(secret)] + [None] * 16
+                side_effect=[None, RuntimeError(secret)] + [None] * 19
             )
         )
         bot = SimpleNamespace(
@@ -337,7 +374,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 18
+        assert channel.send.await_count == 21
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -345,7 +382,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=18 delivered=17 "
+            "Automated message diagnostics completed; attempted=21 delivered=20 "
             "failed=1"
             in caplog.text
         )
@@ -438,6 +475,70 @@ class TestDiscordNotificationDelivery:
             f"characters={len(secret)}"
             in caplog.text
         )
+
+    async def test_embeds_go_out_without_pinging_anybody(self) -> None:
+        channel = SimpleNamespace(send=AsyncMock())
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(
+                discord_notification_channel_id=9012,
+                notifications_enabled=True,
+            ),
+        )
+        bot._get_notification_channel = AsyncMock(return_value=channel)
+        bot._send_notification = lambda message, embeds: (
+            Gw2Bot._send_notification(cast(Gw2Bot, bot), message, embeds)
+        )
+        embed = discord.Embed(title="Event")
+
+        sent = await Gw2Bot._try_send_notification(
+            cast(Gw2Bot, bot),
+            "<@42> created event **1**.",
+            (embed,),
+        )
+
+        assert sent
+        assert channel.send.await_args is not None
+        assert channel.send.await_args.args == ("<@42> created event **1**.",)
+        assert channel.send.await_args.kwargs["embeds"] == [embed]
+        mentions = channel.send.await_args.kwargs["allowed_mentions"]
+        assert not mentions.users and not mentions.roles
+        assert not mentions.everyone
+
+    async def test_a_plain_message_is_sent_as_it_always_was(self) -> None:
+        channel = SimpleNamespace(send=AsyncMock())
+        bot = SimpleNamespace(
+            _get_notification_channel=AsyncMock(return_value=channel),
+        )
+
+        await Gw2Bot._send_notification(cast(Gw2Bot, bot), "join message")
+
+        channel.send.assert_awaited_once_with("join message")
+
+    async def test_embed_delivery_logs_counts_and_not_content(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        secret = "embedded-event-title-secret"
+        bot = SimpleNamespace(
+            _config=SimpleNamespace(
+                discord_notification_channel_id=9012,
+                notifications_enabled=True,
+            ),
+            _send_notification=AsyncMock(),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            sent = await Gw2Bot._try_send_notification(
+                cast(Gw2Bot, bot),
+                "content",
+                (discord.Embed(title=secret), discord.Embed(title=secret)),
+            )
+
+        assert sent
+        assert "Sending Discord notification; characters=7 embeds=2" in (
+            caplog.text
+        )
+        assert secret not in caplog.text
 
     async def test_unset_notification_channel_is_reported_as_a_discord_error(
         self,

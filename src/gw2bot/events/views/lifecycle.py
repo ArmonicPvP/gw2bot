@@ -13,6 +13,11 @@ import discord
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.discord_utils import user_has_role
+from gw2bot.events.audit import (
+    event_deleted_audit,
+    event_edited_audit,
+    send_event_audit,
+)
 from gw2bot.events.formatting import format_event_datetime
 from gw2bot.events.models import (
     Event,
@@ -523,6 +528,22 @@ async def apply_event_edit(
         )
     else:
         content = f"Event **{updated.event_id}** was updated."
+    # Whatever became of the posts, the edit is saved, so it is recorded -
+    # against the event as it is stored now, with the channel a failed move
+    # put back. Before the reply, so a refused reply cannot lose the record.
+    await send_event_audit(
+        bot,
+        event_edited_audit(
+            interaction.user.id,
+            previous,
+            # The run the draft was seeded from, so both embeds show the
+            # date the commander saw and changed rather than the series'
+            # origin.
+            primary.start_time if primary is not None else edited.start_time,
+            updated,
+            edited.start_time,
+        ),
+    )
     await interaction.edit_original_response(content=content, view=None)
 
 
@@ -547,6 +568,25 @@ def _deleted_history_note(kept: int) -> str:
         f" Its {kept} finished runs were kept, with their places on the "
         "calendar, and their posts were left alone."
     )
+
+
+def _deleted_run_start(
+    event: Event,
+    kept: list[EventOccurrence],
+    removed: list[EventOccurrence],
+) -> datetime:
+    """The run a deleted event is recorded under in its audit line.
+
+    The soonest one the deletion called off, which is the post members were
+    looking at; failing that the last one it kept. Both lists are in start
+    order. The event's own start is the series origin, which for a repeating
+    event can be long past.
+    """
+    if removed:
+        return removed[0].start_time
+    if kept:
+        return kept[-1].start_time
+    return event.start_time
 
 
 class EventDeleteConfirmView(discord.ui.View):
@@ -750,6 +790,24 @@ class EventDeleteConfirmView(discord.ui.View):
             kept,
             datetime.now(UTC),
         )
+        if stored is not None:
+            await send_event_audit(
+                self._bot,
+                event_deleted_audit(
+                    interaction.user.id,
+                    event,
+                    _deleted_run_start(event, kept, removed),
+                    len(kept),
+                ),
+            )
+        else:
+            # Somebody else's deletion got there first, and recorded it.
+            LOGGER.debug(
+                "Skipped the audit line for an event already gone; "
+                "event_id=%s user_id=%s",
+                self._event.event_id,
+                interaction.user.id,
+            )
         LOGGER.debug(
             "Deleted event; event_id=%s occurrences_removed=%s "
             "occurrences_kept=%s user_id=%s",

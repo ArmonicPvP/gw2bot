@@ -17,6 +17,7 @@ import discord
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.discord_utils import user_has_role
+from gw2bot.events.audit import event_created_audit, send_event_audit
 from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
     parse_event_datetime,
@@ -752,6 +753,16 @@ class EventConfirmView(_PreviewConfirmView):
             occurrence.occurrence_id,
             interaction.user.id,
             leader_signup is not None,
+        )
+        # Before the reply rather than after it: a reply Discord refuses would
+        # otherwise take the record of an event that is up with it.
+        await send_event_audit(
+            self._bot,
+            event_created_audit(
+                interaction.user.id,
+                event,
+                occurrence.start_time,
+            ),
         )
         await interaction.followup.send(
             f"Event **{event.event_id}** was posted in "

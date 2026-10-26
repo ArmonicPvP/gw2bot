@@ -7,11 +7,19 @@ does not stop the rest from being attempted.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import discord
 
+from gw2bot.events.audit import (
+    event_created_audit,
+    event_deleted_audit,
+    event_edited_audit,
+)
+from gw2bot.events.models import Event, EventCategory, RepeatFrequency
 from gw2bot.gw2.feast_stock import FeastAlert
 from gw2bot.gw2.guild_members import (
     TRIAL_WARNING_MARK_HEADER,
@@ -109,6 +117,25 @@ def _diagnostic_raffle_audit() -> RaffleAudit:
                 ranges=second_ranges,
             ),
         ),
+    )
+
+
+_DIAGNOSTIC_EVENT_START = datetime(2026, 1, 1, 20, 0, tzinfo=UTC)
+
+
+def _diagnostic_event() -> Event:
+    # Every id is zero, so the mentions name nobody and the channel nothing.
+    return Event(
+        event_id=0,
+        category=EventCategory.FRACTAL,
+        title="Diagnostic Event",
+        description="This event does not exist.",
+        channel_id=0,
+        leader_discord_id=0,
+        start_time=_DIAGNOSTIC_EVENT_START,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.WEEKLY,
+        repeat_days=(3,),
     )
 
 
@@ -246,21 +273,32 @@ async def try_send_automated_diagnostic(
     *,
     message: str | None = None,
     embed: discord.Embed | None = None,
+    embeds: Sequence[discord.Embed] = (),
     view: discord.ui.View | None = None,
 ) -> bool:
     characters = len(message or "")
     if embed is not None:
         characters += len(embed.description or "")
+    characters += sum(len(each.description or "") for each in embeds)
     LOGGER.debug(
         "Attempting automated diagnostic delivery; kind=%s characters=%s "
-        "embed=%s view=%s",
+        "embed=%s embeds=%s view=%s",
         kind,
         characters,
         embed is not None,
+        len(embeds),
         view is not None,
     )
     try:
-        if message is not None and embed is not None:
+        if embeds:
+            # Sent the way the real line is: its mentions name people
+            # without calling them.
+            await channel.send(
+                message,
+                embeds=list(embeds),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        elif message is not None and embed is not None:
             await channel.send(message, embed=embed)
         elif message is not None:
             await channel.send(message)
@@ -355,6 +393,42 @@ async def send_automated_message_diagnostics(
         message="**Raffle audit (test)**",
         embed=raffle_audit_embeds(_diagnostic_raffle_audit())[0],
     )
+    event = _diagnostic_event()
+    edited = replace(
+        event,
+        title="Diagnostic Event (edited)",
+        duration_minutes=120,
+    )
+    for kind, label, audit in (
+        (
+            "event-created-preview",
+            "Event created audit log",
+            event_created_audit(0, event, _DIAGNOSTIC_EVENT_START),
+        ),
+        (
+            "event-edited-preview",
+            "Event edited audit log",
+            event_edited_audit(
+                0,
+                event,
+                _DIAGNOSTIC_EVENT_START,
+                edited,
+                _DIAGNOSTIC_EVENT_START + timedelta(days=7),
+            ),
+        ),
+        (
+            "event-deleted-preview",
+            "Event deleted audit log",
+            event_deleted_audit(0, edited, _DIAGNOSTIC_EVENT_START, kept=2),
+        ),
+    ):
+        attempted += 1
+        delivered += await try_send_automated_diagnostic(
+            channel,
+            kind,
+            message=f"**{label} (test)**\n{audit.content}",
+            embeds=audit.embeds,
+        )
     for index, diagnostic_message in enumerate(messages[1:], start=1):
         attempted += 1
         delivered += await try_send_automated_diagnostic(

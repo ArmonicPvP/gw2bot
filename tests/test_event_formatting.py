@@ -5,6 +5,12 @@ from zoneinfo import ZoneInfo
 import discord
 import pytest
 
+from gw2bot.events.audit import (
+    event_audit_embed,
+    event_created_audit,
+    event_deleted_audit,
+    event_edited_audit,
+)
 from gw2bot.events.formatting import (
     CALENDAR_FIELD_NAME,
     DRAFT_PENDING_TEXT,
@@ -1284,3 +1290,196 @@ class TestDescribeRepeat:
             describe_repeat(RepeatFrequency.MONTHLY, (1, 30))
             == "Repeats monthly on day(s) 1, 30"
         )
+
+
+def _audit_fields(embed: discord.Embed) -> dict[str, str]:
+    return {
+        (field.name or "").split(" ", 1)[1]: field.value or ""
+        for field in embed.fields
+    }
+
+
+class TestEventAudit:
+    START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
+
+    def test_shows_every_detail_the_event_was_saved_with(self) -> None:
+        event = replace(
+            make_event(
+                repeat_frequency=RepeatFrequency.WEEKLY,
+                repeat_days=(5,),
+            ),
+            delete_previous_on_repeat=True,
+            ping_role_ids=(10, 11),
+            requirements="Bring a healer.",
+            mentee_enabled=True,
+        )
+
+        embed = event_audit_embed(
+            event,
+            self.START,
+            heading="Created",
+            color=0x2ECC71,
+        )
+
+        assert embed.author.name == "Created"
+        assert embed.title == f"{CATEGORY_EMOJI[EventCategory.FRACTAL]} Kitty Cleanup"
+        assert embed.description == "Bring food."
+        assert embed.footer.text == "eventID: 7"
+        assert _audit_fields(embed) == {
+            "Category": "Fractal",
+            "Date & Time": f"<t:{int(self.START.timestamp())}:f>",
+            "Duration": format_duration(90),
+            "Leader": "<@42>",
+            "Channel": "<#1234>",
+            "Repeats": (
+                "Repeats weekly on Saturday, removing the previous post each "
+                "time"
+            ),
+            "Squad size": "5",
+            "Role pings": "<@&10> <@&11>",
+            "Mentee slot": "Offered",
+            "Requirements": "Bring a healer.",
+        }
+
+    def test_names_a_squad_with_no_limit_and_the_absence_of_pings(
+        self,
+    ) -> None:
+        embed = event_audit_embed(
+            make_event(EventCategory.GENERAL),
+            self.START,
+            heading="Created",
+            color=0x2ECC71,
+        )
+
+        fields = _audit_fields(embed)
+        assert fields["Squad size"] == "No limit"
+        assert fields["Role pings"] == "None"
+        assert fields["Mentee slot"] == "Not offered"
+        assert fields["Requirements"] == "None"
+        assert fields["Repeats"] == "Does not repeat"
+
+    def test_a_headcount_cap_is_the_squad_size_it_shows(self) -> None:
+        event = replace(make_event(EventCategory.WVW), max_participants=20)
+
+        embed = event_audit_embed(
+            event,
+            self.START,
+            heading="Created",
+            color=0x2ECC71,
+        )
+
+        assert _audit_fields(embed)["Squad size"] == "20"
+
+    def test_created_line_names_who_posted_it(self) -> None:
+        audit = event_created_audit(99, make_event(), self.START)
+
+        assert audit.content == "<@99> created event **7**."
+        assert [embed.author.name for embed in audit.embeds] == ["Created"]
+
+    def test_edit_line_names_what_changed_between_before_and_after(
+        self,
+    ) -> None:
+        before = make_event()
+        after = replace(
+            before,
+            title="Renamed",
+            channel_id=5678,
+            leader_discord_id=7,
+            ping_role_ids=(10,),
+        )
+
+        audit = event_edited_audit(
+            99,
+            before,
+            self.START,
+            after,
+            self.START,
+        )
+
+        assert audit.content == (
+            "<@99> edited event **7**. "
+            "Changed: Title, Leader, Channel, Role pings."
+        )
+        before_embed, after_embed = audit.embeds
+        assert before_embed.author.name == "Before"
+        assert after_embed.author.name == "After"
+        assert "Kitty Cleanup" in (before_embed.title or "")
+        assert "Renamed" in (after_embed.title or "")
+        assert _audit_fields(before_embed)["Channel"] == "<#1234>"
+        assert _audit_fields(after_embed)["Channel"] == "<#5678>"
+
+    def test_edit_line_compares_the_runs_it_was_given(self) -> None:
+        # A series' own start is its origin, which a reschedule only shifts:
+        # the line compares the run the commander moved instead.
+        before = make_event(repeat_frequency=RepeatFrequency.DAILY)
+        after = replace(
+            before,
+            start_time=datetime(2020, 1, 1, tzinfo=UTC),
+            category=EventCategory.RAID,
+            description="New plan.",
+            duration_minutes=120,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(1,),
+            requirements="Raid ready.",
+            mentee_enabled=True,
+        )
+        moved = self.START.replace(hour=21)
+
+        audit = event_edited_audit(99, before, self.START, after, moved)
+
+        assert audit.content == (
+            "<@99> edited event **7**. Changed: Description, Category, "
+            "Date & Time, Duration, Repeats, Squad size, Mentee slot, "
+            "Requirements."
+        )
+        assert _audit_fields(audit.embeds[1])["Date & Time"] == (
+            f"<t:{int(moved.timestamp())}:f>"
+        )
+
+    def test_an_edit_that_changed_nothing_says_so(self) -> None:
+        event = make_event()
+
+        audit = event_edited_audit(99, event, self.START, event, self.START)
+
+        assert audit.content == (
+            "<@99> saved event **7** without changing anything."
+        )
+        assert len(audit.embeds) == 2
+
+    def test_an_edit_with_nothing_to_compare_shows_what_was_saved(
+        self,
+    ) -> None:
+        audit = event_edited_audit(99, None, self.START, make_event(), self.START)
+
+        assert audit.content == "<@99> edited event **7**."
+        assert [embed.author.name for embed in audit.embeds] == ["After"]
+
+    def test_before_and_after_fit_one_message_together(self) -> None:
+        # Discord caps every embed on a message together, so two long
+        # descriptions must share the limit rather than each fill it.
+        before = replace(
+            make_event(),
+            description="a" * 4000,
+            requirements="r" * 1024,
+        )
+        after = replace(before, description="b" * 4000)
+
+        audit = event_edited_audit(99, before, self.START, after, self.START)
+
+        assert sum(len(embed) for embed in audit.embeds) <= EMBED_TOTAL_LIMIT
+        assert all(embed.fields for embed in audit.embeds)
+
+    def test_deleted_line_says_how_many_finished_runs_were_kept(self) -> None:
+        event = make_event()
+
+        assert event_deleted_audit(99, event, self.START).content == (
+            "<@99> deleted event **7**."
+        )
+        assert event_deleted_audit(99, event, self.START, kept=1).content == (
+            "<@99> deleted event **7**. Its one finished run was kept."
+        )
+        audit = event_deleted_audit(99, event, self.START, kept=3)
+        assert audit.content == (
+            "<@99> deleted event **7**. Its 3 finished runs were kept."
+        )
+        assert [embed.author.name for embed in audit.embeds] == ["Deleted"]
