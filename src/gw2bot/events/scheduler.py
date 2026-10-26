@@ -5,6 +5,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from gw2bot.events.models import EventStatus
 from gw2bot.events.posting import (
     ensure_next_recurring_occurrence,
@@ -106,6 +108,20 @@ async def run_event_maintenance(
         swept.add(occurrence.occurrence_id)
     await _sweep_outstanding_announcements(bot, swept)
     await _post_pending_occurrences(bot, current_time)
+    _purge_snapshots(bot, current_time)
+
+
+def _purge_snapshots(bot: Gw2Bot, now: datetime) -> None:
+    # `/event restore` stops offering a change once it is a week old whether
+    # or not this runs; this is what keeps the rows from piling up behind it.
+    # Last in the pass, and contained, so it can never cost the posting work.
+    try:
+        bot.event_store.purge_snapshots(now)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not purge expired event snapshots; error_type=%s",
+            type(exc).__name__,
+        )
 
 
 async def _sweep_outstanding_announcements(

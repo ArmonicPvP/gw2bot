@@ -65,6 +65,7 @@ from gw2bot.events.views import (
     EventDraft,
     EventEditConfirmView,
     EventFieldEditModal,
+    EventRestoreConfirmView,
     EventRosterEditView,
     EventRepeatModal,
     EventScheduleModal,
@@ -179,7 +180,14 @@ class TestEventCommandGroup:
 
         assert group.name == "event"
         assert group.guild_only
-        assert commands == {"new", "edit", "remind", "cancel", "delete"}
+        assert commands == {
+            "new",
+            "edit",
+            "remind",
+            "cancel",
+            "delete",
+            "restore",
+        }
 
     async def test_new_rejects_users_without_the_create_role(self) -> None:
         group = EventCommands(make_bot())
@@ -12425,3 +12433,443 @@ class TestAddSignups:
         assert "Delivered direct message" in caplog.text
         assert "Could not deliver a direct message" in caplog.text
         assert "Applied roster addition" in caplog.text
+
+
+def commander_click() -> Any:
+    interaction = make_interaction(
+        role_ids=(EVENT_CREATE_ROLE_ID,),
+        message=ephemeral_message(),
+    )
+    interaction.edit_original_response = AsyncMock()
+    return interaction
+
+
+async def save_edit(fake_bot: Any, event: Any, **changes: Any) -> None:
+    """Save an edit through the preview's own Save changes button."""
+    draft = draft_from_event(event, ZoneInfo("UTC"))
+    for name, value in changes.items():
+        setattr(draft, name, value)
+    await EventEditConfirmView(fake_bot, draft).save_changes.callback(
+        commander_click()
+    )
+
+
+async def delete_through_confirmation(fake_bot: Any, event: Any) -> str:
+    """Delete an event the way `/event delete` does, returning its reply."""
+    interaction = commander_click()
+    await EventDeleteConfirmView(fake_bot, event).delete.callback(interaction)
+    return awaited_kwargs(interaction.edit_original_response)["content"]
+
+
+async def open_restore(fake_bot: Any, event_id: int) -> dict[str, Any]:
+    """Run `/event restore` as a commander, returning what it answered."""
+    group = EventCommands(fake_bot)
+    interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+    await cast(Any, group.restore.callback)(group, interaction, event_id)
+    sent = interaction.response.send_message.await_args
+    assert sent is not None
+    return {"content": sent.args[0], **sent.kwargs}
+
+
+async def press_restore(view: Any) -> str:
+    """Confirm a restore, returning what the confirmation was replaced with."""
+    interaction = commander_click()
+    await view.restore.callback(interaction)
+    if interaction.edit_original_response.await_args is not None:
+        return interaction.edit_original_response.await_args.kwargs["content"]
+    return awaited_kwargs(interaction.response.edit_message)["content"]
+
+
+class TestRestoreCommand:
+    async def test_restore_rejects_users_without_the_create_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, event, title="Edited Title")
+        group = EventCommands(fake_bot)
+        interaction = make_interaction()
+
+        await cast(Any, group.restore.callback)(
+            group,
+            interaction,
+            event.event_id,
+        )
+
+        kwargs = awaited_kwargs(interaction.response.send_message)
+        assert kwargs["ephemeral"] is True
+        assert "view" not in kwargs
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+
+    async def test_restore_says_when_there_is_nothing_to_undo(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "nothing to restore" in answer["content"]
+        assert "7 days" in answer["content"]
+        assert "view" not in answer
+
+    async def test_restore_autocomplete_lists_deleted_and_edited_events(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        edited, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, edited, title="Renamed")
+        deleted, _ = make_posted_edit_event(store)
+        await delete_through_confirmation(fake_bot, deleted)
+        untouched, _ = make_posted_edit_event(store)
+        group = EventCommands(fake_bot)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        choices = await group.restorable_event_id_autocomplete(interaction, "")
+
+        assert sorted(
+            (choice.value, choice.name) for choice in choices
+        ) == [
+            (
+                edited.event_id,
+                f"[Fractal] Renamed — id {edited.event_id} (edited)",
+            ),
+            (
+                deleted.event_id,
+                f"[Fractal] Original Title — id {deleted.event_id} (deleted)",
+            ),
+        ]
+        assert untouched.event_id not in {choice.value for choice in choices}
+        # The title from before the edit still finds it.
+        assert [
+            choice.value
+            for choice in await group.restorable_event_id_autocomplete(
+                interaction,
+                "original",
+            )
+        ] == [deleted.event_id, edited.event_id]
+
+    async def test_restore_autocomplete_is_empty_without_the_role(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, event, title="Renamed")
+        group = EventCommands(fake_bot)
+
+        assert (
+            await group.restorable_event_id_autocomplete(
+                make_interaction(),
+                "",
+            )
+            == []
+        )
+
+
+class TestUndoEventEdit:
+    async def test_an_edit_saved_from_the_preview_can_be_undone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        moved = FAR_FUTURE + timedelta(days=2)
+        await save_edit(
+            fake_bot,
+            event,
+            title="Edited Title",
+            start_time=moved,
+            start_text=format_event_datetime(moved, ZoneInfo("UTC")),
+        )
+        channel.partial_message.edit.reset_mock()
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "Undo the last edit to **Edited Title**" in answer["content"]
+        assert "puts back its title and date & time" in answer["content"]
+        assert "Original Title" in cast(str, answer["embed"].title)
+        view = answer["view"]
+        assert isinstance(view, EventRestoreConfirmView)
+
+        result = await press_restore(view)
+
+        assert "restored to how it was before its last edit" in result
+        assert store.get_event(event.event_id) == event
+        restored = store.get_occurrence(occurrence.occurrence_id)
+        assert restored is not None
+        assert restored.start_time == FAR_FUTURE
+        channel.partial_message.edit.assert_awaited()
+        # Only one edit can be undone, so the undo leaves nothing behind.
+        assert store.get_snapshot(event.event_id) is None
+
+    async def test_undo_puts_a_moved_series_run_back_by_the_edit(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The draft carries the run's start, not the series origin, so the
+        # undo has to move both back by what the edit moved them.
+        event, occurrence = make_posted_recurring_event(store)
+        moved = SERIES_WEEK4 + timedelta(hours=2)
+        await save_edit(
+            fake_bot,
+            event,
+            start_time=moved,
+            start_text=format_event_datetime(moved, ZoneInfo("UTC")),
+        )
+        edited = store.get_event(event.event_id)
+        assert edited is not None
+        assert edited.start_time == SERIES_ORIGIN + timedelta(hours=2)
+
+        view = (await open_restore(fake_bot, event.event_id))["view"]
+        await press_restore(view)
+
+        assert store.get_event(event.event_id) == event
+        restored = store.get_occurrence(occurrence.occurrence_id)
+        assert restored is not None
+        assert restored.start_time == SERIES_WEEK4
+
+    async def test_an_undone_edit_cannot_be_undone_again(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, event, title="Edited Title")
+        await press_restore(
+            (await open_restore(fake_bot, event.event_id))["view"]
+        )
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "nothing to restore" in answer["content"]
+        assert store.get_event(event.event_id).title == "Original Title"  # type: ignore[union-attr]
+
+    async def test_an_event_that_has_started_keeps_its_edit(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_ongoing_edit_event(store)
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title="Renamed",
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+            remember_previous=True,
+        )
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "already started" in answer["content"]
+        assert "view" not in answer
+        assert store.get_event(event.event_id).title == "Renamed"  # type: ignore[union-attr]
+
+    async def test_a_newer_edit_makes_the_open_confirmation_stale(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, event, title="First")
+        view = (await open_restore(fake_bot, event.event_id))["view"]
+        first = store.get_event(event.event_id)
+        assert first is not None
+        await save_edit(fake_bot, first, title="Second")
+
+        result = await press_restore(view)
+
+        assert "has changed since this was opened" in result
+        assert store.get_event(event.event_id).title == "Second"  # type: ignore[union-attr]
+
+    async def test_a_commander_can_leave_the_edit_in_place(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, event, title="Edited Title")
+        view = (await open_restore(fake_bot, event.event_id))["view"]
+        interaction = commander_click()
+
+        await view.keep.callback(interaction)
+
+        assert "Nothing was restored" in awaited_kwargs(
+            interaction.response.edit_message
+        )["content"]
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+        assert store.get_snapshot(event.event_id) is not None
+
+    async def test_a_click_without_the_role_restores_nothing(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await save_edit(fake_bot, event, title="Edited Title")
+        view = (await open_restore(fake_bot, event.event_id))["view"]
+        interaction = make_interaction(message=ephemeral_message())
+
+        await view.restore.callback(interaction)
+
+        sent = interaction.response.send_message.await_args
+        assert sent is not None
+        assert "required role" in sent.args[0]
+        assert store.get_event(event.event_id).title == "Edited Title"  # type: ignore[union-attr]
+
+
+class TestRestoreDeletedEvent:
+    async def test_a_deleted_event_comes_back_with_its_roster(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        reply = await delete_through_confirmation(fake_bot, event)
+        assert "/event restore" in reply
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "Restore **Original Title**" in answer["content"]
+        assert "with the 1 sign-up it had" in answer["content"]
+        result = await press_restore(answer["view"])
+
+        assert "was restored" in result
+        assert "Its run is posted in <#1234>" in result
+        assert store.get_event(event.event_id) == event
+        [restored] = store.get_event_occurrences(event.event_id)
+        assert restored.start_time == FAR_FUTURE
+        assert restored.message_id == 555
+        assert restored.needs_refresh is False
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(restored.occurrence_id)
+        ] == [11]
+        assert len(channel.sent) == 1
+        assert store.get_snapshot(event.event_id) is None
+
+    async def test_a_restored_run_the_bot_cannot_post_is_left_for_the_pass(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        await delete_through_confirmation(fake_bot, event)
+        view = (await open_restore(fake_bot, event.event_id))["view"]
+        channel.send_error = forbidden_error(50013)
+
+        result = await press_restore(view)
+
+        assert "could not be posted yet" in result
+        [restored] = store.get_event_occurrences(event.event_id)
+        assert restored.message_id is None
+        assert restored.needs_refresh is True
+        # The maintenance pass posts it once the bot can.
+        await run_event_maintenance(fake_bot, datetime.now(UTC))
+        reposted = store.get_occurrence(restored.occurrence_id)
+        assert reposted is not None
+        assert reposted.message_id == 555
+
+    async def test_a_series_whose_lost_runs_finished_gets_its_next_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Whole minutes, because a series is seeded at its hour and minute.
+        started = (datetime.now(UTC) - timedelta(hours=3)).replace(
+            second=0,
+            microsecond=0,
+        )
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Weekly clear",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.WEEKLY,
+            repeat_days=(started.weekday(),),
+        )
+        store.create_occurrence(event.event_id, started)
+        store.delete_event(event.event_id, remember=True)
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "its next run is posted" in answer["content"]
+        result = await press_restore(answer["view"])
+
+        assert "Its run is posted in <#1234>" in result
+        [seeded] = store.get_event_occurrences(event.event_id)
+        assert seeded.start_time == started + timedelta(days=7)
+        assert seeded.message_id == 555
+
+    async def test_a_one_off_event_whose_run_is_over_is_not_offered(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        started = datetime.now(UTC) - timedelta(hours=3)
+        event = store.create_event(
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+            leader_discord_id=42,
+            start_time=started,
+            duration_minutes=90,
+            repeat_frequency=RepeatFrequency.NONE,
+            repeat_days=(),
+        )
+        store.create_occurrence(event.event_id, started)
+        store.delete_event(event.event_id, remember=True)
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "nothing left to restore" in answer["content"]
+        assert "view" not in answer
+        assert store.get_event(event.event_id) is None
+        group = EventCommands(fake_bot)
+        assert (
+            await group.restorable_event_id_autocomplete(
+                make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,)),
+                "",
+            )
+            == []
+        )
+
+    async def test_deleting_finished_history_does_not_promise_a_restore(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Every run is behind the event, so the deletion takes none of them
+        # and there is nothing for a restore to post again.
+        event, _, _ = make_event_with_history(store, upcoming=False)
+
+        reply = await delete_through_confirmation(fake_bot, event)
+
+        assert "was deleted" in reply
+        assert "/event restore" not in reply
+

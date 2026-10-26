@@ -611,3 +611,20 @@ class TestRunEventMaintenance:
 
         assert title not in caplog.text
         assert description not in caplog.text
+
+
+class TestSnapshotPurge:
+    async def test_maintenance_purges_snapshots_older_than_a_week(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = await post_event(bot, store)
+        store.delete_event(event.event_id, remember=True, now=BEFORE_START)
+
+        await run_event_maintenance(bot, BEFORE_START + timedelta(days=6))
+        assert store.get_snapshot(event.event_id, BEFORE_START) is not None
+
+        await run_event_maintenance(bot, BEFORE_START + timedelta(days=8))
+        assert store.get_snapshot(event.event_id, BEFORE_START) is None
+

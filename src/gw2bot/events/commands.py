@@ -15,6 +15,8 @@ from gw2bot.events.models import (
     EventOccurrence,
     EventStatus,
     RepeatFrequency,
+    SNAPSHOT_RETENTION,
+    SnapshotKind,
 )
 from gw2bot.events.posting import split_event_history
 from gw2bot.events.reminders import (
@@ -28,6 +30,7 @@ from gw2bot.events.views import (
     EventDetailsModal,
     EventDraft,
     open_event_edit,
+    open_event_restore,
 )
 
 if TYPE_CHECKING:
@@ -37,6 +40,14 @@ LOGGER = logging.getLogger(__name__)
 
 EVENT_AUTOCOMPLETE_LIMIT = 25
 EVENT_CHOICE_NAME_LIMIT = 100
+
+# What a delete confirmation says about taking it back. The new post is a new
+# message and thread: the old thread's messages are not something the bot can
+# bring back.
+RESTORE_NOTE = (
+    "`/event restore` can put it back, with its sign-ups, for "
+    f"{SNAPSHOT_RETENTION.days} days."
+)
 
 
 def _kept_history_note(kept: int) -> str:
@@ -64,11 +75,11 @@ def _kept_history_note(kept: int) -> str:
     )
 
 
-def _event_choice_name(event: Event) -> str:
+def _event_choice_name(event: Event, note: str = "") -> str:
     # Keep the id visible even when a long title has to be truncated, since it
     # is the choice value the commander is really picking.
     prefix = f"[{event.category.value}] "
-    suffix = f" — id {event.event_id}"
+    suffix = f" — id {event.event_id}" + (f" ({note})" if note else "")
     budget = EVENT_CHOICE_NAME_LIMIT - len(prefix) - len(suffix)
     title = event.title
     if budget < 1:
@@ -153,6 +164,58 @@ class EventCommands(app_commands.Group):
                 break
         LOGGER.debug(
             "Returning active event autocomplete choices; choices=%s",
+            len(choices),
+        )
+        return choices
+
+    async def restorable_event_id_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[int]]:
+        # The events with a deletion or an edit /event restore can still
+        # undo. Like the active autocomplete above, it never errors out and
+        # offers nothing to a member without the role.
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
+            return []
+        query = current.strip().casefold()
+        now = datetime.now(UTC)
+        choices: list[app_commands.Choice[int]] = []
+        for snapshot in self._bot.event_store.get_snapshots(now):
+            event = snapshot.event
+            note = "deleted"
+            if snapshot.kind is SnapshotKind.DELETE and not (
+                snapshot.can_restore(now)
+            ):
+                # A one-off event whose run ended after it was deleted has
+                # nothing to bring back, and never will again.
+                continue
+            if snapshot.kind is SnapshotKind.EDIT:
+                # Listed under the title it has now, which is the one the
+                # commander is looking at in the channel.
+                event = (
+                    self._bot.event_store.get_event(event.event_id) or event
+                )
+                note = "edited"
+            if query and (
+                query not in event.title.casefold()
+                and query not in snapshot.event.title.casefold()
+                and query not in str(event.event_id)
+            ):
+                continue
+            choices.append(
+                app_commands.Choice(
+                    name=_event_choice_name(event, note),
+                    value=event.event_id,
+                )
+            )
+            if len(choices) >= EVENT_AUTOCOMPLETE_LIMIT:
+                break
+        LOGGER.debug(
+            "Returning restorable event autocomplete choices; choices=%s",
             len(choices),
         )
         return choices
@@ -413,10 +476,10 @@ class EventCommands(app_commands.Group):
             await interaction.response.send_message(
                 f"**{event.title}** (event **{event.event_id}**) does not "
                 "repeat, so cancelling it deletes the event. This removes "
-                "the run it is on — its message, any signup thread the "
-                "bot opened for it and everyone's sign-ups for it — and "
-                f"cannot be undone.{_kept_history_note(len(kept))} A forum "
-                "post the event was posted into is kept.",
+                "the run it is on: its message, any signup thread the bot "
+                "opened for it and everyone's sign-ups for it."
+                f"{_kept_history_note(len(kept))} A forum post the event was "
+                f"posted into is kept. {RESTORE_NOTE}",
                 view=EventDeleteConfirmView(
                     self._bot,
                     event,
@@ -492,18 +555,21 @@ class EventCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
-        kept, _ = split_event_history(
+        kept, removed = split_event_history(
             event,
             self._bot.event_store.get_event_occurrences(event_id),
             datetime.now(UTC),
         )
+        # An event whose runs have all finished loses none, so there is
+        # nothing for a restore to post again.
+        restore_note = f" {RESTORE_NOTE}" if removed else ""
         await interaction.response.send_message(
             f"Delete **{event.title}** (event **{event.event_id}**)? This "
             "removes every run that has not finished, the one in progress "
-            "included — their message(s), any signup thread(s) the bot "
-            "opened for them and everyone's sign-ups for them — and "
-            f"cannot be undone.{_kept_history_note(len(kept))} A forum post "
-            "the event was posted into is kept.",
+            "included: their message(s), any signup thread(s) the bot "
+            "opened for them and everyone's sign-ups for them."
+            f"{_kept_history_note(len(kept))} A forum post the event was "
+            f"posted into is kept.{restore_note}",
             view=EventDeleteConfirmView(self._bot, event),
             ephemeral=True,
         )
@@ -512,3 +578,38 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
+
+    @app_commands.command(
+        name="restore",
+        description="Restore a deleted event, or undo an event's last edit",
+    )
+    @app_commands.describe(
+        event_id="The deleted or edited event to restore"
+    )
+    @app_commands.autocomplete(event_id=restorable_event_id_autocomplete)
+    async def restore(
+        self,
+        interaction: discord.Interaction,
+        event_id: int,
+    ) -> None:
+        LOGGER.debug(
+            "Event restore command invoked by Discord user %s; event_id=%s",
+            interaction.user.id,
+            event_id,
+        )
+        if not user_has_role(
+            interaction.user,
+            self._bot._config.event_create_role_id,
+        ):
+            LOGGER.warning(
+                "Rejected event restore command from Discord user %s; "
+                "required role %s",
+                interaction.user.id,
+                self._bot._config.event_create_role_id,
+            )
+            await interaction.response.send_message(
+                "You do not have the required role to restore events.",
+                ephemeral=True,
+            )
+            return
+        await open_event_restore(self._bot, interaction, event_id)

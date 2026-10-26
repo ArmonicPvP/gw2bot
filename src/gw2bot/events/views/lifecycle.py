@@ -20,6 +20,8 @@ from gw2bot.events.models import (
     EventStatus,
     RepeatFrequency,
     RosterUpdate,
+    SNAPSHOT_RETENTION,
+    SnapshotKind,
 )
 from gw2bot.events.views.preview import send_event_preview
 from gw2bot.events.views.roster import prune_departed_members
@@ -105,7 +107,15 @@ async def apply_event_edit(
     old_channel_id: int,
     *,
     repost: bool,
+    undoing: bool = False,
 ) -> None:
+    """Save an edit draft over its event and bring every live run up to date.
+
+    The details it replaces are kept for `/event restore` to put back.
+    ``undoing`` is that restore: the draft is the event as it was before its
+    last edit, and saving it uses the snapshot up rather than keeping a new
+    one, so only one edit can be undone.
+    """
     from gw2bot.events.posting import (
         check_roster_membership,
         mentee_movement,
@@ -134,7 +144,9 @@ async def apply_event_edit(
     draft.edit_applied = True
     edited = draft.to_event(editing_event_id)
     await interaction.response.edit_message(
-        content="Saving your changes…",
+        content=(
+            "Undoing the last edit…" if undoing else "Saving your changes…"
+        ),
         embeds=[],
         view=None,
     )
@@ -234,6 +246,8 @@ async def apply_event_edit(
             requirements=edited.requirements,
             mentee_enabled=edited.mentee_enabled,
             max_participants=edited.max_participants,
+            remember_previous=not undoing,
+            consume_snapshot=undoing,
         )
     except SQLAlchemyError as exc:
         # The save did not happen, so clear the guard to allow a fresh retry.
@@ -507,10 +521,11 @@ async def apply_event_edit(
         refreshed,
     )
     move_failed = moving and attempted > 0 and refreshed == 0
+    saved = "restored" if undoing else "saved"
     if move_failed:
         updated = _restore_event_channel(bot, updated, old_channel_id)
         content = (
-            f"Event **{updated.event_id}** was saved, but it could not be "
+            f"Event **{updated.event_id}** was {saved}, but it could not be "
             "posted in the new channel, so it stays in the current one."
         )
     elif attempted > 0 and refreshed == 0:
@@ -518,8 +533,13 @@ async def apply_event_edit(
         # stale even though the stored event was updated; say so instead of
         # claiming the message reflects the change.
         content = (
-            f"Event **{updated.event_id}** was saved, but its posted message "
-            "could not be updated and may be out of date."
+            f"Event **{updated.event_id}** was {saved}, but its posted "
+            "message could not be updated and may be out of date."
+        )
+    elif undoing:
+        content = (
+            f"Event **{updated.event_id}** was restored to how it was before "
+            "its last edit."
         )
     else:
         content = f"Event **{updated.event_id}** was updated."
@@ -546,6 +566,35 @@ def _deleted_history_note(kept: int) -> str:
     return (
         f" Its {kept} finished runs were kept, with their places on the "
         "calendar, and their posts were left alone."
+    )
+
+
+def _restore_hint(bot: Gw2Bot, event_id: int) -> str:
+    """Point at `/event restore` when the deletion left it something to do.
+
+    It does not always: an event whose runs had all finished loses no run, so
+    there is nothing to post again, and the reply must not promise otherwise.
+    """
+    try:
+        snapshot = bot.event_store.get_snapshot(event_id)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the snapshot a deletion kept; event_id=%s "
+            "error_type=%s",
+            event_id,
+            type(exc).__name__,
+        )
+        return ""
+    now = datetime.now(UTC)
+    if (
+        snapshot is None
+        or snapshot.kind is not SnapshotKind.DELETE
+        or not snapshot.can_restore(now)
+    ):
+        return ""
+    return (
+        f" Run `/event restore` within {SNAPSHOT_RETENTION.days} days to put "
+        "it back."
     )
 
 
@@ -719,13 +768,18 @@ class EventDeleteConfirmView(discord.ui.View):
             datetime.now(UTC),
         )
         try:
+            # Either way, what goes is kept for `/event restore` to put back.
             if kept:
                 self._bot.event_store.retire_event(
                     self._event.event_id,
                     [occurrence.occurrence_id for occurrence in removed],
+                    remember=True,
                 )
             else:
-                self._bot.event_store.delete_event(self._event.event_id)
+                self._bot.event_store.delete_event(
+                    self._event.event_id,
+                    remember=True,
+                )
         except SQLAlchemyError as exc:
             self._deleting = False
             LOGGER.error(
@@ -761,7 +815,8 @@ class EventDeleteConfirmView(discord.ui.View):
         await _send_flow_result(
             interaction,
             f"Event **{self._event.event_id}** was deleted."
-            + _deleted_history_note(len(kept)),
+            + _deleted_history_note(len(kept))
+            + _restore_hint(self._bot, self._event.event_id),
             workflow="event deletion",
             event_id=self._event.event_id,
         )

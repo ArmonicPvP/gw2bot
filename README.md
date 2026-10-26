@@ -275,6 +275,7 @@ posts up to three reports daily:
 | `/event remind event_id:<event>` | Pings the next run's seated members now. |
 | `/event cancel event_id:<event>` | Cancels the next run of a repeating event and posts the one after. |
 | `/event delete event_id:<event>` | Ends an event. Past runs stay on the calendar and in statistics. |
+| `/event restore event_id:<event>` | Puts back a deleted event, or undoes an event's last edit. |
 
 All `/event` commands need the `event_create` role. The `event_id` is shown in
 each post's footer.
@@ -334,6 +335,21 @@ hour before, 15 minutes before, and at the start.
 the previous one ends, and the previous post can be deleted automatically.
 
 Members who leave the Discord server are removed from rosters automatically.
+
+**Restoring.** `/event restore` undoes the last deletion or edit of an event,
+for 7 days after it, and asks for confirmation first. Only the latest change
+to each event is kept, so restoring cannot be repeated to step further back,
+and a restore cannot itself be undone.
+
+- A deleted event comes back with its id, settings, sign-ups, automatic
+  sign-ups and remembered roles. Its runs are posted again as new posts, since
+  the old posts and their threads were deleted. Runs that finished while it
+  was deleted are not brought back. A repeating event left with none gets its
+  next run instead, and a one-off event whose run is over cannot be restored.
+- Undoing an edit puts back the event's details as they were before it,
+  including its date and time and its channel, and the post follows as it does
+  for an edit. Roster changes are not edits and are not undone. Like an edit,
+  it waits while a run is in progress.
 
 ### Guild History
 

@@ -14,6 +14,7 @@ from gw2bot.events.models import (
     PreferenceMode,
     RepeatFrequency,
     RosterAssignment,
+    SnapshotKind,
 )
 from gw2bot.events.store import EventStore
 
@@ -2028,6 +2029,37 @@ class TestEventStoreLoggingSafety:
         assert title not in caplog.text
         assert description not in caplog.text
 
+    def test_snapshot_logs_never_contain_user_content(
+        self,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # A snapshot carries the whole event, so keeping, restoring and
+        # purging one must log no more of it than the event's own writes do.
+        title = "SECRET EVENT TITLE"
+        description = "SECRET EVENT DESCRIPTION"
+        with caplog.at_level("DEBUG"):
+            event = create_event(
+                store,
+                title=title,
+                description=description,
+            )
+            store.create_occurrence(event.event_id, START)
+            edit_title(
+                store,
+                event.event_id,
+                "SECRET EDITED TITLE",
+                remember_previous=True,
+            )
+            store.delete_event(event.event_id, remember=True)
+            store.restore_deleted_event(event.event_id)
+            store.purge_snapshots(datetime.now(UTC) + timedelta(days=8))
+
+        assert title not in caplog.text
+        assert description not in caplog.text
+        assert "SECRET EDITED TITLE" not in caplog.text
+        assert "Restored a deleted event" in caplog.text
+
 
 class TestEventStoreMaxParticipants:
     def test_the_cap_round_trips_through_create_and_update(
@@ -2672,3 +2704,488 @@ class TestEventStoreRunHistory:
         assert store.get_mentee_completions(ends[-1]) == {7: 2, 8: 1}
         # Nothing ends after the moment asked about counts yet.
         assert store.get_mentee_completions(ends[0]) == {7: 1}
+
+
+def edit_title(
+    store: EventStore,
+    event_id: int,
+    title: str,
+    *,
+    remember_previous: bool = False,
+    consume_snapshot: bool = False,
+    now: datetime | None = None,
+):
+    event = store.get_event(event_id)
+    assert event is not None
+    return store.update_event(
+        event_id=event_id,
+        category=event.category,
+        title=title,
+        description=event.description,
+        channel_id=event.channel_id,
+        leader_discord_id=event.leader_discord_id,
+        start_time=event.start_time,
+        duration_minutes=event.duration_minutes,
+        repeat_frequency=event.repeat_frequency,
+        repeat_days=event.repeat_days,
+        remember_previous=remember_previous,
+        consume_snapshot=consume_snapshot,
+        now=now,
+    )
+
+
+class TestEventStoreSnapshots:
+    def test_an_edit_keeps_the_event_as_it_was(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        taken = datetime(2027, 1, 2, tzinfo=UTC)
+
+        edit_title(
+            store,
+            event.event_id,
+            "Renamed",
+            remember_previous=True,
+            now=taken,
+        )
+
+        snapshot = store.get_snapshot(event.event_id, taken)
+        assert snapshot is not None
+        assert snapshot.kind is SnapshotKind.EDIT
+        assert snapshot.taken_at == taken
+        assert snapshot.event == event
+        assert snapshot.removed_runs == ()
+
+    def test_an_edit_without_the_flag_keeps_nothing(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+
+        edit_title(store, event.event_id, "Renamed")
+
+        assert store.get_snapshot(event.event_id) is None
+
+    def test_a_save_that_changes_nothing_keeps_the_earlier_edit(
+        self,
+        store: EventStore,
+    ) -> None:
+        # Pressing Save on an edit preview nobody changed must not throw away
+        # the edit that can still be undone.
+        event = create_event(store)
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+
+        snapshot = store.get_snapshot(event.event_id)
+        assert snapshot is not None
+        assert snapshot.event.title == event.title
+
+    def test_only_the_latest_edit_is_kept(self, store: EventStore) -> None:
+        event = create_event(store)
+        edit_title(store, event.event_id, "First", remember_previous=True)
+
+        edit_title(store, event.event_id, "Second", remember_previous=True)
+
+        snapshot = store.get_snapshot(event.event_id)
+        assert snapshot is not None
+        assert snapshot.event.title == "First"
+
+    def test_consuming_the_snapshot_drops_it(self, store: EventStore) -> None:
+        event = create_event(store)
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+
+        edit_title(
+            store,
+            event.event_id,
+            event.title,
+            remember_previous=True,
+            consume_snapshot=True,
+        )
+
+        assert store.get_snapshot(event.event_id) is None
+
+    def test_a_snapshot_expires_after_a_week(self, store: EventStore) -> None:
+        event = create_event(store)
+        taken = datetime(2027, 1, 2, tzinfo=UTC)
+        edit_title(
+            store,
+            event.event_id,
+            "Renamed",
+            remember_previous=True,
+            now=taken,
+        )
+
+        assert store.get_snapshot(
+            event.event_id,
+            taken + timedelta(days=7) - timedelta(seconds=1),
+        ) is not None
+        assert store.get_snapshot(
+            event.event_id,
+            taken + timedelta(days=7, seconds=1),
+        ) is None
+        assert store.get_snapshots(taken + timedelta(days=7, seconds=1)) == []
+
+    def test_purge_drops_only_expired_snapshots(
+        self,
+        store: EventStore,
+    ) -> None:
+        old = create_event(store)
+        recent = create_event(store)
+        taken = datetime(2027, 1, 2, tzinfo=UTC)
+        edit_title(
+            store,
+            old.event_id,
+            "Old",
+            remember_previous=True,
+            now=taken,
+        )
+        edit_title(
+            store,
+            recent.event_id,
+            "Recent",
+            remember_previous=True,
+            now=taken + timedelta(days=5),
+        )
+        later = taken + timedelta(days=8)
+
+        assert store.purge_snapshots(later) == 1
+        assert store.purge_snapshots(later) == 0
+
+        assert store.get_snapshot(old.event_id, taken) is None
+        assert store.get_snapshot(recent.event_id, later) is not None
+
+    def test_snapshots_are_listed_newest_first(
+        self,
+        store: EventStore,
+    ) -> None:
+        first = create_event(store)
+        second = create_event(store)
+        taken = datetime(2027, 1, 2, tzinfo=UTC)
+        edit_title(
+            store,
+            first.event_id,
+            "A",
+            remember_previous=True,
+            now=taken,
+        )
+        edit_title(
+            store,
+            second.event_id,
+            "B",
+            remember_previous=True,
+            now=taken + timedelta(hours=1),
+        )
+
+        listed = store.get_snapshots(taken + timedelta(hours=2))
+
+        assert [snapshot.event.event_id for snapshot in listed] == [
+            second.event_id,
+            first.event_id,
+        ]
+
+    def test_an_unreadable_snapshot_is_skipped(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+        with store._engine.begin() as connection:
+            connection.execute(
+                text("UPDATE gw2_event_snapshots SET payload = 'not json'")
+            )
+
+        assert store.get_snapshot(event.event_id) is None
+        assert store.get_snapshots() == []
+
+    def test_a_deletion_keeps_everything_it_removes(
+        self,
+        store: EventStore,
+    ) -> None:
+        now = datetime.now(UTC)
+        event = create_event(
+            store,
+            start_time=now + timedelta(days=1),
+            repeat_frequency=RepeatFrequency.WEEKLY,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+
+        store.delete_event(event.event_id, remember=True, now=now)
+
+        assert store.get_event(event.event_id) is None
+        snapshot = store.get_snapshot(event.event_id, now)
+        assert snapshot is not None
+        assert snapshot.kind is SnapshotKind.DELETE
+        assert snapshot.event == event
+        assert [
+            (run.start_time, run.signups) for run in snapshot.removed_runs
+        ] == [(event.start_time, 1)]
+
+    def test_a_deletion_replaces_an_edit(self, store: EventStore) -> None:
+        event = create_event(store)
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+
+        store.delete_event(event.event_id, remember=True)
+
+        snapshot = store.get_snapshot(event.event_id)
+        assert snapshot is not None
+        assert snapshot.kind is SnapshotKind.DELETE
+        assert snapshot.event.title == "Renamed"
+
+    def test_a_deletion_without_the_flag_drops_the_snapshot(
+        self,
+        store: EventStore,
+    ) -> None:
+        # The creation flow's own clean-up of an event it could not post.
+        event = create_event(store)
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+
+        store.delete_event(event.event_id)
+
+        assert store.get_snapshot(event.event_id) is None
+
+    def test_restoring_puts_the_event_back_as_it_was(
+        self,
+        store: EventStore,
+    ) -> None:
+        now = datetime.now(UTC)
+        event = create_event(
+            store,
+            start_time=now + timedelta(days=1),
+            repeat_frequency=RepeatFrequency.WEEKLY,
+        )
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+        store.add_signup(
+            occurrence_id=occurrence.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.QUICKNESS_HEAL,
+            assigned_role=EventRole.QUICKNESS_HEAL,
+            flex_roles=(EventRole.DPS,),
+            waitlisted=False,
+        )
+        store.mark_reminders_handled(occurrence.occurrence_id, [60])
+        store.set_auto_signup(
+            event.event_id,
+            11,
+            AutoSignupChoice.YES,
+            EventRole.QUICKNESS_HEAL,
+            (),
+        )
+        store.set_signup_preference(
+            event.event_id,
+            11,
+            EventRole.QUICKNESS_HEAL,
+            (EventRole.DPS,),
+            PreferenceMode.REMEMBER,
+        )
+        store.set_mentee_question_declined(event.event_id, 12, True)
+        store.delete_event(event.event_id, remember=True, now=now)
+
+        restored = store.restore_deleted_event(event.event_id, now)
+
+        assert restored is not None
+        # The same id and creation time, so its footer and its run history
+        # are its own again.
+        assert restored.event == event
+        assert store.get_event(event.event_id) == event
+        assert restored.dropped == 0
+        assert len(restored.occurrences) == 1
+        run = restored.occurrences[0]
+        assert run.start_time == event.start_time
+        # A new row with no post: the deletion took the old post down.
+        assert run.message_id is None
+        assert run.thread_id is None
+        assert run.status is EventStatus.OPEN
+        assert run.needs_refresh is True
+        signups = store.get_signups(run.occurrence_id)
+        assert [
+            (signup.discord_user_id, signup.assigned_role, signup.flex_roles)
+            for signup in signups
+        ] == [(11, EventRole.QUICKNESS_HEAL, (EventRole.DPS,))]
+        assert store.get_handled_reminder_offsets(run.occurrence_id) == {60}
+        auto = store.get_auto_signup(event.event_id, 11)
+        assert auto is not None
+        assert auto.choice is AutoSignupChoice.YES
+        preference = store.get_signup_preference(event.event_id, 11)
+        assert preference is not None
+        assert preference.mode is PreferenceMode.REMEMBER
+        assert store.mentee_question_declined(event.event_id, 12)
+        assert store.get_snapshot(event.event_id, now) is None
+
+    def test_restoring_leaves_out_runs_that_finished(
+        self,
+        store: EventStore,
+    ) -> None:
+        now = datetime.now(UTC)
+        event = create_event(
+            store,
+            start_time=now + timedelta(hours=1),
+            repeat_frequency=RepeatFrequency.DAILY,
+        )
+        store.create_occurrence(event.event_id, event.start_time)
+        store.create_occurrence(
+            event.event_id,
+            event.start_time + timedelta(days=1),
+        )
+        store.delete_event(event.event_id, remember=True, now=now)
+        later = now + timedelta(hours=3)
+
+        restored = store.restore_deleted_event(event.event_id, later)
+
+        assert restored is not None
+        assert restored.dropped == 1
+        assert [run.start_time for run in restored.occurrences] == [
+            event.start_time + timedelta(days=1)
+        ]
+
+    def test_a_one_off_event_whose_run_is_over_is_not_restored(
+        self,
+        store: EventStore,
+    ) -> None:
+        now = datetime.now(UTC)
+        event = create_event(store, start_time=now + timedelta(hours=1))
+        store.create_occurrence(event.event_id, event.start_time)
+        store.delete_event(event.event_id, remember=True, now=now)
+        later = now + timedelta(hours=3)
+
+        snapshot = store.get_snapshot(event.event_id, later)
+        assert snapshot is not None
+        assert not snapshot.can_restore(later)
+        assert store.restore_deleted_event(event.event_id, later) is None
+
+        assert store.get_event(event.event_id) is None
+        assert store.get_snapshot(event.event_id, later) is not None
+
+    def test_an_edit_is_not_restored_as_a_deletion(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        edit_title(store, event.event_id, "Renamed", remember_previous=True)
+
+        assert store.restore_deleted_event(event.event_id) is None
+
+        stored = store.get_event(event.event_id)
+        assert stored is not None
+        assert stored.title == "Renamed"
+
+    def test_a_deleted_events_id_is_not_handed_to_a_new_event(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        store.create_occurrence(event.event_id, event.start_time)
+        store.delete_event(event.event_id, remember=True)
+
+        newer = create_event(store, title="Someone else's")
+
+        assert newer.event_id == event.event_id + 1
+        assert store.restore_deleted_event(event.event_id) is not None
+        restored = store.get_event(event.event_id)
+        assert restored is not None
+        assert restored.title == event.title
+
+    def test_an_id_is_reused_once_nothing_can_restore_it(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        store.delete_event(event.event_id)
+
+        assert create_event(store).event_id == event.event_id
+
+    def test_a_retired_event_keeps_its_row_through_a_restore(
+        self,
+        store: EventStore,
+    ) -> None:
+        now = datetime.now(UTC)
+        event = create_event(
+            store,
+            start_time=now - timedelta(days=7),
+            repeat_frequency=RepeatFrequency.WEEKLY,
+        )
+        finished = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        upcoming = store.create_occurrence(
+            event.event_id,
+            now + timedelta(days=1),
+        )
+        store.add_signup(
+            occurrence_id=upcoming.occurrence_id,
+            discord_user_id=11,
+            role=EventRole.DPS,
+            assigned_role=EventRole.DPS,
+            flex_roles=(),
+            waitlisted=False,
+        )
+        store.retire_event(
+            event.event_id,
+            [upcoming.occurrence_id],
+            remember=True,
+            now=now,
+        )
+
+        restored = store.restore_deleted_event(event.event_id, now)
+
+        assert restored is not None
+        assert [run.start_time for run in restored.occurrences] == [
+            upcoming.start_time
+        ]
+        assert [
+            signup.discord_user_id
+            for signup in store.get_signups(
+                restored.occurrences[0].occurrence_id
+            )
+        ] == [11]
+        kept = store.get_occurrence(finished.occurrence_id)
+        assert kept is not None
+        assert kept.status is EventStatus.OVER
+        assert [event.event_id for event in store.get_active_events()] == [
+            event.event_id
+        ]
+
+    def test_retiring_again_keeps_the_snapshot_that_can_restore(
+        self,
+        store: EventStore,
+    ) -> None:
+        # `/event delete` on an event already retired removes nothing, and
+        # must not replace the snapshot holding the runs the first one did.
+        now = datetime.now(UTC)
+        event = create_event(
+            store,
+            start_time=now - timedelta(days=7),
+            repeat_frequency=RepeatFrequency.WEEKLY,
+        )
+        finished = store.create_occurrence(event.event_id, event.start_time)
+        store.set_occurrence_message(finished.occurrence_id, 1234, 555, 777)
+        store.set_occurrence_status(finished.occurrence_id, EventStatus.OVER)
+        upcoming = store.create_occurrence(
+            event.event_id,
+            now + timedelta(days=1),
+        )
+        store.retire_event(
+            event.event_id,
+            [upcoming.occurrence_id],
+            remember=True,
+            now=now,
+        )
+
+        store.retire_event(event.event_id, [], remember=True)
+
+        snapshot = store.get_snapshot(event.event_id)
+        assert snapshot is not None
+        assert [run.start_time for run in snapshot.removed_runs] == [
+            upcoming.start_time
+        ]
+
