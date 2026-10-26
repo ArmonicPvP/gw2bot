@@ -65,20 +65,29 @@ async def send_legacy_configuration_warning(
     )
 
 
-async def try_send_notification(bot: Gw2Bot, message: str) -> bool:
+async def try_send_notification(
+    bot: Gw2Bot,
+    message: str,
+    embeds: Sequence[discord.Embed] = (),
+) -> bool:
     if not bot._config.notifications_enabled:
         # The startup warning already named the variable; each skipped
         # delivery only needs to be traceable, not repeated at warning level.
         LOGGER.debug(
             "Skipped Discord notification; /settings %s is not set; "
-            "characters=%s",
+            "characters=%s embeds=%s",
             NOTIFICATION_CHANNEL_SETTING,
             len(message),
+            len(embeds),
         )
         return False
-    LOGGER.debug("Sending Discord notification; characters=%s", len(message))
+    LOGGER.debug(
+        "Sending Discord notification; characters=%s embeds=%s",
+        len(message),
+        len(embeds),
+    )
     try:
-        await bot._send_notification(message)
+        await bot._send_notification(message, embeds)
     except discord.DiscordException as exc:
         log_discord_failure(
             "Could not send Discord notification; reason=%s channel_id=%s "
@@ -92,9 +101,24 @@ async def try_send_notification(bot: Gw2Bot, message: str) -> bool:
     return True
 
 
-async def send_notification(bot: Gw2Bot, message: str) -> None:
+async def send_notification(
+    bot: Gw2Bot,
+    message: str,
+    embeds: Sequence[discord.Embed] = (),
+) -> None:
     channel = await bot._get_notification_channel()
-    await channel.send(message)
+    if not embeds:
+        await channel.send(message)
+        return
+    # A message carrying embeds is a record of something a member did, such
+    # as an event audit line: the mentions in it say who, and are not meant
+    # to call anybody to the channel. Those inside an embed never notify
+    # anyway, so this keeps the content's from doing it either.
+    await channel.send(
+        message,
+        embeds=list(embeds),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 async def get_notification_channel(bot: Gw2Bot) -> Any:
     if bot._notification_channel is None:

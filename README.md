@@ -209,6 +209,10 @@ Posted to the notification channel:
   hours while it stays low. Also sent by DM to `feast_notification_user_id`.
 - **Trial reports:** daily at 17:00 UTC (see [Trial Members](#trial-members)).
 - **Audit lines** for raffle deposits and raffle commands.
+- **Event changes:** a line naming who created, edited or deleted an event,
+  with the event's details: as posted, before and after an edit (listing what
+  changed), or as it was just before it was deleted. Mentions in these lines
+  never ping anyone.
 
 Send `diag` in the notification channel to preview every automated message
 without changing any state.
@@ -277,7 +281,8 @@ posts up to three reports daily:
 | `/event delete event_id:<event>` | Ends an event. Past runs stay on the calendar and in statistics. |
 
 All `/event` commands need the `event_create` role. The `event_id` is shown in
-each post's footer.
+each post's footer. Creating, editing and deleting an event is logged in the
+notification channel (see [Notifications](#notifications)).
 
 **Squads.** The category sets the squad size and roles:
 

@@ -273,6 +273,17 @@ class FakeBot:
         self.users: dict[int, FakeUser] = {}
         self.fetch_user_errors: dict[int, Exception] = {}
         self.dm_errors: dict[int, Exception] = {}
+        # What reached the notification channel, as (content, embeds), so a
+        # test can read back the audit lines an event's changes sent.
+        self.notifications: list[tuple[str, list[discord.Embed]]] = []
+
+    async def send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> bool:
+        self.notifications.append((message, list(embeds)))
+        return True
 
     def get_guild(self, guild_id: int) -> Any:
         # The guilds intent is on, so the guild itself is cached; without the

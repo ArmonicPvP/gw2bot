@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -809,8 +809,12 @@ class Gw2Bot(discord.Client):
         )
         return False
 
-    async def send_notification(self, message: str) -> bool:
-        return await self._try_send_notification(message)
+    async def send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> bool:
+        return await self._try_send_notification(message, embeds)
 
     async def resolve_guild_member(
         self,
@@ -1194,8 +1198,12 @@ class Gw2Bot(discord.Client):
     async def _send_pending_rank_change_notifications(self) -> None:
         await guild_log.send_pending_rank_change_notifications(self)
 
-    async def _try_send_notification(self, message: str) -> bool:
-        return await notifications.try_send_notification(self, message)
+    async def _try_send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> bool:
+        return await notifications.try_send_notification(self, message, embeds)
 
     async def _try_send_raffle_contribution_message(self, message: str) -> bool:
         return await raffle_reports.try_send_raffle_contribution_message(self, message)
@@ -1206,8 +1214,12 @@ class Gw2Bot(discord.Client):
     ) -> bool:
         return await raffle_reports.try_send_raffle_contribution_embed(self, embed)
 
-    async def _send_notification(self, message: str) -> None:
-        await notifications.send_notification(self, message)
+    async def _send_notification(
+        self,
+        message: str,
+        embeds: Sequence[discord.Embed] = (),
+    ) -> None:
+        await notifications.send_notification(self, message, embeds)
 
     async def _get_notification_channel(self) -> Any:
         return await notifications.get_notification_channel(self)

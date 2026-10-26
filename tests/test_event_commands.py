@@ -9320,6 +9320,311 @@ def nav_button(view: RemoveSignupsView, label: str) -> Any:
     )
 
 
+def _audit_fields(embed: discord.Embed) -> dict[str, str]:
+    return {
+        (field.name or "").split(" ", 1)[1]: field.value or ""
+        for field in embed.fields
+    }
+
+
+def _epoch_text(value: datetime) -> str:
+    return f"<t:{int(value.timestamp())}:f>"
+
+
+class TestEventAuditLines:
+    """Creating, editing and deleting an event each leave a line behind."""
+
+    def make_commander(self) -> Any:
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def test_posting_an_event_records_it(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        draft = make_complete_draft()
+        view = EventConfirmView(fake_bot, draft)
+
+        await press_post(view, self.make_commander())
+
+        assert len(fake_bot.notifications) == 1
+        content, embeds = fake_bot.notifications[0]
+        assert content == "<@42> created event **1**."
+        (embed,) = embeds
+        assert embed.author.name == "Created"
+        assert "Kitty Cleanup" in (embed.title or "")
+        assert embed.description == "Bring food."
+        assert embed.footer.text == "eventID: 1"
+        fields = _audit_fields(embed)
+        assert fields["Channel"] == "<#1234>"
+        assert fields["Leader"] == "<@42>"
+        assert fields["Date & Time"] == _epoch_text(
+            datetime(2107, 1, 30, 20, 0, tzinfo=UTC)
+        )
+
+    async def test_an_event_that_never_went_up_is_not_recorded(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        channel.send_error = forbidden_error(50001)
+        view = EventConfirmView(fake_bot, make_complete_draft())
+
+        await press_post(view, self.make_commander())
+
+        # The failed post took its rows with it, so there is no event to
+        # record.
+        assert store.get_event(1) is None
+        assert fake_bot.notifications == []
+
+    async def test_an_event_that_could_not_be_saved_is_not_recorded(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        store.create_event = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        view = EventConfirmView(fake_bot, make_complete_draft())
+
+        await press_post(view, self.make_commander())
+
+        assert fake_bot.notifications == []
+
+    async def test_saving_an_edit_records_the_event_before_and_after(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.title = "SECRET EDITED TITLE"
+        draft.duration_minutes = 120
+        view = EventEditConfirmView(fake_bot, draft)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await view.save_changes.callback(self.make_commander())
+
+        assert len(fake_bot.notifications) == 1
+        content, embeds = fake_bot.notifications[0]
+        assert content == (
+            f"<@42> edited event **{event.event_id}**. "
+            "Changed: Title, Duration."
+        )
+        before, after = embeds
+        assert before.author.name == "Before"
+        assert "Original Title" in (before.title or "")
+        assert after.author.name == "After"
+        assert "SECRET EDITED TITLE" in (after.title or "")
+        assert _audit_fields(before)["Duration"] != (
+            _audit_fields(after)["Duration"]
+        )
+        assert (
+            f"Sending event audit line; action=edited "
+            f"event_id={event.event_id} embeds=2"
+        ) in caplog.text
+        assert "delivered=True" in caplog.text
+        assert "SECRET EDITED TITLE" not in caplog.text
+
+    async def test_an_edit_of_a_series_shows_the_run_it_moved(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The series' own start is its origin, weeks behind the run the
+        # commander moved; the line shows that run, before and after.
+        event, _ = make_advanced_recurring_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=SERIES_WEEK4,
+        )
+        moved = SERIES_WEEK4 + timedelta(hours=1)
+        draft.start_time = moved
+        draft.start_text = "01.27.2107 21:00"
+        view = EventEditConfirmView(fake_bot, draft)
+
+        await view.save_changes.callback(self.make_commander())
+
+        content, (before, after) = fake_bot.notifications[0]
+        assert content.endswith("Changed: Date & Time.")
+        assert _audit_fields(before)["Date & Time"] == _epoch_text(
+            SERIES_WEEK4
+        )
+        assert _audit_fields(after)["Date & Time"] == _epoch_text(moved)
+
+    async def test_a_failed_move_is_recorded_in_the_channel_it_stayed_in(
+        self,
+        store: EventStore,
+    ) -> None:
+        old_channel = FakeChannel()
+        new_channel = FakeChannel(channel_id=5678, thread=FakeThread(888))
+        bot = cast(Any, FakeBot(store, old_channel))
+        bot._channels[new_channel.id] = new_channel
+        bot._channels[new_channel.thread.id] = new_channel.thread
+        event = make_edit_event(store, channel_id=old_channel.id)
+        occurrence = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, occurrence)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.channel_id = new_channel.id
+        new_channel.send_error = forbidden_error(50001)
+        view = ChannelMoveConfirmView(bot, draft, old_channel.id)
+
+        await view.move.callback(self.make_commander())
+
+        # The move was put back, so the line says what is stored: the event
+        # never left its channel.
+        content, (_, after) = bot.notifications[0]
+        assert content == (
+            f"<@42> saved event **{event.event_id}** without changing "
+            "anything."
+        )
+        assert _audit_fields(after)["Channel"] == f"<#{old_channel.id}>"
+
+    async def test_a_refused_edit_is_not_recorded(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_ongoing_edit_event(store)
+        draft = draft_from_event(
+            event,
+            ZoneInfo("UTC"),
+            start_time_override=occurrence.start_time,
+        )
+        draft.title = "Too late"
+        view = EventEditConfirmView(fake_bot, draft)
+
+        await view.save_changes.callback(self.make_commander())
+
+        assert store.get_event(event.event_id).title == "Ongoing Title"  # type: ignore[union-attr]
+        assert fake_bot.notifications == []
+
+    async def test_deleting_an_event_records_it_as_it_was(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+
+        await view.delete.callback(self.make_commander())
+
+        assert store.get_event(event.event_id) is None
+        content, (embed,) = fake_bot.notifications[0]
+        assert content == f"<@42> deleted event **{event.event_id}**."
+        assert embed.author.name == "Deleted"
+        assert "Original Title" in (embed.title or "")
+        assert embed.description == "Original description."
+        assert _audit_fields(embed)["Date & Time"] == _epoch_text(
+            occurrence.start_time
+        )
+
+    async def test_deleting_a_series_records_the_run_it_called_off(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _, upcoming = make_event_with_history(store)
+        assert upcoming is not None
+        view = EventDeleteConfirmView(fake_bot, event)
+
+        await view.delete.callback(self.make_commander())
+
+        content, (embed,) = fake_bot.notifications[0]
+        assert content == (
+            f"<@42> deleted event **{event.event_id}**. Its one finished run "
+            "was kept."
+        )
+        assert _audit_fields(embed)["Date & Time"] == _epoch_text(
+            upcoming.start_time
+        )
+
+    async def test_the_details_recorded_are_the_ones_it_was_deleted_with(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        # Edited while the confirmation sat open.
+        store.update_event(
+            event_id=event.event_id,
+            category=event.category,
+            title="Renamed meanwhile",
+            description=event.description,
+            channel_id=event.channel_id,
+            leader_discord_id=event.leader_discord_id,
+            start_time=event.start_time,
+            duration_minutes=event.duration_minutes,
+            repeat_frequency=event.repeat_frequency,
+            repeat_days=event.repeat_days,
+        )
+
+        await view.delete.callback(self.make_commander())
+
+        _, (embed,) = fake_bot.notifications[0]
+        assert "Renamed meanwhile" in (embed.title or "")
+
+    async def test_an_event_already_gone_is_not_recorded_again(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        store.delete_event(event.event_id)
+
+        await view.delete.callback(self.make_commander())
+
+        assert fake_bot.notifications == []
+
+    async def test_a_failed_deletion_is_not_recorded(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_posted_edit_event(store)
+        store.delete_event = MagicMock(  # type: ignore[method-assign]
+            side_effect=SQLAlchemyError("boom")
+        )
+        view = EventDeleteConfirmView(fake_bot, event)
+
+        await view.delete.callback(self.make_commander())
+
+        assert fake_bot.notifications == []
+
+    async def test_an_undelivered_line_does_not_undo_the_change(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        fake_bot.send_notification = AsyncMock(return_value=False)
+        event, _ = make_posted_edit_event(store)
+        view = EventDeleteConfirmView(fake_bot, event)
+        interaction = self.make_commander()
+
+        await view.delete.callback(interaction)
+
+        fake_bot.send_notification.assert_awaited_once()
+        assert store.get_event(event.event_id) is None
+        assert interaction.edit_original_response.await_args is not None
+        assert "was deleted" in (
+            interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+
 class TestRemoveSignups:
     def make_repeating_roster(self, store: EventStore) -> Any:
         # Same roster as make_full_roster, on a series that has a next

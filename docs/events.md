@@ -82,6 +82,22 @@ the next one created, so no copied id identifies anything alone: a run is found
 by its occurrence id and start, and runs are grouped into events by the event
 id and the event's `created_at` together.
 
+## Audit lines
+
+`audit.py` records who created, edited or deleted an event in the notification
+channel, with the event as embeds: as posted, before and after an edit, or as
+it stood when it was deleted. The three call sites are `post_with_leader` in
+`views/create.py`, and `apply_event_edit` and `EventDeleteConfirmView.delete`
+in `views/lifecycle.py`. A leader handover saves through `apply_event_edit`, so
+it is recorded as an edit. Each line is sent only once the change is stored,
+and before the reply to the commander, so a reply Discord refuses cannot lose
+the record. A line that fails to send never undoes the change.
+
+The start an embed shows is a run's start, never the event's own: a repeating
+event stores when its series began. An edit compares the run the draft was
+seeded from with the start it saved, and a deletion shows the soonest run it
+called off.
+
 ## Tests
 
 `tests/test_event_commands.py` covers all of `views/`;
