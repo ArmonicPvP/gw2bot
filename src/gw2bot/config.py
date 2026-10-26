@@ -150,6 +150,9 @@ class Config:
     # in: while it is unset a forum post keeps pinging its own roles, which
     # is what every event did before this setting existed.
     event_ping_channel_id: int | None = None
+    # The roles events may ping. Empty means none: an officer chooses them, and
+    # a role is never pingable for what it happens to be called.
+    event_ping_role_ids: tuple[int, ...] = ()
     trial_forum_channel_id: int = DEFAULT_TRIAL_FORUM_CHANNEL_ID
     trial_accepted_tag_id: int = DEFAULT_TRIAL_ACCEPTED_TAG_ID
     trial_in_review_tag_id: int = DEFAULT_TRIAL_IN_REVIEW_TAG_ID

@@ -85,6 +85,10 @@ from factories import (
 
 START = datetime(2027, 1, 30, 20, 0, tzinfo=UTC)
 BEFORE_START = START - timedelta(hours=2)
+# The roles the posting tests have events ping, all listed in /settings roles
+# event_ping the way the picker would have required. A test about a role taken
+# off the list narrows the config itself.
+PINGABLE_ROLE_IDS = (11, 22, 33)
 
 
 class FakeThread:
@@ -100,9 +104,9 @@ class FakeThread:
 class FakePingGuild:
     """Answers the role lookups the ping check makes before a post goes out.
 
-    Permissive by default: every id resolves to a role carrying the marker,
-    which is what the ordinary posting tests want. Pass explicit roles to
-    exercise one that is gone or no longer marked.
+    Permissive by default: every id resolves to a role, which is what the
+    ordinary posting tests want. Pass explicit roles to exercise one that is
+    gone.
     """
 
     def __init__(self, roles: dict[int, str] | None = None):
@@ -113,7 +117,7 @@ class FakePingGuild:
 
     def get_role(self, role_id: int) -> Any:
         if self._roles is None:
-            return SimpleNamespace(id=role_id, name=f"[GW2] Role {role_id}")
+            return SimpleNamespace(id=role_id, name=f"Role {role_id}")
         name = self._roles.get(role_id)
         if name is None:
             return None
@@ -236,7 +240,10 @@ def forum_post_bot(
     bot._channels[post.id] = post
     if ping_channel is not None:
         bot._channels[ping_channel.id] = ping_channel
-        bot._config = default_config(event_ping_channel_id=ping_channel.id)
+        bot._config = default_config(
+            event_ping_channel_id=ping_channel.id,
+            event_ping_role_ids=PINGABLE_ROLE_IDS,
+        )
     return bot
 
 
@@ -257,8 +264,8 @@ class FakeBot:
         self.event_store = store
         self.event_timezone = ZoneInfo("UTC")
         # Role gates read their id off the config now, so the double carries
-        # one with the shipped defaults.
-        self._config = default_config()
+        # one with the shipped defaults, and the roles events may ping.
+        self._config = default_config(event_ping_role_ids=PINGABLE_ROLE_IDS)
         self._channels: dict[int, Any] = {
             channel.id: channel,
             channel.thread.id: channel.thread,
@@ -672,18 +679,18 @@ class TestPostOccurrence:
         assert mentions.everyone is False
         assert mentions.users is False
 
-    async def test_a_role_renamed_off_the_marker_is_no_longer_pinged(
+    async def test_a_role_taken_off_the_list_is_no_longer_pinged(
         self,
         store: EventStore,
     ) -> None:
         # The stored ids are a snapshot of what the picker offered months
-        # earlier. A role renamed and repurposed since then would otherwise be
-        # notified by every occurrence, which is exactly what the marker is
-        # supposed to prevent.
+        # earlier. A role an officer has since taken off /settings roles
+        # event_ping would otherwise still be notified by every occurrence.
         channel = FakeChannel(
-            guild=FakePingGuild({11: "[GW2] Raiders", 22: "Moderators"})
+            guild=FakePingGuild({11: "Raiders", 22: "Moderators"})
         )
         bot = cast(Any, FakeBot(store, channel))
+        bot._config = replace(bot._config, event_ping_role_ids=(11,))
         event = create_event(store, ping_role_ids=(11, 22))
         occurrence = store.create_occurrence(event.event_id, event.start_time)
 
@@ -697,7 +704,7 @@ class TestPostOccurrence:
         self,
         store: EventStore,
     ) -> None:
-        channel = FakeChannel(guild=FakePingGuild({11: "[GW2] Raiders"}))
+        channel = FakeChannel(guild=FakePingGuild({11: "Raiders"}))
         bot = cast(Any, FakeBot(store, channel))
         event = create_event(store, ping_role_ids=(11, 22))
         occurrence = store.create_occurrence(event.event_id, event.start_time)
@@ -711,8 +718,9 @@ class TestPostOccurrence:
         store: EventStore,
     ) -> None:
         # Losing the ping must not cost the event its post.
-        channel = FakeChannel(guild=FakePingGuild({}))
+        channel = FakeChannel()
         bot = cast(Any, FakeBot(store, channel))
+        bot._config = replace(bot._config, event_ping_role_ids=())
         event = create_event(store, ping_role_ids=(11,))
         occurrence = store.create_occurrence(event.event_id, event.start_time)
 
@@ -720,10 +728,36 @@ class TestPostOccurrence:
 
         assert posted.message_id == 555
         assert channel.sent[0]["content"] is None
-        # The ids stay on the event, so renaming the role back resumes it.
+        # The ids stay on the event, so listing the role again resumes it.
         stored = store.get_event(event.event_id)
         assert stored is not None
         assert stored.ping_role_ids == (11,)
+
+    async def test_listing_a_role_again_resumes_its_pings(
+        self,
+        bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            ping_role_ids=(11,),
+        )
+        listed = bot._config
+        bot._config = replace(listed, event_ping_role_ids=())
+        first = store.create_occurrence(event.event_id, event.start_time)
+        await post_occurrence(bot, event, first, BEFORE_START)
+        bot._config = listed
+        second = store.create_occurrence(
+            event.event_id,
+            event.start_time + timedelta(days=1),
+        )
+
+        await post_occurrence(bot, event, second, BEFORE_START)
+
+        # Nobody had to edit the event: it kept the role all along.
+        assert [sent["content"] for sent in channel.sent] == [None, "<@&11>"]
 
     async def test_an_unresolvable_guild_pings_nobody(
         self,
@@ -1304,7 +1338,7 @@ class TestPingingAForumPostEventFromAnotherChannel:
         # audience, not its ping.
         post = FakeForumPost()
         bot = forum_post_bot(store, post)
-        bot._config = default_config(event_ping_channel_id=9999)
+        bot._config = replace(bot._config, event_ping_channel_id=9999)
 
         await self.post_event_in_post(bot, store, post)
 

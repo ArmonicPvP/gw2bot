@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,6 +38,11 @@ CHANNELS_GROUP = "channels"
 # be stored and then break both the confirmation and every later inspection.
 MAX_ACCOUNT_LIST_CHARACTERS = 1500
 
+# How many roles events may be allowed to ping. The roles a commander picks
+# from are one select, and Discord caps a select at 25 options, so a role past
+# that would be on the list and never offered.
+MAX_EVENT_PING_ROLES = 25
+
 SECRET_PLACEHOLDER = "This secret cannot be viewed once set"
 UNSET_DISPLAY = "Not set"
 
@@ -45,6 +51,8 @@ class ValidationTarget:
     """What a Discord id has to resolve to before it may be stored."""
 
     ROLE = "role"
+    # Every id in a list has to be a role, and none may be @everyone.
+    ROLE_LIST = "role_list"
     TEXT_CHANNEL = "text_channel"
     FORUM_CHANNEL = "forum_channel"
     FORUM_TAG = "forum_tag"
@@ -198,6 +206,53 @@ def _parse_account_list(value: str) -> object:
             "accounts."
         )
     return tuple(accounts)
+
+
+def _format_id_list(value: object) -> str:
+    assert isinstance(value, tuple)
+    return ", ".join(str(entry) for entry in value)
+
+
+def _parse_role_id_list(name: str) -> Callable[[str], object]:
+    one_id = _parse_discord_id(name)
+
+    def parse(value: str) -> object:
+        """Role ids separated by commas or spaces, in the order given.
+
+        Each entry is read the way a single id is, so pasted mentions work
+        too. A role listed twice is kept once, because it can only be pinged
+        once.
+        """
+        role_ids: list[int] = []
+        for entry in re.split(r"[\s,]+", value):
+            if not entry:
+                continue
+            try:
+                role_id = one_id(entry)
+            except ConfigurationError as exc:
+                raise ConfigurationError(
+                    "Every entry has to be a role id. List them separated by "
+                    "commas, for example 123456789012345678, "
+                    "234567890123456789. Turn on Developer Mode to copy a "
+                    "role's id."
+                ) from exc
+            assert isinstance(role_id, int)
+            if role_id not in role_ids:
+                role_ids.append(role_id)
+        if not role_ids:
+            raise ConfigurationError(
+                "List one or more role ids separated by commas. Pass a space "
+                "to clear the list."
+            )
+        if len(role_ids) > MAX_EVENT_PING_ROLES:
+            raise ConfigurationError(
+                f"That is {len(role_ids)} roles, and events can ping at most "
+                f"{MAX_EVENT_PING_ROLES}, because that is all the role picker "
+                "can show. Remove some."
+            )
+        return tuple(role_ids)
+
+    return parse
 
 
 def _parse_text(name: str) -> Callable[[str], object]:
@@ -552,6 +607,22 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         ),
         parse=_parse_discord_id("events_page"),
         validates=ValidationTarget.ROLE,
+    ),
+    SettingDefinition(
+        name="event_ping",
+        field="event_ping_role_ids",
+        group=ROLES_GROUP,
+        default=(),
+        description=(
+            "Roles events may ping, as role ids separated by commas. "
+            "Commanders pick up to three of them for each event, and only "
+            "these are ever pinged: a role taken off the list stops being "
+            "pinged by the events that already carry it. Clear it and no "
+            "event pings anyone."
+        ),
+        parse=_parse_role_id_list("event_ping"),
+        serialize=_format_id_list,
+        validates=ValidationTarget.ROLE_LIST,
     ),
     SettingDefinition(
         name="event_ping",
