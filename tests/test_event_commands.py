@@ -13123,6 +13123,30 @@ class TestRestoreDeletedEvent:
         assert embed.author.name == "Restored"
         assert "Original Title" in (embed.title or "")
 
+    async def test_a_second_delete_confirmation_keeps_the_first_snapshot(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # Two `/event delete` confirmations for one event, answered minutes
+        # apart: the second finds the event gone and must not take the
+        # restore the first one kept with it.
+        event, _ = make_posted_edit_event(store)
+        first = EventDeleteConfirmView(fake_bot, event)
+        second = EventDeleteConfirmView(fake_bot, event)
+        await first.delete.callback(commander_click())
+
+        interaction = commander_click()
+        await second.delete.callback(interaction)
+
+        assert "/event restore" in awaited_kwargs(
+            interaction.edit_original_response
+        )["content"]
+        answer = await open_restore(fake_bot, event.event_id)
+        assert "Restore **Original Title**" in answer["content"]
+        await press_restore(answer["view"])
+        assert store.get_event(event.event_id) == event
+
     async def test_a_restored_run_the_bot_cannot_post_is_left_for_the_pass(
         self,
         fake_bot: Any,

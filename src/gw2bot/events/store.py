@@ -1423,6 +1423,7 @@ class EventStore:
         ``remember`` keeps all of it as the event's snapshot, replacing any
         earlier one, so `/event restore` can put it back. Without it the
         snapshot goes too: an event that is gone has no edit left to undo.
+        An event that was already gone keeps whatever snapshot it has.
         """
         with self._sessions() as session:
             occurrence_ids = session.scalars(
@@ -1474,7 +1475,11 @@ class EventStore:
                 delete(EventRecord).where(EventRecord.event_id == event_id)
             )
             if payload is None:
-                _drop_snapshot(session, event_id)
+                # An event already gone leaves its snapshot alone: that is a
+                # second confirmation of a deletion that has happened, and
+                # the snapshot is what can still undo the first one.
+                if record is not None:
+                    _drop_snapshot(session, event_id)
             else:
                 _keep_snapshot(
                     session,

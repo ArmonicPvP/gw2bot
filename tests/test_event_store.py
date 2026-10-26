@@ -2953,6 +2953,22 @@ class TestEventStoreSnapshots:
 
         assert store.get_snapshot(event.event_id) is None
 
+    def test_deleting_an_event_already_gone_keeps_its_snapshot(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(store)
+        store.create_occurrence(event.event_id, event.start_time)
+        store.delete_event(event.event_id, remember=True)
+
+        store.delete_event(event.event_id, remember=True)
+        store.delete_event(event.event_id)
+
+        snapshot = store.get_snapshot(event.event_id)
+        assert snapshot is not None
+        assert snapshot.kind is SnapshotKind.DELETE
+        assert snapshot.event == event
+
     def test_restoring_puts_the_event_back_as_it_was(
         self,
         store: EventStore,
