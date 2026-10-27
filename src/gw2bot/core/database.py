@@ -1193,16 +1193,14 @@ def initialize_database(engine: Engine) -> set[str]:
             "ping_channel_id",
             "ping_message_id",
         ):
-            if column_name in occurrence_columns:
-                continue
             # Nothing to backfill: no release before this one sent an
             # announcement, so every legacy row correctly reads as having
             # none to clean up.
-            operations.add_column(
-                EventOccurrenceRecord.__tablename__,
+            _add_missing_column(
+                operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
                 Column(column_name, Integer, nullable=True),
+                added_columns,
             )
-            added_columns.add(column_name)
 
         _add_missing_column(
             operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
@@ -1212,7 +1210,7 @@ def initialize_database(engine: Engine) -> set[str]:
                 nullable=False,
                 server_default="",
             ),
-            added_columns, label='occurrence_ping_role_ids',
+            added_columns, label="occurrence_ping_role_ids",
         )
 
         # Nothing to backfill, as above: no release before this one sent an

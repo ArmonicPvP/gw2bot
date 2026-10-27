@@ -32,11 +32,8 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
-    ROLE_EMOJI,
     RosterUpdate,
-    fitting_roles,
     normalize_stored_roles,
-    supported_roles,
 )
 from gw2bot.events.views.preview import build_event_preview, send_event_preview
 from gw2bot.events.views.shared import (

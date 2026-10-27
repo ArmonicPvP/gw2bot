@@ -28,12 +28,9 @@ from gw2bot.events.models import (
     EventStatus,
     MenteeStatus,
     PreferenceMode,
-    ROLE_EMOJI,
     RepeatFrequency,
     available_edit_tokens,
-    fitting_roles,
     normalize_stored_roles,
-    supported_roles,
 )
 from gw2bot.events.views.lifecycle import open_event_edit
 from gw2bot.events.views.shared import (
