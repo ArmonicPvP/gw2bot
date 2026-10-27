@@ -10,6 +10,10 @@ from discord import app_commands
 
 from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import require_role, user_has_role
+from gw2bot.gw2.member_lookup import (
+    report_unverified_membership,
+    resolve_member_or_reply,
+)
 from gw2bot.trials.reports import format_track_audit
 
 if TYPE_CHECKING:
@@ -135,26 +139,18 @@ async def handle_track_command(
         return
 
     await interaction.response.defer(ephemeral=True)
-    try:
-        canonical_username = await bot.resolve_guild_member(username)
-        overdue = (
-            canonical_username is not None
-            and await bot.is_overdue_trial_member(canonical_username)
-        )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        LOGGER.error("Could not refresh the guild member cache")
-        await interaction.followup.send(
-            "Could not verify guild membership. Try again later.",
-            ephemeral=True,
-        )
-        return
-
+    canonical_username = await resolve_member_or_reply(
+        bot,
+        interaction,
+        username,
+        action="Trial member track",
+    )
     if canonical_username is None:
-        LOGGER.debug("Trial member track rejected; guild member was not found")
-        await interaction.followup.send(
-            f"`{username}` is not a member of the configured guild.",
-            ephemeral=True,
-        )
+        return
+    try:
+        overdue = await bot.is_overdue_trial_member(canonical_username)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        await report_unverified_membership(interaction)
         return
 
     # Only starting a warning needs the 14-day mark. An already tracked member

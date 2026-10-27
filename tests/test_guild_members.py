@@ -1,8 +1,11 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 
 from gw2bot.gw2.guild_members import (
@@ -20,6 +23,10 @@ from gw2bot.gw2.guild_members import (
     partition_tracked_overdue_members,
     seconds_until_trial_report,
     select_warned_overdue_members,
+)
+from gw2bot.gw2.member_lookup import (
+    MEMBERSHIP_UNVERIFIED,
+    resolve_member_or_reply,
 )
 
 
@@ -627,3 +634,95 @@ class TestTrialMemberReport:
             seconds_until_trial_report(datetime(2026, 6, 7, 17, 0, tzinfo=UTC))
             == 24 * 60 * 60
         )
+
+
+def _deferred_interaction() -> Any:
+    return SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+
+
+def _resolver(resolve: AsyncMock) -> Any:
+    return SimpleNamespace(resolve_guild_member=resolve)
+
+
+class TestResolveMemberOrReply:
+    async def test_returns_the_canonical_name_without_replying(self) -> None:
+        resolver = _resolver(AsyncMock(return_value="Member.1234"))
+        interaction = _deferred_interaction()
+
+        canonical = await resolve_member_or_reply(
+            resolver,
+            interaction,
+            "member.1234",
+            action="Test lookup",
+        )
+
+        assert canonical == "Member.1234"
+        resolver.resolve_guild_member.assert_awaited_once_with("member.1234")
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_forwards_a_forced_refresh(self) -> None:
+        resolver = _resolver(AsyncMock(return_value="Member.1234"))
+
+        await resolve_member_or_reply(
+            resolver,
+            _deferred_interaction(),
+            "member.1234",
+            action="Test lookup",
+            force_refresh=True,
+        )
+
+        resolver.resolve_guild_member.assert_awaited_once_with(
+            "member.1234",
+            force_refresh=True,
+        )
+
+    async def test_tells_the_caller_an_outsider_is_not_in_the_guild(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        resolver = _resolver(AsyncMock(return_value=None))
+        interaction = _deferred_interaction()
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            canonical = await resolve_member_or_reply(
+                resolver,
+                interaction,
+                "outsider.1234",
+                action="Test lookup",
+            )
+
+        assert canonical is None
+        interaction.followup.send.assert_awaited_once_with(
+            "`outsider.1234` is not a member of the configured guild.",
+            ephemeral=True,
+        )
+        assert "Test lookup rejected; guild member was not found" in caplog.text
+        assert "outsider.1234" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "error",
+        [aiohttp.ClientError("roster-read-secret"), asyncio.TimeoutError()],
+    )
+    async def test_a_failed_roster_read_is_reported_not_raised(
+        self,
+        error: Exception,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        resolver = _resolver(AsyncMock(side_effect=error))
+        interaction = _deferred_interaction()
+
+        with caplog.at_level(logging.ERROR, logger="gw2bot"):
+            canonical = await resolve_member_or_reply(
+                resolver,
+                interaction,
+                "member.1234",
+                action="Test lookup",
+            )
+
+        assert canonical is None
+        interaction.followup.send.assert_awaited_once_with(
+            MEMBERSHIP_UNVERIFIED,
+            ephemeral=True,
+        )
+        assert "Could not refresh the guild member cache" in caplog.text
+        assert "roster-read-secret" not in caplog.text
