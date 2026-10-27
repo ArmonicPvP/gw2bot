@@ -6771,7 +6771,9 @@ class TestEventEditConfirmView:
         current = store.get_occurrence(occurrence.occurrence_id)
         assert updated is not None and updated.title == "Edited Title"
         assert current is not None and current.needs_refresh
-        assert "out of date" in interaction.edit_original_response.await_args.kwargs["content"]
+        reply = interaction.edit_original_response.await_args
+        assert reply is not None
+        assert "out of date" in reply.kwargs["content"]
         assert "Could not update posted occurrence after edit" in caplog.text
         assert secret not in caplog.text
 
