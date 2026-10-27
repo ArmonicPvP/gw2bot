@@ -4,11 +4,29 @@
 
 `core/` holds what every feature shares and nothing that knows about a
 feature: the SQLite engine and its migrations, the redacting log formatter,
-the Discord role and failure helpers, the anchored-series maths, and the
-vocabulary a dashboard range is written in, and message framing that keeps
-whole entries inside Discord's size limit. `anchored_series` also selects a
-history window and builds its boundary points; feature modules supply their
-own observations and turn the resulting values into their own page models.
+the Discord role and failure helpers, the anchored-series maths, the
+vocabulary a dashboard range is written in, and message framing.
+
+`database.initialize_database` keeps upgrades in their existing order.
+`_column_names` reads a table's columns and `_add_missing_column` records an
+added column's migration label and returns whether it was added. Backfill SQL
+and table rebuilds stay in `initialize_database`, so a backfill runs only when
+its column was newly added.
+
+`anchored_series.build_window` selects a history window and builds its
+boundary points. Its input must include the changes between the window and
+the observation used as its anchor, including changes after the window when
+the observation is newer. The opening point precedes changes exactly at the
+start; the closing point includes changes exactly at the end. Without an
+observation, changes have unknown values and the line is empty. Feature
+modules turn those values into their own page models.
+
+`message_chunks.pack_message_lines` repeats a prefix and suffix around whole
+entries, reserving room for the suffix when splitting. An entry too large for
+an empty frame is kept alone rather than split or dropped; it can still
+exceed Discord's size limit. Callers retain their own whitespace and
+empty-report policies. Event reminders remain separate because each message
+also carries the exact user IDs it may mention.
 
 The dependency only ever points one way. Any package may import `core/`;
 nothing in `core/` may import anything else under `gw2bot` - not a feature

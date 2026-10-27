@@ -78,7 +78,7 @@ at once would add the same sales twice.
 
 | Module | What it holds |
 | --- | --- |
-| `shared.py` | The frame every dashboard is built from: the stylesheet, the header, and the time-range picker. A change to the frame is one edit here rather than four. |
+| `shared.py` | Shared styles, including header styles, plus the time-range picker's markup and JavaScript. Each document assembles its own header markup. |
 | `notices.py` | The one-card pages: sign-in, signed-out, and the access refusals. Fixed strings except the sign-in page's login URL, which is escaped after `server.py` has validated it as a local path. |
 | `calendar.py` | The guild event calendar. |
 | `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
