@@ -78,7 +78,7 @@ at once would add the same sales twice.
 
 | Module | What it holds |
 | --- | --- |
-| `shared.py` | The frame every dashboard is built from: the stylesheet, the header, and the time-range picker, plus what the four charted dashboards draw with: the chart stylesheet, the DOM and axis helpers, and the hover and tap selection. A change to the frame or to how a chart is read is one edit here rather than four. |
+| `shared.py` | The frame every page is built from: the document head, the stylesheet, the header with its sign-out controls, the time-range picker, and the script every signed-in page opens with. The four charted dashboards are assembled whole by `chart_dashboard`, around their own rules, markup and script, with the chart, table, loading and hover code they share. A change to any of it is one edit here rather than four. |
 | `notices.py` | The one-card pages: sign-in, signed-out, and the access refusals. Fixed strings except the sign-in page's login URL, which is escaped after `server.py` has validated it as a local path. |
 | `calendar.py` | The guild event calendar. |
 | `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
@@ -90,29 +90,44 @@ at once would add the same sales twice.
 `pages/__init__.py` re-exports every document, so `server.py` imports them all
 from one place.
 
-The names in `shared.py` are public (`SHARED_STYLE`, `DASHBOARD_HEADER_STYLE`,
-`RANGE_PICKER_STYLE`, `CHART_PAGE_STYLE`, `RANGE_PICKER_NAV`,
-`CUSTOM_RANGE_PANEL`, `RANGE_PICKER_LISTENERS_JS`, `CHART_HELPERS_JS`,
-`CHART_HOVER_JS`, `range_picker_js`, `simple_page`, `MAX_CUSTOM_DAYS`) because
-they are the page package's API. They were underscore-prefixed while already
-being imported across modules, which was only ever a mislabel.
+The names in `shared.py` without a leading underscore are public because they
+are the page package's API: other modules import them. They were
+underscore-prefixed while already being imported across modules, which was only
+ever a mislabel.
 
-## One chart hover
+## One dashboard frame
 
-The feast, roster, gold and events dashboards each draw a chart that a mouse
-hovers and a finger taps, and the four used to carry their own copy of that
-machinery. `CHART_HOVER_JS` is the one copy now: a page groups its plotted dots
-into columns and calls `attachChartHover(canvas, columns, options)` from a
-small `attachHover` of its own, passing the tooltip's host, the fixed reason a
-skipped tap is traced with, the ring colour, and a `fillTooltip` that adds the
-page's rows. The page keeps its own `traceSelection`, so each console trace
-still names its dashboard, and its own `M` and `plotW()`, the metrics the
-canvas was drawn with. `CHART_HELPERS_JS` holds the helpers the pages shared
-word for word (`el`, `svg`, `scaleX`, `formatTick`, `formatMoment`, the pointer
-narrowing), and `CHART_PAGE_STYLE` the rules all four stylesheets repeated,
-the tooltip box among them. A page's own rules follow it, which is how the
-feast page keeps its own tooltip width. The profit page draws its chart
-differently and keeps its own.
+The feast, roster, gold and events dashboards differ in what they chart and
+list, not in how. `chart_dashboard(title, subject, style=, body=, script=)`
+writes everything they share around what is their own: the document head, the
+stylesheets (`CHART_PAGE_STYLE` and its predecessors, then the page's `style`,
+which can override them), the header with the range picker and sign-out
+controls, and a script that opens with the shared helpers, runs the page's
+`script`, and ends by loading the window. `subject` names the page in every
+console trace the shared code writes and in nothing else.
+
+The shared script comes in parts, in the order they run:
+
+| Part | What it is |
+| --- | --- |
+| `PAGE_JS` | What every signed-in page opens with, the calendar's included: the phone breakpoint, `el`, `fetchJson` (which sends a signed-out reader to sign in, so no page writes that check itself), and `showWhoami`. |
+| `DASHBOARD_JS` | The charted dashboards' helpers: the stock chart's box and status line, `chartMetrics` (the shared proportions a page adjusts), `windowState`, `scaleX` and `scaleY`, `niceStep`, the tick and moment formats, the pointer narrowing, `logFailure`, `resetChart`, `chartCanvas`, the grid, axes, lines and dots, `showChart`, `renderPagedTable` with its pager, and `loadWindow`. Its header lists what a page must supply. |
+| `CHART_HOVER_JS` | The hover and tap selection, `attachChartHover`, and the two ways of grouping dots into columns. |
+| `CHART_MODE_JS`, `COIN_JS`, `HISTORY_JS` | Parts a page asks for in `parts`: the staircase toggle (feast, gold, roster), coin arithmetic (feast, gold), and what the two history pages share beyond the rest - the boxes `history_main` lays out, the legend, the totals line, the closing figure, the account column, the table of changes, and how the page loads and draws. `HISTORY_STYLE` and `history_main` are that pair's rules and markup. |
+
+A page's own `attachHover` passes `attachChartHover` the tooltip's host, the
+fixed reason a skipped tap is traced with, the ring colour, and a
+`fillTooltip` that adds the page's rows. Every table is a
+`renderPagedTable` spec: its columns, its rows, and where it pages to. A
+column's class is its heading's too unless it names a `head` of its own, which
+is how the feast and roster tables keep their numeric headings at the left
+where gold and events right-align theirs.
+
+The calendar and the profit page are not charted dashboards and are built by
+hand, but they take the same `document_head` and `SIGNOUT_CONTROLS`, the
+calendar takes `PAGE_JS`, and the profit page shares `UTILITY_STYLE` with the
+feast page. The profit page's script, with its own requests and its own chart,
+is its own.
 
 ## Two purples
 

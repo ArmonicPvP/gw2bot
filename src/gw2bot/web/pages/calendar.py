@@ -8,18 +8,14 @@ from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
     DASHBOARD_HEADER_STYLE,
+    PAGE_JS,
     SHARED_STYLE,
+    SIGNOUT_CONTROLS,
+    document_head,
 )
 
 CALENDAR_PAGE = (
-    """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Guild Events</title>
-<style>"""
+    document_head("Guild Events")
     + SHARED_STYLE
     + DASHBOARD_HEADER_STYLE
     + """
@@ -32,11 +28,6 @@ body {
   overflow: hidden;
 }
 .controls, .views { display: flex; gap: 0.25rem; }
-button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
-}
 #period { font-weight: 600; font-size: 0.95rem; min-width: 11rem; }
 main {
   /* min-height:0 lets this flex child shrink to the viewport so its own
@@ -419,19 +410,9 @@ main {
   <span id="period" aria-live="polite"></span>
   <span class="spacer"></span>
   <a href="/profit">Profit</a>
-  <span id="whoami"></span>
-  <form method="post" action="/logout">
-    <button type="submit" class="signout" aria-label="Sign out">
-      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
-        fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
-      </svg>
-      <span class="signout-label">Sign out</span>
-    </button>
-  </form>
+"""
+    + SIGNOUT_CONTROLS
+    + """
 </header>
 <main>
   <div id="grid" class="month" aria-label="Guild event calendar"></div>
@@ -441,6 +422,9 @@ main {
 <script>
 "use strict";
 (function () {
+"""
+    + PAGE_JS
+    + """
   var grid = document.getElementById("grid");
   var scroller = document.querySelector("main");
   var tooltip = document.getElementById("tooltip");
@@ -452,10 +436,8 @@ main {
   var tooltipChip = null;
   var collapseFrame = 0;
 
-  // A single breakpoint drives every behavioural difference on small screens:
+  // The one breakpoint drives every behavioural difference on small screens:
   // the 3-day week, single-letter month, tap-to-open days and swipe steps.
-  var mobileQuery = window.matchMedia("(max-width: 640px)");
-  function isMobile() { return mobileQuery.matches; }
   // The week view collapses to three days on mobile so it never scrolls
   // sideways; the step size follows the same span.
   function weekSpan() { return isMobile() ? 3 : 7; }
@@ -554,13 +536,6 @@ main {
     over: "st-over",
     scheduled: "st-scheduled"
   };
-
-  function el(tag, className, text) {
-    var node = document.createElement(tag);
-    if (className) { node.className = className; }
-    if (text !== undefined) { node.textContent = text; }
-    return node;
-  }
 
   // Renders the Discord markdown subset used in event descriptions by
   // building DOM nodes directly. Event text only ever becomes text nodes,
@@ -1369,17 +1344,9 @@ main {
     writeHash();
     var range = rangeFor();
     statusLine.textContent = "Loading\\u2026";
-    fetch("/api/events?start=" +
+    fetchJson("/api/events?start=" +
       Math.floor(range.start.getTime() / 1000) + "&end=" +
       Math.floor(range.end.getTime() / 1000))
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login";
-          throw new Error("unauthorized");
-        }
-        if (!response.ok) { throw new Error("failed"); }
-        return response.json();
-      })
       .then(function (payload) {
         entries = payload.entries || [];
         render();
@@ -1432,19 +1399,7 @@ main {
   });
   window.addEventListener("resize", scheduleMonthCollapse);
 
-  fetch("/api/me")
-    .then(function (response) {
-      if (response.status === 401) {
-        location.href = "/login";
-        throw new Error("unauthorized");
-      }
-      return response.json();
-    })
-    .then(function (payload) {
-      document.getElementById("whoami").textContent = payload.name || "";
-    })
-    .catch(function () {});
-
+  showWhoami();
   readHash();
   syncViewButtons();
   refresh();

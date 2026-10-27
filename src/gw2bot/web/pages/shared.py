@@ -2,8 +2,9 @@
 
 The dashboard pages differ in their data and their tables, not in their frame:
 they share one stylesheet, one header, and one time-range picker, and the four
-that chart a history share how the chart is drawn and read. Those live here so
-a change to the frame is one edit rather than four.
+that chart a history share the whole document around what is their own - how
+the chart is drawn and read, how a table pages, and how the window is loaded.
+Those live here so a change to any of it is one edit rather than four.
 """
 
 from __future__ import annotations
@@ -76,6 +77,11 @@ button:focus-visible {
   outline: 2px solid var(--accent-on-dark);
   outline-offset: 1px;
 }
+button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
 .spacer { flex: 1; }
 #whoami { color: var(--muted); font-size: 0.85rem; }
 header a { font-size: 0.85rem; }
@@ -108,11 +114,6 @@ header form { display: flex; }
 RANGE_PICKER_STYLE = """
 .ranges { display: flex; gap: 0.25rem; }
 button:disabled { opacity: 0.4; cursor: default; }
-button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
-}
 /* The date picker is a second header row that stays out of the way until the
    Custom button reveals it, so the preset windows remain one tap apart. */
 .custom {
@@ -144,8 +145,41 @@ button.active {
 }
 """
 
-# The layout, axis and hover rules the four charted dashboards share. A page
-# appends its own rules after these, so it can still override any of them.
+# The controls the feast and profit pages both carry.
+UTILITY_STYLE = """
+/* Text a screen reader announces and the page does not show. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* A bare icon that reads as part of its row until a pointer is on it. */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  line-height: 0;
+}
+.icon-button:hover { color: var(--text); background: var(--panel-2); }
+.icon-button svg { pointer-events: none; }
+/* A table wider than a phone scrolls sideways inside its card rather than
+   pushing the page wider. */
+.table-scroll { overflow-x: auto; }
+"""
+
+# The layout, chart, tooltip and table rules the four charted dashboards share.
+# A page appends its own rules after these, so it can still override any of
+# them.
 CHART_PAGE_STYLE = """
 body {
   display: flex;
@@ -168,6 +202,43 @@ main {
   border-radius: 12px;
   padding: 1rem;
 }
+.card h2 { font-size: 0.95rem; }
+/* A chart's heading shares its row with the button that changes how the line
+   is drawn. */
+.chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.chart-mode {
+  min-width: 2rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+/* The legend sits under its chart as a centred row of colour swatches. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem 1.25rem;
+  margin-top: 0.6rem;
+}
+.legend .item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.legend .swatch {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
 /* Each chart is a fixed-viewBox SVG that scales to its container width, so
    every plotted coordinate is computed once against the viewBox and the
    browser handles resizing without a re-render. */
@@ -179,6 +250,8 @@ main {
 .chart-svg .x-label { text-anchor: middle; }
 .chart-svg .x-label.first { text-anchor: start; }
 .chart-svg .x-label.last { text-anchor: end; }
+.chart-svg .series-line { fill: none; stroke-width: 2; }
+.chart-svg .series-dot { stroke: var(--panel); stroke-width: 1; }
 .chart-svg .overlay { fill: transparent; }
 /* A thin, translucent gray line the hover snaps to. */
 .chart-svg .crosshair {
@@ -187,9 +260,9 @@ main {
   pointer-events: none;
 }
 .chart-svg .hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
-/* #chart is the positioning context for the hover tooltip, which is an HTML
-   box overlaid on the SVG so its text wraps and inherits page styling. */
-#chart { position: relative; }
+/* A chart's box is the positioning context for its hover tooltip, which is an
+   HTML box overlaid on the SVG so its text wraps and inherits page styling. */
+.chart-box { position: relative; }
 .chart-tooltip {
   position: absolute;
   z-index: 2;
@@ -205,7 +278,25 @@ main {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
 .chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
-#chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
+/* A tooltip row: a swatch, what it stands for, and its figure against the
+   right edge. The row nearest the pointer is set in bold. */
+.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
+.chart-tooltip .tip-row .swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.chart-tooltip .tip-row .val {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.chart-tooltip .tip-row.em { font-weight: 600; }
+.chart-tooltip .tip-note { color: var(--muted); margin-top: 0.25rem; }
+/* The line under a chart or a section saying what it is doing: loading,
+   empty, or failed. */
+.status-line { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .empty { color: var(--muted); padding: 0.6rem; }
 .pager {
   display: flex;
@@ -214,6 +305,55 @@ main {
   margin-top: 0.75rem;
   color: var(--muted);
   font-size: 0.85rem;
+}
+table.data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+table.data-table th, table.data-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+table.data-table th { color: var(--muted); font-weight: 600; }
+/* A Guild Wars 2 account name, an event title or a Discord name can be one
+   long word, which would otherwise widen the table past the card it sits in
+   and carry the right-hand columns off the page. Breaking inside the word is
+   what bounds the column, and `anywhere` rather than `break-word` because
+   only `anywhere` also shrinks the column's minimum width - which is the
+   width the table lays itself out from, so it is what keeps the table itself
+   inside the card. */
+table.data-table td.name { overflow-wrap: anywhere; }
+table.data-table th.num, table.data-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 640px) {
+  main { padding: 0.6rem 0.5rem; }
+  .card { padding: 0.6rem; }
+}
+"""
+
+# The rules the gold and roster history pages add: the figure the window
+# closed on beside the chart heading, account names in tooltip rows, and the
+# line of totals above the table.
+HISTORY_STYLE = """
+.card h2 .now {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.85rem;
+  margin-left: 0.4rem;
+}
+.chart-tooltip .tip-row .name { overflow-wrap: anywhere; }
+.totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  margin-bottom: 0.75rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.totals .num {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 """
 
@@ -236,6 +376,31 @@ CUSTOM_RANGE_PANEL = """  <div id="custom-range" class="custom">
     <span id="custom-error" class="custom-error" role="status"
       aria-live="polite"></span>
   </div>"""
+
+# The signed-in member's name and the sign-out button that end every header.
+# The button is an icon alone on a phone, where the header has no room for the
+# word.
+SIGNOUT_CONTROLS = """  <span id="whoami"></span>
+  <form method="post" action="/logout">
+    <button type="submit" class="signout" aria-label="Sign out">
+      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
+        fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+        <polyline points="16 17 21 12 16 7"></polyline>
+        <line x1="21" y1="12" x2="9" y2="12"></line>
+      </svg>
+      <span class="signout-label">Sign out</span>
+    </button>
+  </form>"""
+
+# The button beside a stock chart's heading that CHART_MODE_JS switches.
+CHART_MODE_BUTTON = """      <button type="button" id="chart-mode" class="chart-mode"
+        aria-label="Switch to staircase graph" title="Regular line graph">╱</button>"""
+
+# The status line under a dashboard's stock chart, which loadWindow() writes.
+CHART_STATUS_LINE = """    <div id="chart-status" class="status-line" role="status"
+      aria-live="polite"></div>"""
 
 # The longest custom window the history dashboards will serve, mirrored from
 # the server so a range too wide to draw is named as such instead of coming
@@ -474,17 +639,82 @@ RANGE_PICKER_LISTENERS_JS = """  document.querySelectorAll("[data-range]").forEa
 """
 
 
-CHART_HELPERS_JS = """  // The DOM, axis and pointer helpers every charted dashboard draws with.
-  // A page supplies ``state.data`` with ``since`` and ``now`` in seconds, and
-  // ``M`` and ``plotW()``, the metrics and width the plot is drawn at.
-  var SVG_NS = "http://www.w3.org/2000/svg";
+PAGE_JS = """  // What every signed-in page's script opens with: the one breakpoint its
+  // layout changes at, the DOM builder its text goes through, its JSON reads,
+  // and the reader's name in its header.
+  var mobileQuery = window.matchMedia("(max-width: 640px)");
+  function isMobile() { return mobileQuery.matches; }
 
+  // An element, with any text it carries set as text rather than parsed as
+  // markup.
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) { node.className = className; }
     if (text !== undefined) { node.textContent = text; }
     return node;
   }
+
+  // Reads one of the site's JSON endpoints. A session that has run out is
+  // sent back to sign in, and any other refusal rejects, so a caller has one
+  // failure path whatever went wrong.
+  function fetchJson(url, init) {
+    return fetch(url, init).then(function (response) {
+      if (response.status === 401) {
+        location.href = "/login";
+        throw new Error("unauthorized");
+      }
+      if (!response.ok) { throw new Error("failed"); }
+      return response.json();
+    });
+  }
+
+  // Puts the signed-in member's name in the header. A failed read leaves it
+  // blank: the name is a courtesy, and nothing on the page depends on it.
+  function showWhoami() {
+    fetchJson("/api/me")
+      .then(function (payload) {
+        document.getElementById("whoami").textContent = payload.name || "";
+      })
+      .catch(function () {});
+  }
+"""
+
+DASHBOARD_JS = """  // The chart, table and loading helpers the four charted dashboards share.
+  // A page supplies:
+  //   CHART_METRICS        its stock chart's proportions, from chartMetrics()
+  //   state                from windowState(), with the scale ({ low, high,
+  //                        step }) its chart is drawn on
+  //   computeScale()       the stock chart's scale for the data on screen
+  //   attachHover()        the stock chart's hover, through attachChartHover
+  //   render(), refresh()  which draw the page and reload its window
+  // and the markup holds the stock chart's #chart box and #chart-status line.
+  var SVG_NS = "http://www.w3.org/2000/svg";
+
+  var chart = document.getElementById("chart");
+  var chartStatus = document.getElementById("chart-status");
+
+  // The stock chart's proportions: a wide viewBox on desktop, and a taller
+  // one on a phone, where the chart scales to the narrow screen and the
+  // extra height makes it read large. A page changes only what its own
+  // labels or layout need, as mobile and desktop.
+  function chartMetrics(mobile, desktop) {
+    return {
+      mobile: Object.assign({
+        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 40, ticks: 4
+      }, mobile),
+      desktop: Object.assign({
+        w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 40, ticks: 6
+      }, desktop)
+    };
+  }
+
+  // The page's state, with what every dashboard keeps beside its own. No
+  // range until the server answers: the first load asks for the window this
+  // member last picked rather than naming one over the top of it.
+  function windowState(own) {
+    return Object.assign({ range: null, data: null, scale: null }, own);
+  }
+
   function svg(tag, attrs) {
     var node = document.createElementNS(SVG_NS, tag);
     if (attrs) {
@@ -494,6 +724,19 @@ CHART_HELPERS_JS = """  // The DOM, axis and pointer helpers every charted dashb
     }
     return node;
   }
+
+  // The metrics for the current breakpoint. A copy, because a page may widen a
+  // margin to fit the labels it is about to draw.
+  function metrics() {
+    return Object.assign(
+      {}, isMobile() ? CHART_METRICS.mobile : CHART_METRICS.desktop);
+  }
+  // The metrics in use, which resetChart() sets before every drawing.
+  var M = null;
+  function plotW() { return M.w - M.left - M.right; }
+  function plotH() { return M.h - M.top - M.bottom; }
+
+  function points() { return (state.data && state.data.points) || []; }
 
   // How wide the drawn window is, in seconds.
   function windowSpan() {
@@ -509,6 +752,30 @@ CHART_HELPERS_JS = """  // The DOM, axis and pointer helpers every charted dashb
     if (frac < 0) { frac = 0; }
     if (frac > 1) { frac = 1; }
     return M.left + frac * plotW();
+  }
+  // Where a value falls up the plot on the scale in use, held to its ends.
+  function scaleY(value) {
+    var scale = state.scale;
+    var held = Math.max(scale.low, Math.min(scale.high, value));
+    return M.top + (1 - (held - scale.low) / (scale.high - scale.low)) *
+      plotH();
+  }
+
+  // A gridline step of 1, 2 or 5 times a power of ten for a span to be cut
+  // into about target pieces, which is what makes an axis read as round
+  // figures rather than arbitrary divisions. Steps under one are allowed,
+  // because a rolling average can sit well below a whole feast; a chart of
+  // whole things holds its step to one itself.
+  function niceStep(span, target) {
+    var raw = span / target;
+    if (!(raw > 0)) { return 1; }
+    var magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+    var normalized = raw / magnitude;
+    var step = 10;
+    if (normalized <= 1) { step = 1; }
+    else if (normalized <= 2) { step = 2; }
+    else if (normalized <= 5) { step = 5; }
+    return step * magnitude;
   }
 
   function formatTick(t) {
@@ -566,6 +833,217 @@ CHART_HELPERS_JS = """  // The DOM, axis and pointer helpers every charted dashb
     }
     return "other";
   }
+
+  // Logs a failed read or save by the error's type and message alone. what
+  // is a fixed name for the workflow; no request, response or payload is ever
+  // passed through.
+  function logFailure(what, error) {
+    console.error(
+      what + " failed:", error && error.name, error && error.message);
+  }
+
+  // A pinned touch selection listens on the whole page, so the stock chart's
+  // is torn down before another drawing replaces it.
+  var detachHover = null;
+
+  // Clears the stock chart for a new drawing, at the current breakpoint's
+  // metrics and on a scale for the data now on screen.
+  function resetChart() {
+    M = metrics();
+    state.scale = computeScale();
+    if (detachHover) { detachHover(); detachHover = null; }
+    chart.replaceChildren();
+  }
+
+  // An empty chart in the metrics in use, which the browser scales to the
+  // width of its box.
+  function chartCanvas(label) {
+    return svg("svg", {
+      "class": "chart-svg",
+      viewBox: "0 0 " + M.w + " " + M.h,
+      role: "img",
+      "aria-label": label
+    });
+  }
+
+  // A line through coords, the "x,y" pairs it joins, in stroke.
+  function drawLine(canvas, coords, stroke) {
+    canvas.appendChild(svg("polyline", {
+      "class": "series-line", stroke: stroke, points: coords.join(" ")
+    }));
+  }
+  // A dot at x, y, ringed in the panel colour so it stands off its line.
+  function drawDot(canvas, x, y, radius, fill) {
+    canvas.appendChild(svg("circle", {
+      "class": "series-dot",
+      cx: x.toFixed(1),
+      cy: y.toFixed(1),
+      r: radius,
+      fill: fill
+    }));
+  }
+
+  // Puts a finished stock chart on the page with its hover, and says in the
+  // status line when nothing was plotted.
+  function showChart(canvas, plotted, emptyText) {
+    detachHover = attachHover(canvas, plotted);
+    chart.appendChild(canvas);
+    chartStatus.textContent = plotted.length ? "" : emptyText;
+  }
+
+  // Horizontal gridlines and y labels at every step of scale, the lowest drawn
+  // as the axis. yOf places a value and label writes it. The loop counts steps
+  // rather than accumulating them, because a fractional step accumulated in
+  // floating point drifts off the value its label claims.
+  function drawGrid(canvas, scale, yOf, label) {
+    var lines = Math.round((scale.high - scale.low) / scale.step);
+    for (var line = 0; line <= lines; line += 1) {
+      var value = scale.low + scale.step * line;
+      var y = yOf(value);
+      canvas.appendChild(svg("line", {
+        "class": line === 0 ? "axis" : "grid",
+        x1: M.left, y1: y, x2: M.left + plotW(), y2: y
+      }));
+      var yLabel = svg("text", {
+        "class": "y-label", x: M.left - 6, y: y + 4
+      });
+      yLabel.textContent = label(value);
+      canvas.appendChild(yLabel);
+    }
+  }
+
+  function drawLeftAxis(canvas) {
+    canvas.appendChild(svg("line", {
+      "class": "axis",
+      x1: M.left, y1: M.top, x2: M.left, y2: M.top + plotH()
+    }));
+  }
+
+  // The left axis, and x labels spread evenly across the whole window so the
+  // range spans the full width however little happened in it. The outermost
+  // labels sit on the plot's own edges, so centring them would hang half of
+  // each one off the chart and the browser would clip it; tuckEdges sets them
+  // inwards instead - by class, because the stylesheet's text-anchor would
+  // win over a presentation attribute.
+  function drawTimeAxis(canvas, tuckEdges) {
+    drawLeftAxis(canvas);
+    for (var tick = 0; tick <= M.ticks; tick += 1) {
+      var t = state.data.since +
+        (state.data.now - state.data.since) * (tick / M.ticks);
+      var xLabel = svg("text", {
+        "class": "x-label", x: scaleX(t), y: M.top + plotH() + 18
+      });
+      if (tuckEdges && tick === 0) { xLabel.classList.add("first"); }
+      if (tuckEdges && tick === M.ticks) { xLabel.classList.add("last"); }
+      xLabel.textContent = formatTick(t);
+      canvas.appendChild(xLabel);
+    }
+  }
+
+  // A table cell holding one piece of text read off its row.
+  function textFill(read) {
+    return function (cell, row) { cell.textContent = read(row); };
+  }
+  var TIME_COLUMN = {
+    heading: "Time",
+    fill: textFill(function (row) { return formatMoment(row.t); })
+  };
+
+  // The Prev and Next buttons under a table, and the line saying where they
+  // have got to. go(page) shows another page.
+  function renderPager(box, page, count, total, noun, go) {
+    var prev = el("button", null, "Prev");
+    prev.type = "button";
+    prev.disabled = page <= 0;
+    prev.addEventListener("click", function () {
+      if (page > 0) { go(page - 1); }
+    });
+    var next = el("button", null, "Next");
+    next.type = "button";
+    next.disabled = page >= count - 1;
+    next.addEventListener("click", function () {
+      if (page < count - 1) { go(page + 1); }
+    });
+    box.appendChild(prev);
+    box.appendChild(next);
+    box.appendChild(el("span", null,
+      "Page " + (page + 1) + " of " + count +
+      " (" + total + " " + noun + ")"));
+  }
+
+  // One paginated table: a heading row from its columns, the rows of the page
+  // asked for, and the pager under them. A column names its heading, the
+  // class its cells take, the class its heading takes where that differs
+  // (head), and how a cell is filled from a row; cells are built from text
+  // nodes only. spec names the box and pager it fills, the rows, the page and
+  // how many rows one holds (size), the table's own class, what to say when
+  // there are no rows (empty), the noun the pager counts them in, and
+  // go(page). rowClass(row), wrap (the class of a box the table scrolls
+  // inside) and singlePagePager: false, which leaves a table that fits on one
+  // page without a pager, are optional. Returns the page shown: the one asked
+  // for, held inside the pages there are.
+  function renderPagedTable(spec) {
+    spec.box.replaceChildren();
+    spec.pager.replaceChildren();
+    if (!spec.rows.length) {
+      spec.box.appendChild(el("div", "empty", spec.empty));
+      return spec.page;
+    }
+    var count = Math.ceil(spec.rows.length / spec.size);
+    var page = Math.min(spec.page, count - 1);
+    var start = page * spec.size;
+    var table = el("table", "data-table " + spec.className);
+    var head = el("tr");
+    spec.columns.forEach(function (column) {
+      var headClass = column.head === undefined
+        ? column.className
+        : column.head;
+      head.appendChild(el("th", headClass || null, column.heading));
+    });
+    table.appendChild(head);
+    spec.rows.slice(start, start + spec.size).forEach(function (row) {
+      var line = el("tr", spec.rowClass ? spec.rowClass(row) : null);
+      spec.columns.forEach(function (column) {
+        var cell = el("td", column.className || null);
+        column.fill(cell, row);
+        line.appendChild(cell);
+      });
+      table.appendChild(line);
+    });
+    if (spec.wrap) {
+      var scroll = el("div", spec.wrap);
+      scroll.appendChild(table);
+      spec.box.appendChild(scroll);
+    } else {
+      spec.box.appendChild(table);
+    }
+    if (count > 1 || spec.singlePagePager !== false) {
+      renderPager(
+        spec.pager, page, count, spec.rows.length, spec.noun, spec.go);
+    }
+    return page;
+  }
+
+  // Reads the window on screen from path, adopts the window the answer covers,
+  // and hands the payload to show. what names the read in the console, and
+  // failure is what the status line says when it fails. show draws inside
+  // this chain, so a drawing fault lands here too, where it would otherwise
+  // read as a failed request with nothing in the console to trace.
+  function loadWindow(path, what, failure, show) {
+    chartStatus.textContent = "Loading\\u2026";
+    fetchJson(path + rangeQuery())
+      .then(function (payload) {
+        state.data = payload;
+        adoptRange(payload.range, payload.since, payload.now);
+        show(payload);
+      })
+      .catch(function (error) {
+        logFailure(what + " load", error);
+        if (chartStatus.textContent === "Loading\\u2026") {
+          chartStatus.textContent = failure;
+        }
+      });
+  }
 """
 
 CHART_HOVER_JS = """  // The hover and tap selection every dashboard chart carries. A page groups
@@ -580,10 +1058,10 @@ CHART_HOVER_JS = """  // The hover and tap selection every dashboard chart carri
   //   ringRadius    the hover ring's radius; 7 otherwise
   //   nearestByX    pick the column nearest in x alone rather than the dot
   //                 nearest in two dimensions
-  // The page also supplies M, the metrics the canvas was drawn with, and its
-  // own traceSelection, which takes a fixed action name, a fixed reason name
-  // and a count. The returned function tears the selection down so a redraw
-  // cannot leave its page listeners behind.
+  // It draws with M, the metrics the canvas was drawn with, and traces through
+  // traceSelection, which takes a fixed action name, a fixed reason name and a
+  // count. The returned function tears the selection down so a redraw cannot
+  // leave its page listeners behind.
   function attachChartHover(canvas, columns, options) {
     var head = options.headline || formatMoment;
     var ringRadius = options.ringRadius || 7;
@@ -815,6 +1293,200 @@ CHART_HOVER_JS = """  // The hover and tap selection every dashboard chart carri
     // Lets a re-render drop this canvas's page-level listeners with it.
     return function () { release("redraw"); };
   }
+
+  // Every dot its own column, for a chart whose dots are each a moment of
+  // their own.
+  function pointColumns(plotted) {
+    return plotted.map(function (point) {
+      return { t: point.t, x: point.x, points: [point] };
+    });
+  }
+
+  // Dots that share a moment form one column, so the crosshair snaps to one x
+  // and the tooltip lists everything recorded there.
+  function columnsByTime(plotted) {
+    var byTime = {};
+    var columns = [];
+    plotted.forEach(function (point) {
+      var key = String(point.t);
+      var column = byTime[key];
+      if (!column) {
+        column = { t: point.t, x: point.x, points: [] };
+        byTime[key] = column;
+        columns.push(column);
+      }
+      column.points.push(point);
+    });
+    return columns;
+  }
+"""
+
+# The selection trace every chart's hover reports through. chart_dashboard
+# names the page in it.
+_CHART_TRACES_JS = """  // Sanitized tracing for the tap selection lifecycle, so a console trace can
+  // explain why a selection opened, moved or went away. Every call passes a
+  // fixed action name, one of the narrowed reason names, and a count of drawn
+  // elements; nothing read off the payload or the reader's gesture reaches
+  // the console. debug keeps it out of the default console view.
+  function traceSelection(action, reason, count) {
+    console.debug("__SUBJECT__ chart selection:", action, reason, count);
+  }
+"""
+
+# The staircase toggle the feast, gold and roster charts carry, with its trace.
+CHART_MODE_JS = """  // Sanitized tracing for the line style: a fixed mode name and a count.
+  function traceMode(mode, count) {
+    console.debug("__SUBJECT__ chart mode:", mode, count);
+  }
+
+  // The button beside the stock chart's heading, which switches the line
+  // between joining each reading straight to the next and a staircase that
+  // holds each reading until the next one lands. count() is what the trace
+  // reports, and redraw() draws the chart again in the new style.
+  function bindChartMode(count, redraw) {
+    var button = document.getElementById("chart-mode");
+    button.addEventListener("click", function () {
+      state.staircase = !state.staircase;
+      button.textContent = state.staircase ? "⎿" : "╱";
+      button.title = state.staircase
+        ? "Staircase graph"
+        : "Regular line graph";
+      button.setAttribute("aria-label", state.staircase
+        ? "Switch to regular line graph" : "Switch to staircase graph");
+      traceMode(state.staircase ? "staircase" : "regular", count());
+      redraw();
+    });
+  }
+"""
+
+# The coin arithmetic the feast and gold pages write amounts with.
+COIN_JS = """  // Copper is what the guild log, the API and the ledger all deal in.
+  var COPPER_PER_SILVER = 100;
+  var COPPER_PER_GOLD = 100 * COPPER_PER_SILVER;
+
+  // A coin amount as the whole gold, silver and copper it is made of.
+  function splitCoins(copper) {
+    var remaining = Math.max(0, Math.round(copper));
+    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
+    remaining %= COPPER_PER_GOLD;
+    return {
+      gold: goldCoins,
+      silver: Math.floor(remaining / COPPER_PER_SILVER),
+      copper: remaining % COPPER_PER_SILVER
+    };
+  }
+
+  // A coin amount in the profit dashboard's spaced format. Copper is always
+  // written, and silver whenever gold is: 1g 0s 5c keeps its silver, and 5c
+  // does not gain one.
+  function formatCoins(copper) {
+    var coins = splitCoins(copper);
+    var parts = [];
+    if (coins.gold) { parts.push(coins.gold.toLocaleString() + "g"); }
+    if (coins.silver || coins.gold) { parts.push(coins.silver + "s"); }
+    parts.push(coins.copper + "c");
+    return parts.join(" ");
+  }
+"""
+
+# What the gold and roster history pages share beyond the other dashboards:
+# the boxes history_main lays out, the legend, the totals line, the figure the
+# window closed on, the account column, the table, and how the page is loaded
+# and drawn. A page supplies TABLE_PAGE_SIZE, and renderLegend, renderTotals,
+# renderChart and renderTable.
+HISTORY_JS = """  var legend = document.getElementById("legend");
+  var totals = document.getElementById("totals");
+  var tableBox = document.getElementById("table");
+  var pager = document.getElementById("pager");
+
+  // A history legend: one swatch per kind of dot, each named, because there
+  // are only a few kinds and they are fixed.
+  function renderKeyLegend(entries) {
+    legend.replaceChildren();
+    entries.forEach(function (entry) {
+      var item = el("span", "item");
+      item.setAttribute("role", "listitem");
+      var swatch = el("span", "swatch");
+      swatch.style.background = entry.color;
+      item.appendChild(swatch);
+      item.appendChild(el("span", "legend-name", entry.label));
+      legend.appendChild(item);
+    });
+  }
+
+  // The line of totals above a history table: each figure, then what it
+  // counts.
+  function renderTotalsLine(pairs) {
+    totals.replaceChildren();
+    pairs.forEach(function (pair) {
+      var item = el("span", null);
+      item.appendChild(el("span", "num", pair[0]));
+      item.appendChild(document.createTextNode(" " + pair[1]));
+      totals.appendChild(item);
+    });
+  }
+
+  // The figure a window closed on, as it reads after the chart's heading. A
+  // preset window runs to the moment of the request, so its figure is the one
+  // now; a picked one can close months ago, where the figure is true only of
+  // the window's own end.
+  function closingFigure(text) {
+    return "\\u2014 " + text +
+      (state.range === "custom" ? " at the end" : " now");
+  }
+
+  var ACCOUNT_COLUMN = {
+    heading: "Account",
+    head: null,
+    className: "name",
+    fill: textFill(function (row) { return row.name; })
+  };
+
+  // The table of changes under the chart, paged by state.tablePage.
+  function renderHistoryTable(rows, columns, empty, noun) {
+    state.tablePage = renderPagedTable({
+      box: tableBox,
+      pager: pager,
+      rows: rows,
+      page: state.tablePage,
+      size: TABLE_PAGE_SIZE,
+      className: "changes",
+      columns: columns,
+      empty: empty,
+      noun: noun,
+      go: function (page) {
+        state.tablePage = page;
+        renderTable();
+      }
+    });
+  }
+
+  // Reloads the window from path, back on the table's first page.
+  function loadHistory(path, what, failure) {
+    loadWindow(path, what, failure, function () {
+      state.tablePage = 0;
+      render();
+    });
+  }
+
+  function render() {
+    renderLegend();
+    renderTotals();
+    renderChart();
+    renderTable();
+  }
+"""
+
+_DASHBOARD_START_JS = """
+  // Redraw when the breakpoint flips so the chart adopts the layout for the
+  // new width.
+  mobileQuery.addEventListener("change", function () {
+    if (state.data) { render(); }
+  });
+
+  showWhoami();
+  syncRangeButtons();
+  refresh();
 """
 
 
@@ -840,6 +1512,111 @@ def range_picker_js(
         _RANGE_PICKER_JS.replace("__SUBJECT__", subject)
         .replace("__MAX_CUSTOM_DAYS__", str(max_custom_days))
         .replace("__DAY_FUNCTIONS__", _UTC_DAY_JS if utc_days else _LOCAL_DAY_JS)
+    )
+
+
+def document_head(title: str) -> str:
+    """The opening every served document shares, up to its open ``<style>``.
+
+    ``title`` is a fixed string a page module chooses, never anything a request
+    carried, so it is written in as it is.
+    """
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>{title}</title>
+<style>"""
+
+
+def history_main(
+    chart_heading: str,
+    figure_id: str,
+    legend_label: str,
+    table_heading: str,
+    *,
+    after: str = "",
+) -> str:
+    """The two cards a history page opens with.
+
+    The first holds the chart, with the figure the window closed on beside its
+    heading, the staircase toggle, the legend and the status line; the second
+    holds the table of changes with its totals and pager. ``after`` is any
+    further card the page adds below them.
+    """
+    return f"""<main>
+  <section class="card">
+    <div class="chart-heading">
+      <h2>{chart_heading}<span id="{figure_id}" class="now"></span></h2>
+{CHART_MODE_BUTTON}
+    </div>
+    <div id="chart" class="chart-box"></div>
+    <div id="legend" class="legend" role="list"
+      aria-label="{legend_label}"></div>
+{CHART_STATUS_LINE}
+  </section>
+  <section class="card">
+    <h2>{table_heading}</h2>
+    <div id="totals" class="totals"></div>
+    <div id="table"></div>
+    <div id="pager" class="pager"></div>
+  </section>
+{after}</main>
+"""
+
+
+def chart_dashboard(
+    title: str,
+    subject: str,
+    *,
+    style: str,
+    body: str,
+    script: str,
+    parts: tuple[str, ...] = (),
+    start: str = "",
+) -> str:
+    """One of the four charted dashboards, around what is its own.
+
+    The document, the header with its range picker, and the script's shared
+    opening and closing are the same on all four, so a page supplies its own
+    rules (``style``, after the shared ones so it can override them), the
+    markup between the header and the script (``body``), and its own script
+    (``script``, which runs after the shared helpers and the range picker).
+    ``parts`` are the optional shared scripts it draws on, such as
+    ``COIN_JS``, and ``start`` runs once its first load has been asked for.
+    ``title`` is both the document's title and the header's, and ``subject``
+    names the page in its console traces and nothing else.
+    """
+    traced = (_CHART_TRACES_JS + "".join(parts)).replace("__SUBJECT__", subject)
+    return (
+        document_head(title)
+        + SHARED_STYLE
+        + DASHBOARD_HEADER_STYLE
+        + RANGE_PICKER_STYLE
+        + CHART_PAGE_STYLE
+        + style
+        + "</style>\n</head>\n<body>\n<header>\n"
+        + f'  <h1 id="brand">{title}</h1>\n'
+        + RANGE_PICKER_NAV
+        + '\n  <span class="spacer"></span>\n'
+        + SIGNOUT_CONTROLS
+        + "\n"
+        + CUSTOM_RANGE_PANEL
+        + "\n</header>\n"
+        + body
+        + '<script>\n"use strict";\n(function () {\n'
+        + PAGE_JS
+        + DASHBOARD_JS
+        + CHART_HOVER_JS
+        + traced
+        + range_picker_js(subject)
+        + script
+        + RANGE_PICKER_LISTENERS_JS
+        + _DASHBOARD_START_JS
+        + start
+        + "})();\n</script>\n</body>\n</html>\n"
     )
 
 
@@ -872,14 +1649,7 @@ body { display: flex; align-items: center; justify-content: center; }
 
 
 def simple_page(title: str, heading: str, body: str, action: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>{title}</title>
-<style>{SHARED_STYLE}{_SIMPLE_PAGE_STYLE}</style>
+    return document_head(title) + f"""{SHARED_STYLE}{_SIMPLE_PAGE_STYLE}</style>
 </head>
 <body>
 <div class="card">

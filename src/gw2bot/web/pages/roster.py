@@ -7,122 +7,20 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
-    CHART_HELPERS_JS,
-    CHART_HOVER_JS,
-    CHART_PAGE_STYLE,
-    CUSTOM_RANGE_PANEL,
-    DASHBOARD_HEADER_STYLE,
-    RANGE_PICKER_LISTENERS_JS,
-    RANGE_PICKER_NAV,
-    RANGE_PICKER_STYLE,
-    SHARED_STYLE,
-    range_picker_js,
+    CHART_MODE_JS,
+    HISTORY_JS,
+    HISTORY_STYLE,
+    chart_dashboard,
+    history_main,
 )
 
-ROSTER_PAGE = (
-    """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Guild Roster</title>
-<style>"""
-    + SHARED_STYLE
-    + DASHBOARD_HEADER_STYLE
-    + RANGE_PICKER_STYLE
-    + CHART_PAGE_STYLE
+ROSTER_PAGE = chart_dashboard(
+    "Guild Roster",
+    "roster",
+    style=HISTORY_STYLE
     + """
-.card h2 { font-size: 0.95rem; }
-.chart-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.6rem;
-}
-.chart-mode {
-  min-width: 2rem;
-  padding: 0.25rem 0.45rem;
-  font-size: 1rem;
-  line-height: 1;
-}
-.card h2 .now {
-  color: var(--muted);
-  font-weight: 400;
-  font-size: 0.85rem;
-  margin-left: 0.4rem;
-}
-/* The legend names what each colour of dot means. Unlike the feast page there
-   are only three, and they are fixed, so the names are always shown. */
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem 1.25rem;
-  margin-top: 0.6rem;
-}
-.legend .item {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.82rem;
-  color: var(--text);
-}
-.legend .swatch {
-  width: 0.9rem;
-  height: 0.9rem;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.chart-svg .count-line { fill: none; stroke-width: 2; }
-.chart-svg .event-dot { stroke: var(--panel); stroke-width: 1; }
-.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
-.chart-tooltip .tip-row .swatch {
-  width: 0.7rem;
-  height: 0.7rem;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.chart-tooltip .tip-row .name { overflow-wrap: anywhere; }
-.chart-tooltip .tip-row .val {
-  margin-left: auto;
-  padding-left: 0.75rem;
-  font-variant-numeric: tabular-nums;
-}
-.chart-tooltip .tip-row.em { font-weight: 600; }
-.chart-tooltip .tip-note { color: var(--muted); margin-top: 0.25rem; }
-.totals {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem 1.25rem;
-  margin-bottom: 0.75rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-.totals .num {
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-table.changes { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-table.changes th, table.changes td {
-  text-align: left;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-}
-table.changes th { color: var(--muted); font-weight: 600; }
-/* A Guild Wars 2 account name has no spaces to break at, so a long one used
-   to widen the table past the card it sits in and carry the right-hand
-   columns off the page. Breaking inside the word is what bounds the column,
-   and `anywhere` rather than `break-word` because only `anywhere` also
-   shrinks the column's minimum width - which is the width the table lays
-   itself out from, so it is what keeps the table itself inside the card. */
-table.changes td.name, table.changes td.by { overflow-wrap: anywhere; }
-table.changes td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
+/* Who did the kicking is an account name too, so it is bounded the same way. */
+table.changes td.by { overflow-wrap: anywhere; }
 table.changes td.change { white-space: nowrap; }
 table.changes .dot {
   display: inline-block;
@@ -187,10 +85,7 @@ table.changes .tip-trigger {
 /* An invited account that no application post matched has no Discord name to
    show, and the reason reads as an absence rather than as a name. */
 table.changes td.unmatched { color: var(--muted); }
-#pending-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 @media (max-width: 640px) {
-  main { padding: 0.6rem 0.5rem; }
-  .card { padding: 0.6rem; }
   /* The account a change is about is the column worth the width on a phone;
      who did the kicking is shown in the chart tooltip instead. */
   table.changes .by { display: none; }
@@ -214,61 +109,25 @@ table.changes td.unmatched { color: var(--muted); }
      goes with them so the two stay over each other. */
   table.changes .change { text-align: center; }
 }
-</style>
-</head>
-<body>
-<header>
-  <h1 id="brand">Guild Roster</h1>
-"""
-    + RANGE_PICKER_NAV
-    + """
-  <span class="spacer"></span>
-  <span id="whoami"></span>
-  <form method="post" action="/logout">
-    <button type="submit" class="signout" aria-label="Sign out">
-      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
-        fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
-      </svg>
-      <span class="signout-label">Sign out</span>
-    </button>
-  </form>
-"""
-    + CUSTOM_RANGE_PANEL
-    + """
-</header>
-<main>
-  <section class="card">
-    <div class="chart-heading">
-      <h2>Guild members over time<span id="now-count" class="now"></span></h2>
-      <button type="button" id="chart-mode" class="chart-mode"
-        aria-label="Switch to staircase graph" title="Regular line graph">╱</button>
-    </div>
-    <div id="chart"></div>
-    <div id="legend" class="legend" role="list" aria-label="Change kinds"></div>
-    <div id="chart-status" role="status" aria-live="polite"></div>
-  </section>
-  <section class="card">
-    <h2>Membership changes</h2>
-    <div id="totals" class="totals"></div>
-    <div id="table"></div>
-    <div id="pager" class="pager"></div>
-  </section>
-  <section class="card">
+""",
+    body=history_main(
+        "Guild members over time",
+        "now-count",
+        "Change kinds",
+        "Membership changes",
+        after="""  <section class="card">
     <h2>Pending invites<span id="pending-count" class="now"></span></h2>
     <p class="note">These accounts have been invited in-game but have not
       accepted yet, so they hold a place against the guild's 500 without
       being members.</p>
     <div id="pending"></div>
-    <div id="pending-status" role="status" aria-live="polite"></div>
+    <div id="pending-status" class="status-line" role="status"
+      aria-live="polite"></div>
   </section>
-</main>
-<script>
-"use strict";
-(function () {
+""",
+    ),
+    parts=(CHART_MODE_JS, HISTORY_JS),
+    script="""
   // Okabe-Ito colourblind-safe palette: one hue per kind of change, and a
   // fourth for the member count line itself.
   var KINDS = {
@@ -285,59 +144,17 @@ table.changes td.unmatched { color: var(--muted); }
   // The most members a guild can hold, so the y axis never reaches past it.
   var CEILING = 500;
 
-  var mobileQuery = window.matchMedia("(max-width: 640px)");
-  function isMobile() { return mobileQuery.matches; }
+  var CHART_METRICS = chartMetrics({}, {});
 
-  // The chart uses a wide viewBox on desktop and a taller one on mobile, where
-  // it scales to the narrow screen width; the extra height makes the graph
-  // read large on a phone. Coordinates are computed against whichever set is
-  // active, so M is refreshed at the start of every chart render.
-  function metrics() {
-    if (isMobile()) {
-      return {
-        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 40, ticks: 4
-      };
-    }
-    return {
-      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 40, ticks: 6
-    };
-  }
-  var M = metrics();
-  function plotW() { return M.w - M.left - M.right; }
-  function plotH() { return M.h - M.top - M.bottom; }
+  var state = windowState({ tablePage: 0, staircase: false });
 
-  var state = {
-    // No range until the server answers: the first load asks for the window
-    // this member last picked rather than naming one over the top of it.
-    range: null, data: null, tablePage: 0, scale: null, staircase: false
-  };
-
-  // A pinned touch selection listens on the whole page, so the chart it
-  // belongs to is torn down before another one is drawn.
-  var detachHover = null;
-
-  var legend = document.getElementById("legend");
-  var chart = document.getElementById("chart");
-  var chartStatus = document.getElementById("chart-status");
-  var chartMode = document.getElementById("chart-mode");
   var nowCount = document.getElementById("now-count");
   var pendingBox = document.getElementById("pending");
   var pendingStatus = document.getElementById("pending-status");
   var pendingCount = document.getElementById("pending-count");
-  var totals = document.getElementById("totals");
-  var tableBox = document.getElementById("table");
-  var pager = document.getElementById("pager");
 
-"""
-    + CHART_HELPERS_JS
-    + CHART_HOVER_JS
-    + """
-  function points() { return (state.data && state.data.points) || []; }
   function events() { return (state.data && state.data.events) || []; }
 
-  function traceMode(mode, count) {
-    console.debug("roster chart mode:", mode, count);
-  }
   function kindOf(kind) { return KINDS[kind] || KINDS.leave; }
 
   // The axis covers the counts actually reached in the window, padded out to
@@ -371,15 +188,6 @@ table.changes td.unmatched { color: var(--muted); }
       if (low < 0) { low = 0; step = CEILING / 4; }
     }
     return { low: low, high: high, step: step };
-  }
-
-  function scaleY(count) {
-    var scale = state.scale;
-    var span = scale.high - scale.low;
-    var value = count;
-    if (value < scale.low) { value = scale.low; }
-    if (value > scale.high) { value = scale.high; }
-    return M.top + (1 - (value - scale.low) / span) * plotH();
   }
 
   // "Jun 17": as much of a moment as a narrow column has room for. What it
@@ -434,11 +242,9 @@ table.changes td.unmatched { color: var(--muted); }
       formatAge(Math.max(0, Math.floor(Date.now() / 1000 - t)));
   }
 
+
   function renderChart() {
-    M = metrics();
-    state.scale = computeScale();
-    if (detachHover) { detachHover(); detachHover = null; }
-    chart.replaceChildren();
+    resetChart();
     if (!state.scale) {
       chartStatus.textContent = state.data
         ? "No guild member count has been recorded yet, so the roster line " +
@@ -446,51 +252,10 @@ table.changes td.unmatched { color: var(--muted); }
         : "";
       return;
     }
-    var canvas = svg("svg", {
-      "class": "chart-svg",
-      viewBox: "0 0 " + M.w + " " + M.h,
-      role: "img",
-      "aria-label": "Guild member count over time, with one dot per change"
-    });
-
-    // Horizontal gridlines and y labels at every step of the computed scale.
-    for (var value = state.scale.low;
-         value <= state.scale.high;
-         value += state.scale.step) {
-      var y = scaleY(value);
-      canvas.appendChild(svg("line", {
-        "class": value === state.scale.low ? "axis" : "grid",
-        x1: M.left, y1: y, x2: M.left + plotW(), y2: y
-      }));
-      var yLabel = svg("text", {
-        "class": "y-label", x: M.left - 6, y: y + 4
-      });
-      yLabel.textContent = String(value);
-      canvas.appendChild(yLabel);
-    }
-
-    // Left axis, plus x labels spaced evenly across the whole window so the
-    // range spans the full width even when little happened.
-    canvas.appendChild(svg("line", {
-      "class": "axis",
-      x1: M.left, y1: M.top, x2: M.left, y2: M.top + plotH()
-    }));
-    for (var i = 0; i <= M.ticks; i += 1) {
-      var t = state.data.since +
-        (state.data.now - state.data.since) * (i / M.ticks);
-      var x = scaleX(t);
-      var xLabel = svg("text", {
-        "class": "x-label", x: x, y: M.top + plotH() + 18
-      });
-      // The outermost labels sit on the plot's own edges, so centring them
-      // would hang half of each one off the chart and the browser would clip
-      // it. They are tucked inwards instead - by class, because the
-      // stylesheet's text-anchor would win over a presentation attribute.
-      if (i === 0) { xLabel.classList.add("first"); }
-      if (i === M.ticks) { xLabel.classList.add("last"); }
-      xLabel.textContent = formatTick(t);
-      canvas.appendChild(xLabel);
-    }
+    var canvas = chartCanvas(
+      "Guild member count over time, with one dot per change");
+    drawGrid(canvas, state.scale, scaleY, String);
+    drawTimeAxis(canvas, true);
 
     // Regular mode connects recorded counts directly. Staircase mode inserts
     // the previous count at each new timestamp before drawing the jump.
@@ -504,11 +269,7 @@ table.changes td.unmatched { color: var(--muted); }
       }
       coords.push(px.toFixed(1) + "," + py.toFixed(1));
     });
-    if (coords.length > 1) {
-      canvas.appendChild(svg("polyline", {
-        "class": "count-line", stroke: LINE_COLOR, points: coords.join(" ")
-      }));
-    }
+    if (coords.length > 1) { drawLine(canvas, coords, LINE_COLOR); }
 
     // One dot per change, in its kind's colour. Every change is drawn; the
     // series is never downsampled. Each dot is collected so the hover can
@@ -518,63 +279,17 @@ table.changes td.unmatched { color: var(--muted); }
       if (event.count === null) { return; }
       var px = scaleX(event.t);
       var py = scaleY(event.count);
-      canvas.appendChild(svg("circle", {
-        "class": "event-dot",
-        cx: px.toFixed(1),
-        cy: py.toFixed(1),
-        r: 4,
-        fill: kindOf(event.kind).color
-      }));
-      plotted.push({ x: px, y: py, event: event });
+      drawDot(canvas, px, py, 4, kindOf(event.kind).color);
+      plotted.push({ x: px, y: py, t: event.t, event: event });
     });
 
-    detachHover = attachHover(canvas, plotted);
-    chart.appendChild(canvas);
-    chartStatus.textContent = plotted.length
-      ? ""
-      : "No members joined or left in this period.";
+    showChart(canvas, plotted, "No members joined or left in this period.");
   }
 
-  chartMode.addEventListener("click", function () {
-    state.staircase = !state.staircase;
-    chartMode.textContent = state.staircase ? "⎿" : "╱";
-    chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
-    chartMode.setAttribute("aria-label", state.staircase
-      ? "Switch to regular line graph" : "Switch to staircase graph");
-    traceMode(state.staircase ? "staircase" : "regular", points().length);
-    renderChart();
-  });
-
-  // Changes that share a moment form a single column, so the crosshair snaps
-  // to one x and the tooltip lists everything recorded there.
-  function groupColumns(plotted) {
-    var byTime = {};
-    var columns = [];
-    plotted.forEach(function (point) {
-      var key = String(point.event.t);
-      var column = byTime[key];
-      if (!column) {
-        column = { t: point.event.t, x: point.x, points: [] };
-        byTime[key] = column;
-        columns.push(column);
-      }
-      column.points.push(point);
-    });
-    return columns;
-  }
-
-  // Sanitized tracing for the tap selection lifecycle, so a console trace can
-  // explain why a selection opened, moved or went away. Every call passes a
-  // fixed action name, one of the narrowed reason names above, and a count of
-  // drawn elements. Account names, timestamps and member counts are never
-  // passed, so no part of the payload or of the reader's gesture reaches the
-  // console. debug keeps it out of the default console view.
-  function traceSelection(action, reason, count) {
-    console.debug("roster chart selection:", action, reason, count);
-  }
+  bindChartMode(function () { return points().length; }, renderChart);
 
   function attachHover(canvas, plotted) {
-    return attachChartHover(canvas, groupColumns(plotted), {
+    return attachChartHover(canvas, columnsByTime(plotted), {
       host: chart,
       emptyReason: "no-changes",
       ringColor: function (point) { return kindOf(point.event.kind).color; },
@@ -610,116 +325,57 @@ table.changes td.unmatched { color: var(--muted); }
   }
 
   function renderLegend() {
-    legend.replaceChildren();
-    KIND_ORDER.forEach(function (kind) {
-      var item = el("span", "item");
-      item.setAttribute("role", "listitem");
-      var swatch = el("span", "swatch");
-      swatch.style.background = KINDS[kind].color;
-      item.appendChild(swatch);
-      item.appendChild(el("span", "legend-name", KINDS[kind].label));
-      legend.appendChild(item);
-    });
+    renderKeyLegend(KIND_ORDER.map(function (kind) { return KINDS[kind]; }));
   }
 
   function renderTotals() {
-    totals.replaceChildren();
-    if (!state.data) { return; }
-    [
-      ["Joined", state.data.joins],
-      ["Left", state.data.leaves],
-      ["Kicked", state.data.kicks]
-    ].forEach(function (pair) {
-      var item = el("span", null);
-      item.appendChild(el("span", "num", String(pair[1] || 0)));
-      item.appendChild(document.createTextNode(" " + pair[0].toLowerCase()));
-      totals.appendChild(item);
-    });
-    // A preset window runs to the moment of the request, so its closing
-    // count is the count now; a picked one can close months ago, where the
-    // only thing that count is true of is the window's own end.
+    renderTotalsLine([
+      [String(state.data.joins || 0), "joined"],
+      [String(state.data.leaves || 0), "left"],
+      [String(state.data.kicks || 0), "kicked"]
+    ]);
     nowCount.textContent = state.data.member_count === null ||
       state.data.member_count === undefined
       ? ""
-      : "\\u2014 " + state.data.member_count +
-        (state.range === "custom" ? " at the end" : " now");
+      : closingFigure(String(state.data.member_count));
   }
+
+  var CHANGE_COLUMNS = [
+    TIME_COLUMN,
+    ACCOUNT_COLUMN,
+    {
+      heading: "Change",
+      className: "change",
+      fill: function (cell, change) {
+        var dot = el("span", "dot");
+        dot.style.background = kindOf(change.kind).color;
+        cell.appendChild(dot);
+        // The name of the change is its own element so the phone layout can
+        // put it out of sight and leave the dot standing for it.
+        cell.appendChild(
+          el("span", "change-label", kindOf(change.kind).label));
+      }
+    },
+    {
+      heading: "By",
+      className: "by",
+      fill: textFill(function (change) { return change.actor || ""; })
+    },
+    {
+      heading: "Members",
+      head: null,
+      className: "num",
+      fill: textFill(function (change) {
+        return change.count === null ? "" : String(change.count);
+      })
+    }
+  ];
 
   function renderTable() {
-    tableBox.replaceChildren();
-    pager.replaceChildren();
-    var changes = events();
-    if (!changes.length) {
-      tableBox.appendChild(
-        el("div", "empty", "No members joined or left in this period."));
-      return;
-    }
-    var pageCount = Math.ceil(changes.length / TABLE_PAGE_SIZE);
-    if (state.tablePage > pageCount - 1) { state.tablePage = pageCount - 1; }
-    var start = state.tablePage * TABLE_PAGE_SIZE;
-    var pageRows = changes.slice(start, start + TABLE_PAGE_SIZE);
-
-    var table = el("table", "changes");
-    var head = el("tr");
-    head.appendChild(el("th", null, "Time"));
-    head.appendChild(el("th", null, "Account"));
-    head.appendChild(el("th", "change", "Change"));
-    var byHead = el("th", "by", "By");
-    head.appendChild(byHead);
-    head.appendChild(el("th", "num", "Members"));
-    table.appendChild(head);
-    pageRows.forEach(function (change) {
-      var row = el("tr");
-      row.appendChild(el("td", null, formatMoment(change.t)));
-      row.appendChild(el("td", "name", change.name));
-      var kindCell = el("td", "change");
-      var dot = el("span", "dot");
-      dot.style.background = kindOf(change.kind).color;
-      kindCell.appendChild(dot);
-      // The name of the change is its own element so the phone layout can put
-      // it out of sight and leave the dot standing for it.
-      kindCell.appendChild(
-        el("span", "change-label", kindOf(change.kind).label));
-      row.appendChild(kindCell);
-      row.appendChild(el("td", "by", change.actor || ""));
-      row.appendChild(el("td", "num",
-        change.count === null ? "" : String(change.count)));
-      table.appendChild(row);
-    });
-    tableBox.appendChild(table);
-
-    var prev = el("button", null, "Prev");
-    prev.type = "button";
-    prev.disabled = state.tablePage <= 0;
-    prev.addEventListener("click", function () {
-      if (state.tablePage > 0) { state.tablePage -= 1; renderTable(); }
-    });
-    var next = el("button", null, "Next");
-    next.type = "button";
-    next.disabled = state.tablePage >= pageCount - 1;
-    next.addEventListener("click", function () {
-      if (state.tablePage < pageCount - 1) {
-        state.tablePage += 1;
-        renderTable();
-      }
-    });
-    pager.appendChild(prev);
-    pager.appendChild(next);
-    pager.appendChild(el("span", null,
-      "Page " + (state.tablePage + 1) + " of " + pageCount +
-      " (" + changes.length + " changes)"));
+    renderHistoryTable(events(), CHANGE_COLUMNS,
+      "No members joined or left in this period.", "changes");
   }
 
-  function render() {
-    renderLegend();
-    renderTotals();
-    renderChart();
-    renderTable();
-  }
-
-"""
-    + range_picker_js("roster")
-    + """
   // Sanitized tracing for the pending invite section: a fixed action name and
   // a count of rows. No account name, Discord name or payload is ever passed.
   function tracePending(action, count) {
@@ -860,7 +516,7 @@ table.changes td.unmatched { color: var(--muted); }
     }
     // Its own class, because the membership table's "By" column is hidden on
     // a phone and this table's second column is the section's whole point.
-    var table = el("table", "changes pending");
+    var table = el("table", "data-table changes pending");
     var head = el("tr");
     head.appendChild(el("th", null, "Account"));
     head.appendChild(el("th", null, "Discord"));
@@ -898,15 +554,7 @@ table.changes td.unmatched { color: var(--muted); }
   // when the range changes.
   function loadPending() {
     pendingStatus.textContent = "Loading\\u2026";
-    fetch("/api/pending")
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login";
-          throw new Error("unauthorized");
-        }
-        if (!response.ok) { throw new Error("failed"); }
-        return response.json();
-      })
+    fetchJson("/api/pending")
       .then(function (payload) {
         if (!payload.available) {
           pendingBox.replaceChildren();
@@ -936,74 +584,18 @@ table.changes td.unmatched { color: var(--muted); }
       })
       .catch(function (error) {
         // renderPending() runs inside this chain, so a drawing fault lands
-        // here too. Only the error's type and message are logged; no request,
-        // response or payload is ever passed through.
-        console.error(
-          "pending invite load failed:",
-          error && error.name, error && error.message);
+        // here too.
+        logFailure("pending invite load", error);
         pendingStatus.textContent = "Could not load the pending invites.";
       });
   }
 
   function refresh() {
-    chartStatus.textContent = "Loading\\u2026";
-    fetch("/api/roster" + rangeQuery())
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login";
-          throw new Error("unauthorized");
-        }
-        if (!response.ok) { throw new Error("failed"); }
-        return response.json();
-      })
-      .then(function (payload) {
-        state.data = payload;
-        adoptRange(payload.range, payload.since, payload.now);
-        state.tablePage = 0;
-        render();
-      })
-      .catch(function (error) {
-        // render() runs inside this chain, so a drawing fault lands here and
-        // otherwise reads as a failed request with nothing in the console to
-        // trace. Only the error's type and message are logged; no request,
-        // response or payload is ever passed through.
-        console.error(
-          "roster history load failed:",
-          error && error.name, error && error.message);
-        if (chartStatus.textContent === "Loading\\u2026") {
-          chartStatus.textContent = "Could not load the roster history.";
-        }
-      });
+    loadHistory("/api/roster", "roster history",
+      "Could not load the roster history.");
   }
-
-"""
-    + RANGE_PICKER_LISTENERS_JS
-    + """
-  // Redraw when the breakpoint flips so the chart adopts the layout for the
-  // new width.
-  mobileQuery.addEventListener("change", function () {
-    if (state.data) { render(); }
-  });
-
-  fetch("/api/me")
-    .then(function (response) {
-      if (response.status === 401) {
-        location.href = "/login";
-        throw new Error("unauthorized");
-      }
-      return response.json();
-    })
-    .then(function (payload) {
-      document.getElementById("whoami").textContent = payload.name || "";
-    })
-    .catch(function () {});
-
-  syncRangeButtons();
-  refresh();
+""",
+    start="""
   loadPending();
-})();
-</script>
-</body>
-</html>
-"""
+""",
 )
