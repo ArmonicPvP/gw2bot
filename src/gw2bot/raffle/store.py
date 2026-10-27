@@ -1066,7 +1066,7 @@ class RaffleStore:
 
     def _pending_records(
         self,
-        statement: Select[tuple[RecordT]],
+        statement: Select[RecordT],
         convert: Callable[[RecordT], ValueT],
         log_message: str,
     ) -> list[ValueT]:

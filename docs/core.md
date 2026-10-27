@@ -5,7 +5,10 @@
 `core/` holds what every feature shares and nothing that knows about a
 feature: the SQLite engine and its migrations, the redacting log formatter,
 the Discord role and failure helpers, the anchored-series maths, and the
-vocabulary a dashboard range is written in.
+vocabulary a dashboard range is written in, and message framing that keeps
+whole entries inside Discord's size limit. `anchored_series` also selects a
+history window and builds its boundary points; feature modules supply their
+own observations and turn the resulting values into their own page models.
 
 The dependency only ever points one way. Any package may import `core/`;
 nothing in `core/` may import anything else under `gw2bot` - not a feature
@@ -40,3 +43,4 @@ When something in `core/` looks like it needs a feature:
 `gw2/guild_log.py` imports `raffle` to parse gold deposits and render their
 embed, so the layer is deliberately not pure, and extending the assertion to
 `gw2/` would fail until that import is dealt with.
+
