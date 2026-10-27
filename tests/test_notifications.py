@@ -303,6 +303,7 @@ class TestAutomatedMessageDiagnostics:
             "**Event created audit log (test)**",
             "**Event edited audit log (test)**",
             "**Event deleted audit log (test)**",
+            "**Event restored audit log (test)**",
         ]
         for call_ in audits.values():
             mentions = call_.kwargs["allowed_mentions"]
@@ -340,10 +341,10 @@ class TestAutomatedMessageDiagnostics:
             "Prepared automated message diagnostics; messages=14 contributors=1"
             in caplog.text
         )
-        assert caplog.text.count("Attempting automated diagnostic delivery") == 21
-        assert caplog.text.count("Automated diagnostic delivery succeeded") == 21
+        assert caplog.text.count("Attempting automated diagnostic delivery") == 22
+        assert caplog.text.count("Automated diagnostic delivery succeeded") == 22
         assert (
-            "Automated message diagnostics completed; attempted=21 delivered=21 "
+            "Automated message diagnostics completed; attempted=22 delivered=22 "
             "failed=0"
             in caplog.text
         )
@@ -355,7 +356,7 @@ class TestAutomatedMessageDiagnostics:
         secret = "diagnostic-failure-secret"
         channel = SimpleNamespace(
             send=AsyncMock(
-                side_effect=[None, RuntimeError(secret)] + [None] * 19
+                side_effect=[None, RuntimeError(secret)] + [None] * 20
             )
         )
         bot = SimpleNamespace(
@@ -374,7 +375,7 @@ class TestAutomatedMessageDiagnostics:
                 datetime(2026, 6, 12, 14, 30, tzinfo=UTC),
             )
 
-        assert channel.send.await_count == 21
+        assert channel.send.await_count == 22
         assert secret not in caplog.text
         assert (
             "Automated diagnostic delivery failed; kind=contribution-report "
@@ -382,7 +383,7 @@ class TestAutomatedMessageDiagnostics:
             in caplog.text
         )
         assert (
-            "Automated message diagnostics completed; attempted=21 delivered=20 "
+            "Automated message diagnostics completed; attempted=22 delivered=21 "
             "failed=1"
             in caplog.text
         )

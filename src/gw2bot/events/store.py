@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.core.database import (
+    Base,
     EventAutoSignupRecord,
     EventMenteeOptOutRecord,
     EventOccurrenceRecord,
@@ -17,6 +20,7 @@ from gw2bot.core.database import (
     EventRunRecord,
     EventSignupPreferenceRecord,
     EventSignupRecord,
+    EventSnapshotRecord,
     SettingRecord,
     create_database_engine,
     initialize_database,
@@ -31,12 +35,17 @@ from gw2bot.events.models import (
     EventRun,
     EventRunParticipant,
     EventSignup,
+    EventSnapshot,
     EventStatus,
     MenteeStatus,
     PreferenceMode,
     RepeatFrequency,
+    RestoredEvent,
     RosterAssignment,
+    SNAPSHOT_RETENTION,
     SignupPreference,
+    SnapshotKind,
+    SnapshotRun,
     settle_mentee,
 )
 
@@ -401,6 +410,156 @@ def _parse_mentee(value: str) -> MenteeStatus:
         return MenteeStatus.NONE
 
 
+def _row_values(record: Base) -> dict[str, Any]:
+    """A stored row as its column values, which is how a snapshot keeps it."""
+    return {
+        column.key: getattr(record, column.key)
+        for column in record.__table__.columns
+    }
+
+
+def _known_values(
+    record_type: type[Base],
+    values: dict[str, Any],
+    **overrides: Any,
+) -> dict[str, Any]:
+    # A column a later release dropped is left out rather than refused, so a
+    # snapshot taken before an upgrade can still be restored after it.
+    known = {column.key for column in record_type.__table__.columns}
+    kept = {key: value for key, value in values.items() if key in known}
+    return {**kept, **overrides}
+
+
+# The rows a deletion removes for an event as a whole rather than for one of
+# its runs, by the key a deletion snapshot keeps them under.
+_PER_EVENT_RECORDS = (
+    ("auto_signups", EventAutoSignupRecord),
+    ("preferences", EventSignupPreferenceRecord),
+    ("mentee_opt_outs", EventMenteeOptOutRecord),
+)
+
+
+def _deletion_payload(
+    session: Session,
+    event: EventRecord,
+    occurrence_ids: Sequence[int],
+) -> dict[str, Any]:
+    """Everything a deletion is about to remove, for a snapshot to put back.
+
+    The removed runs are kept by their start alone: a restored run comes back
+    as a new row with no message, because the deletion takes its post down.
+    Their sign-ups and the reminders they had already handled go with them,
+    so a restored run neither loses its roster nor pings it twice.
+    """
+    runs: list[dict[str, Any]] = []
+    if occurrence_ids:
+        for occurrence in session.scalars(
+            select(EventOccurrenceRecord)
+            .where(EventOccurrenceRecord.occurrence_id.in_(occurrence_ids))
+            .order_by(EventOccurrenceRecord.start_time)
+        ).all():
+            runs.append(
+                {
+                    "start_time": occurrence.start_time,
+                    "signups": [
+                        _row_values(signup)
+                        for signup in session.scalars(
+                            select(EventSignupRecord).where(
+                                EventSignupRecord.occurrence_id
+                                == occurrence.occurrence_id
+                            )
+                        ).all()
+                    ],
+                    "reminders": [
+                        _row_values(reminder)
+                        for reminder in session.scalars(
+                            select(EventReminderRecord).where(
+                                EventReminderRecord.occurrence_id
+                                == occurrence.occurrence_id
+                            )
+                        ).all()
+                    ],
+                }
+            )
+    per_event: dict[str, list[dict[str, Any]]] = {}
+    for key, record_type in _PER_EVENT_RECORDS:
+        per_event[key] = [
+            _row_values(record)
+            for record in session.scalars(
+                select(record_type).where(
+                    record_type.event_id == event.event_id
+                )
+            ).all()
+        ]
+    return {"event": _row_values(event), "runs": runs, **per_event}
+
+
+def _keep_snapshot(
+    session: Session,
+    event_id: int,
+    kind: SnapshotKind,
+    payload: dict[str, Any],
+    now: datetime,
+) -> None:
+    # Merged, so the change replaces whatever the event's last one was: only
+    # the most recent change can be undone.
+    session.merge(
+        EventSnapshotRecord(
+            event_id=event_id,
+            kind=kind.value,
+            taken_at=_serialize_time(now),
+            payload=json.dumps(payload, separators=(",", ":")),
+        )
+    )
+    LOGGER.debug(
+        "Kept an event snapshot; event_id=%s kind=%s runs=%s",
+        event_id,
+        kind.value,
+        len(payload.get("runs", ())),
+    )
+
+
+def _drop_snapshot(session: Session, event_id: int) -> None:
+    session.execute(
+        delete(EventSnapshotRecord).where(
+            EventSnapshotRecord.event_id == event_id
+        )
+    )
+
+
+def _read_snapshot(record: EventSnapshotRecord) -> EventSnapshot | None:
+    # A snapshot nothing can read is skipped rather than raised on, so one
+    # bad row cannot take the restore autocomplete or command down with it.
+    try:
+        payload = json.loads(record.payload)
+        runs = payload.get("runs", [])
+        return EventSnapshot(
+            kind=SnapshotKind(record.kind),
+            taken_at=_parse_time(record.taken_at),
+            event=_event_from_record(
+                EventRecord(**_known_values(EventRecord, payload["event"]))
+            ),
+            removed_runs=tuple(
+                sorted(
+                    (
+                        SnapshotRun(
+                            start_time=_parse_time(run["start_time"]),
+                            signups=len(run["signups"]),
+                        )
+                        for run in runs
+                    ),
+                    key=lambda run: run.start_time,
+                )
+            ),
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        LOGGER.warning(
+            "Skipping an unreadable event snapshot; event_id=%s",
+            record.event_id,
+        )
+        return None
+
+
 class EventStore:
     def __init__(self, database_path: str):
         LOGGER.debug("Opening event store")
@@ -452,6 +611,18 @@ class EventStore:
                 mentee_enabled=mentee_enabled,
                 max_participants=max_participants,
             )
+            # SQLite hands the highest deleted id to the next row, which would
+            # give a new event the id of one `/event restore` can still put
+            # back. A deleted event keeps its id while its snapshot does.
+            held = session.scalar(
+                select(func.max(EventSnapshotRecord.event_id)).where(
+                    EventSnapshotRecord.kind == SnapshotKind.DELETE.value
+                )
+            )
+            if held is not None:
+                newest = session.scalar(select(func.max(EventRecord.event_id)))
+                if newest is None or held >= newest:
+                    record.event_id = held + 1
             session.add(record)
             session.commit()
             LOGGER.debug(
@@ -486,11 +657,23 @@ class EventStore:
         requirements: str = "",
         mentee_enabled: bool = False,
         max_participants: int | None = None,
+        remember_previous: bool = False,
+        consume_snapshot: bool = False,
+        now: datetime | None = None,
     ) -> Event:
+        """Save an event's details.
+
+        ``remember_previous`` keeps the row as it stood before as the event's
+        snapshot, for `/event restore` to put back, when the save changes it:
+        a save that changes nothing must not replace an edit that can still
+        be undone. ``consume_snapshot`` drops the snapshot instead, for the
+        save that puts it back. Neither touches it otherwise.
+        """
         with self._sessions() as session:
             record = session.get(EventRecord, event_id)
             if record is None:
                 raise ValueError(f"Unknown event {event_id}")
+            previous = _row_values(record)
             leader_changed = record.leader_discord_id != leader_discord_id
             record.category = category.value
             record.title = title
@@ -518,11 +701,26 @@ class EventStore:
                     )
                 ).all():
                     _settle_mentee(session, occurrence_id)
+            remembered = (
+                remember_previous
+                and not consume_snapshot
+                and _row_values(record) != previous
+            )
+            if consume_snapshot:
+                _drop_snapshot(session, event_id)
+            if remembered:
+                _keep_snapshot(
+                    session,
+                    event_id,
+                    SnapshotKind.EDIT,
+                    {"event": previous},
+                    now if now is not None else datetime.now(UTC),
+                )
             session.commit()
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "
                 "title_characters=%s ping_roles=%s mentee_enabled=%s "
-                "max_participants=%s",
+                "max_participants=%s snapshot_kept=%s snapshot_consumed=%s",
                 event_id,
                 category.value,
                 repeat_frequency.value,
@@ -530,6 +728,8 @@ class EventStore:
                 len(ping_role_ids),
                 mentee_enabled,
                 max_participants,
+                remembered,
+                consume_snapshot,
             )
             return _event_from_record(record)
 
@@ -1211,13 +1411,32 @@ class EventStore:
             occurrence_id,
         )
 
-    def delete_event(self, event_id: int) -> None:
+    def delete_event(
+        self,
+        event_id: int,
+        *,
+        remember: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        """Remove an event with every run, sign-up and setting it has.
+
+        ``remember`` keeps all of it as the event's snapshot, replacing any
+        earlier one, so `/event restore` can put it back. Without it the
+        snapshot goes too: an event that is gone has no edit left to undo.
+        An event that was already gone keeps whatever snapshot it has.
+        """
         with self._sessions() as session:
             occurrence_ids = session.scalars(
                 select(EventOccurrenceRecord.occurrence_id).where(
                     EventOccurrenceRecord.event_id == event_id
                 )
             ).all()
+            record = session.get(EventRecord, event_id)
+            payload = (
+                _deletion_payload(session, record, occurrence_ids)
+                if remember and record is not None
+                else None
+            )
             if occurrence_ids:
                 session.execute(
                     delete(EventSignupRecord).where(
@@ -1255,18 +1474,36 @@ class EventStore:
             session.execute(
                 delete(EventRecord).where(EventRecord.event_id == event_id)
             )
+            if payload is None:
+                # An event already gone leaves its snapshot alone: that is a
+                # second confirmation of a deletion that has happened, and
+                # the snapshot is what can still undo the first one.
+                if record is not None:
+                    _drop_snapshot(session, event_id)
+            else:
+                _keep_snapshot(
+                    session,
+                    event_id,
+                    SnapshotKind.DELETE,
+                    payload,
+                    now if now is not None else datetime.now(UTC),
+                )
             session.commit()
         LOGGER.debug(
             "Deleted event with its occurrences and signups; event_id=%s "
-            "occurrences=%s",
+            "occurrences=%s remembered=%s",
             event_id,
             len(occurrence_ids),
+            payload is not None,
         )
 
     def retire_event(
         self,
         event_id: int,
         occurrence_ids: Sequence[int],
+        *,
+        remember: bool = False,
+        now: datetime | None = None,
     ) -> None:
         """Remove the listed runs of an event and keep the rest as history.
 
@@ -1284,8 +1521,23 @@ class EventStore:
         auto-signups and remembered roles go with the removed runs, as they do
         on a full deletion: they only ever feed a run still to come. So do the
         members' answers to the mentee question.
+
+        ``remember`` keeps what is removed as the event's snapshot, as
+        ``delete_event`` does, unless nothing is: deleting an event that was
+        already retired must not replace the snapshot that can bring it back.
         """
         with self._sessions() as session:
+            record = session.get(EventRecord, event_id)
+            payload = (
+                _deletion_payload(session, record, occurrence_ids)
+                if remember and record is not None
+                else None
+            )
+            if payload is not None and not any(
+                payload[key]
+                for key in ("runs", *(key for key, _ in _PER_EVENT_RECORDS))
+            ):
+                payload = None
             if occurrence_ids:
                 session.execute(
                     delete(EventSignupRecord).where(
@@ -1356,15 +1608,204 @@ class EventStore:
                     needs_refresh=False,
                 )
             )
+            if payload is not None:
+                _keep_snapshot(
+                    session,
+                    event_id,
+                    SnapshotKind.DELETE,
+                    payload,
+                    now if now is not None else datetime.now(UTC),
+                )
             session.commit()
         LOGGER.debug(
             "Retired event, keeping the runs it has finished; event_id=%s "
-            "occurrences_removed=%s occurrences_retired=%s runs_recorded=%s",
+            "occurrences_removed=%s occurrences_retired=%s runs_recorded=%s "
+            "remembered=%s",
             event_id,
             len(occurrence_ids),
             retired,
             recorded,
+            payload is not None,
         )
+
+    def get_snapshot(
+        self,
+        event_id: int,
+        now: datetime | None = None,
+    ) -> EventSnapshot | None:
+        """The change to an event `/event restore` can still undo, if any."""
+        current_time = now if now is not None else datetime.now(UTC)
+        with self._sessions() as session:
+            record = session.scalars(
+                select(EventSnapshotRecord)
+                .where(EventSnapshotRecord.event_id == event_id)
+                .where(
+                    EventSnapshotRecord.taken_at
+                    >= _serialize_time(current_time - SNAPSHOT_RETENTION)
+                )
+            ).first()
+            return _read_snapshot(record) if record is not None else None
+
+    def get_snapshots(
+        self,
+        now: datetime | None = None,
+    ) -> list[EventSnapshot]:
+        """Every change `/event restore` can still undo, newest first."""
+        current_time = now if now is not None else datetime.now(UTC)
+        with self._sessions() as session:
+            records = session.scalars(
+                select(EventSnapshotRecord)
+                .where(
+                    EventSnapshotRecord.taken_at
+                    >= _serialize_time(current_time - SNAPSHOT_RETENTION)
+                )
+                .order_by(EventSnapshotRecord.taken_at.desc())
+            ).all()
+            snapshots = [_read_snapshot(record) for record in records]
+        return [snapshot for snapshot in snapshots if snapshot is not None]
+
+    def restore_deleted_event(
+        self,
+        event_id: int,
+        now: datetime | None = None,
+    ) -> RestoredEvent | None:
+        """Put back the event a deletion took down, and drop its snapshot.
+
+        The event row comes back as it was, with its id and creation time, so
+        its run history is still read as its own - unless the deletion kept
+        the row for the runs it had already put on, which then stays. Each
+        removed run still live at ``now`` comes back as a new row with no
+        message, flagged so the maintenance pass posts it if the caller does
+        not, with its sign-ups and the reminders it had already handled. The
+        runs that finished while the event was gone are left out. Automatic
+        sign-ups, remembered roles and mentee answers come back too, without
+        overwriting any a member has given since.
+
+        Returns None, changing nothing, when there is no deletion left to
+        undo or the event does not repeat and its run is over. Raises
+        ValueError when the event's id belongs to another event.
+        """
+        current_time = now if now is not None else datetime.now(UTC)
+        with self._sessions() as session:
+            record = session.get(EventSnapshotRecord, event_id)
+            snapshot = _read_snapshot(record) if record is not None else None
+            if (
+                record is None
+                or snapshot is None
+                or snapshot.kind is not SnapshotKind.DELETE
+                or snapshot.taken_at < current_time - SNAPSHOT_RETENTION
+                or not snapshot.can_restore(current_time)
+            ):
+                LOGGER.debug(
+                    "No deleted event to restore; event_id=%s snapshot=%s",
+                    event_id,
+                    snapshot.kind.value if snapshot is not None else None,
+                )
+                return None
+            payload = json.loads(record.payload)
+            event_record = session.get(EventRecord, event_id)
+            if event_record is None:
+                event_record = EventRecord(
+                    **_known_values(EventRecord, payload["event"])
+                )
+                session.add(event_record)
+            elif event_record.created_at != payload["event"]["created_at"]:
+                raise ValueError(f"Event {event_id} is another event now")
+            duration = timedelta(minutes=event_record.duration_minutes)
+            occurrences: list[EventOccurrenceRecord] = []
+            dropped = 0
+            signups = 0
+            runs = sorted(payload["runs"], key=lambda run: run["start_time"])
+            for run in runs:
+                if _parse_time(run["start_time"]) + duration <= current_time:
+                    dropped += 1
+                    continue
+                occurrence = EventOccurrenceRecord(
+                    event_id=event_id,
+                    start_time=run["start_time"],
+                    message_id=None,
+                    thread_id=None,
+                    status=EventStatus.OPEN.value,
+                    needs_refresh=True,
+                )
+                session.add(occurrence)
+                # The sign-ups are keyed by the new row, so its id is needed.
+                session.flush()
+                for values in run["signups"]:
+                    session.add(
+                        EventSignupRecord(
+                            **_known_values(
+                                EventSignupRecord,
+                                values,
+                                occurrence_id=occurrence.occurrence_id,
+                            )
+                        )
+                    )
+                for values in run["reminders"]:
+                    session.add(
+                        EventReminderRecord(
+                            **_known_values(
+                                EventReminderRecord,
+                                values,
+                                occurrence_id=occurrence.occurrence_id,
+                            )
+                        )
+                    )
+                occurrences.append(occurrence)
+                signups += len(run["signups"])
+            restored_settings = 0
+            for key, record_type in _PER_EVENT_RECORDS:
+                for values in payload.get(key, []):
+                    if (
+                        session.get(
+                            record_type,
+                            (event_id, values["discord_user_id"]),
+                        )
+                        is not None
+                    ):
+                        continue
+                    session.add(
+                        record_type(**_known_values(record_type, values))
+                    )
+                    restored_settings += 1
+            session.delete(record)
+            session.commit()
+            LOGGER.debug(
+                "Restored a deleted event; event_id=%s runs_restored=%s "
+                "runs_dropped=%s signups=%s settings_restored=%s",
+                event_id,
+                len(occurrences),
+                dropped,
+                signups,
+                restored_settings,
+            )
+            return RestoredEvent(
+                event=_event_from_record(event_record),
+                occurrences=tuple(
+                    _occurrence_from_record(occurrence)
+                    for occurrence in occurrences
+                ),
+                dropped=dropped,
+            )
+
+    def purge_snapshots(self, now: datetime | None = None) -> int:
+        """Drop the snapshots too old to restore. Returns how many went."""
+        current_time = now if now is not None else datetime.now(UTC)
+        expired = EventSnapshotRecord.taken_at < _serialize_time(
+            current_time - SNAPSHOT_RETENTION
+        )
+        with self._sessions() as session:
+            purged = session.scalar(
+                select(func.count())
+                .select_from(EventSnapshotRecord)
+                .where(expired)
+            )
+            if purged:
+                session.execute(delete(EventSnapshotRecord).where(expired))
+                session.commit()
+        if purged:
+            LOGGER.debug("Purged expired event snapshots; count=%s", purged)
+        return purged or 0
 
     def has_posted_occurrence(self, event_id: int) -> bool:
         with self._sessions() as session:

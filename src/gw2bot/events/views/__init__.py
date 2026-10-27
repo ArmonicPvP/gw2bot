@@ -3,7 +3,8 @@
 One module per flow. `shared` is the leaf they all build on, `preview` renders
 the draft each flow returns to, and the rest are the flows themselves: creating
 an event, changing one field of it, editing its roster, applying or undoing the
-edit, and signing up to the posted message.
+edit, restoring a deleted or edited event, and signing up to the posted
+message.
 """
 from gw2bot.events.views.create import (
     ContinueToRepeatView as ContinueToRepeatView,
@@ -48,6 +49,10 @@ from gw2bot.events.views.preview import (
     build_details_preview as build_details_preview,
     build_event_preview as build_event_preview,
     send_event_preview as send_event_preview,
+)
+from gw2bot.events.views.restore import (
+    EventRestoreConfirmView as EventRestoreConfirmView,
+    open_event_restore as open_event_restore,
 )
 from gw2bot.events.views.roster import (
     AddSignupsRoleSelect as AddSignupsRoleSelect,

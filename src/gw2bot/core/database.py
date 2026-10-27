@@ -981,6 +981,33 @@ class EventRunParticipantRecord(Base):
     mentee: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class EventSnapshotRecord(Base):
+    """The one change to an event that `/event restore` can still undo.
+
+    Written in the transaction that makes the change: an edit keeps the event
+    row as it stood before it, a deletion keeps the event and everything the
+    deletion removed. There is one per event, so each change replaces the last
+    and only the most recent can be undone, and none is offered once it is
+    more than a week old.
+
+    ``event_id`` is the primary key rather than a foreign key, because a
+    deleted event's row is gone. ``kind`` is "edit" or "delete", ``taken_at``
+    an ISO time like the other event tables, and ``payload`` JSON holding the
+    rows column for column.
+    """
+
+    __tablename__ = "gw2_event_snapshots"
+
+    event_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=False,
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    taken_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class RaffleRunWinnerRecord(Base):
     __tablename__ = "raffle_run_winners"
 

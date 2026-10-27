@@ -255,7 +255,8 @@ class TestVisibleCommands:
     ) -> None:
         text = _help_text(bot, _caller(config.event_create_role_id))
 
-        for name in ("new", "edit", "remind", "cancel", "delete"):
+        names = ("new", "edit", "remind", "cancel", "delete", "restore")
+        for name in names:
             assert f"`/event {name}" in text
 
     @pytest.mark.parametrize(

@@ -25,6 +25,7 @@ One module per flow, in dependency order:
 | `field_edit.py` | The "Change something" flow: pick a field, then edit or re-pick it. |
 | `roster.py` | Editing a posted event's roster: taking members off and putting them on. |
 | `lifecycle.py` | Opening and applying an edit (`open_event_edit` is `/event edit` itself), moving an event's channel, deleting and cancelling. |
+| `restore.py` | `/event restore`: putting back a deleted event, or undoing an edit by saving the old details through `apply_event_edit`. |
 | `signup.py` | What a member does with a posted message: signing up, out, and the settings behind it, and a leader handing their event over. |
 
 The cycle is that previews open flows and flows re-render previews. So
@@ -82,14 +83,42 @@ the next one created, so no copied id identifies anything alone: a run is found
 by its occurrence id and start, and runs are grouped into events by the event
 id and the event's `created_at` together.
 
+## Restore snapshots
+
+`gw2_event_snapshots` holds one row per event: the last change `/event
+restore` can undo. The store writes it inside the transaction that makes the
+change - `update_event(remember_previous=True)` for an edit, `delete_event` and
+`retire_event` with `remember=True` for a deletion - so no path can change an
+event without it, or keep it for a change that did not land. The payload is
+the rows themselves, column for column, as JSON.
+
+An edit that changes nothing does not replace the snapshot, and nor does
+retiring an event that was already retired: either would throw away the one
+change that can still be undone. Undoing uses the snapshot up
+(`consume_snapshot=True`, or `restore_deleted_event`), so there is no undo of
+an undo. Snapshots are not offered once they are a week old, and the
+maintenance pass deletes them after that.
+
+A deleted event keeps its id, because `create_event` will not hand the id of
+an event with a deletion snapshot to a new one. That is what lets the restored
+event keep its footer id and group with its run history, which is keyed by id
+and `created_at` together.
+
+Restored runs are new rows with no message, flagged `needs_refresh`. The
+restore posts them straight away, but the flag is what lets the maintenance
+pass post them if that fails: it skips an unposted run of a series with no
+post of its own unless the run is flagged.
+
 ## Audit lines
 
-`audit.py` records who created, edited or deleted an event in the notification
-channel, with the event as embeds: as posted, before and after an edit, or as
-it stood when it was deleted. The three call sites are `post_with_leader` in
-`views/create.py`, and `apply_event_edit` and `EventDeleteConfirmView.delete`
-in `views/lifecycle.py`. A leader handover saves through `apply_event_edit`, so
-it is recorded as an edit. Each line is sent only once the change is stored,
+`audit.py` records who created, edited, deleted or restored an event in the
+notification channel, with the event as embeds: as posted, before and after an
+edit, as it stood when it was deleted, or as it came back. The call sites are
+`post_with_leader` in `views/create.py`, `apply_event_edit` and
+`EventDeleteConfirmView.delete` in `views/lifecycle.py`, and the restore of a
+deleted event in `views/restore.py`. A leader handover saves through
+`apply_event_edit`, so it is recorded as an edit; so is undoing an edit, whose
+line says it was undone. Each line is sent only once the change is stored,
 and before the reply to the commander, so a reply Discord refuses cannot lose
 the record. A line that fails to send never undoes the change.
 

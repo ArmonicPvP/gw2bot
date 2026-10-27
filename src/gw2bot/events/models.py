@@ -386,6 +386,68 @@ class EventRun:
     participants: tuple[EventRunParticipant, ...] = ()
 
 
+class SnapshotKind(StrEnum):
+    EDIT = "edit"
+    DELETE = "delete"
+
+
+# How long `/event restore` can still undo a change.
+SNAPSHOT_RETENTION = timedelta(days=7)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotRun:
+    """A run a deletion took down, as its snapshot keeps it."""
+
+    start_time: datetime
+    signups: int
+
+
+@dataclass(frozen=True, slots=True)
+class EventSnapshot:
+    """The one change to an event that `/event restore` can still undo.
+
+    ``event`` is the event as it stood before the change. For a deletion,
+    ``removed_runs`` are the runs it took down, earliest first.
+    """
+
+    kind: SnapshotKind
+    taken_at: datetime
+    event: Event
+    removed_runs: tuple[SnapshotRun, ...] = ()
+
+    def restorable_runs(self, now: datetime) -> tuple[SnapshotRun, ...]:
+        """The removed runs that would still be live if put back now."""
+        duration = timedelta(minutes=self.event.duration_minutes)
+        return tuple(
+            run for run in self.removed_runs if run.start_time + duration > now
+        )
+
+    def can_restore(self, now: datetime) -> bool:
+        """Whether putting a deleted event back now leaves it a run to post.
+
+        A repeating event always has one, because its next run is seeded when
+        every run it lost has finished. A one-off event only has the run it
+        lost, and once that is over there is nothing to bring back.
+        """
+        return self.event.repeat_frequency is not RepeatFrequency.NONE or bool(
+            self.restorable_runs(now)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RestoredEvent:
+    """A deleted event put back with the runs it got back, none yet posted.
+
+    ``dropped`` counts the runs the deletion removed that finished while the
+    event was gone, which are left out.
+    """
+
+    event: Event
+    occurrences: tuple[EventOccurrence, ...]
+    dropped: int
+
+
 def _mentee_queue_key(signup: EventSignup) -> tuple[datetime, int]:
     # A claim always records when it was made; the sign-up time only stands in
     # for a row written some other way, so the order stays total either way.

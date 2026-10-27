@@ -18,6 +18,7 @@ from gw2bot.events.audit import (
     event_created_audit,
     event_deleted_audit,
     event_edited_audit,
+    event_restored_audit,
 )
 from gw2bot.events.models import Event, EventCategory, RepeatFrequency
 from gw2bot.gw2.feast_stock import FeastAlert
@@ -420,6 +421,11 @@ async def send_automated_message_diagnostics(
             "event-deleted-preview",
             "Event deleted audit log",
             event_deleted_audit(0, edited, _DIAGNOSTIC_EVENT_START, kept=2),
+        ),
+        (
+            "event-restored-preview",
+            "Event restored audit log",
+            event_restored_audit(0, edited, _DIAGNOSTIC_EVENT_START),
         ),
     ):
         attempted += 1
