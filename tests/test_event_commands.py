@@ -6744,6 +6744,39 @@ class TestMenteeSignup:
 
 
 class TestEventEditConfirmView:
+    async def test_failed_refresh_keeps_the_edit_and_omits_exception_payload(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        event, occurrence = make_posted_edit_event(store)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        draft.title = "Edited Title"
+        secret = "private-database-error-payload"
+        monkeypatch.setattr(
+            "gw2bot.events.posting.refresh_occurrence_message",
+            AsyncMock(side_effect=SQLAlchemyError(secret)),
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,), message=ephemeral_message()
+        )
+        interaction.edit_original_response = AsyncMock()
+        caplog.set_level(logging.DEBUG)
+
+        await EventEditConfirmView(fake_bot, draft).save_changes.callback(interaction)
+
+        updated = store.get_event(event.event_id)
+        current = store.get_occurrence(occurrence.occurrence_id)
+        assert updated is not None and updated.title == "Edited Title"
+        assert current is not None and current.needs_refresh
+        reply = interaction.edit_original_response.await_args
+        assert reply is not None
+        assert "out of date" in reply.kwargs["content"]
+        assert "Could not update posted occurrence after edit" in caplog.text
+        assert secret not in caplog.text
+
     async def test_save_changes_updates_event_and_refreshes_message(
         self,
         fake_bot: Any,
@@ -11659,7 +11692,9 @@ class TestAddSignups:
         self,
         fake_bot: Any,
         store: EventStore,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        private_payload = "private-roster-read-error"
         event, occurrence = self.make_event(store)
         self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
         for user_id in (2, 3, 4, 5):
@@ -11680,7 +11715,7 @@ class TestAddSignups:
 
         def refuse_once_armed(occurrence_id: int) -> Any:
             if refusing:
-                raise SQLAlchemyError("boom")
+                raise SQLAlchemyError(private_payload)
             return real_get_occurrence(occurrence_id)
 
         store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
@@ -11705,6 +11740,10 @@ class TestAddSignups:
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert "could not be read" in kwargs["content"]
         assert "<@11>" in kwargs["content"]
+
+        assert "during a roster addition" in caplog.text
+        assert private_payload not in caplog.text
+        assert private_payload not in kwargs["content"]
 
     async def test_an_addition_reports_what_it_did_when_a_read_fails(
         self,
@@ -13255,4 +13294,5 @@ class TestRestoreDeletedEvent:
 
         assert "was deleted" in reply
         assert "/event restore" not in reply
+
 

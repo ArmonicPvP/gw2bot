@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -16,7 +17,7 @@ from sqlalchemy import (
     create_engine,
     func,
 )
-from sqlalchemy.engine import Engine, URL
+from sqlalchemy.engine import Connection, Engine, URL
 from sqlalchemy.inspection import inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -1028,6 +1029,28 @@ def create_database_engine(database_path: str) -> Engine:
     return create_engine(URL.create("sqlite", database=str(path)))
 
 
+def _column_names(connection: Connection, table_name: str) -> set[str]:
+    return {column["name"] for column in inspect(connection).get_columns(table_name)}
+
+
+def _add_missing_column(
+    operations: Operations,
+    existing: set[str],
+    table_name: str,
+    column: Column[Any],
+    added: set[str],
+    *,
+    label: str | None = None,
+) -> bool:
+    """Add a legacy column and report whether its backfill should run."""
+    if column.name in existing:
+        return False
+    operations.add_column(table_name, column)
+    existing.add(column.name)
+    added.add(column.name if label is None else label)
+    return True
+
+
 def initialize_database(engine: Engine) -> set[str]:
     LOGGER.debug("Initializing database schema")
     # New databases use ORM metadata; Alembic upgrades pre-ORM database files.
@@ -1035,26 +1058,14 @@ def initialize_database(engine: Engine) -> set[str]:
     added_columns: set[str] = set()
 
     with engine.begin() as connection:
-        total_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                RaffleTotalRecord.__tablename__
-            )
-        }
+        total_columns = _column_names(connection, RaffleTotalRecord.__tablename__)
         operations = Operations(MigrationContext.configure(connection))
         for column_name in ("gold_raffle_tickets", "manual_raffle_tickets"):
-            if column_name in total_columns:
-                continue
-            operations.add_column(
-                RaffleTotalRecord.__tablename__,
-                Column(
-                    column_name,
-                    Integer,
-                    nullable=False,
-                    server_default="0",
-                ),
+            _add_missing_column(
+                operations, total_columns, RaffleTotalRecord.__tablename__,
+                Column(column_name, Integer, nullable=False, server_default="0"),
+                added_columns,
             )
-            added_columns.add(column_name)
         if "gold_raffle_tickets" in added_columns:
             # Splitting the legacy raffle_tickets total into gold and manual
             # halves is RaffleStore's job, but only this call knows the column
@@ -1067,22 +1078,17 @@ def initialize_database(engine: Engine) -> set[str]:
                 (PENDING_LEGACY_TOTALS_KEY, "1"),
             )
 
-        deposit_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                RaffleDepositRecord.__tablename__
-            )
-        }
-        if "audit_notification_sent" not in deposit_columns:
-            operations.add_column(
-                RaffleDepositRecord.__tablename__,
-                Column(
-                    "audit_notification_sent",
-                    Boolean,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
+        deposit_columns = _column_names(connection, RaffleDepositRecord.__tablename__)
+        if _add_missing_column(
+            operations, deposit_columns, RaffleDepositRecord.__tablename__,
+            Column(
+                "audit_notification_sent",
+                Boolean,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        ):
             # The legacy flag tracked audit delivery. Preserve pending audits while
             # treating the newly introduced contribution-channel delivery as done.
             connection.exec_driver_sql(
@@ -1090,47 +1096,34 @@ def initialize_database(engine: Engine) -> set[str]:
                 "SET audit_notification_sent = notification_sent, "
                 "notification_sent = 1"
             )
-            added_columns.add("audit_notification_sent")
 
-        sync_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                ProfitCacheSyncRecord.__tablename__
-            )
-        }
-        if "synced_through" not in sync_columns:
-            operations.add_column(
-                ProfitCacheSyncRecord.__tablename__,
-                Column("synced_through", String, nullable=True),
-            )
-            added_columns.add("synced_through")
-        if "backfilled" not in sync_columns:
-            operations.add_column(
-                ProfitCacheSyncRecord.__tablename__,
-                Column(
-                    "backfilled",
-                    Boolean,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
-            # A database written before the watermark existed kept only the
-            # last 92 days and never recorded how far back it read, so its
-            # rows stay marked un-backfilled and the next report walks the
-            # whole history once to fill in what retention had dropped.
-            added_columns.add("backfilled")
+        sync_columns = _column_names(connection, ProfitCacheSyncRecord.__tablename__)
+        _add_missing_column(
+            operations, sync_columns, ProfitCacheSyncRecord.__tablename__,
+            Column("synced_through", String, nullable=True),
+            added_columns,
+        )
+        # A database written before the watermark existed kept only the
+        # last 92 days and never recorded how far back it read, so its
+        # rows stay marked un-backfilled and the next report walks the
+        # whole history once to fill in what retention had dropped.
+        _add_missing_column(
+            operations, sync_columns, ProfitCacheSyncRecord.__tablename__,
+            Column(
+                "backfilled",
+                Boolean,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        )
 
-        item_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                ProfitItemRecord.__tablename__
-            )
-        }
-        if "category" not in item_columns:
-            operations.add_column(
-                ProfitItemRecord.__tablename__,
-                Column("category", String, nullable=True),
-            )
+        item_columns = _column_names(connection, ProfitItemRecord.__tablename__)
+        if _add_missing_column(
+            operations, item_columns, ProfitItemRecord.__tablename__,
+            Column("category", String, nullable=True),
+            added_columns,
+        ):
             # A row written before the column existed carries a name and no
             # category, and the endpoint answers both in one read. Expiring
             # those rows is what gets the categories filled: the daily warm
@@ -1143,67 +1136,47 @@ def initialize_database(engine: Engine) -> set[str]:
                 "SET updated_at = '1970-01-01T00:00:00+00:00' "
                 "WHERE category IS NULL"
             )
-            added_columns.add("category")
 
         for record_type in (ProfitOpenLotRecord, ProfitLotCheckpointRecord):
-            lot_columns = {
-                column["name"]
-                for column in inspect(connection).get_columns(
-                    record_type.__tablename__
-                )
-            }
-            if "transaction_id" in lot_columns:
-                continue
+            lot_columns = _column_names(connection, record_type.__tablename__)
             # Nothing to backfill: the lots are results, and the profit store
             # drops every member's results once so they are matched again
             # with the purchase behind each lot recorded.
-            operations.add_column(
-                record_type.__tablename__,
+            _add_missing_column(
+                operations, lot_columns, record_type.__tablename__,
                 Column("transaction_id", String, nullable=True),
+                added_columns,
+                label=f"{record_type.__tablename__}.transaction_id",
             )
-            added_columns.add(f"{record_type.__tablename__}.transaction_id")
 
-        preference_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                ProfitPreferenceRecord.__tablename__
-            )
-        }
+        preference_columns = _column_names(connection, ProfitPreferenceRecord.__tablename__)
         for column_name in ("custom_start", "custom_end"):
-            if column_name in preference_columns:
-                continue
             # Nothing to backfill: every window stored before this release was
             # a rolling run of days, which is what a row with neither bound
             # set still means.
-            operations.add_column(
-                ProfitPreferenceRecord.__tablename__,
+            _add_missing_column(
+                operations, preference_columns, ProfitPreferenceRecord.__tablename__,
                 Column(column_name, Integer, nullable=True),
+                added_columns,
             )
-            added_columns.add(column_name)
 
-        occurrence_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                EventOccurrenceRecord.__tablename__
-            )
-        }
-        if "needs_refresh" not in occurrence_columns:
-            operations.add_column(
-                EventOccurrenceRecord.__tablename__,
-                Column(
-                    "needs_refresh",
-                    Boolean,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
-            added_columns.add("needs_refresh")
+        occurrence_columns = _column_names(connection, EventOccurrenceRecord.__tablename__)
+        _add_missing_column(
+            operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
+            Column(
+                "needs_refresh",
+                Boolean,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        )
 
-        if "channel_id" not in occurrence_columns:
-            operations.add_column(
-                EventOccurrenceRecord.__tablename__,
-                Column("channel_id", Integer, nullable=True),
-            )
+        if _add_missing_column(
+            operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
+            Column("channel_id", Integer, nullable=True),
+            added_columns,
+        ):
             # Legacy rows predate per-occurrence channels. Every message they
             # reference was posted through the event's channel, which is the
             # only information those rows ever carried, so backfill from it.
@@ -1215,167 +1188,138 @@ def initialize_database(engine: Engine) -> set[str]:
                 "WHERE gw2_events.event_id = gw2_event_occurrences.event_id"
                 ") WHERE message_id IS NOT NULL"
             )
-            added_columns.add("channel_id")
 
         for column_name in (
             "ping_channel_id",
             "ping_message_id",
         ):
-            if column_name in occurrence_columns:
-                continue
             # Nothing to backfill: no release before this one sent an
             # announcement, so every legacy row correctly reads as having
             # none to clean up.
-            operations.add_column(
-                EventOccurrenceRecord.__tablename__,
+            _add_missing_column(
+                operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
                 Column(column_name, Integer, nullable=True),
+                added_columns,
             )
-            added_columns.add(column_name)
 
-        if "ping_role_ids" not in occurrence_columns:
-            operations.add_column(
-                EventOccurrenceRecord.__tablename__,
-                Column(
-                    "ping_role_ids",
-                    String,
-                    nullable=False,
-                    server_default="",
-                ),
-            )
-            added_columns.add("occurrence_ping_role_ids")
+        _add_missing_column(
+            operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
+            Column(
+                "ping_role_ids",
+                String,
+                nullable=False,
+                server_default="",
+            ),
+            added_columns, label="occurrence_ping_role_ids",
+        )
 
-        if "stale_ping_messages" not in occurrence_columns:
-            # Nothing to backfill, as above: no release before this one sent an
-            # announcement, so no legacy row owes a removal.
-            operations.add_column(
-                EventOccurrenceRecord.__tablename__,
-                Column(
-                    "stale_ping_messages",
-                    String,
-                    nullable=False,
-                    server_default="",
-                ),
-            )
-            added_columns.add("stale_ping_messages")
+        # Nothing to backfill, as above: no release before this one sent an
+        # announcement, so no legacy row owes a removal.
+        _add_missing_column(
+            operations, occurrence_columns, EventOccurrenceRecord.__tablename__,
+            Column(
+                "stale_ping_messages",
+                String,
+                nullable=False,
+                server_default="",
+            ),
+            added_columns,
+        )
 
-        event_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                EventRecord.__tablename__
-            )
-        }
-        if "delete_previous_on_repeat" not in event_columns:
-            operations.add_column(
-                EventRecord.__tablename__,
-                Column(
-                    "delete_previous_on_repeat",
-                    Boolean,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
-            added_columns.add("delete_previous_on_repeat")
+        event_columns = _column_names(connection, EventRecord.__tablename__)
+        _add_missing_column(
+            operations, event_columns, EventRecord.__tablename__,
+            Column(
+                "delete_previous_on_repeat",
+                Boolean,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        )
 
-        if "ping_role_ids" not in event_columns:
-            # Events created before role pinging existed ping nobody, which is
-            # exactly what the empty default records.
-            operations.add_column(
-                EventRecord.__tablename__,
-                Column(
-                    "ping_role_ids",
-                    String,
-                    nullable=False,
-                    server_default="",
-                ),
-            )
-            added_columns.add("ping_role_ids")
+        # Events created before role pinging existed ping nobody, which is
+        # exactly what the empty default records.
+        _add_missing_column(
+            operations, event_columns, EventRecord.__tablename__,
+            Column(
+                "ping_role_ids",
+                String,
+                nullable=False,
+                server_default="",
+            ),
+            added_columns,
+        )
 
-        if "requirements" not in event_columns:
-            # Events created before requirements existed have none, which is
-            # exactly what the empty default records.
-            operations.add_column(
-                EventRecord.__tablename__,
-                Column(
-                    "requirements",
-                    String,
-                    nullable=False,
-                    server_default="",
-                ),
-            )
-            added_columns.add("requirements")
+        # Events created before requirements existed have none, which is
+        # exactly what the empty default records.
+        _add_missing_column(
+            operations, event_columns, EventRecord.__tablename__,
+            Column(
+                "requirements",
+                String,
+                nullable=False,
+                server_default="",
+            ),
+            added_columns,
+        )
 
-        if "mentee_enabled" not in event_columns:
-            # Events created before the mentee slot existed never offered one,
-            # which is exactly what the default records.
-            operations.add_column(
-                EventRecord.__tablename__,
-                Column(
-                    "mentee_enabled",
-                    Boolean,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
-            added_columns.add("mentee_enabled")
+        # Events created before the mentee slot existed never offered one,
+        # which is exactly what the default records.
+        _add_missing_column(
+            operations, event_columns, EventRecord.__tablename__,
+            Column(
+                "mentee_enabled",
+                Boolean,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        )
 
-        if "max_participants" not in event_columns:
-            # Events created before the cap existed seat the category's own
-            # squad size, which is what NULL records.
-            operations.add_column(
-                EventRecord.__tablename__,
-                Column("max_participants", Integer, nullable=True),
-            )
-            added_columns.add("max_participants")
+        # Events created before the cap existed seat the category's own
+        # squad size, which is what NULL records.
+        _add_missing_column(
+            operations, event_columns, EventRecord.__tablename__,
+            Column("max_participants", Integer, nullable=True),
+            added_columns,
+        )
 
-        signup_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                EventSignupRecord.__tablename__
-            )
-        }
-        if "edit_tokens" not in signup_columns:
-            operations.add_column(
-                EventSignupRecord.__tablename__,
-                Column(
-                    "edit_tokens",
-                    Float,
-                    nullable=False,
-                    server_default="3.0",
-                ),
-            )
-            added_columns.add("edit_tokens")
-        if "edit_tokens_updated_at" not in signup_columns:
-            operations.add_column(
-                EventSignupRecord.__tablename__,
-                Column("edit_tokens_updated_at", String, nullable=True),
-            )
-            added_columns.add("edit_tokens_updated_at")
-        if "mentee" not in signup_columns:
-            # Nothing to backfill: no signup made before the slot existed
-            # could have asked for it.
-            operations.add_column(
-                EventSignupRecord.__tablename__,
-                Column(
-                    "mentee",
-                    String,
-                    nullable=False,
-                    server_default="none",
-                ),
-            )
-            added_columns.add("mentee")
-        if "mentee_requested_at" not in signup_columns:
-            operations.add_column(
-                EventSignupRecord.__tablename__,
-                Column("mentee_requested_at", String, nullable=True),
-            )
-            added_columns.add("mentee_requested_at")
+        signup_columns = _column_names(connection, EventSignupRecord.__tablename__)
+        _add_missing_column(
+            operations, signup_columns, EventSignupRecord.__tablename__,
+            Column(
+                "edit_tokens",
+                Float,
+                nullable=False,
+                server_default="3.0",
+            ),
+            added_columns,
+        )
+        _add_missing_column(
+            operations, signup_columns, EventSignupRecord.__tablename__,
+            Column("edit_tokens_updated_at", String, nullable=True),
+            added_columns,
+        )
+        # Nothing to backfill: no signup made before the slot existed
+        # could have asked for it.
+        _add_missing_column(
+            operations, signup_columns, EventSignupRecord.__tablename__,
+            Column(
+                "mentee",
+                String,
+                nullable=False,
+                server_default="none",
+            ),
+            added_columns,
+        )
+        _add_missing_column(
+            operations, signup_columns, EventSignupRecord.__tablename__,
+            Column("mentee_requested_at", String, nullable=True),
+            added_columns,
+        )
 
-        preference_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                EventSignupPreferenceRecord.__tablename__
-            )
-        }
+        preference_columns = _column_names(connection, EventSignupPreferenceRecord.__tablename__)
         if "event_id" not in preference_columns:
             # Legacy remembered roles were one global row per member. They are
             # now keyed by event as well, which SQLite cannot express as an
@@ -1409,73 +1353,60 @@ def initialize_database(engine: Engine) -> set[str]:
             operations.drop_table(legacy_table)
             added_columns.add("signup_preference_event_id")
 
-        guild_leave_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                GuildLeaveRecord.__tablename__
-            )
-        }
-        if "kicked_by" not in guild_leave_columns:
-            operations.add_column(
-                GuildLeaveRecord.__tablename__,
-                Column("kicked_by", String, nullable=True),
-            )
-            added_columns.add("kicked_by")
+        guild_leave_columns = _column_names(connection, GuildLeaveRecord.__tablename__)
+        _add_missing_column(
+            operations, guild_leave_columns, GuildLeaveRecord.__tablename__,
+            Column("kicked_by", String, nullable=True),
+            added_columns,
+        )
 
-        run_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns(
-                RaffleRunRecord.__tablename__
-            )
-        }
-        if "purchased_tickets" not in run_columns:
-            operations.add_column(
-                RaffleRunRecord.__tablename__,
-                Column(
-                    "purchased_tickets",
-                    Integer,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
+        run_columns = _column_names(connection, RaffleRunRecord.__tablename__)
+        if _add_missing_column(
+            operations, run_columns, RaffleRunRecord.__tablename__,
+            Column(
+                "purchased_tickets",
+                Integer,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        ):
             connection.exec_driver_sql(
                 "UPDATE raffle_runs SET purchased_tickets = total_tickets"
             )
-            added_columns.add("purchased_tickets")
-        if "free_tickets" not in run_columns:
-            operations.add_column(
-                RaffleRunRecord.__tablename__,
-                Column(
-                    "free_tickets",
-                    Integer,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
+        if _add_missing_column(
+            operations, run_columns, RaffleRunRecord.__tablename__,
+            Column(
+                "free_tickets",
+                Integer,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        ):
             connection.exec_driver_sql(
                 "UPDATE raffle_runs SET free_tickets = "
                 "CASE WHEN total_tickets >= purchased_tickets "
                 "THEN total_tickets - purchased_tickets ELSE 0 END"
             )
-            added_columns.add("free_tickets")
-        if "announcement_sent" not in run_columns:
-            # Legacy runs predate delivery tracking and cannot be recovered.
-            operations.add_column(
-                RaffleRunRecord.__tablename__,
-                Column(
-                    "announcement_sent",
-                    Boolean,
-                    nullable=False,
-                    server_default="0",
-                ),
-            )
+        # Legacy runs predate delivery tracking and cannot be recovered.
+        if _add_missing_column(
+            operations, run_columns, RaffleRunRecord.__tablename__,
+            Column(
+                "announcement_sent",
+                Boolean,
+                nullable=False,
+                server_default="0",
+            ),
+            added_columns,
+        ):
             connection.exec_driver_sql(
                 "UPDATE raffle_runs SET announcement_sent = 1"
             )
-            added_columns.add("announcement_sent")
 
     LOGGER.debug(
         "Database schema initialization completed; added_columns=%s",
         sorted(added_columns),
     )
     return added_columns
+

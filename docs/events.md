@@ -39,6 +39,29 @@ loads in the order above.
 the tests import from `gw2bot.events.views` as before. Private helpers are not
 re-exported: a test that needs one imports it from the module that owns it.
 
+`shared.py` owns `role_pick_options` for the member and commander role
+pickers, `_flex_role_options` for the member and leader flex pickers, and the
+typed `_FlexRolesSelect` and `_FlexRolesView` bases. The flow-specific views
+still decide what picking or skipping a role does.
+
+An edit in `lifecycle.py` saves once, then delegates primary-run rescheduling,
+roster reseating, and posted-message updates to `_sync_primary_start`,
+`_reseat_occurrence`, and `_push_occurrence_update`. Reseating reports the
+latest event and run together with whether the run is ready, retired, or
+unreadable. An unreadable posted run counts as a failed refresh; a retired
+one is skipped. Channel rollback and audit delivery stay in
+`apply_event_edit`; `_edit_result_message` only formats the reply.
+
+Batch roster additions in `views/roster.py` delegate seating and direct
+messages to `_seat_roster_additions` and `_send_addition_notices`. Both return
+the latest event and run, while `_AdditionOutcome` carries the results for
+the single roster announcement and commander summary.
+
+Their four target re-reads use `_read_addition_target`, which logs a failed
+database read by phase and maps it to an unreadable target. The callers
+retain their own decisions: seating stops with the remaining picks recorded,
+while notices can continue using the last known event and run.
+
 ## `posting/` - what an event does to Discord
 
 Also in dependency order:
@@ -62,6 +85,20 @@ occurrence, and that occurrence's auto-sign-ups refresh a post. So
 with the code that reads them. That is what turned the roster and message
 layers from mutually recursive into ordered - they only ever wanted the
 predicate, not the module it used to sit in.
+
+`posting/roster.py` shares the pure `_admission_solution` between live
+signups and unpublished rosters; membership checks, writes and notifications
+remain with their callers. Signup edits use `_write_signup_edit` to spend
+and, when needed, refund a token, `_read_edited_signup` to describe the saved
+result even if its read-back fails, and `_sync_auto_signup_roles` to carry
+the new roles into future runs. A failure after the declaration is saved
+does not report that edit as unsaved.
+
+In `store.py`, `_delete_occurrence_dependents` and
+`_delete_event_preferences` use the caller's session. Snapshot capture stays
+before those deletes, and retirement still records the retained runs in the
+same transaction. `formatting.event_embed` assembles the common frame and
+delegates roster fields to the role-based or headcount field builder.
 
 ## Run history
 

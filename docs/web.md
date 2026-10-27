@@ -62,6 +62,12 @@ posts to `/api/food/cost` as whole copper against the stock log row the restock
 was observed as, gated by the same role the page is; the profit dashboard's
 hidden-item and hidden-trade controls post the same way.
 
+The profit report, section and trade read routes share
+`_profit_failure_response` for known failures: 409 for a missing key, 502 for
+an upstream failure, and 500 with the route's own label for a database or
+value error. Logs record the exception type without its payload. Request
+validation and response serialization remain with each route.
+
 The profit dashboard's Matched Trades table is the one table on the site paged
 on the server: `/api/profit/trades` answers one page in the order and search
 asked for, with totals across every page. A busy trader matches thousands of
@@ -78,7 +84,7 @@ at once would add the same sales twice.
 
 | Module | What it holds |
 | --- | --- |
-| `shared.py` | The frame every dashboard is built from: the stylesheet, the header, and the time-range picker. A change to the frame is one edit here rather than four. |
+| `shared.py` | Shared styles, account/sign-out markup, and the time-range picker's markup and JavaScript. Each document assembles its own title and navigation. |
 | `notices.py` | The one-card pages: sign-in, signed-out, and the access refusals. Fixed strings except the sign-in page's login URL, which is escaped after `server.py` has validated it as a local path. |
 | `calendar.py` | The guild event calendar. |
 | `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
@@ -91,11 +97,17 @@ at once would add the same sales twice.
 from one place.
 
 The names in `shared.py` are public (`SHARED_STYLE`, `DASHBOARD_HEADER_STYLE`,
+`ACCOUNT_CONTROLS_MARKUP`,
 `RANGE_PICKER_STYLE`, `RANGE_PICKER_NAV`, `CUSTOM_RANGE_PANEL`,
 `RANGE_PICKER_LISTENERS_JS`, `range_picker_js`, `simple_page`,
 `MAX_CUSTOM_DAYS`) because they are the page package's API. They were
 underscore-prefixed while already being imported across modules, which was
 only ever a mislabel.
+
+`ACCOUNT_CONTROLS_MARKUP` supplies the account name placeholder and POST
+sign-out form, including the accessible label and icon, to all six main
+pages. It is concatenated at import time like the other shared fragments;
+the complete rendered documents are unchanged by that assembly.
 
 ## Two purples
 

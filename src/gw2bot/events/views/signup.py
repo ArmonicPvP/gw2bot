@@ -28,21 +28,21 @@ from gw2bot.events.models import (
     EventStatus,
     MenteeStatus,
     PreferenceMode,
-    ROLE_EMOJI,
     RepeatFrequency,
     available_edit_tokens,
-    fitting_roles,
     normalize_stored_roles,
-    supported_roles,
 )
 from gw2bot.events.views.lifecycle import open_event_edit
 from gw2bot.events.views.shared import (
     FLOW_TIMEOUT_SECONDS,
+    _FlexRolesSelect,
+    _FlexRolesView,
+    _flex_role_options,
     _auto_signup_enabled,
     _is_ephemeral_component_interaction,
     _load_event_context,
     _primary_live_occurrence,
-    _role_pick_label,
+    role_pick_options,
     _still_seated_note,
     occurrence_has_ended,
 )
@@ -2042,21 +2042,7 @@ def _signup_edit_summary(signup: EventSignup) -> str:
 
 class RolePickSelect(discord.ui.Select["RolePickView"]):
     def __init__(self, flow: SignupFlow):
-        signups = flow.roster_for_labels()
-        supported = supported_roles(flow.event.capacity)
-        available = set(fitting_roles(flow.event.capacity, signups))
-        waitlist_only = not available
-        options = [
-            discord.SelectOption(
-                label=_role_pick_label(
-                    role, role in available, waitlist_only
-                ),
-                value=role.value,
-                emoji=ROLE_EMOJI[role],
-            )
-            for role in EventRole
-            if role in supported
-        ]
+        options = role_pick_options(flow.event.capacity, flow.roster_for_labels())
         super().__init__(placeholder="Pick your role", options=options)
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -2089,35 +2075,12 @@ class RolePickView(discord.ui.View):
         )
 
 
-class FlexRolesSelect(discord.ui.Select["FlexRolesView"]):
+class FlexRolesSelect(_FlexRolesSelect["FlexRolesView"]):
     def __init__(self, flow: SignupFlow):
-        supported = supported_roles(flow.event.capacity)
-        options = [
-            discord.SelectOption(
-                label=role.value,
-                value=role.value,
-                emoji=ROLE_EMOJI[role],
-            )
-            for role in EventRole
-            if role != flow.role and role in supported
-        ]
-        super().__init__(
-            placeholder="Pick any flex roles",
-            options=options,
-            min_values=1,
-            max_values=len(options),
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = self.view
-        if view is not None:
-            await view.pick(
-                interaction,
-                tuple(EventRole(value) for value in self.values),
-            )
+        super().__init__(_flex_role_options(flow.event.capacity, flow.role))
 
 
-class FlexRolesView(discord.ui.View):
+class FlexRolesView(_FlexRolesView):
     def __init__(self, flow: SignupFlow):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._flow = flow
@@ -2508,3 +2471,4 @@ def _mentee_follow_up(
     if not _offers_mentee_question(bot, event, signup):
         return None
     return MenteeChoiceView(bot, event, occurrence, discord_user_id)
+

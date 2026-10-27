@@ -34,7 +34,7 @@ from gw2bot.events.models import (
     mentee_holder,
     mentee_waitlist,
 )
-from gw2bot.gw2.guild_members import DISCORD_MESSAGE_LIMIT
+from gw2bot.core.message_chunks import DISCORD_MESSAGE_LIMIT, pack_message_lines
 
 EVENT_DATETIME_FORMAT = "%m.%d.%Y %H:%M"
 EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"
@@ -356,21 +356,7 @@ def roster_update_messages(update: RosterUpdate) -> list[str]:
 
 
 def _chunk_message_lines(header: str, lines: list[str]) -> list[str]:
-    # Splits on line boundaries, never mid-entry, and repeats the header on
-    # each message. A single line is a mention plus a role name, far below the
-    # limit, so an unsplittable line is only a theoretical case; it is sent on
-    # its own rather than dropped, and Discord rejects that one message alone.
-    messages: list[str] = []
-    current = header
-    for line in lines:
-        candidate = f"{current}\n{line}"
-        if len(candidate) > DISCORD_MESSAGE_LIMIT and current != header:
-            messages.append(current)
-            current = f"{header}\n{line}"
-        else:
-            current = candidate
-    messages.append(current)
-    return messages
+    return pack_message_lines(lines, prefix=header, limit=DISCORD_MESSAGE_LIMIT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,6 +638,108 @@ def event_footer_text(event_id_text: str) -> str:
     return f"eventID: {event_id_text}"[:EMBED_FOOTER_LIMIT]
 
 
+def _add_role_roster_fields(
+    embed: discord.Embed,
+    capacity: CategoryCapacity,
+    signups: list[EventSignup],
+    active: list[EventSignup],
+    waitlisted: list[EventSignup],
+) -> None:
+    counts = count_roster(signups)
+    embed.add_field(
+        name=_participants_name(counts.active, capacity),
+        value="​",
+        inline=False,
+    )
+    healers = [
+        signup
+        for signup in active
+        if signup.assigned_role in HEAL_ROLES
+    ]
+    dps = [
+        signup
+        for signup in active
+        if signup.assigned_role is not None
+        and signup.assigned_role not in HEAL_ROLES
+    ]
+    # Waitlisted members carry no assigned_role, so they are grouped by the
+    # role they requested and listed under the same section, below the
+    # seated members. They are not folded into the "x/capacity" count, which
+    # only reflects seated members.
+    waitlisted_healers = [
+        signup for signup in waitlisted if signup.role in HEAL_ROLES
+    ]
+    waitlisted_dps = [
+        signup for signup in waitlisted if signup.role not in HEAL_ROLES
+    ]
+    # Dungeon rosters are role-based for boon and DPS composition but
+    # deliberately have no healer seats. Do not advertise an unusable
+    # "Healer (0/0)" section for that zero-capacity role.
+    if capacity.healers:
+        _add_chunked_field(
+            embed,
+            f"{_healer_section_name(capacity)} "
+            f"({len(healers)}/{capacity.healers})",
+            [_member_line(signup) for signup in healers]
+            + [
+                _waitlisted_member_line(signup)
+                for signup in waitlisted_healers
+            ],
+        )
+    _add_chunked_field(
+        embed,
+        f"⚔️ DPS ({len(dps)}/{capacity.dps})",
+        [_member_line(signup) for signup in dps]
+        + [_waitlisted_member_line(signup) for signup in waitlisted_dps],
+    )
+    # PvP has no boons to cover, so a "0/0" tally would only be noise.
+    if capacity.has_boons:
+        embed.add_field(
+            name="Boons",
+            value=(
+                f"{EMOJI_ALACRITY} {counts.alacrity}/{capacity.alacrity}"
+                f" | {EMOJI_QUICKNESS} "
+                f"{counts.quickness}/{capacity.quickness}"
+            ),
+            inline=False,
+        )
+    # Flexroles and Waitlist are only shown when populated, so an empty
+    # section never clutters the embed.
+    flexers = [signup for signup in active if signup.flex_roles]
+    if flexers:
+        _add_chunked_field(
+            embed,
+            "🔁 Flexroles",
+            _role_group_lines(flexers),
+        )
+    if waitlisted:
+        _add_chunked_field(
+            embed,
+            f"{WAITLIST_EMOJI} Waitlist",
+            _role_group_lines(waitlisted),
+        )
+
+
+def _add_headcount_roster_fields(
+    embed: discord.Embed,
+    capacity: CategoryCapacity,
+    active: list[EventSignup],
+    waitlisted: list[EventSignup],
+) -> None:
+    participant_lines = [_member_line(signup) for signup in active]
+    participants_name = _participants_name(len(active), capacity)
+    if _uses_two_participant_columns(capacity):
+        _add_two_column_field(embed, participants_name, participant_lines)
+    else:
+        _add_chunked_field(embed, participants_name, participant_lines)
+    if waitlisted:
+        _add_chunked_field(
+            embed,
+            f"{WAITLIST_EMOJI} Waitlist",
+            [_member_line(signup) for signup in waitlisted],
+        )
+
+
 def event_embed(
     event: Event,
     signups: list[EventSignup],
@@ -699,92 +787,9 @@ def event_embed(
     )
 
     if capacity.has_roles:
-        counts = count_roster(signups)
-        embed.add_field(
-            name=_participants_name(counts.active, capacity),
-            value="​",
-            inline=False,
-        )
-        healers = [
-            signup
-            for signup in active
-            if signup.assigned_role in HEAL_ROLES
-        ]
-        dps = [
-            signup
-            for signup in active
-            if signup.assigned_role is not None
-            and signup.assigned_role not in HEAL_ROLES
-        ]
-        # Waitlisted members carry no assigned_role, so they are grouped by the
-        # role they requested and listed under the same section, below the
-        # seated members. They are not folded into the "x/capacity" count, which
-        # only reflects seated members.
-        waitlisted_healers = [
-            signup for signup in waitlisted if signup.role in HEAL_ROLES
-        ]
-        waitlisted_dps = [
-            signup for signup in waitlisted if signup.role not in HEAL_ROLES
-        ]
-        # Dungeon rosters are role-based for boon and DPS composition but
-        # deliberately have no healer seats. Do not advertise an unusable
-        # "Healer (0/0)" section for that zero-capacity role.
-        if capacity.healers:
-            _add_chunked_field(
-                embed,
-                f"{_healer_section_name(capacity)} "
-                f"({len(healers)}/{capacity.healers})",
-                [_member_line(signup) for signup in healers]
-                + [
-                    _waitlisted_member_line(signup)
-                    for signup in waitlisted_healers
-                ],
-            )
-        _add_chunked_field(
-            embed,
-            f"⚔️ DPS ({len(dps)}/{capacity.dps})",
-            [_member_line(signup) for signup in dps]
-            + [_waitlisted_member_line(signup) for signup in waitlisted_dps],
-        )
-        # PvP has no boons to cover, so a "0/0" tally would only be noise.
-        if capacity.has_boons:
-            embed.add_field(
-                name="Boons",
-                value=(
-                    f"{EMOJI_ALACRITY} {counts.alacrity}/{capacity.alacrity}"
-                    f" | {EMOJI_QUICKNESS} "
-                    f"{counts.quickness}/{capacity.quickness}"
-                ),
-                inline=False,
-            )
-        # Flexroles and Waitlist are only shown when populated, so an empty
-        # section never clutters the embed.
-        flexers = [signup for signup in active if signup.flex_roles]
-        if flexers:
-            _add_chunked_field(
-                embed,
-                "🔁 Flexroles",
-                _role_group_lines(flexers),
-            )
-        if waitlisted:
-            _add_chunked_field(
-                embed,
-                f"{WAITLIST_EMOJI} Waitlist",
-                _role_group_lines(waitlisted),
-            )
+        _add_role_roster_fields(embed, capacity, signups, active, waitlisted)
     else:
-        participant_lines = [_member_line(signup) for signup in active]
-        participants_name = _participants_name(len(active), capacity)
-        if _uses_two_participant_columns(capacity):
-            _add_two_column_field(embed, participants_name, participant_lines)
-        else:
-            _add_chunked_field(embed, participants_name, participant_lines)
-        if waitlisted:
-            _add_chunked_field(
-                embed,
-                f"{WAITLIST_EMOJI} Waitlist",
-                [_member_line(signup) for signup in waitlisted],
-            )
+        _add_headcount_roster_fields(embed, capacity, active, waitlisted)
 
     footer_id = event_id_text if event_id_text is not None else str(
         event.event_id
@@ -1002,3 +1007,4 @@ def describe_repeat(
 
 def category_choices() -> list[EventCategory]:
     return list(EventCategory)
+

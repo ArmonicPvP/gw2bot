@@ -3,11 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 
-from gw2bot.core.anchored_series import (
-    derive_values,
-    value_before,
-    value_through,
-)
+from gw2bot.core.anchored_series import build_window
 from gw2bot.gold.models import (
     GoldBalanceSample,
     GoldEvent,
@@ -44,53 +40,30 @@ def build_gold_series(
     movements come back with no balance and the line is empty rather than
     invented.
     """
-    ordered = sorted(movements, key=lambda movement: movement.occurred_at)
-    in_window = [
-        index
-        for index, movement in enumerate(ordered)
-        if since <= movement.occurred_at <= until
-    ]
+    window = build_window(
+        movements,
+        None if anchor is None else (anchor.recorded_at, anchor.coins),
+        since,
+        until,
+    )
+    series = GoldSeries(
+        points=tuple(GoldPoint(at=at, coins=value) for at, value in window.points),
+        movements=tuple(_plot(change, value) for change, value in window.changes),
+    )
     if anchor is None:
         LOGGER.debug(
             "Built gold series without an observed balance; "
             "movements=%s in_window=%s",
-            len(ordered),
-            len(in_window),
+            len(movements),
+            len(window.changes),
         )
-        return GoldSeries(
-            points=(),
-            movements=tuple(_plot(ordered[index], None) for index in in_window),
-        )
+        return series
 
-    coins_after, baseline = derive_values(
-        ordered, anchor.recorded_at, anchor.coins
-    )
-    coins_at_end = value_through(ordered, coins_after, baseline, until)
-    points = [
-        GoldPoint(
-            at=since,
-            coins=value_before(ordered, coins_after, baseline, since),
-        )
-    ]
-    points.extend(
-        GoldPoint(at=ordered[index].occurred_at, coins=coins_after[index])
-        for index in in_window
-    )
-    points.append(GoldPoint(at=until, coins=coins_at_end))
-    series = GoldSeries(
-        points=tuple(points),
-        movements=tuple(
-            _plot(ordered[index], coins_after[index]) for index in in_window
-        ),
-    )
-    # The balance itself never reaches the console: what the guild holds is
-    # the page's whole subject, and this line only has to say that a series
-    # was built and how much of one.
     LOGGER.debug(
         "Built gold series; movements=%s in_window=%s points=%s "
         "anchor_offset_seconds=%s",
-        len(ordered),
-        len(in_window),
+        len(movements),
+        len(window.changes),
         len(series.points),
         int(until - anchor.recorded_at),
     )
@@ -105,3 +78,4 @@ def _plot(movement: GoldMovement, coins_after: int | None) -> GoldEvent:
         coins=movement.coins,
         coins_after=coins_after,
     )
+

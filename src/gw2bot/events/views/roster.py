@@ -32,11 +32,8 @@ from gw2bot.events.models import (
     EventRole,
     EventSignup,
     EventStatus,
-    ROLE_EMOJI,
     RosterUpdate,
-    fitting_roles,
     normalize_stored_roles,
-    supported_roles,
 )
 from gw2bot.events.views.preview import build_event_preview, send_event_preview
 from gw2bot.events.views.shared import (
@@ -54,7 +51,7 @@ from gw2bot.events.views.shared import (
     _link_label,
     _mention_list,
     _preview_status,
-    _role_pick_label,
+    role_pick_options,
     _still_seated_note,
     occurrence_has_ended,
 )
@@ -1258,20 +1255,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
     def __init__(self, event: Event, signups: list[EventSignup]):
         # The same labelling as the member-facing role picker, so a commander
         # can see which roles are already full before choosing.
-        supported = supported_roles(event.capacity)
-        available = set(fitting_roles(event.capacity, signups))
-        waitlist_only = not available
-        options = [
-            discord.SelectOption(
-                label=_role_pick_label(
-                    role, role in available, waitlist_only
-                ),
-                value=role.value,
-                emoji=ROLE_EMOJI[role],
-            )
-            for role in EventRole
-            if role in supported
-        ]
+        options = role_pick_options(event.capacity, signups)
         super().__init__(
             placeholder="Pick the role to add them as",
             options=options,
@@ -1434,6 +1418,26 @@ def _addition_target(
     return _AdditionTarget(fresh_event, fresh_occurrence, stop)
 
 
+def _read_addition_target(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    *,
+    stage: str,
+) -> _AdditionTarget:
+    """Map a failed read to a target whose caller decides how to proceed."""
+    try:
+        return _addition_target(bot, event, occurrence)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the run back %s; occurrence_id=%s error_type=%s",
+            stage,
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+
+
 async def _drop_departed_picks(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -1474,6 +1478,242 @@ async def _drop_departed_picks(
     ], departed
 
 
+async def _seat_roster_additions(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    event: Event,
+    current: EventOccurrence,
+    user_ids: list[int],
+    role: EventRole | None,
+    outcome: _AdditionOutcome,
+    updates: list[RosterUpdate],
+) -> tuple[Event, EventOccurrence]:
+    from gw2bot.events.posting import seat_signup
+
+    for index, user_id in enumerate(user_ids):
+        # Re-read both rows rather than trusting the ones the batch started
+        # with. The member being seated when a change lands is already past
+        # this check and keeps whatever seat the old state gave them; stopping
+        # here bounds that to one member instead of the whole batch.
+        #
+        # A store that refuses those reads has to answer rather than escape:
+        # the response already says the members are being added, and the
+        # check's own departures are committed with nothing to announce them
+        # if this call never reaches the end of the batch, which is where the
+        # one merged announcement goes out.
+        target = _read_addition_target(
+            bot, event, current, stage="during a roster addition"
+        )
+        if target.stop is _AdditionStop.UNREADABLE:
+            outcome.stop = _AdditionStop.UNREADABLE
+            outcome.left_off = list(user_ids[index:])
+            break
+        if target.event is not None and target.occurrence is not None:
+            event, current = target.event, target.occurrence
+        if target.stop is not None:
+            outcome.stop = target.stop
+            outcome.left_off = list(user_ids[index:])
+            LOGGER.debug(
+                "Stopped a roster addition; occurrence_id=%s user_id=%s "
+                "reason=%s left_off=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                target.stop.value,
+                len(outcome.left_off),
+            )
+            break
+        # add_signup would overwrite an existing row, resetting the member's
+        # signed-up time and with it their seating priority, so a member who is
+        # already on the roster is left exactly as they are.
+        #
+        # Guarded like the read above it, and for the same reason: the seats
+        # already taken and the check's own departures are committed, and an
+        # escape here takes the notices, the announcement and the summary
+        # with it.
+        try:
+            already_seated = bot.event_store.get_signup(
+                current.occurrence_id, user_id
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read a member's seat during a roster addition; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.stop = _AdditionStop.UNREADABLE
+            outcome.left_off = list(user_ids[index:])
+            break
+        if already_seated:
+            outcome.skipped.append(user_id)
+            continue
+        try:
+            # Notification is deferred to a single merged announcement
+            # after the loop: per-addition pings would post one thread
+            # message per member for what the leader sees as one edit.
+            signup, update = await seat_signup(
+                bot,
+                event,
+                current,
+                user_id,
+                role,
+                (),
+                notify=False,
+            )
+        except ValueError as error:
+            # The roster refused this member (the occurrence ended between
+            # the check above and the write). One refusal must not abandon
+            # the rest of the batch.
+            LOGGER.debug(
+                "Could not add a member to the roster; occurrence_id=%s "
+                "error_type=%s",
+                current.occurrence_id,
+                type(error).__name__,
+            )
+            outcome.failed.append(user_id)
+            continue
+        outcome.added.append(user_id)
+        updates.append(update)
+        if signup.waitlisted:
+            outcome.waitlisted.append(user_id)
+    if outcome.stop is None:
+        # The last seat refreshed the public message too, and no iteration is
+        # left to notice that the refresh retired the occurrence. Run the same
+        # check once more, so the final member is not sent a link to a message
+        # that is gone and the preview below is not offered for a roster that
+        # can no longer be edited.
+        # Guarded like the one inside the loop: the seats are committed by
+        # now, and a store that will not answer must not take the notices,
+        # the announcement and the summary down with it.
+        target = _read_addition_target(
+            bot, event, current, stage="after a roster addition"
+        )
+        if target.event is not None and target.occurrence is not None:
+            event, current = target.event, target.occurrence
+        if target.stop is not None:
+            outcome.stop = target.stop
+            LOGGER.debug(
+                "Roster addition finished on an event that is no longer "
+                "live; occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                target.stop.value,
+            )
+    return event, current
+
+
+async def _send_addition_notices(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    event: Event,
+    current: EventOccurrence,
+    outcome: _AdditionOutcome,
+) -> tuple[Event, EventOccurrence]:
+    # Sent once the roster's final state is known, so a seat that retired the
+    # occurrence cannot send anyone a link to the deleted message. One member
+    # with closed DMs must not stop the rest, so a failed delivery is only
+    # recorded for the summary.
+    def addition_notice() -> str:
+        link = (
+            None
+            if outcome.stop is _AdditionStop.RETIRED
+            else _event_message_link(interaction.guild_id, event, current)
+        )
+        return _addition_dm_content(interaction.user.id, event, link)
+
+    content = addition_notice()
+    for user_id in outcome.added:
+        # Both rows are read again before each delivery, because each one
+        # awaits Discord: a channel move landing between two notices would
+        # otherwise send the rest of them a jump link to the post the run
+        # has just left, and a run retired mid-loop would keep handing out a
+        # link to a message that has gone. What the notice says is rebuilt
+        # from whatever comes back. A store that will not answer says
+        # nothing about the message, so the notice keeps the last link known
+        # to be good rather than dropping it.
+        live = _read_addition_target(
+            bot, event, current, stage="between addition notices"
+        )
+        # Adopted whether or not it also reports a stop: a save that changes
+        # the category and the channel together answers CHANGED and moves
+        # the post in the same breath, and the notices left would otherwise
+        # carry a link to the message that move deleted.
+        if live.event is not None and live.occurrence is not None:
+            event, current = live.event, live.occurrence
+        if live.stop is not None and outcome.stop is None:
+            outcome.stop = live.stop
+            LOGGER.debug(
+                "Roster addition target went away between its notices; "
+                "occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                live.stop.value,
+            )
+        content = addition_notice()
+        # These are sequential external deliveries, so /event delete can land
+        # between two of them and cascade the whole roster away. The member's
+        # own row is the exact question being answered: a row that has gone
+        # means they are on nothing, so telling them they joined it would be
+        # wrong, while a row that survives an occurrence retired above still
+        # earns its notice (without the link the check above already dropped).
+        # Either way the commander is told they went unnotified.
+        #
+        # A store that will not answer is not evidence the seat has gone, and
+        # everything after this loop - the announcement and the summary - is
+        # still owed to the commander. The notices left are recorded as
+        # undelivered, which is what they are, and the rest carries on.
+        try:
+            seated = bot.event_store.get_signup(
+                current.occurrence_id, user_id
+            )
+        except SQLAlchemyError as exc:
+            LOGGER.error(
+                "Could not read a seat before its addition notice; "
+                "occurrence_id=%s error_type=%s",
+                current.occurrence_id,
+                type(exc).__name__,
+            )
+            outcome.undelivered.extend(
+                outcome.added[outcome.added.index(user_id):]
+            )
+            break
+        if seated is None:
+            LOGGER.debug(
+                "Skipped a roster addition notice for a seat that has gone; "
+                "occurrence_id=%s",
+                current.occurrence_id,
+            )
+            outcome.undelivered.append(user_id)
+            continue
+        if not await send_direct_message(bot, user_id, content):
+            outcome.undelivered.append(user_id)
+    if outcome.stop is None:
+        # Those notices are external deliveries, up to one per picked member,
+        # so the event can be deleted or retired while they go out. The check
+        # above guarded what the notices say; this one guards what is offered
+        # afterwards, so edit controls are never rebuilt for a roster that has
+        # since gone.
+        final = _read_addition_target(
+            bot, event, current, stage="after a roster addition's notices"
+        )
+        # Adopted like the earlier verifications, and for the same reason: a
+        # channel move landing while the notices went out replaces the thread
+        # the announcement below is sent to and the message the preview is
+        # drawn from, so both must be addressed to the run as it now stands.
+        if final.event is not None and final.occurrence is not None:
+            event, current = final.event, final.occurrence
+        if final.stop is not None:
+            outcome.stop = final.stop
+            LOGGER.debug(
+                "Roster addition target went away while its notices were "
+                "sent; occurrence_id=%s user_id=%s reason=%s",
+                current.occurrence_id,
+                interaction.user.id,
+                final.stop.value,
+            )
+    return event, current
+
+
 async def apply_roster_addition(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -1487,7 +1727,6 @@ async def apply_roster_addition(
         check_roster_membership,
         merge_roster_updates,
         notify_roster_update,
-        seat_signup,
     )
 
     context = await _picked_roster_target(
@@ -1577,243 +1816,12 @@ async def apply_roster_addition(
         notify=False,
     )
     updates.append(checked)
-    for index, user_id in enumerate(user_ids):
-        # Re-read both rows rather than trusting the ones the batch started
-        # with. The member being seated when a change lands is already past
-        # this check and keeps whatever seat the old state gave them; stopping
-        # here bounds that to one member instead of the whole batch.
-        #
-        # A store that refuses those reads has to answer rather than escape:
-        # the response already says the members are being added, and the
-        # check's own departures are committed with nothing to announce them
-        # if this call never reaches the end of the batch, which is where the
-        # one merged announcement goes out.
-        try:
-            target = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back during a roster addition; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            outcome.stop = _AdditionStop.UNREADABLE
-            outcome.left_off = list(user_ids[index:])
-            break
-        if target.event is not None and target.occurrence is not None:
-            event, current = target.event, target.occurrence
-        if target.stop is not None:
-            outcome.stop = target.stop
-            outcome.left_off = list(user_ids[index:])
-            LOGGER.debug(
-                "Stopped a roster addition; occurrence_id=%s user_id=%s "
-                "reason=%s left_off=%s",
-                current.occurrence_id,
-                interaction.user.id,
-                target.stop.value,
-                len(outcome.left_off),
-            )
-            break
-        # add_signup would overwrite an existing row, resetting the member's
-        # signed-up time and with it their seating priority, so a member who is
-        # already on the roster is left exactly as they are.
-        #
-        # Guarded like the read above it, and for the same reason: the seats
-        # already taken and the check's own departures are committed, and an
-        # escape here takes the notices, the announcement and the summary
-        # with it.
-        try:
-            already_seated = bot.event_store.get_signup(
-                current.occurrence_id, user_id
-            )
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read a member's seat during a roster addition; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            outcome.stop = _AdditionStop.UNREADABLE
-            outcome.left_off = list(user_ids[index:])
-            break
-        if already_seated:
-            outcome.skipped.append(user_id)
-            continue
-        try:
-            # Notification is deferred to a single merged announcement
-            # after the loop: per-addition pings would post one thread
-            # message per member for what the leader sees as one edit.
-            signup, update = await seat_signup(
-                bot,
-                event,
-                current,
-                user_id,
-                role,
-                (),
-                notify=False,
-            )
-        except ValueError as error:
-            # The roster refused this member (the occurrence ended between
-            # the check above and the write). One refusal must not abandon
-            # the rest of the batch.
-            LOGGER.debug(
-                "Could not add a member to the roster; occurrence_id=%s "
-                "error_type=%s",
-                current.occurrence_id,
-                type(error).__name__,
-            )
-            outcome.failed.append(user_id)
-            continue
-        outcome.added.append(user_id)
-        updates.append(update)
-        if signup.waitlisted:
-            outcome.waitlisted.append(user_id)
-    if outcome.stop is None:
-        # The last seat refreshed the public message too, and no iteration is
-        # left to notice that the refresh retired the occurrence. Run the same
-        # check once more, so the final member is not sent a link to a message
-        # that is gone and the preview below is not offered for a roster that
-        # can no longer be edited.
-        # Guarded like the one inside the loop: the seats are committed by
-        # now, and a store that will not answer must not take the notices,
-        # the announcement and the summary down with it.
-        try:
-            target = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back after a roster addition; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            target = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
-        if target.event is not None and target.occurrence is not None:
-            event, current = target.event, target.occurrence
-        if target.stop is not None:
-            outcome.stop = target.stop
-            LOGGER.debug(
-                "Roster addition finished on an event that is no longer "
-                "live; occurrence_id=%s user_id=%s reason=%s",
-                current.occurrence_id,
-                interaction.user.id,
-                target.stop.value,
-            )
-    # Sent once the roster's final state is known, so a seat that retired the
-    # occurrence cannot send anyone a link to the deleted message. One member
-    # with closed DMs must not stop the rest, so a failed delivery is only
-    # recorded for the summary.
-    def addition_notice() -> str:
-        link = (
-            None
-            if outcome.stop is _AdditionStop.RETIRED
-            else _event_message_link(interaction.guild_id, event, current)
-        )
-        return _addition_dm_content(interaction.user.id, event, link)
-
-    content = addition_notice()
-    for user_id in outcome.added:
-        # Both rows are read again before each delivery, because each one
-        # awaits Discord: a channel move landing between two notices would
-        # otherwise send the rest of them a jump link to the post the run
-        # has just left, and a run retired mid-loop would keep handing out a
-        # link to a message that has gone. What the notice says is rebuilt
-        # from whatever comes back. A store that will not answer says
-        # nothing about the message, so the notice keeps the last link known
-        # to be good rather than dropping it.
-        try:
-            live = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back between addition notices; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            live = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
-        # Adopted whether or not it also reports a stop: a save that changes
-        # the category and the channel together answers CHANGED and moves
-        # the post in the same breath, and the notices left would otherwise
-        # carry a link to the message that move deleted.
-        if live.event is not None and live.occurrence is not None:
-            event, current = live.event, live.occurrence
-        if live.stop is not None and outcome.stop is None:
-            outcome.stop = live.stop
-            LOGGER.debug(
-                "Roster addition target went away between its notices; "
-                "occurrence_id=%s user_id=%s reason=%s",
-                current.occurrence_id,
-                interaction.user.id,
-                live.stop.value,
-            )
-        content = addition_notice()
-        # These are sequential external deliveries, so /event delete can land
-        # between two of them and cascade the whole roster away. The member's
-        # own row is the exact question being answered: a row that has gone
-        # means they are on nothing, so telling them they joined it would be
-        # wrong, while a row that survives an occurrence retired above still
-        # earns its notice (without the link the check above already dropped).
-        # Either way the commander is told they went unnotified.
-        #
-        # A store that will not answer is not evidence the seat has gone, and
-        # everything after this loop - the announcement and the summary - is
-        # still owed to the commander. The notices left are recorded as
-        # undelivered, which is what they are, and the rest carries on.
-        try:
-            seated = bot.event_store.get_signup(
-                current.occurrence_id, user_id
-            )
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read a seat before its addition notice; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            outcome.undelivered.extend(
-                outcome.added[outcome.added.index(user_id):]
-            )
-            break
-        if seated is None:
-            LOGGER.debug(
-                "Skipped a roster addition notice for a seat that has gone; "
-                "occurrence_id=%s",
-                current.occurrence_id,
-            )
-            outcome.undelivered.append(user_id)
-            continue
-        if not await send_direct_message(bot, user_id, content):
-            outcome.undelivered.append(user_id)
-    if outcome.stop is None:
-        # Those notices are external deliveries, up to one per picked member,
-        # so the event can be deleted or retired while they go out. The check
-        # above guarded what the notices say; this one guards what is offered
-        # afterwards, so edit controls are never rebuilt for a roster that has
-        # since gone.
-        try:
-            final = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back after a roster addition's "
-                "notices; occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            final = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
-        # Adopted like the earlier verifications, and for the same reason: a
-        # channel move landing while the notices went out replaces the thread
-        # the announcement below is sent to and the message the preview is
-        # drawn from, so both must be addressed to the run as it now stands.
-        if final.event is not None and final.occurrence is not None:
-            event, current = final.event, final.occurrence
-        if final.stop is not None:
-            outcome.stop = final.stop
-            LOGGER.debug(
-                "Roster addition target went away while its notices were "
-                "sent; occurrence_id=%s user_id=%s reason=%s",
-                current.occurrence_id,
-                interaction.user.id,
-                final.stop.value,
-            )
+    event, current = await _seat_roster_additions(
+        bot, interaction, event, current, user_ids, role, outcome, updates
+    )
+    event, current = await _send_addition_notices(
+        bot, interaction, event, current, outcome
+    )
     # Re-read the seats rather than trusting what each write returned. An edit
     # landing while seat_signup awaited Discord re-seats the whole roster under
     # the new capacity, so the row a write returned can describe a capacity
@@ -1997,3 +2005,4 @@ def _addition_summary(outcome: _AdditionOutcome) -> str:
             + ", so they were not notified."
         )
     return "\n".join(lines)
+
