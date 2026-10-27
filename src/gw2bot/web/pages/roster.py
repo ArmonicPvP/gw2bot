@@ -363,7 +363,6 @@ table.changes td.unmatched { color: var(--muted); }
     },
     {
       heading: "Members",
-      head: null,
       className: "num",
       fill: textFill(function (change) {
         return change.count === null ? "" : String(change.count);
