@@ -7,6 +7,9 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
+    CHART_PAGE_STYLE,
+    CHART_HELPERS_JS,
+    CHART_HOVER_JS,
     CUSTOM_RANGE_PANEL,
     DASHBOARD_HEADER_STYLE,
     RANGE_PICKER_LISTENERS_JS,
@@ -28,28 +31,8 @@ EVENTS_PAGE = (
     + SHARED_STYLE
     + DASHBOARD_HEADER_STYLE
     + RANGE_PICKER_STYLE
+    + CHART_PAGE_STYLE
     + """
-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-main {
-  flex: 1;
-  width: 100%;
-  max-width: 62rem;
-  margin: 0 auto;
-  padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1rem;
-}
 .card h2 { font-size: 0.95rem; margin-bottom: 0.6rem; }
 /* The four headline figures are tiles rather than a chart: each is one
    number, and a number is read faster than a bar. */
@@ -77,30 +60,10 @@ main {
    rather than breaking the row of tiles. */
 .tile .value.name { font-size: 1.1rem; }
 .tile .note { color: var(--muted); font-size: 0.8rem; margin-top: 0.2rem; }
-/* The chart is a fixed-viewBox SVG that scales to its container width, so
-   every plotted coordinate is computed once against the viewBox and the
-   browser handles resizing without a re-render. */
-.chart-svg { width: 100%; height: auto; display: block; }
-.chart-svg .axis { stroke: var(--border); stroke-width: 1; }
-.chart-svg .grid { stroke: var(--border); stroke-width: 1; opacity: 0.35; }
-.chart-svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
-.chart-svg .y-label { text-anchor: end; }
-.chart-svg .x-label { text-anchor: middle; }
 .chart-svg .x-label.first { text-anchor: start; }
 .chart-svg .x-label.last { text-anchor: end; }
 .chart-svg .runs-line { fill: none; stroke-width: 2; }
 .chart-svg .run-dot { stroke: var(--panel); stroke-width: 2; }
-.chart-svg .overlay { fill: transparent; }
-/* A thin, translucent gray line the hover snaps to the nearest run. */
-.chart-svg .crosshair {
-  stroke: rgba(128, 128, 128, 0.45);
-  stroke-width: 1;
-  pointer-events: none;
-}
-.chart-svg .hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
-/* #chart is the positioning context for the hover tooltip, which is an HTML
-   box overlaid on the SVG so its text wraps and inherits page styling. */
-#chart { position: relative; }
 .chart-tooltip {
   position: absolute;
   z-index: 2;
@@ -115,11 +78,9 @@ main {
   pointer-events: none;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
-.chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
 .chart-tooltip .tip-row { overflow-wrap: anywhere; }
 .chart-tooltip .tip-row .by { color: var(--muted); }
 .chart-tooltip .tip-note { color: var(--muted); margin-top: 0.25rem; }
-#chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 table.stats { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 table.stats th, table.stats td {
   text-align: left;
@@ -136,15 +97,6 @@ table.stats th.num, table.stats td.num {
   font-variant-numeric: tabular-nums;
 }
 table.stats td.unknown { color: var(--muted); }
-.empty { color: var(--muted); padding: 0.6rem; }
-.pager {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
 .pager:empty { display: none; }
 .table-note { color: var(--muted); font-size: 0.85rem; margin-top: 0.6rem; }
 .table-note:empty { display: none; }
@@ -237,7 +189,6 @@ table.stats td.unknown { color: var(--muted); }
   // The cumulative line is the page's one series, drawn in the colour the
   // roster page gives its own line.
   var LINE_COLOR = "#56B4E9";
-  var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 10;
 
   var mobileQuery = window.matchMedia("(max-width: 640px)");
@@ -275,22 +226,10 @@ table.stats td.unknown { color: var(--muted); }
   var chart = document.getElementById("chart");
   var chartStatus = document.getElementById("chart-status");
 
-  function el(tag, className, text) {
-    var node = document.createElement(tag);
-    if (className) { node.className = className; }
-    if (text !== undefined) { node.textContent = text; }
-    return node;
-  }
-  function svg(tag, attrs) {
-    var node = document.createElementNS(SVG_NS, tag);
-    if (attrs) {
-      Object.keys(attrs).forEach(function (key) {
-        node.setAttribute(key, attrs[key]);
-      });
-    }
-    return node;
-  }
-
+"""
+    + CHART_HELPERS_JS
+    + CHART_HOVER_JS
+    + """
   function points() { return (state.data && state.data.points) || []; }
   function total() { return (state.data && state.data.runs) || 0; }
 
@@ -343,34 +282,6 @@ table.stats td.unknown { color: var(--muted); }
     var value = Math.max(scale.low, Math.min(scale.high, count));
     return M.top + (1 - (value - scale.low) / (scale.high - scale.low)) *
       plotH();
-  }
-
-  // How wide the drawn window is, in seconds.
-  function windowSpan() {
-    return state.data ? state.data.now - state.data.since : 0;
-  }
-
-  function formatTick(t) {
-    var date = new Date(t * 1000);
-    // A window of about a day or less is read off the clock and a wider one
-    // off the calendar. The span decides rather than the range's name, so a
-    // custom pair of dates is labelled like the preset it resembles.
-    if (windowSpan() <= 48 * 60 * 60) {
-      return date.toLocaleTimeString(
-        undefined, { hour: "numeric", minute: "2-digit" });
-    }
-    return date.toLocaleDateString(
-      undefined, { month: "numeric", day: "numeric" });
-  }
-  function formatMoment(t) {
-    return new Date(t * 1000).toLocaleString(
-      undefined,
-      {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit"
-      });
   }
 
   // Runs that ended in the same clock minute share one dot, at the count
@@ -490,34 +401,6 @@ table.stats td.unknown { color: var(--muted); }
       : "No event runs ended in this period.";
   }
 
-  // Tells a hovering pointer from a finger or a pen. Touch selects by
-  // tapping instead and never reaches the move or leave handlers.
-  function isHoverPointer(event) {
-    return !event.pointerType || event.pointerType === "mouse";
-  }
-
-  // How far a finger may travel from where it landed and still count as a
-  // tap rather than the start of a scroll, in CSS pixels.
-  var TAP_SLOP = 12;
-
-  // Pointer and event types are narrowed to the names the spec defines
-  // before they are traced, so an exotic value cannot ride into the console.
-  function pointerKind(event) {
-    var kind = event && event.pointerType;
-    if (kind === "mouse" || kind === "pen" || kind === "touch") {
-      return kind;
-    }
-    return "other";
-  }
-  function eventKind(event) {
-    var name = event && event.type;
-    if (name === "pointerdown" || name === "wheel" ||
-        name === "keydown" || name === "blur") {
-      return name;
-    }
-    return "other";
-  }
-
   // Sanitized tracing for the tap selection lifecycle. Every call passes a
   // fixed action name, one of the narrowed reason names above, and a count
   // of drawn elements. Event titles, names and times are never passed.
@@ -525,185 +408,28 @@ table.stats td.unknown { color: var(--muted); }
     console.debug("events chart selection:", action, reason, count);
   }
 
+  // Every point is its own column: two runs a few minutes apart are still
+  // told apart by height, because the nearest dot is picked in both
+  // directions.
   function attachHover(canvas, plotted) {
-    // The viewBox differs between the mobile and desktop layouts, so the
-    // hover is pinned to the metrics this canvas was drawn with.
-    var m = M;
-    var innerW = m.w - m.left - m.right;
-    var innerH = m.h - m.top - m.bottom;
-    var pinned = false;
-    var pinOrigin = null;
-
-    var crosshair = svg("line", {
-      "class": "crosshair",
-      y1: m.top,
-      y2: m.top + innerH
+    var columns = plotted.map(function (point) {
+      return { t: point.t, x: point.x, points: [point] };
     });
-    crosshair.style.visibility = "hidden";
-    var ring = svg("circle", {
-      "class": "hover-ring", r: 7, stroke: LINE_COLOR
-    });
-    ring.style.visibility = "hidden";
-    var overlay = svg("rect", {
-      "class": "overlay",
-      x: m.left,
-      y: m.top,
-      width: innerW,
-      height: innerH
-    });
-    overlay.style.cursor = "crosshair";
-    canvas.appendChild(crosshair);
-    canvas.appendChild(ring);
-    canvas.appendChild(overlay);
-
-    var tooltip = el("div", "chart-tooltip");
-    tooltip.style.visibility = "hidden";
-    chart.appendChild(tooltip);
-
-    // Picks the dot nearest the pointer in both directions, so two runs a
-    // few minutes apart can still be told apart by height.
-    function nearest(vbX, vbY) {
-      var best = null;
-      var bestDist = Infinity;
-      plotted.forEach(function (point) {
-        var dx = point.x - vbX;
-        var dy = point.y - vbY;
-        var dist = dx * dx + dy * dy;
-        if (dist < bestDist) { bestDist = dist; best = point; }
-      });
-      return best;
-    }
-
-    function show(point) {
-      crosshair.setAttribute("x1", point.x);
-      crosshair.setAttribute("x2", point.x);
-      crosshair.style.visibility = "visible";
-      ring.setAttribute("cx", point.x);
-      ring.setAttribute("cy", point.y);
-      ring.style.visibility = "visible";
-      tooltip.replaceChildren();
-      tooltip.appendChild(el("div", "tip-time", formatMoment(point.t)));
-      point.runs.forEach(function (run) {
-        var row = el("div", "tip-row", run.title);
-        row.appendChild(el("span", "by", " \\u2014 " + run.commander));
-        tooltip.appendChild(row);
-      });
-      tooltip.appendChild(el("div", "tip-note",
-        formatCount(point.count) + " " + runsWord(point.count) +
-        " so far."));
-      var leftPct = Math.max(10, Math.min(90, point.x / m.w * 100));
-      var topPct = point.y / m.h * 100;
-      tooltip.style.left = leftPct + "%";
-      tooltip.style.top = topPct + "%";
-      tooltip.style.transform = topPct < 32
-        ? "translate(-50%, 14px)"
-        : "translate(-50%, calc(-100% - 14px))";
-      tooltip.style.visibility = "visible";
-    }
-
-    function hide() {
-      crosshair.style.visibility = "hidden";
-      ring.style.visibility = "hidden";
-      tooltip.style.visibility = "hidden";
-      unpin();
-    }
-
-    // Translates a pointer position into viewBox coordinates, or null while
-    // the canvas has no laid-out size to measure against.
-    function pointFromEvent(event) {
-      var rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) { return null; }
-      return {
-        x: (event.clientX - rect.left) / rect.width * m.w,
-        y: (event.clientY - rect.top) / rect.height * m.h
-      };
-    }
-
-    function release(reason) {
-      var wasPinned = pinned;
-      hide();
-      if (wasPinned) { traceSelection("release", reason, plotted.length); }
-    }
-
-    // Anything other than another tap on the plot clears a pinned selection.
-    function dismiss(event) {
-      if (event && event.type === "pointerdown" &&
-          event.target === overlay && !isHoverPointer(event)) {
-        traceSelection("keep", "retarget-on-plot", plotted.length);
-        return;
+    return attachChartHover(canvas, columns, {
+      host: chart,
+      emptyReason: "no-runs",
+      ringColor: function () { return LINE_COLOR; },
+      fillTooltip: function (tooltip, column, point) {
+        point.runs.forEach(function (run) {
+          var row = el("div", "tip-row", run.title);
+          row.appendChild(el("span", "by", " \\u2014 " + run.commander));
+          tooltip.appendChild(row);
+        });
+        tooltip.appendChild(el("div", "tip-note",
+          formatCount(point.count) + " " + runsWord(point.count) +
+          " so far."));
       }
-      release("page-" + eventKind(event));
-    }
-
-    function pin(event, kind) {
-      pinOrigin = { x: event.clientX, y: event.clientY };
-      if (pinned) { return; }
-      pinned = true;
-      document.addEventListener("pointerdown", dismiss, true);
-      document.addEventListener("wheel", dismiss, true);
-      document.addEventListener("keydown", dismiss, true);
-      window.addEventListener("blur", dismiss);
-      traceSelection("pin", kind, plotted.length);
-    }
-
-    function unpin() {
-      if (!pinned) { return; }
-      pinned = false;
-      pinOrigin = null;
-      document.removeEventListener("pointerdown", dismiss, true);
-      document.removeEventListener("wheel", dismiss, true);
-      document.removeEventListener("keydown", dismiss, true);
-      window.removeEventListener("blur", dismiss);
-    }
-
-    // Resolves the dot a pointer is over. When there is nothing to show,
-    // reason names why with a fixed string.
-    function resolve(event) {
-      if (!plotted.length) { return { point: null, reason: "no-runs" }; }
-      var at = pointFromEvent(event);
-      if (!at) { return { point: null, reason: "unsized-canvas" }; }
-      return { point: nearest(at.x, at.y), reason: "ok" };
-    }
-
-    overlay.addEventListener("pointermove", function (event) {
-      if (!isHoverPointer(event)) {
-        // A finger that travels past the tap slop is scrolling the page, not
-        // picking a point, so the selection it opened is dropped.
-        if (pinned && pinOrigin) {
-          var dx = event.clientX - pinOrigin.x;
-          var dy = event.clientY - pinOrigin.y;
-          if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { release("drag"); }
-        }
-        return;
-      }
-      var hovered = resolve(event);
-      if (hovered.point) { show(hovered.point); }
     });
-    overlay.addEventListener("pointerleave", function (event) {
-      if (isHoverPointer(event)) { release("pointer-leave"); }
-    });
-    // Touch and pen select by tapping: the nearest dot opens and stays up
-    // until the next interaction, and a tap on another dot moves it there.
-    overlay.addEventListener("pointerdown", function (event) {
-      if (isHoverPointer(event)) { return; }
-      var kind = pointerKind(event);
-      var tapped = resolve(event);
-      if (!tapped.point) {
-        traceSelection("skip", tapped.reason, plotted.length);
-        release("skipped-tap");
-        return;
-      }
-      var moved = pinned;
-      pin(event, kind);
-      show(tapped.point);
-      traceSelection(moved ? "move" : "open", kind, tapped.point.runs.length);
-    });
-    overlay.addEventListener("pointercancel", function (event) {
-      if (!isHoverPointer(event)) { release("pointer-cancel"); }
-    });
-
-    // Lets a re-render drop this canvas's page-level listeners with it.
-    return function () { release("redraw"); };
   }
 
   function renderTiles() {

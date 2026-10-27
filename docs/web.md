@@ -78,7 +78,7 @@ at once would add the same sales twice.
 
 | Module | What it holds |
 | --- | --- |
-| `shared.py` | The frame every dashboard is built from: the stylesheet, the header, and the time-range picker. A change to the frame is one edit here rather than four. |
+| `shared.py` | The frame every dashboard is built from: the stylesheet, the header, and the time-range picker, plus what the four charted dashboards draw with: the chart stylesheet, the DOM and axis helpers, and the hover and tap selection. A change to the frame or to how a chart is read is one edit here rather than four. |
 | `notices.py` | The one-card pages: sign-in, signed-out, and the access refusals. Fixed strings except the sign-in page's login URL, which is escaped after `server.py` has validated it as a local path. |
 | `calendar.py` | The guild event calendar. |
 | `food.py` | The feast usage dashboard, including the Additions table and the cost editor its Edit pencil opens. |
@@ -91,11 +91,27 @@ at once would add the same sales twice.
 from one place.
 
 The names in `shared.py` are public (`SHARED_STYLE`, `DASHBOARD_HEADER_STYLE`,
-`RANGE_PICKER_STYLE`, `RANGE_PICKER_NAV`, `CUSTOM_RANGE_PANEL`,
-`RANGE_PICKER_LISTENERS_JS`, `range_picker_js`, `simple_page`,
-`MAX_CUSTOM_DAYS`) because they are the page package's API. They were
+`RANGE_PICKER_STYLE`, `CHART_PAGE_STYLE`, `RANGE_PICKER_NAV`,
+`CUSTOM_RANGE_PANEL`, `RANGE_PICKER_LISTENERS_JS`, `CHART_HELPERS_JS`,
+`CHART_HOVER_JS`, `range_picker_js`, `simple_page`, `MAX_CUSTOM_DAYS`) because
+they are the page package's API. They were
 underscore-prefixed while already being imported across modules, which was
 only ever a mislabel.
+
+## One chart hover
+
+The feast, roster, gold and events dashboards each draw a chart that a mouse
+hovers and a finger taps, and the four used to carry their own copy of that
+machinery. `CHART_HOVER_JS` is the one copy now: a page groups its plotted dots
+into columns and calls `attachChartHover(canvas, columns, options)` from a
+small `attachHover` of its own, passing the tooltip's host, the fixed reason a
+skipped tap is traced with, the ring colour, and a `fillTooltip` that adds the
+page's rows. The page keeps its own `traceSelection`, so each console trace
+still names its dashboard, and its own `M`, the metrics the canvas was drawn
+with. `CHART_HELPERS_JS` holds the helpers the pages shared word for word
+(`el`, `svg`, `formatTick`, `formatMoment`, the pointer narrowing), and
+`CHART_PAGE_STYLE` the rules all four stylesheets repeated. The profit page
+draws its chart differently and keeps its own.
 
 ## Two purples
 

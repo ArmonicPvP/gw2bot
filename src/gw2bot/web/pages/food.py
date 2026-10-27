@@ -7,6 +7,9 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
+    CHART_PAGE_STYLE,
+    CHART_HELPERS_JS,
+    CHART_HOVER_JS,
     CUSTOM_RANGE_PANEL,
     DASHBOARD_HEADER_STYLE,
     RANGE_PICKER_LISTENERS_JS,
@@ -28,28 +31,8 @@ FOOD_PAGE = (
     + SHARED_STYLE
     + DASHBOARD_HEADER_STYLE
     + RANGE_PICKER_STYLE
+    + CHART_PAGE_STYLE
     + """
-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-main {
-  flex: 1;
-  width: 100%;
-  max-width: 62rem;
-  margin: 0 auto;
-  padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1rem;
-}
 .card h2 { font-size: 0.95rem; }
 .chart-heading {
   display: flex;
@@ -90,28 +73,8 @@ main {
    colour reduced to an outline, so what is missing from the chart is still
    named and one more click puts it back. */
 .legend .item.off { opacity: 0.55; }
-/* The chart is a fixed-viewBox SVG that scales to its container width, so
-   every plotted coordinate is computed once against the viewBox and the
-   browser handles resizing without a re-render. */
-.chart-svg { width: 100%; height: auto; display: block; }
-.chart-svg .axis { stroke: var(--border); stroke-width: 1; }
-.chart-svg .grid { stroke: var(--border); stroke-width: 1; opacity: 0.35; }
-.chart-svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
-.chart-svg .y-label { text-anchor: end; }
-.chart-svg .x-label { text-anchor: middle; }
 .chart-svg .series-line { fill: none; stroke-width: 2; }
 .chart-svg .series-dot { stroke: var(--panel); stroke-width: 1; }
-.chart-svg .overlay { fill: transparent; }
-/* A thin, translucent gray line the hover snaps to the nearest sample. */
-.chart-svg .crosshair {
-  stroke: rgba(128, 128, 128, 0.45);
-  stroke-width: 1;
-  pointer-events: none;
-}
-.chart-svg .hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
-/* #chart is the positioning context for the hover tooltip, which is an HTML
-   box overlaid on the SVG so its text wraps and inherits page styling. */
-#chart { position: relative; }
 /* Every chart below the stock graph is the same box: the positioning context
    its hover tooltip is placed in. */
 .chart-box { position: relative; }
@@ -136,7 +99,6 @@ main {
   pointer-events: none;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
-.chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
 .chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
 .chart-tooltip .tip-row .swatch {
   width: 0.7rem;
@@ -150,7 +112,6 @@ main {
   font-variant-numeric: tabular-nums;
 }
 .chart-tooltip .tip-row.em { font-weight: 600; }
-#chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.75rem; }
 .tabs button { font-size: 0.8rem; }
 table.removals, table.additions {
@@ -264,15 +225,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: 0.6rem;
-}
-.empty { color: var(--muted); padding: 0.6rem; }
-.pager {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  color: var(--muted);
-  font-size: 0.85rem;
 }
 @media (max-width: 640px) {
   main { padding: 0.6rem 0.5rem; }
@@ -427,7 +379,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
 (function () {
   // Okabe-Ito colourblind-safe categorical palette, one hue per tracked feast.
   var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
-  var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 5;
   var COPPER_PER_SILVER = 100;
   var COPPER_PER_GOLD = 100 * COPPER_PER_SILVER;
@@ -503,22 +454,10 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     copper: document.getElementById("cost-copper")
   };
 
-  function el(tag, className, text) {
-    var node = document.createElement(tag);
-    if (className) { node.className = className; }
-    if (text !== undefined) { node.textContent = text; }
-    return node;
-  }
-  function svg(tag, attrs) {
-    var node = document.createElementNS(SVG_NS, tag);
-    if (attrs) {
-      Object.keys(attrs).forEach(function (key) {
-        node.setAttribute(key, attrs[key]);
-      });
-    }
-    return node;
-  }
-
+"""
+    + CHART_HELPERS_JS
+    + CHART_HOVER_JS
+    + """
   function feasts() {
     return (state.data && state.data.feasts) || [];
   }
@@ -585,34 +524,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     if (value < 0) { value = 0; }
     if (value > high) { value = high; }
     return M.top + (1 - value / high) * plotH();
-  }
-
-  // How wide the drawn window is, in seconds.
-  function windowSpan() {
-    return state.data ? state.data.now - state.data.since : 0;
-  }
-
-  function formatTick(t) {
-    var date = new Date(t * 1000);
-    // A window of about a day or less is read off the clock and a wider one
-    // off the calendar. The span decides rather than the range's name, so a
-    // custom pair of dates is labelled like the preset it resembles.
-    if (windowSpan() <= 48 * 60 * 60) {
-      return date.toLocaleTimeString(
-        undefined, { hour: "numeric", minute: "2-digit" });
-    }
-    return date.toLocaleDateString(
-      undefined, { month: "numeric", day: "numeric" });
-  }
-  function formatMoment(t) {
-    return new Date(t * 1000).toLocaleString(
-      undefined,
-      {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit"
-      });
   }
 
   function renderChart() {
@@ -758,37 +669,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     return columns;
   }
 
-  // Tells a hovering pointer from a finger or a pen. A touch has no hover
-  // state: the browser sends one pointermove at the tap point and then a
-  // pointerleave as the finger lifts, which is why a tap used to flash the
-  // crosshair and lose it again. Touch selects by tapping instead and never
-  // reaches the move or leave handlers.
-  function isHoverPointer(event) {
-    return !event.pointerType || event.pointerType === "mouse";
-  }
-
-  // How far a finger may travel from where it landed and still count as a tap
-  // rather than the start of a scroll, in CSS pixels.
-  var TAP_SLOP = 12;
-
-  // Pointer and event types are narrowed to the names the spec defines before
-  // they are traced, so an exotic value cannot ride into the console.
-  function pointerKind(event) {
-    var kind = event && event.pointerType;
-    if (kind === "mouse" || kind === "pen" || kind === "touch") {
-      return kind;
-    }
-    return "other";
-  }
-  function eventKind(event) {
-    var name = event && event.type;
-    if (name === "pointerdown" || name === "wheel" ||
-        name === "keydown" || name === "blur") {
-      return name;
-    }
-    return "other";
-  }
-
   // Sanitized tracing for the tap selection lifecycle, so a console trace can
   // explain why a selection opened, moved or went away. Every call passes a
   // fixed action name, one of the narrowed reason names above, and a count of
@@ -802,232 +682,32 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   // host is the positioning box the tooltip is placed in and headline names a
   // column; both default to the stock chart's, so its own call site reads the
   // way it always has while the daily charts below pass their own.
+  // The usage chart and the daily charts share this; a daily chart passes
+  // its own host and a day headline, and its columns are evenly spaced days,
+  // so the column nearest in x is the one meant.
   function attachHover(canvas, plotted, host, headline) {
-    var box = host || chart;
-    var head = headline || formatMoment;
-    var columns = groupColumns(plotted);
-    // The viewBox differs between the mobile and desktop layouts, so the hover
-    // is pinned to the metrics this canvas was drawn with rather than to
-    // whichever set is current when a pointer event arrives.
-    var m = M;
-    var innerW = m.w - m.left - m.right;
-    var innerH = m.h - m.top - m.bottom;
-    // Set while a tap holds a column open, together with the page listeners
-    // that dismiss it. A mouse hover never arms them.
-    var pinned = false;
-    var pinOrigin = null;
-
-    var crosshair = svg("line", {
-      "class": "crosshair",
-      y1: m.top,
-      y2: m.top + innerH
-    });
-    crosshair.style.visibility = "hidden";
-    var rings = svg("g");
-    var overlay = svg("rect", {
-      "class": "overlay",
-      x: m.left,
-      y: m.top,
-      width: innerW,
-      height: innerH
-    });
-    overlay.style.cursor = "crosshair";
-    canvas.appendChild(crosshair);
-    canvas.appendChild(rings);
-    canvas.appendChild(overlay);
-
-    var tooltip = el("div", "chart-tooltip");
-    tooltip.style.visibility = "hidden";
-    box.appendChild(tooltip);
-
-    function nearestColumn(vbX) {
-      var best = null;
-      var bestDist = Infinity;
-      columns.forEach(function (column) {
-        var dist = Math.abs(column.x - vbX);
-        if (dist < bestDist) { bestDist = dist; best = column; }
-      });
-      return best;
-    }
-
-    function showTooltip(column, emphasized) {
-      tooltip.replaceChildren();
-      tooltip.appendChild(el("div", "tip-time", head(column.t)));
-      column.points.forEach(function (point) {
-        var row = el("div",
-          "tip-row" + (point === emphasized ? " em" : ""));
-        var swatch = el("span", "swatch");
-        swatch.style.background = point.color;
-        row.appendChild(swatch);
-        row.appendChild(el("span", "name", point.name));
-        row.appendChild(el("span", "val", point.text !== undefined
-          ? point.text
-          : String(point.count)));
-        tooltip.appendChild(row);
-      });
-      // Anchor to the point nearest the cursor and flip below the axis top
-      // when there is no room to sit above it.
-      var leftPct = Math.max(10, Math.min(90, emphasized.x / m.w * 100));
-      var topPct = emphasized.y / m.h * 100;
-      tooltip.style.left = leftPct + "%";
-      tooltip.style.top = topPct + "%";
-      tooltip.style.transform = topPct < 32
-        ? "translate(-50%, 14px)"
-        : "translate(-50%, calc(-100% - 14px))";
-      tooltip.style.visibility = "visible";
-    }
-
-    function showHover(column, vbY) {
-      crosshair.setAttribute("x1", column.x);
-      crosshair.setAttribute("x2", column.x);
-      crosshair.style.visibility = "visible";
-      rings.replaceChildren();
-      var emphasized = column.points[0];
-      var bestDy = Infinity;
-      column.points.forEach(function (point) {
-        rings.appendChild(svg("circle", {
-          "class": "hover-ring",
-          cx: point.x,
-          cy: point.y,
-          r: 5,
-          stroke: point.color
-        }));
-        var dy = Math.abs(point.y - vbY);
-        if (dy < bestDy) { bestDy = dy; emphasized = point; }
-      });
-      showTooltip(column, emphasized);
-    }
-
-    function hideHover() {
-      crosshair.style.visibility = "hidden";
-      rings.replaceChildren();
-      tooltip.style.visibility = "hidden";
-      unpin();
-    }
-
-    // Translates a pointer position into viewBox coordinates, or null while
-    // the canvas has no laid-out size to measure against.
-    function pointFromEvent(event) {
-      var rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) { return null; }
-      return {
-        x: (event.clientX - rect.left) / rect.width * m.w,
-        y: (event.clientY - rect.top) / rect.height * m.h
-      };
-    }
-
-    // Clears the selection and traces why it went away, but only when a tap
-    // was holding it open. A mouse hover follows the pointer continuously, so
-    // tracing every move that ends one would bury the trace it exists to give.
-    function release(reason) {
-      var wasPinned = pinned;
-      hideHover();
-      if (wasPinned) { traceSelection("release", reason, columns.length); }
-    }
-
-    // Anything other than another tap on the plot clears a pinned selection: a
-    // tap elsewhere on the page, a wheel, a key, or the window losing focus.
-    function dismiss(event) {
-      // A tap that moves the selection to another column reaches the overlay
-      // after this capture listener has already run, so it is left to the
-      // overlay's own handler. Only a tap earns that exemption: a wheel over
-      // the plot, or a mouse press on it, is aimed at the overlay too, but the
-      // handler there acts on neither, so waving those through would strand
-      // the selection on screen with nothing left to clear it.
-      if (isRetargetingTap(event)) {
-        traceSelection("keep", "retarget-on-plot", columns.length);
-        return;
+    return attachChartHover(canvas, groupColumns(plotted), {
+      host: host || chart,
+      headline: headline || formatMoment,
+      emptyReason: "no-samples",
+      nearestByX: true,
+      ringRadius: 5,
+      ringColor: function (point) { return point.color; },
+      fillTooltip: function (tooltip, column, emphasized) {
+        column.points.forEach(function (point) {
+          var row = el("div",
+            "tip-row" + (point === emphasized ? " em" : ""));
+          var swatch = el("span", "swatch");
+          swatch.style.background = point.color;
+          row.appendChild(swatch);
+          row.appendChild(el("span", "name", point.name));
+          row.appendChild(el("span", "val", point.text !== undefined
+            ? point.text
+            : String(point.count)));
+          tooltip.appendChild(row);
+        });
       }
-      release("page-" + eventKind(event));
-    }
-
-    // True only for the events the overlay's pointerdown handler will act on,
-    // which is what makes leaving them to it safe.
-    function isRetargetingTap(event) {
-      return !!event && event.type === "pointerdown" &&
-        event.target === overlay && !isHoverPointer(event);
-    }
-
-    function pin(event, kind) {
-      pinOrigin = { x: event.clientX, y: event.clientY };
-      if (pinned) { return; }
-      pinned = true;
-      document.addEventListener("pointerdown", dismiss, true);
-      document.addEventListener("wheel", dismiss, true);
-      document.addEventListener("keydown", dismiss, true);
-      window.addEventListener("blur", dismiss);
-      traceSelection("pin", kind, columns.length);
-    }
-
-    function unpin() {
-      if (!pinned) { return; }
-      pinned = false;
-      pinOrigin = null;
-      document.removeEventListener("pointerdown", dismiss, true);
-      document.removeEventListener("wheel", dismiss, true);
-      document.removeEventListener("keydown", dismiss, true);
-      window.removeEventListener("blur", dismiss);
-    }
-
-    // Resolves the column a pointer is over. When there is nothing to show,
-    // reason names why so the caller can trace the skip; the names are fixed
-    // strings, never anything read off the event or the payload.
-    function resolveColumn(event) {
-      if (!columns.length) { return { column: null, reason: "no-samples" }; }
-      var at = pointFromEvent(event);
-      if (!at) { return { column: null, reason: "unsized-canvas" }; }
-      var column = nearestColumn(at.x);
-      if (!column) { return { column: null, reason: "no-nearest" }; }
-      return { column: column, at: at, reason: "ok" };
-    }
-
-    overlay.addEventListener("pointermove", function (event) {
-      if (!isHoverPointer(event)) {
-        // A finger that travels past the tap slop is scrolling the page, not
-        // picking a point, so the selection it opened is dropped.
-        if (pinned && pinOrigin) {
-          var dx = event.clientX - pinOrigin.x;
-          var dy = event.clientY - pinOrigin.y;
-          if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { release("drag"); }
-        }
-        return;
-      }
-      var hovered = resolveColumn(event);
-      if (hovered.column) { showHover(hovered.column, hovered.at.y); }
     });
-    overlay.addEventListener("pointerleave", function (event) {
-      // A finger's pointerleave arrives as it lifts off the glass; only a
-      // mouse leaving the plot means its hover is over.
-      if (isHoverPointer(event)) { release("pointer-leave"); }
-    });
-    // Touch and pen select by tapping: the nearest column opens and stays up
-    // until the next interaction, and a tap on another point moves it there.
-    overlay.addEventListener("pointerdown", function (event) {
-      if (isHoverPointer(event)) { return; }
-      var kind = pointerKind(event);
-      var tapped = resolveColumn(event);
-      if (!tapped.column) {
-        // Nothing to open, so the tap is reported and any selection already
-        // showing is cleared rather than left behind as a stale reading.
-        traceSelection("skip", tapped.reason, columns.length);
-        release("skipped-tap");
-        return;
-      }
-      // Tracing the move apart from the open is what shows a trace reader that
-      // a second tap replaced the first selection instead of adding to it.
-      var moved = pinned;
-      pin(event, kind);
-      showHover(tapped.column, tapped.at.y);
-      traceSelection(
-        moved ? "move" : "open", kind, tapped.column.points.length);
-    });
-    // The browser claims the gesture once it decides a touch is a scroll.
-    overlay.addEventListener("pointercancel", function (event) {
-      if (!isHoverPointer(event)) { release("pointer-cancel"); }
-    });
-
-    // Lets a re-render drop this canvas's page-level listeners with it.
-    return function () { release("redraw"); };
   }
 
   // Sanitized tracing for the legend, so a console trace can explain why the

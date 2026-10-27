@@ -17,7 +17,12 @@ from gw2bot.web.pages import (
     SIGNED_OUT_PAGE,
     sign_in_page,
 )
-from gw2bot.web.pages.shared import SHARED_STYLE
+from gw2bot.web.pages.shared import (
+    CHART_HELPERS_JS,
+    CHART_HOVER_JS,
+    CHART_PAGE_STYLE,
+    SHARED_STYLE,
+)
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 from gw2bot.web.pages.profit import (
     PAGE_SIZE_DEFAULT,
@@ -1309,6 +1314,58 @@ class TestDashboardHeaders:
             assert '<h1 id="brand">' in page
 
 
+class TestDashboardChartHover:
+    """The four history dashboards draw their charts with one shared hover."""
+
+    PAGES = (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE, EVENTS_PAGE)
+
+    def test_every_chart_dashboard_carries_the_shared_chart_code_once(
+        self,
+    ) -> None:
+        for page in self.PAGES:
+            assert page.count(CHART_HELPERS_JS) == 1
+            assert page.count(CHART_HOVER_JS) == 1
+            assert page.count(CHART_PAGE_STYLE) == 1
+
+    def test_no_dashboard_keeps_its_own_copy_of_a_shared_helper(self) -> None:
+        # A second definition would quietly win over the shared one inside the
+        # page's closure, which is how the copies drifted apart before.
+        shared = (
+            "el(tag, className, text)",
+            "svg(tag, attrs)",
+            "windowSpan()",
+            "formatTick(t)",
+            "formatMoment(t)",
+            "isHoverPointer(event)",
+            "pointerKind(event)",
+            "eventKind(event)",
+            "attachChartHover(canvas, columns, options)",
+            "nearestColumn(vbX, vbY)",
+        )
+        for page in self.PAGES:
+            for signature in shared:
+                assert page.count("function " + signature) == 1, signature
+            assert page.count("var TAP_SLOP = ") == 1
+            assert page.count("var SVG_NS = ") == 1
+
+    def test_each_dashboard_supplies_the_hover_hooks(self) -> None:
+        for page in self.PAGES:
+            hover = page.split("  function attachHover(", 1)[1]
+            hover = hover.split("\n  }", 1)[0]
+            assert "return attachChartHover(canvas, " in hover
+            assert "host: " in hover
+            assert "ringColor: function (" in hover
+            assert "fillTooltip: function (tooltip, column, " in hover
+            # The reason a skipped tap is traced with must be a fixed name,
+            # never a value read off the payload.
+            assert re.search(r'emptyReason: "[a-z-]+",', hover), hover
+
+    def test_shared_tooltip_rows_never_become_markup(self) -> None:
+        assert "innerHTML" not in CHART_HOVER_JS
+        assert "insertAdjacentHTML" not in CHART_HOVER_JS
+        assert "textContent = text" in CHART_HELPERS_JS
+
+
 def _relative_luminance(hex_color: str) -> float:
     channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
     linear = [
@@ -1861,7 +1918,10 @@ class TestFoodPage:
         }
         # Each skip a tap can take has its own reason rather than a shared
         # "nothing happened".
-        assert '{ column: null, reason: "no-samples" }' in FOOD_PAGE
+        assert 'emptyReason: "no-samples",' in FOOD_PAGE
+        assert "return { column: null, reason: options.emptyReason };" in (
+            FOOD_PAGE
+        )
         assert '{ column: null, reason: "unsized-canvas" }' in FOOD_PAGE
         assert '{ column: null, reason: "no-nearest" }' in FOOD_PAGE
 
@@ -1914,7 +1974,8 @@ class TestFoodPage:
             in FOOD_PAGE
         )
         assert 'if (name === "pointerdown" || name === "wheel" ||' in FOOD_PAGE
-        assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
+        assert 'name === "keydown" || name === "blur" ||' in FOOD_PAGE
+        assert 'name === "scroll" || name === "resize") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
         # Every console call is a sanitized workflow trace, or one of the two
@@ -2797,7 +2858,7 @@ class TestGoldPage:
     def test_grouped_dot_and_hover_use_the_combined_balance_change(self) -> None:
         assert "netChangeColor(previousCoins, minute.after)" in GOLD_PAGE
         assert "fill: point.color" in GOLD_PAGE
-        assert "stroke: point.color" in GOLD_PAGE
+        assert "ringColor: function (point) { return point.color; }" in GOLD_PAGE
         assert "finalMovement" not in GOLD_PAGE
 
     def test_balance_line_uses_only_combined_minute_points(self) -> None:
@@ -2899,7 +2960,15 @@ class TestEventsPage:
     def test_hover_and_tap_select_the_nearest_run(self) -> None:
         assert 'overlay.addEventListener("pointermove"' in EVENTS_PAGE
         assert 'overlay.addEventListener("pointerdown"' in EVENTS_PAGE
-        assert "function nearest(vbX, vbY) {" in EVENTS_PAGE
+        # Every run is its own column and the nearest dot is picked in both
+        # directions, so two runs minutes apart are told apart by height.
+        assert "return { t: point.t, x: point.x, points: [point] };" in (
+            EVENTS_PAGE
+        )
+        hover = EVENTS_PAGE.split("function attachHover(canvas, plotted) {", 1)[1]
+        hover = hover.split("\n  }", 1)[0]
+        assert "attachChartHover(canvas, columns, {" in hover
+        assert "nearestByX" not in hover
         # A redraw drops the previous chart's page-level listeners.
         assert "if (detachHover) { detachHover(); detachHover = null; }" in (
             EVENTS_PAGE
