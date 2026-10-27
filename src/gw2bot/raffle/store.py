@@ -4,15 +4,16 @@ import logging
 import secrets
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, TypeVar
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import Select, and_, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from gw2bot.config import same_guild_id
 from gw2bot.core.dashboard_ranges import StoredRange
 from gw2bot.core.database import (
     PENDING_LEGACY_TOTALS_KEY,
+    Base,
     DashboardRangeRecord,
     FeastAdditionCostRecord,
     FeastAlertRecord,
@@ -102,6 +103,9 @@ from gw2bot.roster.models import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+RecordT = TypeVar("RecordT", bound=Base)
+ValueT = TypeVar("ValueT")
 
 MANUAL_TICKET_CAP_MIGRATION_KEY = "manual_ticket_cap_v1"
 OFFICER_PURCHASE_EVENT_ID_KEY = "officer_purchase_event_id"
@@ -845,26 +849,13 @@ class RaffleStore:
             )
             .order_by(GuildStashCoinLogRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_gold_withdrawal(record)
-                for record in session.scalars(statement).all()
-            ]
-        LOGGER.debug(
-            "Loaded %s pending gold withdrawal notifications",
-            len(results),
-        )
-        return results
+        return self._pending_records(statement, _to_gold_withdrawal, 'Loaded %s pending gold withdrawal notifications')
 
     def mark_gold_withdrawal_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(GuildStashCoinLogRecord, event_id)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug(
-                    "Marked gold withdrawal notification sent for event %s",
-                    event_id,
-                )
+        self._mark_sent(
+            GuildStashCoinLogRecord, event_id, "notification_sent",
+            'Marked gold withdrawal notification sent for event %s',
+        )
 
     def initialize_cursor(self, event_id: int) -> None:
         with self._sessions.begin() as session:
@@ -1073,19 +1064,37 @@ class RaffleStore:
             cursor,
         )
 
+    def _pending_records(
+        self,
+        statement: Select[tuple[RecordT]],
+        convert: Callable[[RecordT], ValueT],
+        log_message: str,
+    ) -> list[ValueT]:
+        with self._sessions() as session:
+            results = [convert(record) for record in session.scalars(statement).all()]
+        LOGGER.debug(log_message, len(results))
+        return results
+
+    def _mark_sent(
+        self,
+        record_type: type[RecordT],
+        identifier: int,
+        field: Literal["notification_sent", "audit_notification_sent", "announcement_sent"],
+        log_message: str,
+    ) -> None:
+        with self._sessions.begin() as session:
+            record = session.get(record_type, identifier)
+            if record is not None:
+                setattr(record, field, True)
+                LOGGER.debug(log_message, identifier)
+
     def get_pending_notifications(self) -> list[RaffleDeposit]:
         statement = (
             select(RaffleDepositRecord)
             .where(RaffleDepositRecord.notification_sent.is_(False))
             .order_by(RaffleDepositRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_raffle_deposit(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug("Loaded %s pending raffle notifications", len(results))
-            return results
+        return self._pending_records(statement, _to_raffle_deposit, 'Loaded %s pending raffle notifications')
 
     def get_pending_deposit_audit_notifications(self) -> list[RaffleDeposit]:
         statement = (
@@ -1093,16 +1102,7 @@ class RaffleStore:
             .where(RaffleDepositRecord.audit_notification_sent.is_(False))
             .order_by(RaffleDepositRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_raffle_deposit(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug(
-                "Loaded %s pending raffle deposit audit notifications",
-                len(results),
-            )
-            return results
+        return self._pending_records(statement, _to_raffle_deposit, 'Loaded %s pending raffle deposit audit notifications')
 
     def get_pending_leave_notifications(self) -> list[GuildLeave]:
         statement = (
@@ -1110,13 +1110,7 @@ class RaffleStore:
             .where(GuildLeaveRecord.notification_sent.is_(False))
             .order_by(GuildLeaveRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_guild_leave(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug("Loaded %s pending guild-leave notifications", len(results))
-            return results
+        return self._pending_records(statement, _to_guild_leave, 'Loaded %s pending guild-leave notifications')
 
     def get_pending_join_notifications(self) -> list[GuildJoin]:
         statement = (
@@ -1124,13 +1118,7 @@ class RaffleStore:
             .where(GuildJoinRecord.notification_sent.is_(False))
             .order_by(GuildJoinRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_guild_join(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug("Loaded %s pending guild-join notifications", len(results))
-            return results
+        return self._pending_records(statement, _to_guild_join, 'Loaded %s pending guild-join notifications')
 
     def get_pending_invite_notifications(self) -> list[GuildInvite]:
         statement = (
@@ -1138,13 +1126,7 @@ class RaffleStore:
             .where(GuildInviteRecord.notification_sent.is_(False))
             .order_by(GuildInviteRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_guild_invite(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug("Loaded %s pending guild-invite notifications", len(results))
-            return results
+        return self._pending_records(statement, _to_guild_invite, 'Loaded %s pending guild-invite notifications')
 
     def get_guild_invite_times(self) -> dict[str, datetime]:
         """When each outstanding invitation was sent, by casefolded name.
@@ -1255,16 +1237,7 @@ class RaffleStore:
             .where(GuildRankChangeRecord.notification_sent.is_(False))
             .order_by(GuildRankChangeRecord.event_id)
         )
-        with self._sessions() as session:
-            results = [
-                _to_guild_rank_change(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug(
-                "Loaded %s pending guild-rank-change notifications",
-                len(results),
-            )
-            return results
+        return self._pending_records(statement, _to_guild_rank_change, 'Loaded %s pending guild-rank-change notifications')
 
     def get_pending_milestones(self) -> list[RaffleMilestone]:
         statement = (
@@ -1272,13 +1245,7 @@ class RaffleStore:
             .where(RaffleMilestoneRecord.notification_sent.is_(False))
             .order_by(RaffleMilestoneRecord.threshold)
         )
-        with self._sessions() as session:
-            results = [
-                _to_raffle_milestone(record)
-                for record in session.scalars(statement).all()
-            ]
-            LOGGER.debug("Loaded %s pending raffle milestones", len(results))
-            return results
+        return self._pending_records(statement, _to_raffle_milestone, 'Loaded %s pending raffle milestones')
 
     def get_totals(self) -> list[RaffleTotal]:
         with self._sessions() as session:
@@ -1556,26 +1523,32 @@ class RaffleStore:
         start: datetime,
         end: datetime,
     ) -> list[RaffleContribution]:
-        start_utc = start.astimezone(UTC)
-        end_utc = end.astimezone(UTC)
+        return self._contributions((start.astimezone(UTC), end.astimezone(UTC)))
+
+    def get_lifetime_contributions(self) -> list[RaffleContribution]:
+        results = self._contributions()
+        LOGGER.debug("Loaded %s lifetime raffle contributors", len(results))
+        return results
+
+    def _contributions(
+        self,
+        window: tuple[datetime, datetime] | None = None,
+    ) -> list[RaffleContribution]:
         contributions: dict[str, list[int]] = {}
         with self._sessions() as session:
-            deposits = session.scalars(
-                select(RaffleDepositRecord).where(
-                    RaffleDepositRecord.raffle_tickets > 0
-                )
-            ).all()
+            deposits = session.scalars(select(RaffleDepositRecord).where(
+                RaffleDepositRecord.raffle_tickets > 0
+            )).all()
             manual_tickets = session.scalars(select(RaffleManualTicketRecord)).all()
 
         for deposit in deposits:
-            if event_in_window(deposit.event_time, start_utc, end_utc):
+            if window is None or event_in_window(deposit.event_time, *window):
                 counts = contributions.setdefault(deposit.username, [0, 0])
                 counts[0] += deposit.raffle_tickets
         for ticket in manual_tickets:
-            if event_in_window(ticket.event_time, start_utc, end_utc):
+            if window is None or event_in_window(ticket.event_time, *window):
                 counts = contributions.setdefault(ticket.username, [0, 0])
                 counts[1] += 1
-
         return [
             RaffleContribution(
                 username=username,
@@ -1585,47 +1558,10 @@ class RaffleStore:
             for username, counts in sorted(
                 contributions.items(),
                 key=lambda item: (
-                    -(item[1][0] + item[1][1]),
-                    item[0].casefold(),
-                    item[0],
+                    -(item[1][0] + item[1][1]), item[0].casefold(), item[0]
                 ),
             )
         ]
-
-    def get_lifetime_contributions(self) -> list[RaffleContribution]:
-        contributions: dict[str, list[int]] = {}
-        with self._sessions() as session:
-            deposits = session.scalars(
-                select(RaffleDepositRecord).where(
-                    RaffleDepositRecord.raffle_tickets > 0
-                )
-            ).all()
-            manual_tickets = session.scalars(select(RaffleManualTicketRecord)).all()
-
-        for deposit in deposits:
-            counts = contributions.setdefault(deposit.username, [0, 0])
-            counts[0] += deposit.raffle_tickets
-        for ticket in manual_tickets:
-            counts = contributions.setdefault(ticket.username, [0, 0])
-            counts[1] += 1
-
-        results = [
-            RaffleContribution(
-                username=username,
-                purchased_tickets=counts[0],
-                event_tickets=counts[1],
-            )
-            for username, counts in sorted(
-                contributions.items(),
-                key=lambda item: (
-                    -(item[1][0] + item[1][1]),
-                    item[0].casefold(),
-                    item[0],
-                ),
-            )
-        ]
-        LOGGER.debug("Loaded %s lifetime raffle contributors", len(results))
-        return results
 
     def run_raffle(
         self,
@@ -1835,59 +1771,46 @@ class RaffleStore:
             return audit
 
     def mark_raffle_announcement_sent(self, run_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(RaffleRunRecord, run_id)
-            if record is not None:
-                record.announcement_sent = True
-                LOGGER.debug("Marked raffle run %s announcement sent", run_id)
+        self._mark_sent(
+            RaffleRunRecord, run_id, "announcement_sent",
+            'Marked raffle run %s announcement sent',
+        )
 
     def mark_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(RaffleDepositRecord, event_id)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug("Marked raffle deposit event %s notification sent", event_id)
+        self._mark_sent(
+            RaffleDepositRecord, event_id, "notification_sent",
+            'Marked raffle deposit event %s notification sent',
+        )
 
     def mark_deposit_audit_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(RaffleDepositRecord, event_id)
-            if record is not None:
-                record.audit_notification_sent = True
-                LOGGER.debug(
-                    "Marked raffle deposit event %s audit notification sent",
-                    event_id,
-                )
+        self._mark_sent(
+            RaffleDepositRecord, event_id, "audit_notification_sent",
+            'Marked raffle deposit event %s audit notification sent',
+        )
 
     def mark_leave_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(GuildLeaveRecord, event_id)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug("Marked guild-leave event %s notification sent", event_id)
+        self._mark_sent(
+            GuildLeaveRecord, event_id, "notification_sent",
+            'Marked guild-leave event %s notification sent',
+        )
 
     def mark_join_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(GuildJoinRecord, event_id)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug("Marked guild-join event %s notification sent", event_id)
+        self._mark_sent(
+            GuildJoinRecord, event_id, "notification_sent",
+            'Marked guild-join event %s notification sent',
+        )
 
     def mark_invite_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(GuildInviteRecord, event_id)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug("Marked guild-invite event %s notification sent", event_id)
+        self._mark_sent(
+            GuildInviteRecord, event_id, "notification_sent",
+            'Marked guild-invite event %s notification sent',
+        )
 
     def mark_rank_change_notification_sent(self, event_id: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(GuildRankChangeRecord, event_id)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug(
-                    "Marked guild-rank-change event %s notification sent",
-                    event_id,
-                )
+        self._mark_sent(
+            GuildRankChangeRecord, event_id, "notification_sent",
+            'Marked guild-rank-change event %s notification sent',
+        )
 
     def get_tracked_trial_members(self) -> set[str]:
         with self._sessions() as session:
@@ -2063,11 +1986,10 @@ class RaffleStore:
         LOGGER.debug("Recorded Trial forum index source")
 
     def mark_milestone_notification_sent(self, threshold: int) -> None:
-        with self._sessions.begin() as session:
-            record = session.get(RaffleMilestoneRecord, threshold)
-            if record is not None:
-                record.notification_sent = True
-                LOGGER.debug("Marked raffle milestone %s notification sent", threshold)
+        self._mark_sent(
+            RaffleMilestoneRecord, threshold, "notification_sent",
+            'Marked raffle milestone %s notification sent',
+        )
 
     def _process_deposit(
         self,
@@ -2437,3 +2359,4 @@ def _winner_count_for_purchased_tickets(
             break
         winner_count = tier.winner_count
     return winner_count
+

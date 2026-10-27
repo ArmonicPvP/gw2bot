@@ -71,6 +71,21 @@ def anchor(offset: float, gold: float) -> GoldBalanceSample:
     )
 
 
+@pytest.mark.parametrize("observed", [anchor(-1, 92), anchor(20, 100)])
+def test_window_edges_keep_same_time_movements_in_their_original_order(
+    observed: GoldBalanceSample,
+) -> None:
+    series = build_gold_series(
+        [movement(10, gold=2), movement(0, WITHDRAW),
+         movement(10, gold=3), movement(20, gold=4)],
+        observed,
+        NOW,
+        NOW + 10,
+    )
+    assert balances(series) == [92, 91, 93, 96, 96]
+    assert plotted(series) == [91, 93, 96]
+
+
 def balances(series: GoldSeries) -> list[float]:
     return [point.coins / COPPER_PER_GOLD for point in series.points]
 
@@ -857,3 +872,4 @@ class TestGoldRanges:
             "7d": 7 * 24 * 60 * 60,
             "30d": 30 * 24 * 60 * 60,
         }
+

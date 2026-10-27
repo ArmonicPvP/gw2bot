@@ -61,6 +61,9 @@ from gw2bot.events.views.shared import (
     PING_ROLE_PROMPT,
     RepeatAttempt,
     _DETAILS_CHANGE_FIELDS,
+    _FlexRolesSelect,
+    _FlexRolesView,
+    _flex_role_options,
     _ModalOpenView,
     _category_options,
     _destination_error,
@@ -888,41 +891,11 @@ class LeaderRolePickView(discord.ui.View):
         )
 
 
-def _flex_role_options(
-    capacity: CategoryCapacity,
-    role: EventRole,
-) -> list[discord.SelectOption]:
-    supported = supported_roles(capacity)
-    return [
-        discord.SelectOption(
-            label=flex.value,
-            value=flex.value,
-            emoji=ROLE_EMOJI[flex],
-        )
-        for flex in EventRole
-        if flex != role and flex in supported
-    ]
+class LeaderFlexRolesSelect(_FlexRolesSelect["LeaderFlexRolesView"]):
+    pass
 
 
-class LeaderFlexRolesSelect(discord.ui.Select["LeaderFlexRolesView"]):
-    def __init__(self, options: list[discord.SelectOption]):
-        super().__init__(
-            placeholder="Pick any flex roles",
-            options=options,
-            min_values=1,
-            max_values=len(options),
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        view = self.view
-        if view is not None:
-            await view.pick(
-                interaction,
-                tuple(EventRole(value) for value in self.values),
-            )
-
-
-class LeaderFlexRolesView(discord.ui.View):
+class LeaderFlexRolesView(_FlexRolesView):
     def __init__(
         self,
         confirm: EventConfirmView,
@@ -1102,3 +1075,4 @@ class RepeatChoiceView(discord.ui.View):
         self._draft.repeat_days_text = ""
         self._draft.delete_previous_on_repeat = False
         await send_event_preview(self._bot, interaction, self._draft)
+

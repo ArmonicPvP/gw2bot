@@ -54,7 +54,7 @@ from gw2bot.events.views.shared import (
     _link_label,
     _mention_list,
     _preview_status,
-    _role_pick_label,
+    role_pick_options,
     _still_seated_note,
     occurrence_has_ended,
 )
@@ -1258,20 +1258,7 @@ class AddSignupsRoleSelect(discord.ui.Select["AddSignupsRoleView"]):
     def __init__(self, event: Event, signups: list[EventSignup]):
         # The same labelling as the member-facing role picker, so a commander
         # can see which roles are already full before choosing.
-        supported = supported_roles(event.capacity)
-        available = set(fitting_roles(event.capacity, signups))
-        waitlist_only = not available
-        options = [
-            discord.SelectOption(
-                label=_role_pick_label(
-                    role, role in available, waitlist_only
-                ),
-                value=role.value,
-                emoji=ROLE_EMOJI[role],
-            )
-            for role in EventRole
-            if role in supported
-        ]
+        options = role_pick_options(event.capacity, signups)
         super().__init__(
             placeholder="Pick the role to add them as",
             options=options,
@@ -1474,109 +1461,18 @@ async def _drop_departed_picks(
     ], departed
 
 
-async def apply_roster_addition(
+async def _seat_roster_additions(
     bot: Gw2Bot,
     interaction: discord.Interaction,
-    draft: EventDraft,
-    occurrence: EventOccurrence,
+    event: Event,
+    current: EventOccurrence,
     user_ids: list[int],
     role: EventRole | None,
-) -> None:
-    """Sign the picked members up, then report what the roster did."""
-    from gw2bot.events.posting import (
-        check_roster_membership,
-        merge_roster_updates,
-        notify_roster_update,
-        seat_signup,
-    )
+    outcome: _AdditionOutcome,
+    updates: list[RosterUpdate],
+) -> tuple[Event, EventOccurrence]:
+    from gw2bot.events.posting import seat_signup
 
-    context = await _picked_roster_target(
-        bot,
-        interaction,
-        draft,
-        occurrence.occurrence_id,
-        "addition",
-    )
-    if context is None:
-        return
-    event, current = context
-    # The role step is answered against the category the picker was opened
-    # for, and another leader changing the category between the two swaps the
-    # capacity underneath it. A role chosen for a role-based event would then
-    # be persisted onto a headcount signup, which is always role-less, and a
-    # later rebalance would honour a role picked for a category the event no
-    # longer has. The freshly read event decides, so this mismatch is exactly
-    # that race - the flow itself always pairs them correctly.
-    if event.capacity.has_roles != (role is not None):
-        LOGGER.debug(
-            "Rejected a roster addition whose role step no longer matches "
-            "the event; event_id=%s user_id=%s has_roles=%s role_picked=%s",
-            event.event_id,
-            interaction.user.id,
-            event.capacity.has_roles,
-            role is not None,
-        )
-        await interaction.response.edit_message(
-            content=(
-                "Another leader changed this event's category while you were "
-                "picking, so nobody was added. Run `/event edit` again to add "
-                "them."
-            ),
-            embeds=[],
-            view=None,
-        )
-        return
-    if event.capacity.has_roles and role is not None:
-        normalized_role, _ = normalize_stored_roles(
-            event.capacity,
-            role,
-            (),
-        )
-        if normalized_role is not role:
-            LOGGER.debug(
-                "Normalized a roster-addition role after an event changed "
-                "category; event_id=%s user_id=%s category=%s "
-                "normalized_role=%s",
-                event.event_id,
-                interaction.user.id,
-                event.category.value,
-                normalized_role.value,
-            )
-            role = normalized_role
-    await interaction.response.edit_message(
-        content="Adding the selected members…",
-        embeds=[],
-        view=None,
-    )
-    outcome = _AdditionOutcome()
-    updates: list[RosterUpdate] = []
-    picked = list(user_ids)
-    user_ids, outcome.departed = await _drop_departed_picks(
-        bot,
-        interaction,
-        user_ids,
-    )
-    # The picks are checked above; this checks the roster they are being
-    # seated alongside. The preview behind this picker already asked about it,
-    # and its answer stands for a minute, so the seats would otherwise be
-    # solved against a roster read before the commander opened the picker -
-    # and a member who left while it sat open would hold one of them. Once
-    # for the batch: the seatings below each ask too, and are answered from
-    # this one rather than sweeping the roster per member.
-    #
-    # Quietly: the additions below collect their own moves for a single
-    # announcement at the end, and a member the check promotes can be moved
-    # again by a seating in the same batch. One commander action says one
-    # thing about each member, so the check's half is folded in rather than
-    # sent ahead of it.
-    _, checked = await check_roster_membership(
-        bot,
-        event,
-        current,
-        force=True,
-        notify=False,
-    )
-    updates.append(checked)
     for index, user_id in enumerate(user_ids):
         # Re-read both rows rather than trusting the ones the batch started
         # with. The member being seated when a change lands is already past
@@ -1698,6 +1594,16 @@ async def apply_roster_addition(
                 interaction.user.id,
                 target.stop.value,
             )
+    return event, current
+
+
+async def _send_addition_notices(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    event: Event,
+    current: EventOccurrence,
+    outcome: _AdditionOutcome,
+) -> tuple[Event, EventOccurrence]:
     # Sent once the roster's final state is known, so a seat that retired the
     # occurrence cannot send anyone a link to the deleted message. One member
     # with closed DMs must not stop the rest, so a failed delivery is only
@@ -1814,6 +1720,117 @@ async def apply_roster_addition(
                 interaction.user.id,
                 final.stop.value,
             )
+    return event, current
+
+
+async def apply_roster_addition(
+    bot: Gw2Bot,
+    interaction: discord.Interaction,
+    draft: EventDraft,
+    occurrence: EventOccurrence,
+    user_ids: list[int],
+    role: EventRole | None,
+) -> None:
+    """Sign the picked members up, then report what the roster did."""
+    from gw2bot.events.posting import (
+        check_roster_membership,
+        merge_roster_updates,
+        notify_roster_update,
+    )
+
+    context = await _picked_roster_target(
+        bot,
+        interaction,
+        draft,
+        occurrence.occurrence_id,
+        "addition",
+    )
+    if context is None:
+        return
+    event, current = context
+    # The role step is answered against the category the picker was opened
+    # for, and another leader changing the category between the two swaps the
+    # capacity underneath it. A role chosen for a role-based event would then
+    # be persisted onto a headcount signup, which is always role-less, and a
+    # later rebalance would honour a role picked for a category the event no
+    # longer has. The freshly read event decides, so this mismatch is exactly
+    # that race - the flow itself always pairs them correctly.
+    if event.capacity.has_roles != (role is not None):
+        LOGGER.debug(
+            "Rejected a roster addition whose role step no longer matches "
+            "the event; event_id=%s user_id=%s has_roles=%s role_picked=%s",
+            event.event_id,
+            interaction.user.id,
+            event.capacity.has_roles,
+            role is not None,
+        )
+        await interaction.response.edit_message(
+            content=(
+                "Another leader changed this event's category while you were "
+                "picking, so nobody was added. Run `/event edit` again to add "
+                "them."
+            ),
+            embeds=[],
+            view=None,
+        )
+        return
+    if event.capacity.has_roles and role is not None:
+        normalized_role, _ = normalize_stored_roles(
+            event.capacity,
+            role,
+            (),
+        )
+        if normalized_role is not role:
+            LOGGER.debug(
+                "Normalized a roster-addition role after an event changed "
+                "category; event_id=%s user_id=%s category=%s "
+                "normalized_role=%s",
+                event.event_id,
+                interaction.user.id,
+                event.category.value,
+                normalized_role.value,
+            )
+            role = normalized_role
+    await interaction.response.edit_message(
+        content="Adding the selected members…",
+        embeds=[],
+        view=None,
+    )
+    outcome = _AdditionOutcome()
+    updates: list[RosterUpdate] = []
+    picked = list(user_ids)
+    user_ids, outcome.departed = await _drop_departed_picks(
+        bot,
+        interaction,
+        user_ids,
+    )
+    # The picks are checked above; this checks the roster they are being
+    # seated alongside. The preview behind this picker already asked about it,
+    # and its answer stands for a minute, so the seats would otherwise be
+    # solved against a roster read before the commander opened the picker -
+    # and a member who left while it sat open would hold one of them. Once
+    # for the batch: the seatings below each ask too, and are answered from
+    # this one rather than sweeping the roster per member.
+    #
+    # Quietly: the additions below collect their own moves for a single
+    # announcement at the end, and a member the check promotes can be moved
+    # again by a seating in the same batch. One commander action says one
+    # thing about each member, so the check's half is folded in rather than
+    # sent ahead of it.
+    _, checked = await check_roster_membership(
+        bot,
+        event,
+        current,
+        force=True,
+        notify=False,
+    )
+    updates.append(checked)
+    event, current = await _seat_roster_additions(
+        bot, interaction, event, current, user_ids, role, outcome, updates
+    )
+    event, current = await _send_addition_notices(
+        bot, interaction, event, current, outcome
+    )
     # Re-read the seats rather than trusting what each write returned. An edit
     # landing while seat_signup awaited Discord re-seats the whole roster under
     # the new capacity, so the row a write returned can describe a capacity
@@ -1997,3 +2014,4 @@ def _addition_summary(outcome: _AdditionOutcome) -> str:
             + ", so they were not notified."
         )
     return "\n".join(lines)
+

@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import discord
 from sqlalchemy.exc import SQLAlchemyError
@@ -105,6 +105,281 @@ class ChannelMoveConfirmView(discord.ui.View):
         await send_event_preview(self._bot, interaction, self._draft)
 
 
+def _sync_primary_start(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+    primary: EventOccurrence | None,
+    new_start: datetime,
+) -> EventOccurrence:
+    current = occurrence
+    if (
+        primary is not None
+        and occurrence.occurrence_id == primary.occurrence_id
+        and occurrence.start_time != new_start
+    ):
+        # A date/time edit reschedules the occurrence the commander sees;
+        # sync its own start_time so the embed and thread name update too.
+        # This tracks the draft's start, not the event's: the event now
+        # carries the series origin, which is a different instant.
+        bot.event_store.set_occurrence_start_time(
+            occurrence.occurrence_id,
+            new_start,
+        )
+        refetched = bot.event_store.get_occurrence(
+            occurrence.occurrence_id
+        )
+        if refetched is not None:
+            current = refetched
+    return current
+
+
+@dataclass(frozen=True)
+class _ReseatResult:
+    event: Event
+    occurrence: EventOccurrence
+    update: RosterUpdate
+    status: Literal["ready", "retired", "unreadable"] = "ready"
+
+
+async def _reseat_occurrence(
+    bot: Gw2Bot,
+    updated: Event,
+    current: EventOccurrence,
+    roster_update: RosterUpdate,
+) -> _ReseatResult:
+    from gw2bot.events.posting import (
+        check_roster_membership,
+        merge_roster_updates,
+        notify_roster_update,
+        occurrence_finished,
+        rebalance_occurrence_roster,
+    )
+
+    # Re-seat the members who are actually still here. The preview's
+    # check can be minutes old by the time the pickers and the modal
+    # are done with, and a departed member re-seated under the new
+    # capacity would hold one of its seats - or be handed a better one
+    # - for a squad they cannot see, with their automatic sign-up
+    # still on. A move checks again after its post as well, which is a
+    # different question: who is still here to be subscribed to the
+    # thread it has just opened.
+    checked = RosterUpdate()
+    try:
+        _, checked = await check_roster_membership(
+            bot,
+            updated,
+            current,
+            force=True,
+            notify=False,
+        )
+    except (discord.DiscordException, SQLAlchemyError) as exc:
+        # A roster the bot could not check is still a roster to
+        # re-seat; the departures wait for the next check.
+        LOGGER.error(
+            "Could not check the roster before a rebalance; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+    # The check removes through remove_signup, which re-solves the
+    # roster it leaves behind, so the rebalance below must see those
+    # rows rather than the ones read before it. That removal also
+    # refreshes a message somebody may have deleted, and the NotFound
+    # behind it retires the run: re-seating a roster that is history,
+    # and re-rendering a message that is gone, helps nobody. Every
+    # occurrence here is still in the future, so only that can end one.
+    try:
+        reread = bot.event_store.get_occurrence(
+            current.occurrence_id
+        )
+        # The event comes back with it. This edit's own save is
+        # committed, but the check awaits Discord for every member,
+        # and another leader saving in that window leaves the row
+        # holding their category, title, channel and duration. The
+        # re-seat and the render below have to describe the event
+        # that is stored, or the roster and the public post are left
+        # disagreeing with it.
+        resaved = bot.event_store.get_event(updated.event_id)
+    except SQLAlchemyError as exc:
+        # The event row is already saved, so this must not escape the
+        # callback and leave the commander on "Saving your changes".
+        # A store that cannot answer cannot re-seat either.
+        #
+        # Not the same thing as a run that has gone, though, which is
+        # why this does not fall into the branch below: that message
+        # is still in its channel carrying the old category, and
+        # calling the edit applied would leave it there. Counted as a
+        # posted occurrence that failed to refresh, so the scheduler
+        # retries it, the commander is told, and a move puts the
+        # channel back rather than pointing the event at one its post
+        # never reached.
+        LOGGER.error(
+            "Could not re-read the occurrence after its roster "
+            "check; occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+        await notify_roster_update(
+            bot,
+            current,
+            merge_roster_updates([roster_update, checked]),
+        )
+        if current.message_id is not None:
+            _mark_occurrence_stale(bot, current)
+        return _ReseatResult(updated, current, roster_update, "unreadable")
+    if (
+        reread is None
+        or resaved is None
+        or occurrence_finished(resaved, reread)
+    ):
+        LOGGER.debug(
+            "Skipped a roster rebalance for a run the check "
+            "retired; occurrence_id=%s exists=%s event_exists=%s",
+            current.occurrence_id,
+            reread is not None,
+            resaved is not None,
+        )
+        await notify_roster_update(
+            bot,
+            current,
+            merge_roster_updates([roster_update, checked]),
+        )
+        return _ReseatResult(updated, current, roster_update, "retired")
+    current = reread
+    updated = resaved
+    # The stored assignments were seated against the old capacity.
+    # Re-seat the roster before the message is re-rendered, so the
+    # embed and the capacity checks both describe the new one, and
+    # announce the moves in the occurrence's thread so members learn
+    # their new seat.
+    try:
+        _, rebalanced = rebalance_occurrence_roster(
+            bot, updated, current
+        )
+        # The check moved the roster before the re-seat did, and it
+        # can have moved the same member: folded, they read as one
+        # move, and anybody it took off is dropped rather than given a
+        # seat in the new squad.
+        roster_update = merge_roster_updates(
+            [roster_update, checked, rebalanced]
+        )
+    except (SQLAlchemyError, ValueError) as exc:
+        # A stale roster must not block the rest of the edit.
+        LOGGER.error(
+            "Could not rebalance roster after a capacity change; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+        # The check's own movements are committed whatever the
+        # re-seat did, so they are still what gets announced.
+        roster_update = merge_roster_updates([roster_update, checked])
+    return _ReseatResult(updated, current, roster_update)
+
+
+async def _push_occurrence_update(
+    bot: Gw2Bot,
+    updated: Event,
+    current: EventOccurrence,
+    moving: bool,
+    roster_update: RosterUpdate,
+) -> bool:
+    from gw2bot.events.posting import refresh_occurrence_message, repost_occurrence
+
+    try:
+        if moving:
+            # The old message is addressed through the channel the
+            # occurrence was actually posted to, which repost_occurrence
+            # reads off the occurrence itself. It deletes the old thread and
+            # returns the occurrence carrying the new one, so the deferred
+            # roster ping goes there - the old thread the members were
+            # notified in no longer exists.
+            # The re-post checks the roster against the server, which
+            # can take departed members off it and re-seat the rest, so
+            # the update computed above is handed over rather than sent
+            # after it: the two are folded into one line per member,
+            # inside the thread the move has just opened.
+            reposted = await repost_occurrence(
+                bot,
+                updated,
+                current,
+                roster_update,
+            )
+            if reposted is None:
+                # The move's own roster check retired this run - its
+                # replacement message was gone by the time the check
+                # refreshed it - so there is no live post in the new
+                # channel to report as moved.
+                LOGGER.error(
+                    "Moved occurrence retired during its roster check; "
+                    "occurrence_id=%s",
+                    current.occurrence_id,
+                )
+                return False
+        else:
+            await refresh_occurrence_message(
+                bot,
+                updated,
+                current,
+                force_thread_rename=True,
+            )
+            # refresh_occurrence_message absorbs Discord failures: it marks
+            # the occurrence dirty for the scheduler to retry and returns
+            # the old status rather than raising, so the handler below never
+            # sees them. Re-read the row and treat a dirty occurrence as a
+            # failed refresh, otherwise a message or thread name that is
+            # still stale would be reported as successfully updated.
+            saved = bot.event_store.get_occurrence(current.occurrence_id)
+            if saved is not None and saved.needs_refresh:
+                LOGGER.error(
+                    "Posted occurrence left stale after edit; "
+                    "occurrence_id=%s",
+                    current.occurrence_id,
+                )
+                return False
+    except (discord.HTTPException, SQLAlchemyError) as exc:
+        # One occurrence failing must not block the others.
+        LOGGER.error(
+            "Could not update posted occurrence after edit; "
+            "occurrence_id=%s error_type=%s",
+            current.occurrence_id,
+            type(exc).__name__,
+        )
+        _mark_occurrence_stale(bot, current)
+        return False
+    return True
+
+
+def _edit_result_message(
+    updated: Event,
+    undoing: bool,
+    moving: bool,
+    attempted: int,
+    refreshed: int,
+) -> str:
+    saved = "restored" if undoing else "saved"
+    if moving and attempted > 0 and refreshed == 0:
+        return (
+            f"Event **{updated.event_id}** was {saved}, but it could not be "
+            "posted in the new channel, so it stays in the current one."
+        )
+    elif attempted > 0 and refreshed == 0:
+        # Every posted occurrence failed to refresh, so the public message is
+        # stale even though the stored event was updated; say so instead of
+        # claiming the message reflects the change.
+        return (
+            f"Event **{updated.event_id}** was {saved}, but its posted "
+            "message could not be updated and may be out of date."
+        )
+    elif undoing:
+        return (
+            f"Event **{updated.event_id}** was restored to how it was before "
+            "its last edit."
+        )
+    else:
+        return f"Event **{updated.event_id}** was updated."
+
+
 async def apply_event_edit(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -122,15 +397,9 @@ async def apply_event_edit(
     one, so only one edit can be undone.
     """
     from gw2bot.events.posting import (
-        check_roster_membership,
         mentee_movement,
         mentee_snapshot,
-        merge_roster_updates,
         notify_roster_update,
-        occurrence_finished,
-        rebalance_occurrence_roster,
-        refresh_occurrence_message,
-        repost_occurrence,
     )
 
     editing_event_id = draft.editing_event_id
@@ -286,145 +555,16 @@ async def apply_event_edit(
             occurrence.occurrence_id,
             mentee_rosters.get(occurrence.occurrence_id),
         )
-        if (
-            primary is not None
-            and occurrence.occurrence_id == primary.occurrence_id
-            and occurrence.start_time != edited.start_time
-        ):
-            # A date/time edit reschedules the occurrence the commander sees;
-            # sync its own start_time so the embed and thread name update too.
-            # This tracks the draft's start, not the event's: the event now
-            # carries the series origin, which is a different instant.
-            bot.event_store.set_occurrence_start_time(
-                occurrence.occurrence_id,
-                edited.start_time,
-            )
-            refetched = bot.event_store.get_occurrence(
-                occurrence.occurrence_id
-            )
-            if refetched is not None:
-                current = refetched
+        current = _sync_primary_start(bot, occurrence, primary, edited.start_time)
         if roster_resized:
-            # Re-seat the members who are actually still here. The preview's
-            # check can be minutes old by the time the pickers and the modal
-            # are done with, and a departed member re-seated under the new
-            # capacity would hold one of its seats - or be handed a better one
-            # - for a squad they cannot see, with their automatic sign-up
-            # still on. A move checks again after its post as well, which is a
-            # different question: who is still here to be subscribed to the
-            # thread it has just opened.
-            checked = RosterUpdate()
-            try:
-                _, checked = await check_roster_membership(
-                    bot,
-                    updated,
-                    current,
-                    force=True,
-                    notify=False,
-                )
-            except (discord.DiscordException, SQLAlchemyError) as exc:
-                # A roster the bot could not check is still a roster to
-                # re-seat; the departures wait for the next check.
-                LOGGER.error(
-                    "Could not check the roster before a rebalance; "
-                    "occurrence_id=%s error_type=%s",
-                    current.occurrence_id,
-                    type(exc).__name__,
-                )
-            # The check removes through remove_signup, which re-solves the
-            # roster it leaves behind, so the rebalance below must see those
-            # rows rather than the ones read before it. That removal also
-            # refreshes a message somebody may have deleted, and the NotFound
-            # behind it retires the run: re-seating a roster that is history,
-            # and re-rendering a message that is gone, helps nobody. Every
-            # occurrence here is still in the future, so only that can end one.
-            try:
-                reread = bot.event_store.get_occurrence(
-                    current.occurrence_id
-                )
-                # The event comes back with it. This edit's own save is
-                # committed, but the check awaits Discord for every member,
-                # and another leader saving in that window leaves the row
-                # holding their category, title, channel and duration. The
-                # re-seat and the render below have to describe the event
-                # that is stored, or the roster and the public post are left
-                # disagreeing with it.
-                resaved = bot.event_store.get_event(updated.event_id)
-            except SQLAlchemyError as exc:
-                # The event row is already saved, so this must not escape the
-                # callback and leave the commander on "Saving your changes".
-                # A store that cannot answer cannot re-seat either.
-                #
-                # Not the same thing as a run that has gone, though, which is
-                # why this does not fall into the branch below: that message
-                # is still in its channel carrying the old category, and
-                # calling the edit applied would leave it there. Counted as a
-                # posted occurrence that failed to refresh, so the scheduler
-                # retries it, the commander is told, and a move puts the
-                # channel back rather than pointing the event at one its post
-                # never reached.
-                LOGGER.error(
-                    "Could not re-read the occurrence after its roster "
-                    "check; occurrence_id=%s error_type=%s",
-                    current.occurrence_id,
-                    type(exc).__name__,
-                )
-                await notify_roster_update(
-                    bot,
-                    current,
-                    merge_roster_updates([roster_update, checked]),
-                )
-                if current.message_id is not None:
+            reseated = await _reseat_occurrence(bot, updated, current, roster_update)
+            if reseated.status != "ready":
+                if reseated.status == "unreadable" and current.message_id is not None:
                     attempted += 1
-                    _mark_occurrence_stale(bot, current)
                 continue
-            if (
-                reread is None
-                or resaved is None
-                or occurrence_finished(resaved, reread)
-            ):
-                LOGGER.debug(
-                    "Skipped a roster rebalance for a run the check "
-                    "retired; occurrence_id=%s exists=%s event_exists=%s",
-                    current.occurrence_id,
-                    reread is not None,
-                    resaved is not None,
-                )
-                await notify_roster_update(
-                    bot,
-                    current,
-                    merge_roster_updates([roster_update, checked]),
-                )
-                continue
-            current = reread
-            updated = resaved
-            # The stored assignments were seated against the old capacity.
-            # Re-seat the roster before the message is re-rendered, so the
-            # embed and the capacity checks both describe the new one, and
-            # announce the moves in the occurrence's thread so members learn
-            # their new seat.
-            try:
-                _, rebalanced = rebalance_occurrence_roster(
-                    bot, updated, current
-                )
-                # The check moved the roster before the re-seat did, and it
-                # can have moved the same member: folded, they read as one
-                # move, and anybody it took off is dropped rather than given a
-                # seat in the new squad.
-                roster_update = merge_roster_updates(
-                    [roster_update, checked, rebalanced]
-                )
-            except (SQLAlchemyError, ValueError) as exc:
-                # A stale roster must not block the rest of the edit.
-                LOGGER.error(
-                    "Could not rebalance roster after a capacity change; "
-                    "occurrence_id=%s error_type=%s",
-                    current.occurrence_id,
-                    type(exc).__name__,
-                )
-                # The check's own movements are committed whatever the
-                # re-seat did, so they are still what gets announced.
-                roster_update = merge_roster_updates([roster_update, checked])
+            updated, current, roster_update = (
+                reseated.event, reseated.occurrence, reseated.update
+            )
         edit_before = mentee_rosters.get(occurrence.occurrence_id)
         if edit_before is not None:
             # A new leader handed the slot on, and a re-seat can then have
@@ -454,68 +594,8 @@ async def apply_event_edit(
             # the new time; there is no live message to refresh now.
             continue
         attempted += 1
-        try:
-            if moving:
-                # The old message is addressed through the channel the
-                # occurrence was actually posted to, which repost_occurrence
-                # reads off the occurrence itself. It deletes the old thread and
-                # returns the occurrence carrying the new one, so the deferred
-                # roster ping goes there - the old thread the members were
-                # notified in no longer exists.
-                # The re-post checks the roster against the server, which
-                # can take departed members off it and re-seat the rest, so
-                # the update computed above is handed over rather than sent
-                # after it: the two are folded into one line per member,
-                # inside the thread the move has just opened.
-                reposted = await repost_occurrence(
-                    bot,
-                    updated,
-                    current,
-                    roster_update,
-                )
-                if reposted is None:
-                    # The move's own roster check retired this run - its
-                    # replacement message was gone by the time the check
-                    # refreshed it - so there is no live post in the new
-                    # channel to report as moved.
-                    LOGGER.error(
-                        "Moved occurrence retired during its roster check; "
-                        "occurrence_id=%s",
-                        current.occurrence_id,
-                    )
-                    continue
-            else:
-                await refresh_occurrence_message(
-                    bot,
-                    updated,
-                    current,
-                    force_thread_rename=True,
-                )
-                # refresh_occurrence_message absorbs Discord failures: it marks
-                # the occurrence dirty for the scheduler to retry and returns
-                # the old status rather than raising, so the handler below never
-                # sees them. Re-read the row and treat a dirty occurrence as a
-                # failed refresh, otherwise a message or thread name that is
-                # still stale would be reported as successfully updated.
-                saved = bot.event_store.get_occurrence(current.occurrence_id)
-                if saved is not None and saved.needs_refresh:
-                    LOGGER.error(
-                        "Posted occurrence left stale after edit; "
-                        "occurrence_id=%s",
-                        current.occurrence_id,
-                    )
-                    continue
-        except (discord.HTTPException, SQLAlchemyError) as exc:
-            # One occurrence failing must not block the others.
-            LOGGER.error(
-                "Could not update posted occurrence after edit; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            _mark_occurrence_stale(bot, current)
-            continue
-        refreshed += 1
+        if await _push_occurrence_update(bot, updated, current, moving, roster_update):
+            refreshed += 1
     LOGGER.debug(
         "Applied event edit; event_id=%s repost=%s channel_changed=%s "
         "occurrences_attempted=%s occurrences_refreshed=%s",
@@ -526,28 +606,9 @@ async def apply_event_edit(
         refreshed,
     )
     move_failed = moving and attempted > 0 and refreshed == 0
-    saved = "restored" if undoing else "saved"
     if move_failed:
         updated = _restore_event_channel(bot, updated, old_channel_id)
-        content = (
-            f"Event **{updated.event_id}** was {saved}, but it could not be "
-            "posted in the new channel, so it stays in the current one."
-        )
-    elif attempted > 0 and refreshed == 0:
-        # Every posted occurrence failed to refresh, so the public message is
-        # stale even though the stored event was updated; say so instead of
-        # claiming the message reflects the change.
-        content = (
-            f"Event **{updated.event_id}** was {saved}, but its posted "
-            "message could not be updated and may be out of date."
-        )
-    elif undoing:
-        content = (
-            f"Event **{updated.event_id}** was restored to how it was before "
-            "its last edit."
-        )
-    else:
-        content = f"Event **{updated.event_id}** was updated."
+    content = _edit_result_message(updated, undoing, moving, attempted, refreshed)
     # Whatever became of the posts, the edit is saved, so it is recorded -
     # against the event as it is stored now, with the channel a failed move
     # put back. Before the reply, so a refused reply cannot lose the record.
@@ -1428,4 +1489,5 @@ async def open_event_edit(
         leader_discord_id is not None,
     )
     return True
+
 

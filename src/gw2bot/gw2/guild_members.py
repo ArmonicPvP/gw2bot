@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from gw2bot.core.message_chunks import (
+    DISCORD_MESSAGE_LIMIT as DISCORD_MESSAGE_LIMIT,
+    pack_message_lines,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 TRIAL_RANK = "Trial"
@@ -18,7 +23,6 @@ INVITED_RANK = "invited"
 TRIAL_PERIOD = timedelta(days=14)
 TRIAL_WARNING_PERIOD = timedelta(days=7)
 TRIAL_REPORT_HOUR_UTC = 17
-DISCORD_MESSAGE_LIMIT = 2_000
 BACKGROUND_REFRESH_RETRY_SECONDS = 30
 SUNBORNE_DISCORD_STATUS = "Sunborne"
 TRIAL_DISCORD_STATUS = "Trial"
@@ -467,21 +471,9 @@ def _format_trial_report_line(
 
 
 def _pack_trial_report_messages(header: str, lines: Sequence[str]) -> list[str]:
-    messages: list[str] = []
-    current = header
-    holds_entry = False
-    for line in lines:
-        # Only break to a new message once the current one has an entry to show
-        # for itself. A line too long to fit under a bare header would otherwise
-        # flush a header with nothing beneath it, and the message it opened next
-        # would still be over the limit.
-        if holds_entry and len(current) + len(line) > DISCORD_MESSAGE_LIMIT:
-            messages.append(current.rstrip())
-            current = header
-        current += line
-        holds_entry = True
-    messages.append(current.rstrip())
-    return messages
+    return [message.rstrip() for message in pack_message_lines(
+        lines, prefix=header, separator="", limit=DISCORD_MESSAGE_LIMIT
+    )]
 
 
 def format_overdue_trial_report(
@@ -533,28 +525,12 @@ def _format_congrats_line(entry: TrialMemberReportEntry) -> str:
 
 
 def _pack_congrats_messages(lines: Sequence[str]) -> list[str]:
-    opening = f"```\n{TRIAL_BEFORE_MARK_CONGRATS_MESSAGE}"
-    closing = "```"
-    messages: list[str] = []
-    current = opening
-    holds_member = False
-    for line in lines:
-        candidate = f"{current}\n{line}"
-        # Only start a new block when the current one has a member to show for
-        # itself. A line long enough to overflow an empty block would otherwise
-        # emit a code block holding nothing but the greeting, and the block it
-        # opened next would still be over the limit.
-        if (
-            holds_member
-            and len(candidate) + 1 + len(closing) > DISCORD_MESSAGE_LIMIT
-        ):
-            messages.append(f"{current}\n{closing}")
-            current = f"{opening}\n{line}"
-        else:
-            current = candidate
-        holds_member = True
-    messages.append(f"{current}\n{closing}")
-    return messages
+    return pack_message_lines(
+        lines,
+        prefix=f"```\n{TRIAL_BEFORE_MARK_CONGRATS_MESSAGE}",
+        suffix="\n```",
+        limit=DISCORD_MESSAGE_LIMIT,
+    )
 
 
 def format_before_mark_trial_report(
@@ -668,3 +644,4 @@ def _parse_api_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+

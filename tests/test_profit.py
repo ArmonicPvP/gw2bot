@@ -1516,6 +1516,38 @@ class TestReportWindow:
         assert span.days == 10
 
 
+def test_checkpoint_and_open_lots_preserve_the_same_legacy_and_invalid_rows(
+    profit_store: tuple[ProfitStore, SecretRegistry, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store, _, database = profit_store
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
+    secret = "private-purchase-reference"
+    lots = {8871: (
+        BuyLot(2, 100, moment, secret),
+        BuyLot(3, 200, moment, "legacy"),
+    )}
+    caplog.set_level(logging.DEBUG)
+    store.store_rollups(101, {}, lots, moment, now=moment)
+    store.store_lot_checkpoint(101, moment, lots)
+    engine = create_database_engine(str(database))
+    try:
+        with engine.begin() as connection:
+            for table in ("gw2_profit_open_lots", "gw2_profit_lot_checkpoints"):
+                connection.exec_driver_sql(
+                    f"UPDATE {table} SET occurred_at = 'unreadable' WHERE lot_index = 0"
+                )
+                connection.exec_driver_sql(
+                    f"UPDATE {table} SET transaction_id = NULL WHERE lot_index = 1"
+                )
+        expected = {8871: (BuyLot(3, 200, moment, ""),)}
+        assert store.get_open_lots(101) == expected
+        assert store.get_lot_checkpoint_at_or_before(101, moment) == (moment, expected)
+        assert secret not in caplog.text
+    finally:
+        engine.dispose()
+
+
 class TestProfitStore:
     def test_encrypts_and_isolates_each_members_api_key(
         self,
@@ -6450,3 +6482,4 @@ class TestProfitCommands:
         assert "all Trading Post transaction routes" in reply
         assert f"`{DELIVERY_PATH}`" in reply
         assert "subtoken URL restrictions" in reply
+

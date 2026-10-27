@@ -13,7 +13,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, TypeVar
 from zoneinfo import ZoneInfo
 
 import discord
@@ -32,6 +32,7 @@ from gw2bot.events.models import (
     AutoSignupChoice,
     CATEGORY_CAPACITIES,
     CATEGORY_EMOJI,
+    CategoryCapacity,
     Event,
     EventCategory,
     EventOccurrence,
@@ -41,7 +42,10 @@ from gw2bot.events.models import (
     MAX_PARTICIPANTS_LIMIT,
     MAX_PING_ROLES,
     RepeatFrequency,
+    ROLE_EMOJI,
+    fitting_roles,
     is_roster_full,
+    supported_roles,
 )
 
 if TYPE_CHECKING:
@@ -960,6 +964,69 @@ def _auto_signup_enabled(
     return auto is not None and auto.choice is AutoSignupChoice.YES
 
 
+def role_pick_options(
+    capacity: CategoryCapacity,
+    signups: list[EventSignup],
+) -> list[discord.SelectOption]:
+    supported = supported_roles(capacity)
+    available = set(fitting_roles(capacity, signups))
+    return [
+        discord.SelectOption(
+            label=_role_pick_label(role, role in available, not available),
+            value=role.value,
+            emoji=ROLE_EMOJI[role],
+        )
+        for role in EventRole
+        if role in supported
+    ]
+
+
+def _flex_role_options(
+    capacity: CategoryCapacity,
+    role: EventRole | None,
+) -> list[discord.SelectOption]:
+    supported = supported_roles(capacity)
+    return [
+        discord.SelectOption(
+            label=flex.value,
+            value=flex.value,
+            emoji=ROLE_EMOJI[flex],
+        )
+        for flex in EventRole
+        if flex != role and flex in supported
+    ]
+
+
+class _FlexRolesView(discord.ui.View):
+    async def pick(
+        self,
+        interaction: discord.Interaction,
+        flex_roles: tuple[EventRole, ...],
+    ) -> None:
+        raise NotImplementedError
+
+
+FlexViewT = TypeVar("FlexViewT", bound=_FlexRolesView)
+
+
+class _FlexRolesSelect(discord.ui.Select[FlexViewT]):
+    def __init__(self, options: list[discord.SelectOption]):
+        super().__init__(
+            placeholder="Pick any flex roles",
+            options=options,
+            min_values=1,
+            max_values=len(options),
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if view is not None:
+            await view.pick(
+                interaction,
+                tuple(EventRole(value) for value in self.values),
+            )
+
+
 def _role_pick_label(
     role: EventRole,
     fits: bool,
@@ -975,3 +1042,4 @@ def _role_pick_label(
     if not fits:
         return f"{role.value} (full)"
     return role.value
+

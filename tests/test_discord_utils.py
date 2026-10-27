@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
+from gw2bot.core.message_chunks import pack_message_lines
+
 from gw2bot.core.discord_utils import (
     GuildMembership,
     resolve_display_name,
@@ -21,6 +23,33 @@ from factories import (
     not_found_error,
     unknown_guild_error,
 )
+
+
+@pytest.mark.parametrize(
+    ("lines", "prefix", "separator", "suffix", "limit", "expected"),
+    [
+        (["abc", "def"], "H", "\n", "", 9, ["H\nabc\ndef"]),
+        (["abc", "def"], "H", "\n", "", 8, ["H\nabc", "H\ndef"]),
+        (["abc", "def"], "```", "\n", "\n```", 11,
+         ["```\nabc\n```", "```\ndef\n```"]),
+        (["abc\n", "def\n"], "H\n", "", "", 6,
+         ["H\nabc\n", "H\ndef\n"]),
+        (["oversized", "x"], "H", "\n", "!", 5,
+         ["H\noversized!", "H\nx!"]),
+        ([], "H", "\n", "!", 5, ["H!"]),
+    ],
+)
+def test_message_frames_count_separators_and_closing_text(
+    lines: list[str],
+    prefix: str,
+    separator: str,
+    suffix: str,
+    limit: int,
+    expected: list[str],
+) -> None:
+    assert pack_message_lines(
+        lines, prefix=prefix, separator=separator, suffix=suffix, limit=limit
+    ) == expected
 
 
 class FakeUser:
