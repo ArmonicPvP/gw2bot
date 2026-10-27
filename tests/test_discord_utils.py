@@ -9,6 +9,7 @@ import pytest
 from gw2bot.core.discord_utils import (
     ROLE_DENIAL,
     GuildMembership,
+    autocomplete_allowed,
     require_role,
     resolve_display_name,
     resolve_display_names,
@@ -426,6 +427,50 @@ class TestRequireRole:
             "Authorized event delete command; user_id=42 required_role=9"
             in caplog.text
         )
+
+
+class TestAutocompleteAllowed:
+    def test_offers_suggestions_to_a_member_with_the_role(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        interaction = _role_interaction(7, 9)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            allowed = autocomplete_allowed(
+                interaction,
+                9,
+                action="active event",
+            )
+
+        assert allowed
+        assert "Skipped" not in caplog.text
+
+    def test_withholds_them_from_a_member_without_it_and_says_so(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # An autocomplete cannot answer with a message, so the refusal is the
+        # empty list the caller returns; only the debug line records it.
+        interaction = _role_interaction(7)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            allowed = autocomplete_allowed(
+                interaction,
+                9,
+                action="active event",
+            )
+
+        assert not allowed
+        assert "Skipped active event autocomplete; authorized=false" in (
+            caplog.text
+        )
+        assert [
+            record.levelno
+            for record in caplog.records
+            if "autocomplete" in record.getMessage()
+        ] == [logging.DEBUG]
+        interaction.response.send_message.assert_not_awaited()
 
 
 class TestSendInteractionNotice:

@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 
 from gw2bot.core.command_access import RoleSetting, access_extras
-from gw2bot.core.discord_utils import require_role, user_has_role
+from gw2bot.core.discord_utils import autocomplete_allowed, require_role
 from gw2bot.events.formatting import format_event_datetime
 from gw2bot.events.models import (
     Event,
@@ -133,9 +133,10 @@ class EventCommands(app_commands.Group):
         # Shared by /event edit and /event delete. Autocomplete must never error
         # out; unauthorized users simply see no suggestions (each command still
         # enforces the role).
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="active event",
         ):
             return []
         query = current.strip().casefold()
@@ -168,9 +169,10 @@ class EventCommands(app_commands.Group):
         # The events with a deletion or an edit /event restore can still
         # undo. Like the active autocomplete above, it never errors out and
         # offers nothing to a member without the role.
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="restorable event",
         ):
             return []
         query = current.strip().casefold()

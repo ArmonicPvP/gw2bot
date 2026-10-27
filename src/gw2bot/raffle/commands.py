@@ -10,7 +10,7 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.command_access import Everyone, RoleSetting, access_extras
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import autocomplete_allowed
 from gw2bot.gw2.member_lookup import resolve_member_or_reply
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
@@ -62,13 +62,11 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.guild_roster_role_id,
+            action="raffle guild member",
         ):
-            LOGGER.debug(
-                "Skipped raffle guild member autocomplete; authorized=false"
-            )
             return []
         if not self._bot.gw2_api_enabled:
             LOGGER.debug(
@@ -94,13 +92,11 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.raffle_draw_role_id,
+            action="purchased ticket holder",
         ):
-            LOGGER.debug(
-                "Skipped purchased ticket holder autocomplete; authorized=false"
-            )
             return []
         if not self._bot.gw2_api_enabled:
             # These names come from the persisted ledger rather than the GW2

@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 
 from gw2bot.core.command_access import RoleSetting, access_extras
-from gw2bot.core.discord_utils import require_role, user_has_role
+from gw2bot.core.discord_utils import autocomplete_allowed, require_role
 from gw2bot.gw2.member_lookup import (
     report_unverified_membership,
     resolve_member_or_reply,
@@ -96,11 +96,11 @@ async def track_member_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    if not user_has_role(
-        interaction.user,
+    if not autocomplete_allowed(
+        interaction,
         bot._config.raffle_officer_role_id,
+        action="track guild member",
     ):
-        LOGGER.debug("Skipped track guild member autocomplete; authorized=false")
         return []
     if not bot.gw2_api_enabled:
         LOGGER.debug("Skipped track guild member autocomplete; gw2_api_enabled=false")

@@ -74,6 +74,27 @@ async def require_role(
     return False
 
 
+def autocomplete_allowed(
+    interaction: discord.Interaction,
+    required_role_id: int,
+    *,
+    action: str,
+) -> bool:
+    """Whether the caller holds the role a role-gated autocomplete asks for.
+
+    An autocomplete can only answer with suggestions, never a message, so a
+    member without the role is offered none rather than refused; the command
+    itself still refuses them when they run it. Each keystroke asks again, so
+    the decision is logged at debug rather than as a warning. ``action`` names
+    the autocomplete in the log line ("raffle guild member") and must never
+    carry anything the caller typed.
+    """
+    if user_has_role(interaction.user, required_role_id):
+        return True
+    LOGGER.debug("Skipped %s autocomplete; authorized=false", action)
+    return False
+
+
 def log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:
     LOGGER.error(
         message + " (type=%s status=%s code=%s)",
