@@ -663,7 +663,7 @@ def _add_role_roster_fields(
         and signup.assigned_role not in HEAL_ROLES
     ]
     # Waitlisted members carry no assigned_role, so they are grouped by the
-e they requested and listed under the same section, below the
+    # role they requested and listed under the same section, below the
     # seated members. They are not folded into the "x/capacity" count, which
     # only reflects seated members.
     waitlisted_healers = [
