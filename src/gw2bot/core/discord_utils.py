@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
@@ -25,6 +25,53 @@ def user_has_role(user: Any, required_role_id: int) -> bool:
         role.id == required_role_id
         for role in getattr(user, "roles", ())
     )
+
+
+ROLE_DENIAL = "You do not have the required role for this command."
+
+
+async def _reply_ephemeral(interaction: discord.Interaction, message: str) -> None:
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+async def require_role(
+    interaction: discord.Interaction,
+    required_role_id: int,
+    *,
+    action: str,
+    denial: str = ROLE_DENIAL,
+    reply: Callable[[discord.Interaction, str], Awaitable[object]] = _reply_ephemeral,
+) -> bool:
+    """Whether the caller holds ``required_role_id``, refusing them if not.
+
+    Every role-gated command and button opens the same way: check the role,
+    log the refusal, answer privately and stop. ``action`` names what was
+    refused in the log line ("event edit command") and must never carry
+    anything the caller typed; ``denial`` is what they are told. The refusal
+    goes out as the interaction's first response, because every gate runs
+    before its handler defers; a caller that may already have responded
+    passes ``reply=send_interaction_notice``, which picks the followup.
+    """
+    user = interaction.user
+    user_id = getattr(user, "id", "unknown")
+    if user_has_role(user, required_role_id):
+        LOGGER.debug(
+            "Authorized %s; user_id=%s required_role=%s",
+            action,
+            user_id,
+            required_role_id,
+        )
+        return True
+    LOGGER.warning(
+        "Rejected %s from Discord user %s; required role %s, "
+        "resolved member roles: %s",
+        action,
+        user_id,
+        required_role_id,
+        [role.id for role in getattr(user, "roles", ())],
+    )
+    await reply(interaction, denial)
+    return False
 
 
 def log_discord_failure(message: str, error: discord.DiscordException, *args: object) -> None:

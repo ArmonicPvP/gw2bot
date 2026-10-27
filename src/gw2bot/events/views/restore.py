@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import require_role
 from gw2bot.events.audit import event_restored_audit, send_event_audit
 from gw2bot.events.formatting import calendar_link, event_embed
 from gw2bot.events.models import (
@@ -339,20 +339,12 @@ class EventRestoreConfirmView(discord.ui.View):
     ) -> None:
         # The confirmation can sit open for minutes; recheck the role before
         # changing anything, as the edit and delete confirmations do.
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event restore",
+            denial="You do not have the required role to restore events.",
         ):
-            LOGGER.warning(
-                "Rejected event restore from Discord user %s; required role "
-                "%s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to restore events.",
-                ephemeral=True,
-            )
             return
         # Guard a double click racing two callbacks before the first removes
         # the buttons; the check and set are synchronous, so the second

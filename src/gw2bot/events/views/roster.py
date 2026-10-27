@@ -22,8 +22,8 @@ from gw2bot.core.discord_utils import (
     GuildMembership,
     resolve_guild_memberships,
     safe_int,
+    require_role,
     send_direct_message,
-    user_has_role,
 )
 from gw2bot.events.formatting import calendar_link, event_embed
 from gw2bot.events.models import (
@@ -118,17 +118,12 @@ async def _opened_roster_target(
             ephemeral=True,
         )
         return None
-    if not user_has_role(interaction.user, bot._config.event_create_role_id):
-        LOGGER.warning(
-            "Rejected event roster %s from Discord user %s; required role %s",
-            action,
-            interaction.user.id,
-            bot._config.event_create_role_id,
-        )
-        await interaction.response.send_message(
-            "You do not have the required role to edit events.",
-            ephemeral=True,
-        )
+    if not await require_role(
+        interaction,
+        bot._config.event_create_role_id,
+        action=f"event roster {action}",
+        denial="You do not have the required role to edit events.",
+    ):
         return None
     # The roster belongs to the occurrence, not the draft, so it is read
     # fresh: members can sign up or out while the preview sits open. A
@@ -187,17 +182,12 @@ async def _picked_roster_target(
     for rather than re-resolving the draft's, so a series that seeds its
     successor mid-session cannot redirect the change onto the next run.
     """
-    if not user_has_role(interaction.user, bot._config.event_create_role_id):
-        LOGGER.warning(
-            "Rejected event roster %s from Discord user %s; required role %s",
-            action,
-            interaction.user.id,
-            bot._config.event_create_role_id,
-        )
-        await interaction.response.send_message(
-            "You do not have the required role to edit events.",
-            ephemeral=True,
-        )
+    if not await require_role(
+        interaction,
+        bot._config.event_create_role_id,
+        action=f"event roster {action}",
+        denial="You do not have the required role to edit events.",
+    ):
         return None
     editing_event_id = draft.editing_event_id
     event = (

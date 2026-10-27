@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 
 from gw2bot.core.command_access import RoleSetting, access_extras
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import require_role, user_has_role
 from gw2bot.trials.reports import format_track_audit
 
 if TYPE_CHECKING:
@@ -38,20 +38,11 @@ async def handle_check_command(
         "Trial member check command invoked by Discord user %s",
         getattr(getattr(interaction, "user", None), "id", "unknown"),
     )
-    if not user_has_role(
-        interaction.user,
+    if not await require_role(
+        interaction,
         bot._config.raffle_officer_role_id,
+        action="Trial member check command",
     ):
-        LOGGER.warning(
-            "Rejected Trial member check command from Discord user %s; "
-            "required role %s",
-            getattr(getattr(interaction, "user", None), "id", "unknown"),
-            bot._config.raffle_officer_role_id,
-        )
-        await interaction.response.send_message(
-            "You do not have the required role for this command.",
-            ephemeral=True,
-        )
         return
 
     if await bot.reject_without_gw2_api(interaction, "Trial member check command"):
@@ -133,20 +124,11 @@ async def handle_track_command(
         "Trial member track command invoked by Discord user %s",
         getattr(getattr(interaction, "user", None), "id", "unknown"),
     )
-    if not user_has_role(
-        interaction.user,
+    if not await require_role(
+        interaction,
         bot._config.raffle_officer_role_id,
+        action="Trial member track command",
     ):
-        LOGGER.warning(
-            "Rejected Trial member track command from Discord user %s; "
-            "required role %s",
-            getattr(getattr(interaction, "user", None), "id", "unknown"),
-            bot._config.raffle_officer_role_id,
-        )
-        await interaction.response.send_message(
-            "You do not have the required role for this command.",
-            ephemeral=True,
-        )
         return
 
     if await bot.reject_without_gw2_api(interaction, "Trial member track command"):

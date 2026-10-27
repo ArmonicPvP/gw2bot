@@ -10,8 +10,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from gw2bot.core.command_access import RoleSetting, access_extras
 from gw2bot.core.discord_utils import (
     log_discord_failure,
+    require_role,
     send_interaction_notice,
-    user_has_role,
 )
 from gw2bot.roster.import_log import (
     format_import_result,
@@ -56,23 +56,12 @@ class RosterCommands(app_commands.Group):
         )
 
     async def authorize(self, interaction: discord.Interaction) -> bool:
-        officer_role_id = self._bot._config.raffle_officer_role_id
-        if user_has_role(interaction.user, officer_role_id):
-            LOGGER.debug(
-                "Authorized roster command; user_id=%s",
-                interaction.user.id,
-            )
-            return True
-        LOGGER.warning(
-            "Rejected roster command from Discord user %s; required role %s",
-            interaction.user.id,
-            officer_role_id,
-        )
-        await send_interaction_notice(
+        return await require_role(
             interaction,
-            "You do not have the required role for this command.",
+            self._bot._config.raffle_officer_role_id,
+            action="roster command",
+            reply=send_interaction_notice,
         )
-        return False
 
     async def _handle_import(self, interaction: discord.Interaction) -> None:
         LOGGER.debug(
