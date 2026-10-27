@@ -94,9 +94,8 @@ The names in `shared.py` are public (`SHARED_STYLE`, `DASHBOARD_HEADER_STYLE`,
 `RANGE_PICKER_STYLE`, `CHART_PAGE_STYLE`, `RANGE_PICKER_NAV`,
 `CUSTOM_RANGE_PANEL`, `RANGE_PICKER_LISTENERS_JS`, `CHART_HELPERS_JS`,
 `CHART_HOVER_JS`, `range_picker_js`, `simple_page`, `MAX_CUSTOM_DAYS`) because
-they are the page package's API. They were
-underscore-prefixed while already being imported across modules, which was
-only ever a mislabel.
+they are the page package's API. They were underscore-prefixed while already
+being imported across modules, which was only ever a mislabel.
 
 ## One chart hover
 
@@ -107,11 +106,13 @@ into columns and calls `attachChartHover(canvas, columns, options)` from a
 small `attachHover` of its own, passing the tooltip's host, the fixed reason a
 skipped tap is traced with, the ring colour, and a `fillTooltip` that adds the
 page's rows. The page keeps its own `traceSelection`, so each console trace
-still names its dashboard, and its own `M`, the metrics the canvas was drawn
-with. `CHART_HELPERS_JS` holds the helpers the pages shared word for word
-(`el`, `svg`, `formatTick`, `formatMoment`, the pointer narrowing), and
-`CHART_PAGE_STYLE` the rules all four stylesheets repeated. The profit page
-draws its chart differently and keeps its own.
+still names its dashboard, and its own `M` and `plotW()`, the metrics the
+canvas was drawn with. `CHART_HELPERS_JS` holds the helpers the pages shared
+word for word (`el`, `svg`, `scaleX`, `formatTick`, `formatMoment`, the pointer
+narrowing), and `CHART_PAGE_STYLE` the rules all four stylesheets repeated,
+the tooltip box among them. A page's own rules follow it, which is how the
+feast page keeps its own tooltip width. The profit page draws its chart
+differently and keeps its own.
 
 ## Two purples
 

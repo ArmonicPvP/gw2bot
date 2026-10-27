@@ -20,9 +20,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.discord_utils import (
     GuildMembership,
+    require_role,
     resolve_guild_memberships,
     safe_int,
-    require_role,
     send_direct_message,
 )
 from gw2bot.events.formatting import calendar_link, event_embed

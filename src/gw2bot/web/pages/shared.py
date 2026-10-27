@@ -144,10 +144,8 @@ button.active {
 }
 """
 
-# The three preset buttons and the Custom one that reveals the date fields.
-# Every dashboard carries the same four, so a reader who learns one header has
-# learned all of them.
-
+# The layout, axis and hover rules the four charted dashboards share. A page
+# appends its own rules after these, so it can still override any of them.
 CHART_PAGE_STYLE = """
 body {
   display: flex;
@@ -179,6 +177,8 @@ main {
 .chart-svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
 .chart-svg .y-label { text-anchor: end; }
 .chart-svg .x-label { text-anchor: middle; }
+.chart-svg .x-label.first { text-anchor: start; }
+.chart-svg .x-label.last { text-anchor: end; }
 .chart-svg .overlay { fill: transparent; }
 /* A thin, translucent gray line the hover snaps to. */
 .chart-svg .crosshair {
@@ -190,6 +190,20 @@ main {
 /* #chart is the positioning context for the hover tooltip, which is an HTML
    box overlaid on the SVG so its text wraps and inherits page styling. */
 #chart { position: relative; }
+.chart-tooltip {
+  position: absolute;
+  z-index: 2;
+  min-width: 9rem;
+  max-width: 16rem;
+  padding: 0.45rem 0.55rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--text);
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
 .chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
 #chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
 .empty { color: var(--muted); padding: 0.6rem; }
@@ -203,7 +217,9 @@ main {
 }
 """
 
-
+# The three preset buttons and the Custom one that reveals the date fields.
+# Every dashboard carries the same four, so a reader who learns one header has
+# learned all of them.
 RANGE_PICKER_NAV = """  <nav class="ranges" aria-label="Time range">
     <button type="button" data-range="24h">24h</button>
     <button type="button" data-range="7d">7d</button>
@@ -459,7 +475,8 @@ RANGE_PICKER_LISTENERS_JS = """  document.querySelectorAll("[data-range]").forEa
 
 
 CHART_HELPERS_JS = """  // The DOM, axis and pointer helpers every charted dashboard draws with.
-  // A page supplies ``state.data`` with ``since`` and ``now`` in seconds.
+  // A page supplies ``state.data`` with ``since`` and ``now`` in seconds, and
+  // ``M`` and ``plotW()``, the metrics and width the plot is drawn at.
   var SVG_NS = "http://www.w3.org/2000/svg";
 
   function el(tag, className, text) {
@@ -481,6 +498,17 @@ CHART_HELPERS_JS = """  // The DOM, axis and pointer helpers every charted dashb
   // How wide the drawn window is, in seconds.
   function windowSpan() {
     return state.data ? state.data.now - state.data.since : 0;
+  }
+
+  // Where a moment falls across the plot, held to the drawn window's edges.
+  function scaleX(t) {
+    var since = state.data.since;
+    var now = state.data.now;
+    var span = now - since;
+    var frac = span > 0 ? (t - since) / span : 0;
+    if (frac < 0) { frac = 0; }
+    if (frac > 1) { frac = 1; }
+    return M.left + frac * plotW();
   }
 
   function formatTick(t) {
@@ -596,8 +624,8 @@ CHART_HOVER_JS = """  // The hover and tap selection every dashboard chart carri
     // By default this picks from the actual dots in two dimensions, then
     // returns their time column: close timestamps can occupy nearly the same
     // x coordinate, so x-only navigation would make their different y
-    // positions impossible to use. A chart whose columns are evenly spaced
-    // days asks for x alone instead.
+    // positions impossible to use. The feast page's charts, which have always
+    // been read by time alone, ask for x instead.
     function nearestColumn(vbX, vbY) {
       var best = null;
       var bestDist = Infinity;

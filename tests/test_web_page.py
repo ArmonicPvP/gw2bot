@@ -1334,6 +1334,7 @@ class TestDashboardChartHover:
             "el(tag, className, text)",
             "svg(tag, attrs)",
             "windowSpan()",
+            "scaleX(t)",
             "formatTick(t)",
             "formatMoment(t)",
             "isHoverPointer(event)",
@@ -1347,6 +1348,17 @@ class TestDashboardChartHover:
                 assert page.count("function " + signature) == 1, signature
             assert page.count("var TAP_SLOP = ") == 1
             assert page.count("var SVG_NS = ") == 1
+
+    def test_no_dashboard_restates_a_shared_chart_rule(self) -> None:
+        # A page's own rules follow CHART_PAGE_STYLE, so it may still override
+        # one of them, but a full second copy is the drift this replaced.
+        for page in self.PAGES:
+            own = page.replace(CHART_PAGE_STYLE, "")
+            assert ".card {\n" not in own
+            assert ".chart-svg .x-label {" not in own
+            assert ".chart-svg .x-label.first" not in own
+            assert ".chart-tooltip {\n  position: absolute;" not in own
+            assert ".pager {\n" not in own
 
     def test_each_dashboard_supplies_the_hover_hooks(self) -> None:
         for page in self.PAGES:

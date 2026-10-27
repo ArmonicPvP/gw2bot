@@ -7,9 +7,9 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
-    CHART_PAGE_STYLE,
     CHART_HELPERS_JS,
     CHART_HOVER_JS,
+    CHART_PAGE_STYLE,
     CUSTOM_RANGE_PANEL,
     DASHBOARD_HEADER_STYLE,
     RANGE_PICKER_LISTENERS_JS,
@@ -86,19 +86,9 @@ FOOD_PAGE = (
   margin: -0.35rem 0 0.6rem;
 }
 .chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
-.chart-tooltip {
-  position: absolute;
-  z-index: 2;
-  min-width: 8rem;
-  padding: 0.45rem 0.55rem;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 0.78rem;
-  color: var(--text);
-  pointer-events: none;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
-}
+/* A feast tooltip keeps its own sizing: it is not capped at the shared width,
+   so a long feast name has room beside its count. */
+.chart-tooltip { min-width: 8rem; max-width: none; }
 .chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
 .chart-tooltip .tip-row .swatch {
   width: 0.7rem;
@@ -475,15 +465,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     console.debug("feast chart mode:", mode, count);
   }
 
-  function scaleX(t) {
-    var since = state.data.since;
-    var now = state.data.now;
-    var span = now - since;
-    var frac = span > 0 ? (t - since) / span : 0;
-    if (frac < 0) { frac = 0; }
-    if (frac > 1) { frac = 1; }
-    return M.left + frac * plotW();
-  }
   // A gridline step of 1, 2 or 5 times a power of ten, which is what makes
   // the axis read as round counts rather than as arbitrary divisions.
   function niceStep(span, target) {
@@ -681,10 +662,8 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
 
   // host is the positioning box the tooltip is placed in and headline names a
   // column; both default to the stock chart's, so its own call site reads the
-  // way it always has while the daily charts below pass their own.
-  // The usage chart and the daily charts share this; a daily chart passes
-  // its own host and a day headline, and its columns are evenly spaced days,
-  // so the column nearest in x is the one meant.
+  // way it always has while the daily charts below pass their own. Every
+  // chart on this page picks the column nearest in x alone, as it always has.
   function attachHover(canvas, plotted, host, headline) {
     return attachChartHover(canvas, groupColumns(plotted), {
       host: host || chart,

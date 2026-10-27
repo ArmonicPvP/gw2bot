@@ -7,9 +7,9 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
-    CHART_PAGE_STYLE,
     CHART_HELPERS_JS,
     CHART_HOVER_JS,
+    CHART_PAGE_STYLE,
     CUSTOM_RANGE_PANEL,
     DASHBOARD_HEADER_STYLE,
     RANGE_PICKER_LISTENERS_JS,
@@ -75,24 +75,8 @@ GOLD_PAGE = (
   border-radius: 50%;
   flex-shrink: 0;
 }
-.chart-svg .x-label.first { text-anchor: start; }
-.chart-svg .x-label.last { text-anchor: end; }
 .chart-svg .balance-line { fill: none; stroke-width: 2; }
 .chart-svg .event-dot { stroke: var(--panel); stroke-width: 1; }
-.chart-tooltip {
-  position: absolute;
-  z-index: 2;
-  min-width: 9rem;
-  max-width: 16rem;
-  padding: 0.45rem 0.55rem;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 0.78rem;
-  color: var(--text);
-  pointer-events: none;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
-}
 .chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
 .chart-tooltip .tip-row .swatch {
   width: 0.7rem;
@@ -355,15 +339,6 @@ table.changes td.amount { white-space: nowrap; }
     return { low: low, high: high, step: step };
   }
 
-  function scaleX(t) {
-    var since = state.data.since;
-    var now = state.data.now;
-    var span = now - since;
-    var frac = span > 0 ? (t - since) / span : 0;
-    if (frac < 0) { frac = 0; }
-    if (frac > 1) { frac = 1; }
-    return M.left + frac * plotW();
-  }
   function scaleY(copper) {
     var scale = state.scale;
     var span = scale.high - scale.low;
