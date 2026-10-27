@@ -1890,7 +1890,7 @@ class TestProfitPage:
         assert await response.json() == {
             "error": expected_error or f"{scope} unavailable"
         }
-        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Cache-Control"] == "no-store, private"
         assert private_payload not in await response.text()
         assert private_payload not in caplog.text
 
