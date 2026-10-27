@@ -1848,6 +1848,53 @@ class TestProfitPage:
         assert secret not in body
 
 
+    @pytest.mark.parametrize(
+        ("path", "loader", "scope"),
+        [
+            ("/api/profit", "load_report", "report"),
+            ("/api/profit/delivery", "load_delivery", "section"),
+            ("/api/profit/orders", "load_open_orders", "section"),
+            ("/api/profit/trades?since=100", "load_trades", "trades"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("error_type", "status", "expected_error"),
+        [
+            (MissingProfitApiKey, 409, "api_key_missing"),
+            (ProfitApiError, 502, "upstream unavailable"),
+            (aiohttp.ClientError, 502, "upstream unavailable"),
+            (TimeoutError, 502, "upstream unavailable"),
+            (SQLAlchemyError, 500, None),
+            (ValueError, 500, None),
+        ],
+    )
+    async def test_profit_read_routes_keep_their_error_contracts(
+        self,
+        client: TestClient,
+        bot: FakeBot,
+        caplog: pytest.LogCaptureFixture,
+        path: str,
+        loader: str,
+        scope: str,
+        error_type: type[Exception],
+        status: int,
+        expected_error: str | None,
+    ) -> None:
+        private_payload = "private-profit-error-payload"
+        getattr(bot.profit_service, loader).side_effect = error_type(private_payload)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            response = await client.get(path, headers=self._headers())
+
+        assert response.status == status
+        assert await response.json() == {
+            "error": expected_error or f"{scope} unavailable"
+        }
+        assert response.headers["Cache-Control"] == "no-store"
+        assert private_payload not in await response.text()
+        assert private_payload not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("path", "stored"),
     [

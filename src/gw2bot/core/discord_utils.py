@@ -11,6 +11,47 @@ import discord
 LOGGER = logging.getLogger(__name__)
 
 
+class PageButtonFactory(Protocol):
+    def __call__(
+        self,
+        page: int,
+        direction: int,
+        *,
+        disabled: bool,
+    ) -> discord.ui.Item[Any]: ...
+
+
+def clamp_page(page: int, direction: int, page_count: int) -> int:
+    return max(0, min(page + direction, page_count - 1))
+
+
+def page_button(
+    custom_id: str,
+    direction: int,
+    *,
+    disabled: bool = False,
+) -> discord.ui.Button[Any]:
+    return discord.ui.Button(
+        label="<" if direction < 0 else ">",
+        style=discord.ButtonStyle.secondary,
+        custom_id=custom_id,
+        disabled=disabled,
+    )
+
+
+def add_pager_buttons(
+    view: discord.ui.View,
+    page_count: int,
+    page: int,
+    *,
+    button_factory: PageButtonFactory,
+) -> None:
+    """Build both arrows while the caller owns their IDs and dispatch."""
+    page = clamp_page(page, 0, page_count)
+    view.add_item(button_factory(page, -1, disabled=page == 0))
+    view.add_item(button_factory(page, 1, disabled=page >= page_count - 1))
+
+
 class TopicEditableChannel(Protocol):
     async def edit(
         self,

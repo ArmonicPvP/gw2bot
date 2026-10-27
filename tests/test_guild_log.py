@@ -1,9 +1,104 @@
+import logging
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from gw2bot.bot import Gw2Bot
+from gw2bot.gw2 import guild_log
 from gw2bot.raffle import RaffleDeposit
+
+
+@pytest.mark.parametrize(
+    ("sender", "getter", "marker"),
+    [
+        (
+            "send_pending_gold_withdrawal_notifications",
+            "get_pending_gold_withdrawal_notifications",
+            "mark_gold_withdrawal_notification_sent",
+        ),
+        (
+            "send_pending_deposit_audit_notifications",
+            "get_pending_deposit_audit_notifications",
+            "mark_deposit_audit_notification_sent",
+        ),
+        (
+            "send_pending_leave_notifications",
+            "get_pending_leave_notifications",
+            "mark_leave_notification_sent",
+        ),
+        (
+            "send_pending_join_notifications",
+            "get_pending_join_notifications",
+            "mark_join_notification_sent",
+        ),
+        (
+            "send_pending_invite_notifications",
+            "get_pending_invite_notifications",
+            "mark_invite_notification_sent",
+        ),
+        (
+            "send_pending_rank_change_notifications",
+            "get_pending_rank_change_notifications",
+            "mark_rank_change_notification_sent",
+        ),
+    ],
+)
+async def test_pending_delivery_marks_only_successes_in_send_order(
+    sender: str,
+    getter: str,
+    marker: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = MagicMock()
+    private_message = "private-notification-content"
+    pending = [
+        SimpleNamespace(event_id=index, message=f"{private_message}-{index}")
+        for index in (1, 2, 3)
+    ]
+    getattr(store, getter).return_value = pending
+    activity: list[tuple[str, object]] = []
+
+    async def send(message: str) -> bool:
+        activity.append(("send", message))
+        return message != pending[1].message
+
+    def mark(event_id: int) -> None:
+        activity.append(("mark", event_id))
+
+    getattr(store, marker).side_effect = mark
+    bot = SimpleNamespace(
+        _raffle_store=store, _try_send_notification=AsyncMock(side_effect=send)
+    )
+    caplog.set_level(logging.DEBUG)
+
+    await getattr(guild_log, sender)(cast(Gw2Bot, bot))
+
+    assert activity == [
+        ("send", pending[0].message), ("mark", 1),
+        ("send", pending[1].message),
+        ("send", pending[2].message), ("mark", 3),
+    ]
+    assert private_message not in caplog.text
+
+
+async def test_pending_delivery_propagates_a_failure_before_marking() -> None:
+    store = MagicMock()
+    store.get_pending_join_notifications.return_value = [
+        SimpleNamespace(event_id=1, message="first"),
+        SimpleNamespace(event_id=2, message="second"),
+    ]
+    bot = SimpleNamespace(
+        _raffle_store=store,
+        _try_send_notification=AsyncMock(side_effect=RuntimeError("delivery failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await guild_log.send_pending_join_notifications(cast(Gw2Bot, bot))
+
+    store.mark_join_notification_sent.assert_not_called()
+    bot._try_send_notification.assert_awaited_once_with("first")
 
 
 class TestGuildLogRefresh:

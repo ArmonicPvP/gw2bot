@@ -1418,6 +1418,26 @@ def _addition_target(
     return _AdditionTarget(fresh_event, fresh_occurrence, stop)
 
 
+def _read_addition_target(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    *,
+    stage: str,
+) -> _AdditionTarget:
+    """Map a failed read to a target whose caller decides how to proceed."""
+    try:
+        return _addition_target(bot, event, occurrence)
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read the run back %s; occurrence_id=%s error_type=%s",
+            stage,
+            occurrence.occurrence_id,
+            type(exc).__name__,
+        )
+        return _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+
+
 async def _drop_departed_picks(
     bot: Gw2Bot,
     interaction: discord.Interaction,
@@ -1481,15 +1501,10 @@ async def _seat_roster_additions(
         # check's own departures are committed with nothing to announce them
         # if this call never reaches the end of the batch, which is where the
         # one merged announcement goes out.
-        try:
-            target = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back during a roster addition; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
+        target = _read_addition_target(
+            bot, event, current, stage="during a roster addition"
+        )
+        if target.stop is _AdditionStop.UNREADABLE:
             outcome.stop = _AdditionStop.UNREADABLE
             outcome.left_off = list(user_ids[index:])
             break
@@ -1570,16 +1585,9 @@ async def _seat_roster_additions(
         # Guarded like the one inside the loop: the seats are committed by
         # now, and a store that will not answer must not take the notices,
         # the announcement and the summary down with it.
-        try:
-            target = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back after a roster addition; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            target = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        target = _read_addition_target(
+            bot, event, current, stage="after a roster addition"
+        )
         if target.event is not None and target.occurrence is not None:
             event, current = target.event, target.occurrence
         if target.stop is not None:
@@ -1623,16 +1631,9 @@ async def _send_addition_notices(
         # from whatever comes back. A store that will not answer says
         # nothing about the message, so the notice keeps the last link known
         # to be good rather than dropping it.
-        try:
-            live = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back between addition notices; "
-                "occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            live = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        live = _read_addition_target(
+            bot, event, current, stage="between addition notices"
+        )
         # Adopted whether or not it also reports a stop: a save that changes
         # the category and the channel together answers CHANGED and moves
         # the post in the same breath, and the notices left would otherwise
@@ -1692,16 +1693,9 @@ async def _send_addition_notices(
         # above guarded what the notices say; this one guards what is offered
         # afterwards, so edit controls are never rebuilt for a roster that has
         # since gone.
-        try:
-            final = _addition_target(bot, event, current)
-        except SQLAlchemyError as exc:
-            LOGGER.error(
-                "Could not read the run back after a roster addition's "
-                "notices; occurrence_id=%s error_type=%s",
-                current.occurrence_id,
-                type(exc).__name__,
-            )
-            final = _AdditionTarget(stop=_AdditionStop.UNREADABLE)
+        final = _read_addition_target(
+            bot, event, current, stage="after a roster addition's notices"
+        )
         # Adopted like the earlier verifications, and for the same reason: a
         # channel move landing while the notices went out replaces the thread
         # the announcement below is sent to and the message the preview is

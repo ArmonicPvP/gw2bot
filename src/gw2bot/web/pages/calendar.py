@@ -7,6 +7,7 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
+    ACCOUNT_CONTROLS_MARKUP,
     DASHBOARD_HEADER_STYLE,
     SHARED_STYLE,
 )
@@ -419,19 +420,9 @@ main {
   <span id="period" aria-live="polite"></span>
   <span class="spacer"></span>
   <a href="/profit">Profit</a>
-  <span id="whoami"></span>
-  <form method="post" action="/logout">
-    <button type="submit" class="signout" aria-label="Sign out">
-      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
-        fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
-      </svg>
-      <span class="signout-label">Sign out</span>
-    </button>
-  </form>
+"""
+    + ACCOUNT_CONTROLS_MARKUP
+    + """
 </header>
 <main>
   <div id="grid" class="month" aria-label="Guild event calendar"></div>

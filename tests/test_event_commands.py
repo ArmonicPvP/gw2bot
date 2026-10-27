@@ -11692,7 +11692,9 @@ class TestAddSignups:
         self,
         fake_bot: Any,
         store: EventStore,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
+        private_payload = "private-roster-read-error"
         event, occurrence = self.make_event(store)
         self.seat(store, occurrence, 1, EventRole.QUICKNESS_HEAL)
         for user_id in (2, 3, 4, 5):
@@ -11713,7 +11715,7 @@ class TestAddSignups:
 
         def refuse_once_armed(occurrence_id: int) -> Any:
             if refusing:
-                raise SQLAlchemyError("boom")
+                raise SQLAlchemyError(private_payload)
             return real_get_occurrence(occurrence_id)
 
         store.set_auto_signup = arm_the_refusal  # type: ignore[method-assign]
@@ -11738,6 +11740,10 @@ class TestAddSignups:
         kwargs = interaction.edit_original_response.await_args.kwargs
         assert "could not be read" in kwargs["content"]
         assert "<@11>" in kwargs["content"]
+
+        assert "during a roster addition" in caplog.text
+        assert private_payload not in caplog.text
+        assert private_payload not in kwargs["content"]
 
     async def test_an_addition_reports_what_it_did_when_a_read_fails(
         self,

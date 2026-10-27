@@ -57,6 +57,11 @@ messages to `_seat_roster_additions` and `_send_addition_notices`. Both return
 the latest event and run, while `_AdditionOutcome` carries the results for
 the single roster announcement and commander summary.
 
+Their four target re-reads use `_read_addition_target`, which logs a failed
+database read by phase and maps it to an unreadable target. The callers
+retain their own decisions: seating stops with the remaining picks recorded,
+while notices can continue using the last known event and run.
+
 ## `posting/` - what an event does to Discord
 
 Also in dependency order:

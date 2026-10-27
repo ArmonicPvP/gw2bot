@@ -28,6 +28,11 @@ exceed Discord's size limit. Callers retain their own whitespace and
 empty-report policies. Event reminders remain separate because each message
 also carries the exact user IDs it may mention.
 
+`discord_utils` owns the pager primitives: `clamp_page`, `page_button`, and
+`add_pager_buttons`. A view supplies a typed button factory, so raffle and
+help retain their own persistent IDs, dynamic-item patterns, data reads and
+rendering while sharing arrow styling and disabled-state calculations.
+
 The dependency only ever points one way. Any package may import `core/`;
 nothing in `core/` may import anything else under `gw2bot` - not a feature
 package, not `gw2/`, not `bot.py`, not `config.py`. A single-dot relative
