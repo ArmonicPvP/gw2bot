@@ -120,8 +120,9 @@ fixed reason a skipped tap is traced with, the ring colour, and a
 `fillTooltip` that adds the page's rows. Every table is a
 `renderPagedTable` spec: its columns, its rows, and where it pages to. A
 column's class is its heading's too unless it names a `head` of its own, so
-every numeric heading right-aligns over its figures; the text columns, the
-account and the feast's User, name `head: null` to keep theirs plain.
+every numeric heading right-aligns over its figures, and a class that hides
+a column on a phone, such as the events table's `last`, hides its heading
+with it. Only the account column and the feast's User name `head: null`.
 
 The calendar and the profit page are not charted dashboards and are built by
 hand, but they take the same `document_head` and `SIGNOUT_CONTROLS`, the

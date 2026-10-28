@@ -1428,7 +1428,7 @@ class TestDashboardChartHover:
 
     def test_every_numeric_heading_sits_over_its_figures(self) -> None:
         # A heading takes its column's class unless the column names a head
-        # of its own, and only the text columns do.
+        # of its own, and only the account column and the feast's User do.
         assert "table.data-table th.num, table.data-table td.num {" in (
             CHART_PAGE_STYLE
         )
@@ -2328,6 +2328,22 @@ class TestFoodDailyCharts:
         assert FOOD_PAGE.count(
             'empty: "No feasts were used in this period.",'
         ) == 5
+
+    def test_the_daily_charts_tuck_their_outermost_day_labels(self) -> None:
+        # They label real days rather than calling drawTimeAxis, so they
+        # set the same classes themselves. A window of one day puts its
+        # only label mid-plot, where it stays centred.
+        loop = FOOD_PAGE.split(
+            "var ticks = Math.min(m.ticks, grid.length - 1);", 1
+        )[1].split("canvas.appendChild(xLabel);", 1)[0]
+        assert (
+            'if (ticks > 0 && tick === 0) { xLabel.classList.add("first"); }'
+            in loop
+        )
+        assert (
+            'if (ticks > 0 && tick === ticks) '
+            '{ xLabel.classList.add("last"); }' in loop
+        )
 
 
 class TestFoodAdditionsSection:

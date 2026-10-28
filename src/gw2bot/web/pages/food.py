@@ -797,6 +797,11 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
         var xLabel = svg("text", {
           "class": "x-label", x: x(grid[at]), y: m.top + innerH + 18
         });
+        // The outermost days sit on the plot's edges, so they are set
+        // inwards as the stock chart's are; a lone day sits mid-plot and
+        // stays centred.
+        if (ticks > 0 && tick === 0) { xLabel.classList.add("first"); }
+        if (ticks > 0 && tick === ticks) { xLabel.classList.add("last"); }
         xLabel.textContent = formatDay(grid[at]);
         canvas.appendChild(xLabel);
       }
