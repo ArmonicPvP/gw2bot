@@ -14,16 +14,10 @@ from gw2bot.web.pages.profit.markup import (
 )
 from gw2bot.web.pages.profit.script import PROFIT_SCRIPT
 from gw2bot.web.pages.profit.style import PROFIT_STYLE
+from gw2bot.web.pages.shared import document_head
 
 _PROFIT_PAGE_TEMPLATE = (
-    """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Trading Post Profit</title>
-<style>"""
+    document_head("Trading Post Profit")
     + PROFIT_STYLE
     + """</style>
 </head>

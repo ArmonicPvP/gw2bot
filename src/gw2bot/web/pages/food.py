@@ -7,114 +7,65 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
-    CUSTOM_RANGE_PANEL,
-    DASHBOARD_HEADER_STYLE,
-    RANGE_PICKER_LISTENERS_JS,
-    RANGE_PICKER_NAV,
-    RANGE_PICKER_STYLE,
-    SHARED_STYLE,
-    range_picker_js,
+    CHART_MODE_BUTTON,
+    CHART_MODE_JS,
+    CHART_STATUS_LINE,
+    COIN_JS,
+    UTILITY_STYLE,
+    chart_dashboard,
 )
 
-FOOD_PAGE = (
-    """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Feast Usage</title>
-<style>"""
-    + SHARED_STYLE
-    + DASHBOARD_HEADER_STYLE
-    + RANGE_PICKER_STYLE
+
+def _daily_card(
+    chart_id: str,
+    heading: str,
+    note: str,
+    *,
+    legend: bool = True,
+) -> str:
+    """One of the daily charts below the stock graph.
+
+    Each is a card with its heading, the line saying what it plots, its box,
+    a legend of its own unless it sums the others, and its status line.
+    """
+    legend_box = (
+        f'    <div id="legend-{chart_id}" class="legend" role="list"\n'
+        '      aria-label="Feast colours"></div>\n'
+        if legend
+        else ""
+    )
+    return f"""  <section class="card">
+    <div class="chart-heading">
+      <h2>{heading}</h2>
+    </div>
+    <p class="chart-note">{note}</p>
+    <div id="chart-{chart_id}" class="chart-box"></div>
+{legend_box}    <div id="status-{chart_id}" class="status-line" role="status"
+      aria-live="polite"></div>
+  </section>
+"""
+
+
+FOOD_PAGE = chart_dashboard(
+    "Feast Usage",
+    "feast",
+    style=UTILITY_STYLE
     + """
-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-main {
-  flex: 1;
-  width: 100%;
-  max-width: 62rem;
-  margin: 0 auto;
-  padding: 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1rem;
-}
-.card h2 { font-size: 0.95rem; }
-.chart-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.6rem;
-}
-.chart-mode {
-  min-width: 2rem;
-  padding: 0.25rem 0.45rem;
-  font-size: 1rem;
-  line-height: 1;
-}
-/* The legend sits under the chart as a row of colour swatches. Each swatch is
-   a button so a tap can reveal the feast it stands for. */
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem 1.25rem;
-  margin-top: 0.6rem;
-}
+/* Each legend swatch is a button, so a tap can switch the feast it stands
+   for, and its square corners set the feasts apart from the round dots of
+   the history pages. */
 .legend .item {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.82rem;
   background: none;
   border: none;
   padding: 0.2rem 0.25rem;
-  color: var(--text);
   cursor: pointer;
 }
-.legend .swatch { width: 0.9rem; height: 0.9rem; border-radius: 3px; flex-shrink: 0; }
+.legend .swatch { border-radius: 3px; }
 .legend .legend-name { display: inline; }
 /* A feast switched off keeps its place in the legend, dimmed and with its
    colour reduced to an outline, so what is missing from the chart is still
    named and one more click puts it back. */
 .legend .item.off { opacity: 0.55; }
-/* The chart is a fixed-viewBox SVG that scales to its container width, so
-   every plotted coordinate is computed once against the viewBox and the
-   browser handles resizing without a re-render. */
-.chart-svg { width: 100%; height: auto; display: block; }
-.chart-svg .axis { stroke: var(--border); stroke-width: 1; }
-.chart-svg .grid { stroke: var(--border); stroke-width: 1; opacity: 0.35; }
-.chart-svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
-.chart-svg .y-label { text-anchor: end; }
-.chart-svg .x-label { text-anchor: middle; }
-.chart-svg .series-line { fill: none; stroke-width: 2; }
-.chart-svg .series-dot { stroke: var(--panel); stroke-width: 1; }
-.chart-svg .overlay { fill: transparent; }
-/* A thin, translucent gray line the hover snaps to the nearest sample. */
-.chart-svg .crosshair {
-  stroke: rgba(128, 128, 128, 0.45);
-  stroke-width: 1;
-  pointer-events: none;
-}
-.chart-svg .hover-ring { fill: none; stroke-width: 2; pointer-events: none; }
-/* #chart is the positioning context for the hover tooltip, which is an HTML
-   box overlaid on the SVG so its text wraps and inherits page styling. */
-#chart { position: relative; }
-/* Every chart below the stock graph is the same box: the positioning context
-   its hover tooltip is placed in. */
-.chart-box { position: relative; }
 /* One line under a heading saying what the chart below it plots, because a
    rolling average and a daily total look alike and are not. */
 .chart-note {
@@ -122,58 +73,14 @@ main {
   font-size: 0.8rem;
   margin: -0.35rem 0 0.6rem;
 }
-.chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
-.chart-tooltip {
-  position: absolute;
-  z-index: 2;
-  min-width: 8rem;
-  padding: 0.45rem 0.55rem;
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 0.78rem;
-  color: var(--text);
-  pointer-events: none;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
-}
-.chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
-.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
-.chart-tooltip .tip-row .swatch {
-  width: 0.7rem;
-  height: 0.7rem;
-  border-radius: 2px;
-  flex-shrink: 0;
-}
-.chart-tooltip .tip-row .val {
-  margin-left: auto;
-  padding-left: 0.75rem;
-  font-variant-numeric: tabular-nums;
-}
-.chart-tooltip .tip-row.em { font-weight: 600; }
-#chart-status { color: var(--muted); font-size: 0.85rem; padding-top: 0.5rem; }
+/* A feast tooltip keeps its own sizing: it is not capped at the shared width,
+   so a long feast name has room beside its count. */
+.chart-tooltip { min-width: 8rem; max-width: none; }
+.chart-tooltip .tip-row .swatch { border-radius: 2px; }
 .tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.75rem; }
 .tabs button { font-size: 0.8rem; }
-table.removals, table.additions {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-}
-table.removals th, table.removals td,
-table.additions th, table.additions td {
-  text-align: left;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-}
-table.removals th, table.additions th {
-  color: var(--muted);
-  font-weight: 600;
-}
-table.removals td.num, table.additions td.num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-/* Additions are that table with three more columns, so they share every rule
-   above and add only what the extra columns need. */
+/* Additions are the removals table with three more columns, so they add only
+   what the extra columns need. */
 /* Six narrow columns read as a row, so only the account names wrap; the
    rest keep their line and the table scrolls instead. */
 table.additions th, table.additions td { white-space: nowrap; }
@@ -184,32 +91,8 @@ table.additions th.actions, table.additions td.actions { text-align: right; }
    the column. */
 table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
 /* Six columns are more than a phone has room for, so the table scrolls
-   sideways inside its card rather than pushing the page wider. */
-.table-scroll { overflow-x: auto; }
+   sideways inside its card. */
 .table-scroll table { min-width: 34rem; }
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.25rem;
-  background: transparent;
-  border-color: transparent;
-  color: var(--muted);
-  line-height: 0;
-}
-.icon-button:hover { color: var(--text); background: var(--panel-2); }
-.icon-button svg { pointer-events: none; }
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
-}
 /* The cost editor. The shared reset zeroes every margin, which takes the
    centring a modal dialog normally gets from the user agent with it. */
 .cost-dialog {
@@ -265,119 +148,61 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   gap: 0.5rem;
   margin-top: 0.6rem;
 }
-.empty { color: var(--muted); padding: 0.6rem; }
-.pager {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
 @media (max-width: 640px) {
-  main { padding: 0.6rem 0.5rem; }
-  .card { padding: 0.6rem; }
   /* Names are hidden, leaving a compact colour key. A feast switched off
      names itself, so a tap still answers "which one is this?" - it answers by
      taking the line away and labelling what went. */
   .legend .legend-name { display: none; }
   .legend .item.off .legend-name { display: inline; }
 }
-</style>
-</head>
-<body>
-<header>
-  <h1 id="brand">Feast Usage</h1>
-"""
-    + RANGE_PICKER_NAV
-    + """
-  <span class="spacer"></span>
-  <span id="whoami"></span>
-  <form method="post" action="/logout">
-    <button type="submit" class="signout" aria-label="Sign out">
-      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
-        fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
-      </svg>
-      <span class="signout-label">Sign out</span>
-    </button>
-  </form>
-"""
-    + CUSTOM_RANGE_PANEL
-    + """
-</header>
-<main>
+""",
+    body="""<main>
   <section class="card">
     <div class="chart-heading">
       <h2>Stock on hand over time</h2>
-      <button type="button" id="chart-mode" class="chart-mode"
-        aria-label="Switch to staircase graph" title="Regular line graph">╱</button>
+"""
+    + CHART_MODE_BUTTON
+    + """
     </div>
-    <div id="chart"></div>
+    <div id="chart" class="chart-box"></div>
     <div id="legend" class="legend" role="list" aria-label="Feast colours"></div>
-    <div id="chart-status" role="status" aria-live="polite"></div>
+"""
+    + CHART_STATUS_LINE
+    + """
   </section>
-  <section class="card">
-    <div class="chart-heading">
-      <h2>Food usage &ndash; 7-day rolling average</h2>
-    </div>
-    <p class="chart-note">Feasts taken per day, averaged over the seven days
-      ending on each date. Days are cut in UTC.</p>
-    <div id="chart-usage-avg" class="chart-box"></div>
-    <div id="legend-usage-avg" class="legend" role="list"
-      aria-label="Feast colours"></div>
-    <div id="status-usage-avg" class="chart-status" role="status"
-      aria-live="polite"></div>
-  </section>
-  <section class="card">
-    <div class="chart-heading">
-      <h2>Food cost &ndash; 7-day rolling average</h2>
-    </div>
-    <p class="chart-note">What the feasts used each day had cost, averaged
-      over the seven days ending on each date.</p>
-    <div id="chart-cost-avg" class="chart-box"></div>
-    <div id="legend-cost-avg" class="legend" role="list"
-      aria-label="Feast colours"></div>
-    <div id="status-cost-avg" class="chart-status" role="status"
-      aria-live="polite"></div>
-  </section>
-  <section class="card">
-    <div class="chart-heading">
-      <h2>Food cost by day</h2>
-    </div>
-    <p class="chart-note">What the feasts used each day had cost, with no
-      averaging.</p>
-    <div id="chart-cost-by-day" class="chart-box"></div>
-    <div id="legend-cost-by-day" class="legend" role="list"
-      aria-label="Feast colours"></div>
-    <div id="status-cost-by-day" class="chart-status" role="status"
-      aria-live="polite"></div>
-  </section>
-  <section class="card">
-    <div class="chart-heading">
-      <h2>Total food cost</h2>
-    </div>
-    <p class="chart-note">What every drawn feast used in the window had cost,
-      added up. Each point is the running total to the end of that day.</p>
-    <div id="chart-total-cost" class="chart-box"></div>
-    <div id="status-total-cost" class="chart-status" role="status"
-      aria-live="polite"></div>
-  </section>
-  <section class="card">
-    <div class="chart-heading">
-      <h2>Food cost by food</h2>
-    </div>
-    <p class="chart-note">The same running total, one line per feast, so the
-      shelf the gold went on is the line it is read off.</p>
-    <div id="chart-cost-by-food" class="chart-box"></div>
-    <div id="legend-cost-by-food" class="legend" role="list"
-      aria-label="Feast colours"></div>
-    <div id="status-cost-by-food" class="chart-status" role="status"
-      aria-live="polite"></div>
-  </section>
+"""
+    + _daily_card(
+        "usage-avg",
+        "Food usage &ndash; 7-day rolling average",
+        """Feasts taken per day, averaged over the seven days
+      ending on each date. Days are cut in UTC.""",
+    )
+    + _daily_card(
+        "cost-avg",
+        "Food cost &ndash; 7-day rolling average",
+        """What the feasts used each day had cost, averaged
+      over the seven days ending on each date.""",
+    )
+    + _daily_card(
+        "cost-by-day",
+        "Food cost by day",
+        """What the feasts used each day had cost, with no
+      averaging.""",
+    )
+    + _daily_card(
+        "total-cost",
+        "Total food cost",
+        """What every drawn feast used in the window had cost,
+      added up. Each point is the running total to the end of that day.""",
+        legend=False,
+    )
+    + _daily_card(
+        "cost-by-food",
+        "Food cost by food",
+        """The same running total, one line per feast, so the
+      shelf the gold went on is the line it is read off.""",
+    )
+    + """
   <section class="card">
     <h2>Removals</h2>
     <div id="tabs" class="tabs"></div>
@@ -422,15 +247,12 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     </div>
   </form>
 </dialog>
-<script>
-"use strict";
-(function () {
+""",
+    parts=(COIN_JS, CHART_MODE_JS),
+    script="""
   // Okabe-Ito colourblind-safe categorical palette, one hue per tracked feast.
   var COLORS = ["#56B4E9", "#E69F00", "#009E73", "#CC79A7"];
-  var SVG_NS = "http://www.w3.org/2000/svg";
   var TABLE_PAGE_SIZE = 5;
-  var COPPER_PER_SILVER = 100;
-  var COPPER_PER_GOLD = 100 * COPPER_PER_SILVER;
   // The ceiling the server holds a recorded cost to, mirrored here so a
   // mistyped figure is named at the keyboard rather than coming back as a
   // rejected save.
@@ -440,52 +262,23 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   // squeezed onto one or two of them.
   var MIN_TOP = 10;
 
-  var mobileQuery = window.matchMedia("(max-width: 640px)");
-  function isMobile() { return mobileQuery.matches; }
-
-  // The chart uses a wide viewBox on desktop and a taller one on mobile, where
-  // it scales to the narrow screen width; the extra height makes the graph
-  // read large on a phone. Coordinates are computed against whichever set is
-  // active, so M is refreshed at the start of every chart render. The left
-  // margin matches the roster page's, because the axis is no longer capped at
-  // two digits and a four-figure stock has to fit beside it.
-  function metrics() {
-    if (isMobile()) {
-      return {
-        w: 480, h: 620, top: 16, right: 14, bottom: 36, left: 40, ticks: 4
-      };
-    }
-    return {
-      w: 960, h: 380, top: 16, right: 16, bottom: 32, left: 40, ticks: 6
-    };
-  }
-  var M = metrics();
-  function plotW() { return M.w - M.left - M.right; }
-  function plotH() { return M.h - M.top - M.bottom; }
+  // The left margin matches the roster page's, because the axis is no longer
+  // capped at two digits and a four-figure stock has to fit beside it.
+  var CHART_METRICS = chartMetrics({}, {});
 
   // hidden holds the feasts the reader has switched off in the legend, keyed
   // by guild storage id so the choice outlives a range change and the redraw
   // it brings.
-  var state = {
-    // No range until the server answers: the first load asks for the window
-    // this member last picked rather than naming one over the top of it.
-    range: null, data: null, activeFeast: 0, tablePage: 0, hidden: {},
-    staircase: false, scale: null,
+  var state = windowState({
+    activeFeast: 0, tablePage: 0, hidden: {}, staircase: false,
     // The Additions table keeps its own feast and page: an officer pricing a
     // restock is reading a different question than the removals above it.
     activeAddition: 0, additionPage: 0,
     // The restock the cost dialog is open over, or null while it is closed.
     editing: null
-  };
-
-  // A pinned touch selection listens on the whole page, so the chart it
-  // belongs to is torn down before another one is drawn.
-  var detachHover = null;
+  });
 
   var legend = document.getElementById("legend");
-  var chart = document.getElementById("chart");
-  var chartStatus = document.getElementById("chart-status");
-  var chartMode = document.getElementById("chart-mode");
   var tabs = document.getElementById("tabs");
   var tableBox = document.getElementById("table");
   var pager = document.getElementById("pager");
@@ -503,22 +296,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     copper: document.getElementById("cost-copper")
   };
 
-  function el(tag, className, text) {
-    var node = document.createElement(tag);
-    if (className) { node.className = className; }
-    if (text !== undefined) { node.textContent = text; }
-    return node;
-  }
-  function svg(tag, attrs) {
-    var node = document.createElementNS(SVG_NS, tag);
-    if (attrs) {
-      Object.keys(attrs).forEach(function (key) {
-        node.setAttribute(key, attrs[key]);
-      });
-    }
-    return node;
-  }
-
   function feasts() {
     return (state.data && state.data.feasts) || [];
   }
@@ -530,33 +307,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   }
   function visibleFeasts() {
     return feasts().filter(function (feast) { return !isHidden(feast); });
-  }
-
-  function traceMode(mode, count) {
-    console.debug("feast chart mode:", mode, count);
-  }
-
-  function scaleX(t) {
-    var since = state.data.since;
-    var now = state.data.now;
-    var span = now - since;
-    var frac = span > 0 ? (t - since) / span : 0;
-    if (frac < 0) { frac = 0; }
-    if (frac > 1) { frac = 1; }
-    return M.left + frac * plotW();
-  }
-  // A gridline step of 1, 2 or 5 times a power of ten, which is what makes
-  // the axis read as round counts rather than as arbitrary divisions.
-  function niceStep(span, target) {
-    var raw = span / target;
-    if (!(raw > 0)) { return 1; }
-    var magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
-    var normalized = raw / magnitude;
-    var step = 10;
-    if (normalized <= 1) { step = 1; }
-    else if (normalized <= 2) { step = 2; }
-    else if (normalized <= 5) { step = 5; }
-    return step * magnitude;
   }
 
   // The axis covers the counts actually reached in the window, padded out to
@@ -576,89 +326,15 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     // on the topmost gridline.
     var span = high * 1.1;
     var step = niceStep(span, 6);
-    return { high: step * Math.ceil(span / step), step: step };
-  }
-
-  function scaleY(count) {
-    var high = state.scale.high;
-    var value = count;
-    if (value < 0) { value = 0; }
-    if (value > high) { value = high; }
-    return M.top + (1 - value / high) * plotH();
-  }
-
-  // How wide the drawn window is, in seconds.
-  function windowSpan() {
-    return state.data ? state.data.now - state.data.since : 0;
-  }
-
-  function formatTick(t) {
-    var date = new Date(t * 1000);
-    // A window of about a day or less is read off the clock and a wider one
-    // off the calendar. The span decides rather than the range's name, so a
-    // custom pair of dates is labelled like the preset it resembles.
-    if (windowSpan() <= 48 * 60 * 60) {
-      return date.toLocaleTimeString(
-        undefined, { hour: "numeric", minute: "2-digit" });
-    }
-    return date.toLocaleDateString(
-      undefined, { month: "numeric", day: "numeric" });
-  }
-  function formatMoment(t) {
-    return new Date(t * 1000).toLocaleString(
-      undefined,
-      {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit"
-      });
+    return { low: 0, high: step * Math.ceil(span / step), step: step };
   }
 
   function renderChart() {
-    M = metrics();
-    state.scale = computeScale();
-    if (detachHover) { detachHover(); detachHover = null; }
-    chart.replaceChildren();
-    var canvas = svg("svg", {
-      "class": "chart-svg",
-      viewBox: "0 0 " + M.w + " " + M.h,
-      role: "img",
-      "aria-label": "Stock on hand over time, one line per feast"
-    });
-
-    // Horizontal gridlines and y labels at every step of the computed scale.
-    var lines = Math.round(state.scale.high / state.scale.step);
-    for (var line = 0; line <= lines; line += 1) {
-      var value = state.scale.step * line;
-      var y = scaleY(value);
-      canvas.appendChild(svg("line", {
-        "class": line === 0 ? "axis" : "grid",
-        x1: M.left, y1: y, x2: M.left + plotW(), y2: y
-      }));
-      var yLabel = svg("text", {
-        "class": "y-label", x: M.left - 6, y: y + 4
-      });
-      yLabel.textContent = String(value);
-      canvas.appendChild(yLabel);
-    }
-
-    // Left axis, plus x labels spaced evenly across the whole window so the
-    // range spans the full width even when few points were recorded.
-    canvas.appendChild(svg("line", {
-      "class": "axis",
-      x1: M.left, y1: M.top, x2: M.left, y2: M.top + plotH()
-    }));
-    for (var i = 0; i <= M.ticks; i += 1) {
-      var t = state.data.since +
-        (state.data.now - state.data.since) * (i / M.ticks);
-      var x = scaleX(t);
-      var xLabel = svg("text", {
-        "class": "x-label", x: x, y: M.top + plotH() + 18
-      });
-      xLabel.textContent = formatTick(t);
-      canvas.appendChild(xLabel);
-    }
+    resetChart();
+    var canvas = chartCanvas("Stock on hand over time, one line per feast");
+    drawGrid(canvas, state.scale, scaleY, String);
+    // This chart has always centred its outermost time labels.
+    drawTimeAxis(canvas, false);
 
     // One polyline plus point markers per feast, each in its own colour. Every
     // recorded sample is drawn; the series is never downsampled. Each plotted
@@ -682,20 +358,12 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
           coords.push(px.toFixed(1) + "," +
             scaleY(point.count).toFixed(1));
         });
-        canvas.appendChild(svg("polyline", {
-          "class": "series-line", stroke: color, points: coords.join(" ")
-        }));
+        drawLine(canvas, coords, color);
       }
       points.forEach(function (point) {
         var px = scaleX(point.t);
         var py = scaleY(point.count);
-        canvas.appendChild(svg("circle", {
-          "class": "series-dot",
-          cx: px.toFixed(1),
-          cy: py.toFixed(1),
-          r: 3,
-          fill: color
-        }));
+        drawDot(canvas, px, py, 3, color);
         plotted.push({
           x: px,
           y: py,
@@ -708,19 +376,10 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
       });
     });
 
-    detachHover = attachHover(canvas, plotted);
-    chart.appendChild(canvas);
-
-    chartStatus.textContent = chartStatusText(plotted.length);
+    showChart(canvas, plotted, chartStatusText(plotted.length));
   }
 
-  chartMode.addEventListener("click", function () {
-    state.staircase = !state.staircase;
-    chartMode.textContent = state.staircase ? "⎿" : "╱";
-    chartMode.title = state.staircase ? "Staircase graph" : "Regular line graph";
-    chartMode.setAttribute("aria-label", state.staircase
-      ? "Switch to regular line graph" : "Switch to staircase graph");
-    traceMode(state.staircase ? "staircase" : "regular", feasts().length);
+  bindChartMode(function () { return feasts().length; }, function () {
     if (state.data) { renderChart(); }
   });
 
@@ -740,294 +399,40 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   // once) form a single column, so the crosshair snaps to one x and the
   // tooltip lists every value recorded there.
   function groupColumns(plotted) {
-    var byTime = {};
-    var columns = [];
-    plotted.forEach(function (point) {
-      var key = String(point.t);
-      var column = byTime[key];
-      if (!column) {
-        column = { t: point.t, x: point.x, points: [] };
-        byTime[key] = column;
-        columns.push(column);
-      }
-      column.points.push(point);
-    });
+    var columns = columnsByTime(plotted);
     columns.forEach(function (column) {
       column.points.sort(function (a, b) { return a.feast - b.feast; });
     });
     return columns;
   }
 
-  // Tells a hovering pointer from a finger or a pen. A touch has no hover
-  // state: the browser sends one pointermove at the tap point and then a
-  // pointerleave as the finger lifts, which is why a tap used to flash the
-  // crosshair and lose it again. Touch selects by tapping instead and never
-  // reaches the move or leave handlers.
-  function isHoverPointer(event) {
-    return !event.pointerType || event.pointerType === "mouse";
-  }
-
-  // How far a finger may travel from where it landed and still count as a tap
-  // rather than the start of a scroll, in CSS pixels.
-  var TAP_SLOP = 12;
-
-  // Pointer and event types are narrowed to the names the spec defines before
-  // they are traced, so an exotic value cannot ride into the console.
-  function pointerKind(event) {
-    var kind = event && event.pointerType;
-    if (kind === "mouse" || kind === "pen" || kind === "touch") {
-      return kind;
-    }
-    return "other";
-  }
-  function eventKind(event) {
-    var name = event && event.type;
-    if (name === "pointerdown" || name === "wheel" ||
-        name === "keydown" || name === "blur") {
-      return name;
-    }
-    return "other";
-  }
-
-  // Sanitized tracing for the tap selection lifecycle, so a console trace can
-  // explain why a selection opened, moved or went away. Every call passes a
-  // fixed action name, one of the narrowed reason names above, and a count of
-  // drawn elements. Coordinates, timestamps, stock values and feast names are
-  // never passed, so no part of the payload or of the reader's gesture reaches
-  // the console. debug keeps it out of the default console view.
-  function traceSelection(action, reason, count) {
-    console.debug("feast chart selection:", action, reason, count);
-  }
-
   // host is the positioning box the tooltip is placed in and headline names a
   // column; both default to the stock chart's, so its own call site reads the
-  // way it always has while the daily charts below pass their own.
+  // way it always has while the daily charts below pass their own. Every
+  // chart on this page picks the column nearest in x alone, as it always has.
   function attachHover(canvas, plotted, host, headline) {
-    var box = host || chart;
-    var head = headline || formatMoment;
-    var columns = groupColumns(plotted);
-    // The viewBox differs between the mobile and desktop layouts, so the hover
-    // is pinned to the metrics this canvas was drawn with rather than to
-    // whichever set is current when a pointer event arrives.
-    var m = M;
-    var innerW = m.w - m.left - m.right;
-    var innerH = m.h - m.top - m.bottom;
-    // Set while a tap holds a column open, together with the page listeners
-    // that dismiss it. A mouse hover never arms them.
-    var pinned = false;
-    var pinOrigin = null;
-
-    var crosshair = svg("line", {
-      "class": "crosshair",
-      y1: m.top,
-      y2: m.top + innerH
-    });
-    crosshair.style.visibility = "hidden";
-    var rings = svg("g");
-    var overlay = svg("rect", {
-      "class": "overlay",
-      x: m.left,
-      y: m.top,
-      width: innerW,
-      height: innerH
-    });
-    overlay.style.cursor = "crosshair";
-    canvas.appendChild(crosshair);
-    canvas.appendChild(rings);
-    canvas.appendChild(overlay);
-
-    var tooltip = el("div", "chart-tooltip");
-    tooltip.style.visibility = "hidden";
-    box.appendChild(tooltip);
-
-    function nearestColumn(vbX) {
-      var best = null;
-      var bestDist = Infinity;
-      columns.forEach(function (column) {
-        var dist = Math.abs(column.x - vbX);
-        if (dist < bestDist) { bestDist = dist; best = column; }
-      });
-      return best;
-    }
-
-    function showTooltip(column, emphasized) {
-      tooltip.replaceChildren();
-      tooltip.appendChild(el("div", "tip-time", head(column.t)));
-      column.points.forEach(function (point) {
-        var row = el("div",
-          "tip-row" + (point === emphasized ? " em" : ""));
-        var swatch = el("span", "swatch");
-        swatch.style.background = point.color;
-        row.appendChild(swatch);
-        row.appendChild(el("span", "name", point.name));
-        row.appendChild(el("span", "val", point.text !== undefined
-          ? point.text
-          : String(point.count)));
-        tooltip.appendChild(row);
-      });
-      // Anchor to the point nearest the cursor and flip below the axis top
-      // when there is no room to sit above it.
-      var leftPct = Math.max(10, Math.min(90, emphasized.x / m.w * 100));
-      var topPct = emphasized.y / m.h * 100;
-      tooltip.style.left = leftPct + "%";
-      tooltip.style.top = topPct + "%";
-      tooltip.style.transform = topPct < 32
-        ? "translate(-50%, 14px)"
-        : "translate(-50%, calc(-100% - 14px))";
-      tooltip.style.visibility = "visible";
-    }
-
-    function showHover(column, vbY) {
-      crosshair.setAttribute("x1", column.x);
-      crosshair.setAttribute("x2", column.x);
-      crosshair.style.visibility = "visible";
-      rings.replaceChildren();
-      var emphasized = column.points[0];
-      var bestDy = Infinity;
-      column.points.forEach(function (point) {
-        rings.appendChild(svg("circle", {
-          "class": "hover-ring",
-          cx: point.x,
-          cy: point.y,
-          r: 5,
-          stroke: point.color
-        }));
-        var dy = Math.abs(point.y - vbY);
-        if (dy < bestDy) { bestDy = dy; emphasized = point; }
-      });
-      showTooltip(column, emphasized);
-    }
-
-    function hideHover() {
-      crosshair.style.visibility = "hidden";
-      rings.replaceChildren();
-      tooltip.style.visibility = "hidden";
-      unpin();
-    }
-
-    // Translates a pointer position into viewBox coordinates, or null while
-    // the canvas has no laid-out size to measure against.
-    function pointFromEvent(event) {
-      var rect = canvas.getBoundingClientRect();
-      if (!rect.width || !rect.height) { return null; }
-      return {
-        x: (event.clientX - rect.left) / rect.width * m.w,
-        y: (event.clientY - rect.top) / rect.height * m.h
-      };
-    }
-
-    // Clears the selection and traces why it went away, but only when a tap
-    // was holding it open. A mouse hover follows the pointer continuously, so
-    // tracing every move that ends one would bury the trace it exists to give.
-    function release(reason) {
-      var wasPinned = pinned;
-      hideHover();
-      if (wasPinned) { traceSelection("release", reason, columns.length); }
-    }
-
-    // Anything other than another tap on the plot clears a pinned selection: a
-    // tap elsewhere on the page, a wheel, a key, or the window losing focus.
-    function dismiss(event) {
-      // A tap that moves the selection to another column reaches the overlay
-      // after this capture listener has already run, so it is left to the
-      // overlay's own handler. Only a tap earns that exemption: a wheel over
-      // the plot, or a mouse press on it, is aimed at the overlay too, but the
-      // handler there acts on neither, so waving those through would strand
-      // the selection on screen with nothing left to clear it.
-      if (isRetargetingTap(event)) {
-        traceSelection("keep", "retarget-on-plot", columns.length);
-        return;
+    return attachChartHover(canvas, groupColumns(plotted), {
+      host: host || chart,
+      headline: headline || formatMoment,
+      emptyReason: "no-samples",
+      nearestByX: true,
+      ringRadius: 5,
+      ringColor: function (point) { return point.color; },
+      fillTooltip: function (tooltip, column, emphasized) {
+        column.points.forEach(function (point) {
+          var row = el("div",
+            "tip-row" + (point === emphasized ? " em" : ""));
+          var swatch = el("span", "swatch");
+          swatch.style.background = point.color;
+          row.appendChild(swatch);
+          row.appendChild(el("span", "name", point.name));
+          row.appendChild(el("span", "val", point.text !== undefined
+            ? point.text
+            : String(point.count)));
+          tooltip.appendChild(row);
+        });
       }
-      release("page-" + eventKind(event));
-    }
-
-    // True only for the events the overlay's pointerdown handler will act on,
-    // which is what makes leaving them to it safe.
-    function isRetargetingTap(event) {
-      return !!event && event.type === "pointerdown" &&
-        event.target === overlay && !isHoverPointer(event);
-    }
-
-    function pin(event, kind) {
-      pinOrigin = { x: event.clientX, y: event.clientY };
-      if (pinned) { return; }
-      pinned = true;
-      document.addEventListener("pointerdown", dismiss, true);
-      document.addEventListener("wheel", dismiss, true);
-      document.addEventListener("keydown", dismiss, true);
-      window.addEventListener("blur", dismiss);
-      traceSelection("pin", kind, columns.length);
-    }
-
-    function unpin() {
-      if (!pinned) { return; }
-      pinned = false;
-      pinOrigin = null;
-      document.removeEventListener("pointerdown", dismiss, true);
-      document.removeEventListener("wheel", dismiss, true);
-      document.removeEventListener("keydown", dismiss, true);
-      window.removeEventListener("blur", dismiss);
-    }
-
-    // Resolves the column a pointer is over. When there is nothing to show,
-    // reason names why so the caller can trace the skip; the names are fixed
-    // strings, never anything read off the event or the payload.
-    function resolveColumn(event) {
-      if (!columns.length) { return { column: null, reason: "no-samples" }; }
-      var at = pointFromEvent(event);
-      if (!at) { return { column: null, reason: "unsized-canvas" }; }
-      var column = nearestColumn(at.x);
-      if (!column) { return { column: null, reason: "no-nearest" }; }
-      return { column: column, at: at, reason: "ok" };
-    }
-
-    overlay.addEventListener("pointermove", function (event) {
-      if (!isHoverPointer(event)) {
-        // A finger that travels past the tap slop is scrolling the page, not
-        // picking a point, so the selection it opened is dropped.
-        if (pinned && pinOrigin) {
-          var dx = event.clientX - pinOrigin.x;
-          var dy = event.clientY - pinOrigin.y;
-          if (Math.sqrt(dx * dx + dy * dy) > TAP_SLOP) { release("drag"); }
-        }
-        return;
-      }
-      var hovered = resolveColumn(event);
-      if (hovered.column) { showHover(hovered.column, hovered.at.y); }
     });
-    overlay.addEventListener("pointerleave", function (event) {
-      // A finger's pointerleave arrives as it lifts off the glass; only a
-      // mouse leaving the plot means its hover is over.
-      if (isHoverPointer(event)) { release("pointer-leave"); }
-    });
-    // Touch and pen select by tapping: the nearest column opens and stays up
-    // until the next interaction, and a tap on another point moves it there.
-    overlay.addEventListener("pointerdown", function (event) {
-      if (isHoverPointer(event)) { return; }
-      var kind = pointerKind(event);
-      var tapped = resolveColumn(event);
-      if (!tapped.column) {
-        // Nothing to open, so the tap is reported and any selection already
-        // showing is cleared rather than left behind as a stale reading.
-        traceSelection("skip", tapped.reason, columns.length);
-        release("skipped-tap");
-        return;
-      }
-      // Tracing the move apart from the open is what shows a trace reader that
-      // a second tap replaced the first selection instead of adding to it.
-      var moved = pinned;
-      pin(event, kind);
-      showHover(tapped.column, tapped.at.y);
-      traceSelection(
-        moved ? "move" : "open", kind, tapped.column.points.length);
-    });
-    // The browser claims the gesture once it decides a touch is a scroll.
-    overlay.addEventListener("pointercancel", function (event) {
-      if (!isHoverPointer(event)) { release("pointer-cancel"); }
-    });
-
-    // Lets a re-render drop this canvas's page-level listeners with it.
-    return function () { release("redraw"); };
   }
 
   // Sanitized tracing for the legend, so a console trace can explain why the
@@ -1285,10 +690,10 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
         if (point.v > high) { high = point.v; }
       });
     });
-    if (!(high > 0)) { return { high: 1, step: 1 }; }
+    if (!(high > 0)) { return { low: 0, high: 1, step: 1 }; }
     var span = high * 1.1;
     var step = niceStep(span, 5);
-    return { high: step * Math.ceil(span / step), step: step };
+    return { low: 0, high: step * Math.ceil(span / step), step: step };
   }
 
   // The window's first and last day. A window that covers a single day is
@@ -1375,31 +780,11 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
       return m.top + (1 - plotValue / scale.high) * innerH;
     }
 
-    var canvas = svg("svg", {
-      "class": "chart-svg",
-      viewBox: "0 0 " + m.w + " " + m.h,
-      role: "img",
-      "aria-label": spec.label
+    var canvas = chartCanvas(spec.label);
+    drawGrid(canvas, scale, y, function (value) {
+      return formatAxisValue(spec, value, decimals);
     });
-
-    var lines = Math.round(scale.high / scale.step);
-    for (var line = 0; line <= lines; line += 1) {
-      var value = scale.step * line;
-      var gridY = y(value);
-      canvas.appendChild(svg("line", {
-        "class": line === 0 ? "axis" : "grid",
-        x1: m.left, y1: gridY, x2: m.left + innerW, y2: gridY
-      }));
-      var yLabel = svg("text", {
-        "class": "y-label", x: m.left - 6, y: gridY + 4
-      });
-      yLabel.textContent = formatAxisValue(spec, value, decimals);
-      canvas.appendChild(yLabel);
-    }
-    canvas.appendChild(svg("line", {
-      "class": "axis",
-      x1: m.left, y1: m.top, x2: m.left, y2: m.top + innerH
-    }));
+    drawLeftAxis(canvas);
 
     // Labels name real days rather than points along the window, and they are
     // spread evenly across the grid so a thirty-day window is not labelled
@@ -1450,22 +835,10 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
       });
       runs.push(run);
       runs.forEach(function (coords) {
-        if (coords.length > 1) {
-          canvas.appendChild(svg("polyline", {
-            "class": "series-line",
-            stroke: item.color,
-            points: coords.join(" ")
-          }));
-        }
+        if (coords.length > 1) { drawLine(canvas, coords, item.color); }
       });
       item.points.forEach(function (point) {
-        canvas.appendChild(svg("circle", {
-          "class": "series-dot",
-          cx: x(point.t).toFixed(1),
-          cy: y(point.v).toFixed(1),
-          r: 3,
-          fill: item.color
-        }));
+        drawDot(canvas, x(point.t), y(point.v), 3, item.color);
       });
     });
 
@@ -1478,92 +851,67 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     DAILY_CHARTS.forEach(function (spec) { renderDailyChart(spec); });
   }
 
-  function renderTabs() {
-    tabs.replaceChildren();
+  // A row of feast buttons over a table, the one it shows pressed.
+  // choose(index) switches the table to another feast.
+  function renderFeastTabs(box, activeIndex, choose) {
+    box.replaceChildren();
     feasts().forEach(function (feast, index) {
       var button = el("button", null, feast.name);
       button.type = "button";
-      var active = index === state.activeFeast;
+      var active = index === activeIndex;
       if (active) { button.classList.add("active"); }
       button.setAttribute("aria-pressed", active ? "true" : "false");
-      button.addEventListener("click", function () {
-        state.activeFeast = index;
-        state.tablePage = 0;
-        renderTabs();
-        renderTable();
-      });
-      tabs.appendChild(button);
+      button.addEventListener("click", function () { choose(index); });
+      box.appendChild(button);
     });
   }
 
+  function renderTabs() {
+    renderFeastTabs(tabs, state.activeFeast, function (index) {
+      state.activeFeast = index;
+      state.tablePage = 0;
+      renderTabs();
+      renderTable();
+    });
+  }
+
+  // A count read off the row as it is. Its heading stays at the left of the
+  // column, as every heading in these tables but Edit has.
+  function countColumn(heading, key) {
+    return {
+      heading: heading,
+      head: null,
+      className: "num",
+      fill: textFill(function (row) { return String(row[key]); })
+    };
+  }
+
+  var REMOVAL_COLUMNS = [
+    TIME_COLUMN,
+    countColumn("Removed", "amount"),
+    countColumn("Remaining", "remaining")
+  ];
+
   function renderTable() {
-    tableBox.replaceChildren();
-    pager.replaceChildren();
     var feast = activeFeast();
-    var removals = (feast && feast.removals) || [];
-    if (!removals.length) {
-      tableBox.appendChild(
-        el("div", "empty", "No removals were recorded in this period."));
-      return;
-    }
-    var pageCount = Math.ceil(removals.length / TABLE_PAGE_SIZE);
-    if (state.tablePage > pageCount - 1) { state.tablePage = pageCount - 1; }
-    var start = state.tablePage * TABLE_PAGE_SIZE;
-    var pageRows = removals.slice(start, start + TABLE_PAGE_SIZE);
-
-    var table = el("table", "removals");
-    var head = el("tr");
-    head.appendChild(el("th", null, "Time"));
-    head.appendChild(el("th", null, "Removed"));
-    head.appendChild(el("th", null, "Remaining"));
-    table.appendChild(head);
-    pageRows.forEach(function (row) {
-      var tr = el("tr");
-      tr.appendChild(el("td", null, formatMoment(row.t)));
-      tr.appendChild(el("td", "num", String(row.amount)));
-      tr.appendChild(el("td", "num", String(row.remaining)));
-      table.appendChild(tr);
-    });
-    tableBox.appendChild(table);
-
-    var prev = el("button", null, "Prev");
-    prev.type = "button";
-    prev.disabled = state.tablePage <= 0;
-    prev.addEventListener("click", function () {
-      if (state.tablePage > 0) { state.tablePage -= 1; renderTable(); }
-    });
-    var next = el("button", null, "Next");
-    next.type = "button";
-    next.disabled = state.tablePage >= pageCount - 1;
-    next.addEventListener("click", function () {
-      if (state.tablePage < pageCount - 1) {
-        state.tablePage += 1;
+    state.tablePage = renderPagedTable({
+      box: tableBox,
+      pager: pager,
+      rows: (feast && feast.removals) || [],
+      page: state.tablePage,
+      size: TABLE_PAGE_SIZE,
+      className: "removals",
+      columns: REMOVAL_COLUMNS,
+      empty: "No removals were recorded in this period.",
+      noun: "removals",
+      go: function (page) {
+        state.tablePage = page;
         renderTable();
       }
     });
-    pager.appendChild(prev);
-    pager.appendChild(next);
-    pager.appendChild(el("span", null,
-      "Page " + (state.tablePage + 1) + " of " + pageCount +
-      " (" + removals.length + " removals)"));
   }
 
   // --- Additions ----------------------------------------------------------
-
-  // The whole coin price as gold, silver and copper, dropping the units a
-  // price does not reach: 1g 0s 5c keeps its silver, 5c does not gain one.
-  function formatCoins(copper) {
-    var remaining = Math.max(0, Math.round(copper));
-    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
-    remaining -= goldCoins * COPPER_PER_GOLD;
-    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
-    var copperCoins = remaining % COPPER_PER_SILVER;
-    var parts = [];
-    if (goldCoins) { parts.push(goldCoins.toLocaleString() + "g"); }
-    if (silverCoins || goldCoins) { parts.push(silverCoins + "s"); }
-    parts.push(copperCoins + "c");
-    return parts.join(" ");
-  }
 
   function pencilIcon() {
     var icon = svg("svg", {
@@ -1601,101 +949,75 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
   }
 
   function renderAdditionTabs() {
-    addTabs.replaceChildren();
-    feasts().forEach(function (feast, index) {
-      var button = el("button", null, feast.name);
-      button.type = "button";
-      var active = index === state.activeAddition;
-      if (active) { button.classList.add("active"); }
-      button.setAttribute("aria-pressed", active ? "true" : "false");
-      button.addEventListener("click", function () {
-        state.activeAddition = index;
-        state.additionPage = 0;
-        renderAdditionTabs();
-        renderAdditions();
-      });
-      addTabs.appendChild(button);
+    renderFeastTabs(addTabs, state.activeAddition, function (index) {
+      state.activeAddition = index;
+      state.additionPage = 0;
+      renderAdditionTabs();
+      renderAdditions();
     });
   }
 
+  var ADDITION_COLUMNS = [
+    TIME_COLUMN,
+    {
+      heading: "User",
+      head: null,
+      className: "user",
+      fill: textFill(function (row) {
+        var users = row.users || [];
+        return users.length ? users.join(", ") : "\u2014";
+      })
+    },
+    countColumn("Added", "amount"),
+    countColumn("Remaining", "remaining"),
+    {
+      heading: "Cost",
+      head: null,
+      className: "num",
+      fill: textFill(function (row) {
+        return typeof row.cost === "number" ? formatCoins(row.cost) : "\u2014";
+      })
+    },
+    {
+      heading: "Edit",
+      className: "actions",
+      fill: function (cell, row) {
+        var edit = el("button", "icon-button");
+        edit.type = "button";
+        edit.setAttribute("aria-haspopup", "dialog");
+        edit.setAttribute("aria-label", "Edit cost");
+        edit.title = "Edit cost";
+        edit.appendChild(pencilIcon());
+        edit.addEventListener("click", function () {
+          openCostDialog(additionFeast(), row);
+        });
+        cell.appendChild(edit);
+      }
+    }
+  ];
+
   function renderAdditions() {
-    addTableBox.replaceChildren();
-    addPager.replaceChildren();
-    var feast = additionFeast();
-    var additions = additionsOf(feast);
-    if (!additions.length) {
-      addTableBox.appendChild(
-        el("div", "empty", "No additions were recorded in this period."));
-      return;
-    }
-    var pageCount = Math.ceil(additions.length / TABLE_PAGE_SIZE);
-    if (state.additionPage > pageCount - 1) {
-      state.additionPage = pageCount - 1;
-    }
-    var start = state.additionPage * TABLE_PAGE_SIZE;
-    var pageRows = additions.slice(start, start + TABLE_PAGE_SIZE);
-
-    var table = el("table", "additions");
-    var head = el("tr");
-    head.appendChild(el("th", null, "Time"));
-    head.appendChild(el("th", null, "User"));
-    head.appendChild(el("th", null, "Added"));
-    head.appendChild(el("th", null, "Remaining"));
-    head.appendChild(el("th", null, "Cost"));
-    head.appendChild(el("th", "actions", "Edit"));
-    table.appendChild(head);
-    pageRows.forEach(function (row) {
-      var priced = typeof row.cost === "number";
-      var tr = el("tr", priced ? null : "unpriced");
-      tr.appendChild(el("td", null, formatMoment(row.t)));
-      var users = row.users || [];
-      tr.appendChild(el("td", "user",
-        users.length ? users.join(", ") : "\u2014"));
-      tr.appendChild(el("td", "num", String(row.amount)));
-      tr.appendChild(el("td", "num", String(row.remaining)));
-      tr.appendChild(el("td", "num",
-        priced ? formatCoins(row.cost) : "\u2014"));
-      var actions = el("td", "actions");
-      var edit = el("button", "icon-button");
-      edit.type = "button";
-      edit.setAttribute("aria-haspopup", "dialog");
-      edit.setAttribute("aria-label", "Edit cost");
-      edit.title = "Edit cost";
-      edit.appendChild(pencilIcon());
-      edit.addEventListener("click", function () {
-        openCostDialog(feast, row);
-      });
-      actions.appendChild(edit);
-      tr.appendChild(actions);
-      table.appendChild(tr);
-    });
-    var scroll = el("div", "table-scroll");
-    scroll.appendChild(table);
-    addTableBox.appendChild(scroll);
-
-    var prev = el("button", null, "Prev");
-    prev.type = "button";
-    prev.disabled = state.additionPage <= 0;
-    prev.addEventListener("click", function () {
-      if (state.additionPage > 0) {
-        state.additionPage -= 1;
+    state.additionPage = renderPagedTable({
+      box: addTableBox,
+      pager: addPager,
+      rows: additionsOf(additionFeast()),
+      page: state.additionPage,
+      size: TABLE_PAGE_SIZE,
+      className: "additions",
+      columns: ADDITION_COLUMNS,
+      // A restock nobody has priced yet is the row an officer opened this
+      // section to act on.
+      rowClass: function (row) {
+        return typeof row.cost === "number" ? null : "unpriced";
+      },
+      wrap: "table-scroll",
+      empty: "No additions were recorded in this period.",
+      noun: "additions",
+      go: function (page) {
+        state.additionPage = page;
         renderAdditions();
       }
     });
-    var next = el("button", null, "Next");
-    next.type = "button";
-    next.disabled = state.additionPage >= pageCount - 1;
-    next.addEventListener("click", function () {
-      if (state.additionPage < pageCount - 1) {
-        state.additionPage += 1;
-        renderAdditions();
-      }
-    });
-    addPager.appendChild(prev);
-    addPager.appendChild(next);
-    addPager.appendChild(el("span", null,
-      "Page " + (state.additionPage + 1) + " of " + pageCount +
-      " (" + additions.length + " additions)"));
   }
 
   // --- The cost dialog ------------------------------------------------------
@@ -1710,14 +1032,10 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
       costFields.copper.value = "";
       return;
     }
-    var remaining = Math.max(0, Math.round(cost));
-    var goldCoins = Math.floor(remaining / COPPER_PER_GOLD);
-    remaining -= goldCoins * COPPER_PER_GOLD;
-    var silverCoins = Math.floor(remaining / COPPER_PER_SILVER);
-    var copperCoins = remaining % COPPER_PER_SILVER;
-    costFields.gold.value = goldCoins ? String(goldCoins) : "";
-    costFields.silver.value = silverCoins ? String(silverCoins) : "";
-    costFields.copper.value = copperCoins ? String(copperCoins) : "";
+    var coins = splitCoins(cost);
+    costFields.gold.value = coins.gold ? String(coins.gold) : "";
+    costFields.silver.value = coins.silver ? String(coins.silver) : "";
+    costFields.copper.value = coins.copper ? String(coins.copper) : "";
   }
 
   function openCostDialog(feast, addition) {
@@ -1776,19 +1094,11 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     var addition = editing.addition;
     costError.textContent = "";
     costSave.disabled = true;
-    fetch("/api/food/cost", {
+    fetchJson("/api/food/cost", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ log_id: addition.log_id, cost: read.cost })
     })
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login";
-          throw new Error("unauthorized");
-        }
-        if (!response.ok) { throw new Error("failed"); }
-        return response.json();
-      })
       .then(function (payload) {
         addition.cost = payload.cost;
         traceCost("save", "stored");
@@ -1803,11 +1113,7 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
         refresh({ keepPlace: true });
       })
       .catch(function (error) {
-        // Only the error's type and message are logged; no price, account or
-        // response body is ever passed through.
-        console.error(
-          "feast cost save failed:",
-          error && error.name, error && error.message);
+        logFailure("feast cost save", error);
         costSave.disabled = false;
         costError.textContent = "Could not save that cost.";
       });
@@ -1844,27 +1150,13 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     renderAdditions();
   }
 
-"""
-    + range_picker_js("feast")
-    + """
   // options.keepPlace holds the reader's tab and page across the fetch, for
   // the re-read a saved cost asks for: the rows are the ones they were just
   // working down, not a window they have only now opened.
   function refresh(options) {
     var keepPlace = !!(options && options.keepPlace);
-    chartStatus.textContent = "Loading\\u2026";
-    fetch("/api/food" + rangeQuery())
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login";
-          throw new Error("unauthorized");
-        }
-        if (!response.ok) { throw new Error("failed"); }
-        return response.json();
-      })
-      .then(function (payload) {
-        state.data = payload;
-        adoptRange(payload.range, payload.since, payload.now);
+    loadWindow("/api/food", "feast usage", "Could not load feast usage.",
+      function (payload) {
         if (state.activeFeast >= (payload.feasts || []).length) {
           state.activeFeast = 0;
         }
@@ -1879,48 +1171,7 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
         // was opened over is gone.
         closeCostDialog();
         render();
-      })
-      .catch(function (error) {
-        // render() runs inside this chain, so a drawing fault lands here and
-        // otherwise reads as a failed request with nothing in the console to
-        // trace. Only the error's type and message are logged; no request,
-        // response or payload is ever passed through.
-        console.error(
-          "feast usage load failed:",
-          error && error.name, error && error.message);
-        if (chartStatus.textContent === "Loading\\u2026") {
-          chartStatus.textContent = "Could not load feast usage.";
-        }
       });
   }
-
-"""
-    + RANGE_PICKER_LISTENERS_JS
-    + """
-  // Redraw when the breakpoint flips so the chart adopts the layout for the
-  // new width.
-  mobileQuery.addEventListener("change", function () {
-    if (state.data) { render(); }
-  });
-
-  fetch("/api/me")
-    .then(function (response) {
-      if (response.status === 401) {
-        location.href = "/login";
-        throw new Error("unauthorized");
-      }
-      return response.json();
-    })
-    .then(function (payload) {
-      document.getElementById("whoami").textContent = payload.name || "";
-    })
-    .catch(function () {});
-
-  syncRangeButtons();
-  refresh();
-})();
-</script>
-</body>
-</html>
-"""
+""",
 )

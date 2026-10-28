@@ -10,7 +10,7 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.command_access import RoleSetting, access_extras
-from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
+from gw2bot.core.discord_utils import require_role, send_interaction_notice
 from gw2bot.gold.import_log import format_import_result, import_gold_history
 
 if TYPE_CHECKING:
@@ -51,23 +51,12 @@ class GoldCommands(app_commands.Group):
         )
 
     async def authorize(self, interaction: discord.Interaction) -> bool:
-        officer_role_id = self._bot._config.raffle_officer_role_id
-        if user_has_role(interaction.user, officer_role_id):
-            LOGGER.debug(
-                "Authorized gold command; user_id=%s",
-                interaction.user.id,
-            )
-            return True
-        LOGGER.warning(
-            "Rejected gold command from Discord user %s; required role %s",
-            interaction.user.id,
-            officer_role_id,
-        )
-        await send_interaction_notice(
+        return await require_role(
             interaction,
-            "You do not have the required role for this command.",
+            self._bot._config.raffle_officer_role_id,
+            action="gold command",
+            reply=send_interaction_notice,
         )
-        return False
 
     async def _handle_import(self, interaction: discord.Interaction) -> None:
         LOGGER.debug(

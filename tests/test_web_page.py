@@ -17,7 +17,19 @@ from gw2bot.web.pages import (
     SIGNED_OUT_PAGE,
     sign_in_page,
 )
-from gw2bot.web.pages.shared import SHARED_STYLE
+from gw2bot.web.pages.shared import (
+    CHART_HOVER_JS,
+    CHART_MODE_JS,
+    CHART_PAGE_STYLE,
+    COIN_JS,
+    DASHBOARD_JS,
+    HISTORY_JS,
+    HISTORY_STYLE,
+    PAGE_JS,
+    SHARED_STYLE,
+    SIGNOUT_CONTROLS,
+    UTILITY_STYLE,
+)
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 from gw2bot.web.pages.profit import (
     PAGE_SIZE_DEFAULT,
@@ -1309,6 +1321,119 @@ class TestDashboardHeaders:
             assert '<h1 id="brand">' in page
 
 
+class TestDashboardChartHover:
+    """The four history dashboards are built from one shared frame."""
+
+    PAGES = (FOOD_PAGE, ROSTER_PAGE, GOLD_PAGE, EVENTS_PAGE)
+    SUBJECTS = {
+        "feast": FOOD_PAGE,
+        "roster": ROSTER_PAGE,
+        "gold": GOLD_PAGE,
+        "events": EVENTS_PAGE,
+    }
+
+    def test_every_chart_dashboard_carries_the_shared_code_once(
+        self,
+    ) -> None:
+        for page in self.PAGES:
+            assert page.count(PAGE_JS) == 1
+            assert page.count(DASHBOARD_JS) == 1
+            assert page.count(CHART_HOVER_JS) == 1
+            assert page.count(CHART_PAGE_STYLE) == 1
+            assert page.count(SIGNOUT_CONTROLS) == 1
+
+    def test_the_optional_parts_reach_the_pages_that_use_them(self) -> None:
+        def part(js: str, subject: str) -> str:
+            return js.replace("__SUBJECT__", subject)
+
+        for subject, page in self.SUBJECTS.items():
+            # Every trace a shared part writes names the page it runs on.
+            assert "__SUBJECT__" not in page
+            has_mode = subject != "events"
+            assert (page.count(part(CHART_MODE_JS, subject)) == 1) is has_mode
+            assert (page.count(COIN_JS) == 1) is (subject in ("feast", "gold"))
+            history = subject in ("gold", "roster")
+            assert (page.count(HISTORY_JS) == 1) is history
+            assert (page.count(HISTORY_STYLE) == 1) is history
+        assert FOOD_PAGE.count(UTILITY_STYLE) == 1
+        assert PROFIT_PAGE.count(UTILITY_STYLE) == 1
+        assert CALENDAR_PAGE.count(PAGE_JS) == 1
+        assert CALENDAR_PAGE.count(SIGNOUT_CONTROLS) == 1
+        assert PROFIT_PAGE.count(SIGNOUT_CONTROLS) == 1
+
+    def test_no_page_defines_a_function_or_variable_twice(self) -> None:
+        # A second definition would quietly win over the shared one inside the
+        # page's closure, which is how the copies drifted apart before.
+        for page in (*self.PAGES, CALENDAR_PAGE):
+            functions = re.findall(r"(?m)^  function (\w+)\(", page)
+            variables = re.findall(r"(?m)^  var (\w+) =", page)
+            assert len(functions) == len(set(functions)), sorted(
+                name for name in functions if functions.count(name) > 1)
+            assert len(variables) == len(set(variables)), sorted(
+                name for name in variables if variables.count(name) > 1)
+
+    def test_no_dashboard_restates_a_shared_rule(self) -> None:
+        # A page's own rules follow CHART_PAGE_STYLE, so it may still override
+        # one of them, but a full second copy is the drift this replaced.
+        for page in self.PAGES:
+            own = page.replace(CHART_PAGE_STYLE, "")
+            assert ".card {\n" not in own
+            assert ".chart-svg .x-label {" not in own
+            assert ".chart-svg .x-label.first" not in own
+            assert ".chart-tooltip {\n  position: absolute;" not in own
+            assert ".pager {\n" not in own
+            assert "border-collapse: collapse;" not in own
+            assert ".chart-heading {" not in own
+            assert ".legend {" not in own
+            assert "main { padding: 0.6rem 0.5rem; }" not in own
+            assert "fill: none; stroke-width: 2;" not in own
+        for page in (FOOD_PAGE, PROFIT_PAGE):
+            own = page.replace(UTILITY_STYLE, "")
+            assert ".visually-hidden {" not in own
+            assert ".table-scroll { overflow-x: auto; }" not in own
+
+    def test_each_dashboard_supplies_the_hover_hooks(self) -> None:
+        for page in self.PAGES:
+            hover = page.split("  function attachHover(", 1)[1]
+            hover = hover.split("\n  }", 1)[0]
+            assert "return attachChartHover(canvas, " in hover
+            assert "host: " in hover
+            assert "ringColor: function (" in hover
+            assert "fillTooltip: function (tooltip, column, " in hover
+            # The reason a skipped tap is traced with must be a fixed name,
+            # never a value read off the payload.
+            assert re.search(r'emptyReason: "[a-z-]+",', hover), hover
+
+    def test_shared_text_never_becomes_markup(self) -> None:
+        for js in (
+            PAGE_JS,
+            DASHBOARD_JS,
+            CHART_HOVER_JS,
+            CHART_MODE_JS,
+            COIN_JS,
+            HISTORY_JS,
+        ):
+            assert "innerHTML" not in js
+            assert "insertAdjacentHTML" not in js
+        assert "if (text !== undefined) { node.textContent = text; }" in PAGE_JS
+        assert "cell.textContent = read(row);" in DASHBOARD_JS
+
+    def test_every_table_is_built_by_the_shared_pager(self) -> None:
+        # The Prev and Next buttons are written once, in renderPager.
+        assert DASHBOARD_JS.count('el("button", null, "Prev")') == 1
+        for page in self.PAGES:
+            own = page.replace(DASHBOARD_JS, "")
+            assert '"Prev"' not in own
+            assert "renderPagedTable({" in own
+
+    def test_every_dashboard_loads_through_one_json_read(self) -> None:
+        # The signed-out redirect is written once, in fetchJson.
+        for page in (*self.PAGES, CALENDAR_PAGE):
+            own = page.replace(PAGE_JS, "")
+            assert "response.status === 401" not in own
+            assert "fetch(" not in own
+
+
 def _relative_luminance(hex_color: str) -> float:
     channels = [int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
     linear = [
@@ -1652,19 +1777,27 @@ class TestFoodPage:
         # read for, so zero stays on the floor of the chart, and a quiet window
         # still spans at least MIN_TOP rather than a count or two.
         assert "var MIN_TOP = 10;" in FOOD_PAGE
-        assert "if (value < 0) { value = 0; }" in FOOD_PAGE
-        assert "return M.top + (1 - value / high) * plotH();" in FOOD_PAGE
+        assert (
+            "return { low: 0, high: step * Math.ceil(span / step), step: step };"
+            in FOOD_PAGE
+        )
+        # The shared scaleY holds a value to the scale's ends, here zero.
+        assert (
+            "var held = Math.max(scale.low, Math.min(scale.high, value));"
+            in DASHBOARD_JS
+        )
 
     def test_chart_y_axis_lands_on_round_counts(self) -> None:
         # Gridlines step through the computed scale on a 1, 2 or 5 times a
         # power of ten step, so the labels read as round counts.
-        assert "function niceStep(span, target)" in FOOD_PAGE
+        assert "function niceStep(span, target)" in DASHBOARD_JS
         assert "var step = niceStep(span, 6);" in FOOD_PAGE
+        assert "drawGrid(canvas, state.scale, scaleY, String);" in FOOD_PAGE
         assert (
-            "var lines = Math.round(state.scale.high / state.scale.step);"
-            in FOOD_PAGE
+            "var lines = Math.round((scale.high - scale.low) / scale.step);"
+            in DASHBOARD_JS
         )
-        assert "for (var line = 0; line <= lines; line += 1)" in FOOD_PAGE
+        assert "for (var line = 0; line <= lines; line += 1)" in DASHBOARD_JS
 
     def test_chart_axis_margin_fits_a_wider_count(self) -> None:
         # An uncapped axis can label counts of three or four digits, which do
@@ -1698,7 +1831,7 @@ class TestFoodPage:
     def test_legend_sits_below_the_chart_as_tappable_swatches(self) -> None:
         # The legend follows the chart in the DOM and each entry is a button
         # that switches its feast off and back on.
-        chart_index = FOOD_PAGE.index('<div id="chart">')
+        chart_index = FOOD_PAGE.index('<div id="chart" class="chart-box">')
         legend_index = FOOD_PAGE.index('<div id="legend"')
         assert chart_index < legend_index
         assert 'var item = el("button", hidden ? "item off" : "item");' in (
@@ -1861,7 +1994,10 @@ class TestFoodPage:
         }
         # Each skip a tap can take has its own reason rather than a shared
         # "nothing happened".
-        assert '{ column: null, reason: "no-samples" }' in FOOD_PAGE
+        assert 'emptyReason: "no-samples",' in FOOD_PAGE
+        assert "return { column: null, reason: options.emptyReason };" in (
+            FOOD_PAGE
+        )
         assert '{ column: null, reason: "unsized-canvas" }' in FOOD_PAGE
         assert '{ column: null, reason: "no-nearest" }' in FOOD_PAGE
 
@@ -1914,27 +2050,36 @@ class TestFoodPage:
             in FOOD_PAGE
         )
         assert 'if (name === "pointerdown" || name === "wheel" ||' in FOOD_PAGE
-        assert 'name === "keydown" || name === "blur") {' in FOOD_PAGE
+        assert 'name === "keydown" || name === "blur" ||' in FOOD_PAGE
+        assert 'name === "scroll" || name === "resize") {' in FOOD_PAGE
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
         # Every console call is a sanitized workflow trace, or one of the two
         # failures that log an error's type and message.
         assert re.findall(r"console\.\w+", FOOD_PAGE) == [
-            "console.debug",
-            "console.debug",
-            "console.debug",
-            "console.debug",
             "console.error",
             "console.debug",
-            "console.error",
+            "console.debug",
+            "console.debug",
+            "console.debug",
+            "console.debug",
         ]
         assert _call_arguments(FOOD_PAGE, "console.debug") == [
-            ['"feast chart mode:"', "mode", "count"],
             ['"feast chart selection:"', "action", "reason", "count"],
+            ['"feast chart mode:"', "mode", "count"],
+            ['"feast chart range:"', "action", "reason", "days"],
             ['"feast chart legend:"', "action", "count"],
             ['"feast cost:"', "action", "outcome"],
-            ['"feast chart range:"', "action", "reason", "days"],
         ]
+        # The one error call is logFailure's, and every failure it is handed
+        # is named by a fixed string.
+        assert _call_arguments(FOOD_PAGE, "logFailure") == [
+            ['what + " load"', "error"],
+            ['"feast cost save"', "error"],
+        ]
+        assert [
+            call[:3] for call in _call_arguments(FOOD_PAGE, "loadWindow")
+        ] == [['"/api/food"', '"feast usage"', '"Could not load feast usage."']]
 
     def test_hover_geometry_uses_the_active_layout_metrics(self) -> None:
         # The hover was written against fixed chart constants that the mobile
@@ -1960,10 +2105,12 @@ class TestFoodPage:
         # render() runs inside the fetch chain, so a drawing fault surfaces as
         # the same generic message as a failed request. Logging the error type
         # keeps it traceable; no request, response or payload is logged.
-        assert 'console.error(\n          "feast usage load failed:",' in (
-            FOOD_PAGE
+        assert 'logFailure(what + " load", error);' in DASHBOARD_JS
+        assert (
+            'what + " failed:", error && error.name, error && error.message);'
+            in DASHBOARD_JS
         )
-        assert "error && error.name, error && error.message);" in FOOD_PAGE
+        assert 'loadWindow("/api/food", "feast usage",' in FOOD_PAGE
 
     def test_table_pages_five_removals_at_a_time(self) -> None:
         assert "var TABLE_PAGE_SIZE = 5;" in FOOD_PAGE
@@ -1990,7 +2137,7 @@ class TestFoodDailyCharts:
             assert f'<div id="chart-{chart_id}" class="chart-box"></div>' in (
                 FOOD_PAGE
             )
-            assert f'<div id="status-{chart_id}" class="chart-status"' in (
+            assert f'<div id="status-{chart_id}" class="status-line"' in (
                 FOOD_PAGE
             )
             expected = chart_id != "total-cost"
@@ -2100,7 +2247,7 @@ class TestFoodDailyCharts:
         body = FOOD_PAGE.split("function dailyScale(series) {", 1)[1]
         body = body.split("\n  }", 1)[0]
         assert "var high = 0;" in body
-        assert "if (!(high > 0)) { return { high: 1, step: 1 }; }" in body
+        assert "if (!(high > 0)) { return { low: 0, high: 1, step: 1 }; }" in body
         assert "var step = niceStep(span, 5);" in body
 
     def test_a_redraw_releases_each_charts_hover_listeners(self) -> None:
@@ -2176,19 +2323,30 @@ class TestFoodAdditionsSection:
         assert "activeAddition: 0, additionPage: 0," in FOOD_PAGE
 
     def test_the_table_names_its_six_columns(self) -> None:
-        body = FOOD_PAGE.split("function renderAdditions() {", 1)[1]
-        assert 'head.appendChild(el("th", null, "Time"));' in body
-        assert 'head.appendChild(el("th", null, "User"));' in body
-        assert 'head.appendChild(el("th", null, "Added"));' in body
-        assert 'head.appendChild(el("th", null, "Remaining"));' in body
-        assert 'head.appendChild(el("th", null, "Cost"));' in body
-        assert 'head.appendChild(el("th", "actions", "Edit"));' in body
+        body = FOOD_PAGE.split("var ADDITION_COLUMNS = [", 1)[1]
+        body = body.split("\n  ];", 1)[0]
+        assert body.startswith("\n    TIME_COLUMN,")
+        assert re.findall(r'heading: "(\w+)"|countColumn\("(\w+)"', body) == [
+            ("User", ""), ("", "Added"), ("", "Remaining"), ("Cost", ""),
+            ("Edit", ""),
+        ]
+        # Only the Edit heading takes its column's class.
+        assert body.count("head: null,") == 2
+        assert "      head: null,\n      className: \"num\"," in (
+            FOOD_PAGE.split("function countColumn(heading, key) {", 1)[1]
+        )
+        assert 'heading: "Edit",\n      className: "actions",' in body
 
     def test_a_restock_nobody_has_priced_is_marked(self) -> None:
         # The tint is what an officer scans for, so the row carries a class
         # and the stylesheet gives it the light red behind it.
-        assert 'var priced = typeof row.cost === "number";' in FOOD_PAGE
-        assert 'var tr = el("tr", priced ? null : "unpriced");' in FOOD_PAGE
+        assert (
+            'return typeof row.cost === "number" ? null : "unpriced";'
+            in FOOD_PAGE
+        )
+        assert 'var line = el("tr", spec.rowClass ? spec.rowClass(row) : null);' in (
+            DASHBOARD_JS
+        )
         assert (
             "table.additions tr.unpriced td "
             "{ background: rgba(231, 76, 60, 0.22); }"
@@ -2198,7 +2356,7 @@ class TestFoodAdditionsSection:
         assert 'edit.setAttribute("aria-haspopup", "dialog");' in FOOD_PAGE
         assert 'edit.setAttribute("aria-label", "Edit cost");' in FOOD_PAGE
         assert "edit.appendChild(pencilIcon());" in FOOD_PAGE
-        assert "openCostDialog(feast, row);" in FOOD_PAGE
+        assert "openCostDialog(additionFeast(), row);" in FOOD_PAGE
         assert "costDialog.showModal();" in FOOD_PAGE
 
     def test_the_dialog_asks_for_gold_silver_and_copper_in_one_row(
@@ -2221,16 +2379,17 @@ class TestFoodAdditionsSection:
         # price that does not reach a unit leaves that box empty rather than
         # showing a 0 to delete.
         assert 'if (raw === "") { return 0; }' in FOOD_PAGE
+        assert "var coins = splitCoins(cost);" in FOOD_PAGE
         assert (
-            'costFields.gold.value = goldCoins ? String(goldCoins) : "";'
+            'costFields.gold.value = coins.gold ? String(coins.gold) : "";'
             in FOOD_PAGE
         )
         assert (
-            'costFields.silver.value = silverCoins ? String(silverCoins) : "";'
+            'costFields.silver.value = coins.silver ? String(coins.silver) : "";'
             in FOOD_PAGE
         )
         assert (
-            'costFields.copper.value = copperCoins ? String(copperCoins) : "";'
+            'costFields.copper.value = coins.copper ? String(coins.copper) : "";'
             in FOOD_PAGE
         )
         assert 'if (typeof cost !== "number") {' in FOOD_PAGE
@@ -2241,7 +2400,7 @@ class TestFoodAdditionsSection:
         assert "if (total > MAX_COST_COPPER) {" in FOOD_PAGE
 
     def test_the_cost_is_saved_as_whole_copper(self) -> None:
-        assert 'fetch("/api/food/cost", {' in FOOD_PAGE
+        assert 'fetchJson("/api/food/cost", {' in FOOD_PAGE
         assert (
             "body: JSON.stringify({ log_id: addition.log_id, "
             "cost: read.cost })"
@@ -2410,10 +2569,12 @@ class TestCustomRangePicker:
             assert (
                 'encodeURIComponent(String(customWindow.since))'
             ) in page
-        assert 'fetch("/api/food" + rangeQuery())' in FOOD_PAGE
-        assert 'fetch("/api/roster" + rangeQuery())' in ROSTER_PAGE
-        assert 'fetch("/api/gold" + rangeQuery())' in GOLD_PAGE
-        assert 'fetch("/api/admin/events" + rangeQuery())' in EVENTS_PAGE
+        assert "fetchJson(path + rangeQuery())" in DASHBOARD_JS
+        assert 'loadWindow("/api/food", ' in FOOD_PAGE
+        assert "loadWindow(path, what, failure, function () {" in HISTORY_JS
+        assert 'loadHistory("/api/roster", ' in ROSTER_PAGE
+        assert 'loadHistory("/api/gold", ' in GOLD_PAGE
+        assert 'loadWindow("/api/admin/events", ' in EVENTS_PAGE
 
     def test_axis_labels_follow_the_windows_width(self) -> None:
         # A custom window has no preset name to key the label format off, so
@@ -2450,13 +2611,16 @@ class TestDashboardChartModes:
             assert "function traceMode(mode, count) {" in page
             assert f"console.debug({message}, mode, count);" in page
             assert (
-                'traceMode(state.staircase ? "staircase" : "regular", '
-                + count + ");"
+                "bindChartMode(function () { return " + count + "; }, "
             ) in page
+        assert (
+            'traceMode(state.staircase ? "staircase" : "regular", count());'
+            in CHART_MODE_JS
+        )
 
     def test_feast_mode_can_change_before_data_loads(self) -> None:
         handler = FOOD_PAGE.split(
-            'chartMode.addEventListener("click", function () {', 1
+            "bindChartMode(function () { return feasts().length; }, ", 1
         )[1].split("\n  });", 1)[0]
         assert "if (state.data) { renderChart(); }" in handler
         assert "renderChart();\n" not in handler.replace(
@@ -2484,11 +2648,14 @@ class TestRosterTable:
         # table grows past its card and carries the rest of the row off the
         # page. `anywhere` is what also shrinks the column's minimum width,
         # which is the width the table lays itself out from.
-        assert (
-            "table.changes td.name, table.changes td.by "
-            "{ overflow-wrap: anywhere; }"
-        ) in ROSTER_PAGE
-        assert 'el("td", "name", change.name)' in ROSTER_PAGE
+        assert "table.data-table td.name { overflow-wrap: anywhere; }" in (
+            CHART_PAGE_STYLE
+        )
+        assert "table.changes td.by { overflow-wrap: anywhere; }" in ROSTER_PAGE
+        assert 'className: "name",' in HISTORY_JS
+        assert "fill: textFill(function (row) { return row.name; })" in (
+            HISTORY_JS
+        )
         assert ".chart-tooltip .tip-row .name { overflow-wrap: anywhere; }" in (
             ROSTER_PAGE
         )
@@ -2512,12 +2679,14 @@ class TestRosterTable:
         # With only the dot left in the cell, the column is centred so it
         # reads as a column of dots; the heading carries the same class so
         # the two stay over each other.
-        assert 'el("th", "change", "Change")' in ROSTER_PAGE
-        mobile = ROSTER_PAGE[ROSTER_PAGE.index("@media (max-width: 640px)"):]
+        assert 'heading: "Change",\n      className: "change",' in ROSTER_PAGE
+        # A column without a head of its own gives its heading its class.
+        assert "var headClass = column.head === undefined" in DASHBOARD_JS
+        mobile = ROSTER_PAGE[ROSTER_PAGE.rindex("@media (max-width: 640px)"):]
         assert "table.changes .change { text-align: center; }" in mobile
         assert "table.changes .change .dot { margin-right: 0; }" in mobile
-        desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
-        assert "text-align: center" not in desktop
+        desktop = ROSTER_PAGE[: ROSTER_PAGE.rindex("@media (max-width: 640px)")]
+        assert "text-align: center" not in desktop.replace(SHARED_STYLE, "")
 
     def test_the_desktop_layout_keeps_the_word(self) -> None:
         desktop = ROSTER_PAGE[: ROSTER_PAGE.index("@media (max-width: 640px)")]
@@ -2537,7 +2706,7 @@ class TestRosterPendingInvites:
     def test_the_list_is_loaded_once_rather_than_per_range(self) -> None:
         # The invites are the guild's state now, not a window of history, so
         # the range buttons do not reload them.
-        assert 'fetch("/api/pending")' in ROSTER_PAGE
+        assert 'fetchJson("/api/pending")' in ROSTER_PAGE
         assert "function loadPending()" in ROSTER_PAGE
         assert "  loadPending();\n})();" in ROSTER_PAGE
         assert "loadPending" not in ROSTER_PAGE[
@@ -2584,7 +2753,7 @@ class TestRosterPendingInvites:
         # The membership table hides its "By" column on a phone, and this
         # table's second column is the section's whole point, so it is not
         # that column.
-        assert 'el("table", "changes pending")' in ROSTER_PAGE
+        assert 'el("table", "data-table changes pending")' in ROSTER_PAGE
         assert 'el("td", "discord", invite.discord_name)' in ROSTER_PAGE
         # The table rules live in the last of the page's mobile blocks.
         mobile = ROSTER_PAGE[
@@ -2749,17 +2918,21 @@ class TestRosterPendingInvites:
 
 class TestGoldPage:
     def test_coin_values_match_the_profit_pages_spaced_denominations(self) -> None:
-        assert "function formatCoins(copper)" in GOLD_PAGE
-        assert 'parts.push(goldCoins.toLocaleString() + "g")' in GOLD_PAGE
-        assert 'parts.push(silverCoins + "s")' in GOLD_PAGE
-        assert 'parts.push(copperCoins + "c")' in GOLD_PAGE
-        assert 'return parts.join(" ");' in GOLD_PAGE
+        assert GOLD_PAGE.count(COIN_JS) == 1
+        assert "function formatCoins(copper)" in COIN_JS
+        assert 'parts.push(coins.gold.toLocaleString() + "g")' in COIN_JS
+        assert 'parts.push(coins.silver + "s")' in COIN_JS
+        assert 'parts.push(coins.copper + "c")' in COIN_JS
+        assert 'return parts.join(" ");' in COIN_JS
         assert "formatGold" not in GOLD_PAGE
 
     def test_axis_keeps_compact_coin_labels_inside_its_margin(self) -> None:
         assert "function formatAxisCoins(copper)" in GOLD_PAGE
-        assert "yLabel.textContent = formatAxisCoins(" in GOLD_PAGE
-        assert "yLabel.textContent = formatCoins(" not in GOLD_PAGE
+        assert (
+            "function (value) { return formatAxisCoins(value * COPPER_PER_GOLD); }"
+            in GOLD_PAGE
+        )
+        assert "return formatCoins(value * COPPER_PER_GOLD)" not in GOLD_PAGE
         # A bank in six figures of gold outgrows the fixed margin, so the
         # margin is widened to the labels rather than cutting them off at
         # the edge of the viewBox. It is only ever widened, and the widening
@@ -2769,8 +2942,9 @@ class TestGoldPage:
             "M.left = Math.max(M.left, "
             "Math.ceil(widest * Y_LABEL_CHAR_WIDTH) + 10);"
         ) in GOLD_PAGE
-        assert GOLD_PAGE.index("M.left = Math.max(M.left,") < GOLD_PAGE.index(
-            'x1: M.left, y1: y, x2: M.left + plotW(), y2: y'
+        chart = GOLD_PAGE.split("function renderChart() {", 1)[1]
+        assert chart.index("M.left = Math.max(M.left,") < chart.index(
+            "drawGrid(canvas, state.scale,"
         )
 
     def test_table_amount_is_only_an_ascii_sign_and_value(self) -> None:
@@ -2796,8 +2970,8 @@ class TestGoldPage:
 
     def test_grouped_dot_and_hover_use_the_combined_balance_change(self) -> None:
         assert "netChangeColor(previousCoins, minute.after)" in GOLD_PAGE
-        assert "fill: point.color" in GOLD_PAGE
-        assert "stroke: point.color" in GOLD_PAGE
+        assert "drawDot(canvas, point.x, point.y, 4, point.color);" in GOLD_PAGE
+        assert "ringColor: function (point) { return point.color; }" in GOLD_PAGE
         assert "finalMovement" not in GOLD_PAGE
 
     def test_balance_line_uses_only_combined_minute_points(self) -> None:
@@ -2812,8 +2986,8 @@ class TestGoldPage:
         )
         dot_loop = GOLD_PAGE.index('plotted.forEach(function (point) {', segment_loop)
         assert segment_loop < dot_loop
-        assert '"class": "balance-line"' in GOLD_PAGE[segment_loop:dot_loop]
-        assert '"class": "event-dot"' in GOLD_PAGE[dot_loop:]
+        assert "drawLine(canvas, coords," in GOLD_PAGE[segment_loop:dot_loop]
+        assert "drawDot(canvas, point.x, point.y, 4," in GOLD_PAGE[dot_loop:]
 
     def test_legend_describes_net_balance_changes(self) -> None:
         assert 'label: "Increase"' in GOLD_PAGE
@@ -2822,8 +2996,8 @@ class TestGoldPage:
         legend = GOLD_PAGE.split("function renderLegend()", 1)[1].split(
             "function renderTotals()", 1
         )[0]
-        assert "NET_CHANGES.forEach" in legend
-        assert "OPERATION_ORDER.forEach" not in legend
+        assert "renderKeyLegend(NET_CHANGES);" in legend
+        assert "OPERATION_ORDER" not in GOLD_PAGE
 
     def test_net_zero_lines_and_dots_use_the_neutral_legend_colour(self) -> None:
         colour_picker = GOLD_PAGE.split(
@@ -2842,9 +3016,9 @@ class TestGoldPage:
 
 class TestEventsPage:
     def test_the_page_fetches_its_own_api(self) -> None:
-        assert 'fetch("/api/admin/events" + rangeQuery())' in EVENTS_PAGE
+        assert 'loadWindow("/api/admin/events", ' in EVENTS_PAGE
         # /api/events is the calendar's, and nothing about it is drawn here.
-        assert 'fetch("/api/events' not in EVENTS_PAGE
+        assert '"/api/events' not in EVENTS_PAGE
 
     def test_every_asked_for_figure_has_its_place(self) -> None:
         for element in (
@@ -2890,7 +3064,8 @@ class TestEventsPage:
         assert "return { low: 0, high: step * Math.ceil(high / step)" in (
             EVENTS_PAGE
         )
-        assert "if (!(raw > 1)) { return 1; }" in EVENTS_PAGE
+        # A count has no fractions, so the shared step is held to one run.
+        assert "var step = Math.max(1, niceStep(high, 4));" in EVENTS_PAGE
 
     def test_an_unknown_all_time_count_is_not_shown_as_none(self) -> None:
         assert "row.completed_all_time === null" in EVENTS_PAGE
@@ -2899,7 +3074,15 @@ class TestEventsPage:
     def test_hover_and_tap_select_the_nearest_run(self) -> None:
         assert 'overlay.addEventListener("pointermove"' in EVENTS_PAGE
         assert 'overlay.addEventListener("pointerdown"' in EVENTS_PAGE
-        assert "function nearest(vbX, vbY) {" in EVENTS_PAGE
+        # Every run is its own column and the nearest dot is picked in both
+        # directions, so two runs minutes apart are told apart by height.
+        assert "return { t: point.t, x: point.x, points: [point] };" in (
+            CHART_HOVER_JS
+        )
+        hover = EVENTS_PAGE.split("function attachHover(canvas, plotted) {", 1)[1]
+        hover = hover.split("\n  }", 1)[0]
+        assert "attachChartHover(canvas, pointColumns(plotted), {" in hover
+        assert "nearestByX" not in hover
         # A redraw drops the previous chart's page-level listeners.
         assert "if (detachHover) { detachHover(); detachHover = null; }" in (
             EVENTS_PAGE
@@ -2907,13 +3090,16 @@ class TestEventsPage:
 
     def test_the_page_only_logs_through_its_sanitized_call_sites(self) -> None:
         assert re.findall(r"console\.\w+", EVENTS_PAGE) == [
-            "console.debug",
-            "console.debug",
             "console.error",
+            "console.debug",
+            "console.debug",
         ]
         assert _call_arguments(EVENTS_PAGE, "console.debug") == [
             ['"events chart selection:"', "action", "reason", "count"],
             ['"events chart range:"', "action", "reason", "days"],
+        ]
+        assert _call_arguments(EVENTS_PAGE, "logFailure") == [
+            ['what + " load"', "error"],
         ]
 
     def test_dynamic_values_never_become_markup(self) -> None:

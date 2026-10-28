@@ -8,7 +8,7 @@ import discord
 from discord import app_commands
 
 from gw2bot.core.command_access import RoleSetting, access_extras
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import autocomplete_allowed, require_role
 from gw2bot.events.formatting import format_event_datetime
 from gw2bot.events.models import (
     Event,
@@ -106,20 +106,12 @@ class EventCommands(app_commands.Group):
             "Event creation command invoked by Discord user %s",
             interaction.user.id,
         )
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event creation command",
+            denial="You do not have the required role to create events.",
         ):
-            LOGGER.warning(
-                "Rejected event creation command from Discord user %s; "
-                "required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to create events.",
-                ephemeral=True,
-            )
             return
         draft = EventDraft(leader_discord_id=interaction.user.id)
         # The guild is what the ping-role picker is built from; the command is
@@ -141,9 +133,10 @@ class EventCommands(app_commands.Group):
         # Shared by /event edit and /event delete. Autocomplete must never error
         # out; unauthorized users simply see no suggestions (each command still
         # enforces the role).
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="active event",
         ):
             return []
         query = current.strip().casefold()
@@ -176,9 +169,10 @@ class EventCommands(app_commands.Group):
         # The events with a deletion or an edit /event restore can still
         # undo. Like the active autocomplete above, it never errors out and
         # offers nothing to a member without the role.
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="restorable event",
         ):
             return []
         query = current.strip().casefold()
@@ -237,20 +231,12 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event edit command",
+            denial="You do not have the required role to edit events.",
         ):
-            LOGGER.warning(
-                "Rejected event edit command from Discord user %s; "
-                "required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to edit events.",
-                ephemeral=True,
-            )
             return
         await open_event_edit(self._bot, interaction, event_id)
 
@@ -301,20 +287,12 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event remind command",
+            denial="You do not have the required role to remind event members.",
         ):
-            LOGGER.warning(
-                "Rejected event remind command from Discord user %s; "
-                "required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to remind event members.",
-                ephemeral=True,
-            )
             return
         event = self._bot.event_store.get_event(event_id)
         occurrence = (
@@ -408,20 +386,12 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event cancel command",
+            denial="You do not have the required role to cancel events.",
         ):
-            LOGGER.warning(
-                "Rejected event cancel command from Discord user %s; "
-                "required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to cancel events.",
-                ephemeral=True,
-            )
             return
         event = self._bot.event_store.get_event(event_id)
         if event is None or event.cancelled:
@@ -527,20 +497,12 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event delete command",
+            denial="You do not have the required role to delete events.",
         ):
-            LOGGER.warning(
-                "Rejected event delete command from Discord user %s; "
-                "required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to delete events.",
-                ephemeral=True,
-            )
             return
         event = self._bot.event_store.get_event(event_id)
         if event is None:
@@ -597,19 +559,11 @@ class EventCommands(app_commands.Group):
             interaction.user.id,
             event_id,
         )
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event restore command",
+            denial="You do not have the required role to restore events.",
         ):
-            LOGGER.warning(
-                "Rejected event restore command from Discord user %s; "
-                "required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to restore events.",
-                ephemeral=True,
-            )
             return
         await open_event_restore(self._bot, interaction, event_id)
