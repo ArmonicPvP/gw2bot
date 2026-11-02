@@ -230,6 +230,23 @@ class PollStore:
         return PollResults(poll=poll, counts=counts)
 
 
+    def results(self, poll_id: int) -> PollResults | None:
+        """The tallies frozen when a poll closed; None if it is missing or open."""
+        with self._sessions() as session:
+            record = session.get(PollRecord, poll_id)
+            if record is None or record.closed_at is None:
+                return None
+            counts = session.scalars(
+                select(PollOptionRecord.final_votes)
+                .where(PollOptionRecord.poll_id == poll_id)
+                .order_by(PollOptionRecord.position)
+            ).all()
+            return PollResults(
+                poll=_poll_from_record(session, record),
+                counts=tuple(count or 0 for count in counts),
+            )
+
+
 def _poll_from_record(session: Session, record: PollRecord) -> Poll:
     labels = session.scalars(
         select(PollOptionRecord.label)

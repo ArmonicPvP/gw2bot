@@ -453,13 +453,19 @@ class PollCommands(app_commands.Group):
         if not await authorize(self._bot, interaction):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
+        just_closed = False
         try:
             existing = self._bot.poll_store.get_poll(poll)
-            results = (
-                self._bot.poll_store.close_poll(poll, interaction.user.id)
-                if existing is not None and existing.is_open
-                else None
-            )
+            results: PollResults | None = None
+            if existing is not None and existing.is_open:
+                results = self._bot.poll_store.close_poll(poll, interaction.user.id)
+                just_closed = results is not None
+            if existing is not None and results is None:
+                # Already ended - possibly by an earlier /poll end whose edit
+                # of the post failed, or that a restart cut short. Its frozen
+                # tallies are delivered again, so running the command once
+                # more is how an officer puts the post right.
+                results = self._bot.poll_store.results(poll)
         except SQLAlchemyError as error:
             LOGGER.error(
                 "Could not close a poll; poll_id=%s error_type=%s",
@@ -472,22 +478,27 @@ class PollCommands(app_commands.Group):
                 "console log.",
             )
             return
-        if existing is None:
+        if existing is None or results is None:
             await send_interaction_notice(
                 interaction,
                 f"There is no poll with id {poll}.",
             )
             return
-        if results is None:
-            await send_interaction_notice(
-                interaction,
-                f"**{escape_markdown(existing.name)}** has already ended.",
-            )
-            return
         posted = await _close_post(self._bot, results)
-        if posted:
-            await _announce_results(self._bot, results)
-        content = f"Ended **{escape_markdown(existing.name)}**."
+        name = escape_markdown(existing.name)
+        if just_closed:
+            # Announced only the first time, so repairing a post does not
+            # tell the channel twice.
+            if posted:
+                await _announce_results(self._bot, results)
+            content = f"Ended **{name}**."
+        else:
+            LOGGER.debug(
+                "Re-delivered the results of an ended poll; poll_id=%s posted=%s",
+                poll,
+                posted,
+            )
+            content = f"**{name}** had already ended."
         link = poll_message_link(
             getattr(interaction.guild, "id", None),
             results.poll,

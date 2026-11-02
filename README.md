@@ -391,7 +391,7 @@ Officers can post an anonymous poll in any text channel or thread.
 | Command | Role | What it does |
 | --- | --- | --- |
 | `/poll create` | `raffle_officer` | Opens a form for the poll's name, its options separated by commas (2 to 9), and an optional description, then posts the poll in the channel you ran it in. |
-| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. The poll's id is in the post's footer. |
+| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. The poll's id is in the post's footer. Run it again on a poll that has ended to put the results back on its post. |
 
 - Members vote by picking an option from the post's menu, then confirming it
   in a reply only they can see. Picking another option and confirming replaces

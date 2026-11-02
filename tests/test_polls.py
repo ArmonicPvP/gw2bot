@@ -312,6 +312,21 @@ class TestStore:
         assert store.record_vote(404, VOTER_ID, 0) is VoteOutcome.CLOSED
         assert store.close_poll(404, OFFICER_ID) is None
 
+    def test_results_read_back_the_frozen_tallies(self, store: PollStore) -> None:
+        poll = make_poll(store)
+        store.record_vote(poll.poll_id, 1, 1)
+        store.record_vote(poll.poll_id, 2, 1)
+
+        assert store.results(poll.poll_id) is None
+        closed = store.close_poll(poll.poll_id, OFFICER_ID)
+
+        results = store.results(poll.poll_id)
+        assert results is not None
+        assert closed is not None
+        assert results.counts == closed.counts == (0, 2, 0)
+        assert results.poll == closed.poll
+        assert store.results(404) is None
+
     def test_deleting_a_poll_removes_it(self, store: PollStore) -> None:
         poll = make_poll(store, message_id=None)
 
@@ -782,11 +797,12 @@ class TestEndCommand:
 
         assert notice(interaction) == "There is no poll with id 404."
 
-    async def test_a_poll_that_already_ended_is_reported(
+    async def test_ending_an_ended_poll_puts_its_results_back_without_announcing(
         self,
         store: PollStore,
     ) -> None:
         poll = make_poll(store)
+        store.record_vote(poll.poll_id, 1, 2)
         store.close_poll(poll.poll_id, OFFICER_ID)
         bot = make_bot(store)
         commands = PollCommands(bot)
@@ -794,8 +810,38 @@ class TestEndCommand:
 
         await cast(Any, commands.end.callback)(commands, interaction, poll.poll_id)
 
-        assert notice(interaction) == "**Raid night** has already ended."
-        bot.post.edit.assert_not_awaited()
+        edit = bot.post.edit.await_args.kwargs
+        assert edit["view"] is None
+        assert "Winner:** Friday" in (edit["embed"].description or "")
+        bot.post.reply.assert_not_awaited()
+        followup = interaction.followup.send.await_args
+        assert followup.args[0].startswith("**Raid night** had already ended.")
+        assert followup.kwargs["embed"].fields[0].value == "1"
+
+    async def test_a_failed_post_edit_is_put_right_by_ending_again(
+        self,
+        store: PollStore,
+    ) -> None:
+        poll = make_poll(store)
+        store.record_vote(poll.poll_id, 1, 0)
+        bot = make_bot(store)
+        bot.post.edit.side_effect = [forbidden_error(50013), None]
+        commands = PollCommands(bot)
+
+        first = make_interaction()
+        await cast(Any, commands.end.callback)(commands, first, poll.poll_id)
+        assert "only shown here" in first.followup.send.await_args.args[0]
+
+        second = make_interaction()
+        await cast(Any, commands.end.callback)(commands, second, poll.poll_id)
+
+        assert bot.post.edit.await_count == 2
+        assert bot.post.edit.await_args.kwargs["view"] is None
+        # The tallies were frozen by the first run, not recounted from the
+        # votes it deleted.
+        embed = second.followup.send.await_args.kwargs["embed"]
+        assert "Winner:** Monday" in (embed.description or "")
+        assert "The results are on the poll" in second.followup.send.await_args.args[0]
 
 
 class TestEndAutocomplete:
