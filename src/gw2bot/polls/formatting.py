@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import discord
 
 from gw2bot.polls.models import Poll, PollResults, option_display
@@ -9,6 +11,7 @@ from gw2bot.polls.models import Poll, PollResults, option_display
 OPEN_COLOR = discord.Color.blurple()
 CLOSED_COLOR = discord.Color.dark_grey()
 RESULT_BAR_WIDTH = 12
+OPEN_FOOTER = "Pick from the menu below. Results are shown when the poll ends."
 
 
 def _votes(count: int) -> str:
@@ -19,6 +22,12 @@ def _with_description(poll: Poll, body: str) -> str:
     if not poll.description:
         return body
     return f"{poll.description}\n\n{body}"
+
+
+def discord_timestamp(value: datetime) -> str:
+    """A time every member sees in their own timezone, with how far away it is."""
+    seconds = int(value.timestamp())
+    return f"<t:{seconds}:F> (<t:{seconds}:R>)"
 
 
 def open_poll_embed(poll: Poll, voter_count: int) -> discord.Embed:
@@ -33,18 +42,14 @@ def open_poll_embed(poll: Poll, voter_count: int) -> discord.Embed:
     )
     embed = discord.Embed(
         title=poll.name,
-        description=_with_description(poll, options),
+        description=poll.description or None,
         color=OPEN_COLOR,
-        timestamp=poll.created_at,
     )
+    embed.add_field(name="Options", value=options, inline=False)
+    if poll.ends_at is not None:
+        embed.add_field(name="Ends", value=discord_timestamp(poll.ends_at))
     embed.add_field(name="Votes cast", value=str(voter_count))
-    embed.set_footer(
-        text=(
-            f"Anonymous poll #{poll.poll_id} · Pick from the menu below. "
-            "Nobody can see what you chose, and results are shown when the "
-            "poll ends."
-        )
-    )
+    embed.set_footer(text=OPEN_FOOTER)
     return embed
 
 

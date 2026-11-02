@@ -42,6 +42,7 @@ from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2.api import Gw2ApiClient
 from gw2bot.notifications.poll_status import PollStatusTracker
 from gw2bot.polls import PollCommands, PollStore, PollVoteSelect
+from gw2bot.polls import closing as poll_closing
 from gw2bot.profit.commands import ProfitCommands
 from gw2bot.profit.service import ProfitService
 from gw2bot.profit.store import ProfitStore
@@ -297,6 +298,9 @@ class Gw2Bot(discord.Client):
         wanted: dict[str, Callable[[], Coroutine[Any, Any, None]]] = {
             "gw2-raffle-contribution-poller": self._poll_raffle_contributions,
             "gw2-event-scheduler": self._poll_event_updates,
+            # Closes polls whose end time has passed. Polls need nothing
+            # optional configured, so it always runs.
+            "gw2-poll-closer": self._poll_scheduled_poll_closings,
             # Members supply their own Trading Post keys, so this runs
             # whatever the guild-wide GW2 settings are. With nobody signed up
             # it costs one query a day and does nothing.
@@ -1146,6 +1150,9 @@ class Gw2Bot(discord.Client):
 
     async def _poll_event_updates(self) -> None:
         await event_scheduler.poll_event_updates(self)
+
+    async def _poll_scheduled_poll_closings(self) -> None:
+        await poll_closing.poll_scheduled_closings(self)
 
     async def _poll_guild_member_count_topic(self) -> None:
         await member_count.poll_guild_member_count_topic(self)

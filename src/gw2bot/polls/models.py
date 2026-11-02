@@ -86,10 +86,24 @@ class Poll:
     created_at: datetime
     closed_at: datetime | None = None
     closed_by: int | None = None
+    ends_at: datetime | None = None
 
     @property
     def is_open(self) -> bool:
         return self.closed_at is None
+
+    def is_due(self, now: datetime) -> bool:
+        """Whether the poll's end time has come, ended or not yet."""
+        return self.ends_at is not None and self.ends_at <= now
+
+    def accepts_votes(self, now: datetime) -> bool:
+        """Open and not past its end time.
+
+        The closing pass runs on an interval, so a poll can sit open for a
+        few seconds after its end time; a vote cast then is refused rather
+        than counted after the deadline.
+        """
+        return self.is_open and not self.is_due(now)
 
 
 @dataclass(frozen=True, slots=True)

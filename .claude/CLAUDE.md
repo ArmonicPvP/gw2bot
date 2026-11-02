@@ -79,7 +79,7 @@ Source lives under `src/gw2bot`:
 | `roster/` | Guild membership history: the series the roster page draws, and the one-time `/roster import`. |
 | `gold/` | Guild bank gold history: the series the gold page draws, and the one-time `/gold import`. |
 | `profit/` | Trading Post profit reports: the member's API key, the price and delivery reads behind it, and `/profit`. |
-| `polls/` | Anonymous polls: `/poll create` and `/poll end`, the persistent voting dropdown and its private confirmation, and the store that deletes who voted for what when a poll ends. |
+| `polls/` | Anonymous polls: `/poll create` and `/poll end`, the persistent voting dropdown and its private confirmation, `closing.py` for ending a poll by command or at its end time, and the store that deletes who voted for what when a poll ends. |
 | `trials/` | Trial member tracking, the Accepted forum index, `/check` and `/track`. |
 | `events/` | Guild events: models, store, scheduler, reminders, `/event` commands, the run history and `stats.py` behind `/admin/events`, plus `posting/` and `views/` - see `docs/events.md`. |
 | `web/` | Optional aiohttp site: Discord OAuth, the server, and one module per served document under `pages/`, with the role-gated dashboards under `/admin` - see `docs/web.md`. |

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -20,7 +23,8 @@ from gw2bot.polls.commands import (
     PollDraft,
     PollRetryView,
 )
-from gw2bot.polls.formatting import closed_poll_embed, open_poll_embed
+from gw2bot.polls.closing import close_due_polls
+from gw2bot.polls.formatting import OPEN_FOOTER, closed_poll_embed, open_poll_embed
 from gw2bot.polls.models import (
     MAX_POLL_OPTIONS,
     POLL_OPTION_MAX_LENGTH,
@@ -46,6 +50,9 @@ VOTER_ID = 777
 CHANNEL_ID = 9001
 GUILD_ID = 5678
 CREATED_AT = datetime(2026, 11, 2, 18, 0, tzinfo=UTC)
+ENDS_AT = datetime(2026, 11, 5, 1, 0, tzinfo=UTC)
+# The event timezone the create form reads an end time in.
+FORM_TIMEZONE = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
@@ -62,6 +69,7 @@ def make_poll(
     options: tuple[str, ...] = ("Monday", "Wednesday", "Friday"),
     description: str = "",
     message_id: int | None = 555,
+    ends_at: datetime | None = None,
 ) -> Poll:
     poll = store.create_poll(
         name=name,
@@ -69,6 +77,7 @@ def make_poll(
         options=options,
         channel_id=CHANNEL_ID,
         created_by=OFFICER_ID,
+        ends_at=ends_at,
         now=CREATED_AT,
     )
     if message_id is not None:
@@ -93,6 +102,7 @@ def make_bot(store: PollStore, post: FakePost | None = None) -> Any:
         poll_store=store,
         _config=default_config(raffle_officer_role_id=OFFICER_ROLE_ID),
         get_partial_messageable=MagicMock(return_value=channel),
+        event_timezone=FORM_TIMEZONE,
         post=post,
     )
 
@@ -155,10 +165,17 @@ def notice(interaction: Any) -> str:
     return call.args[0]
 
 
-def fill_modal(modal: PollCreateModal, name: str, options: str, description: str = "") -> None:
+def fill_modal(
+    modal: PollCreateModal,
+    name: str,
+    options: str,
+    description: str = "",
+    ends: str = "",
+) -> None:
     modal.name_input._value = name
     modal.options_input._value = options
     modal.description_input._value = description
+    modal.ends_input._value = ends
 
 
 class TestParseOptions:
@@ -359,15 +376,34 @@ class TestFormatting:
         embed = open_poll_embed(poll, 7)
 
         assert embed.title == "Raid night"
-        description = embed.description or ""
-        assert description.startswith("Pick a night\n\n")
-        assert "1️⃣ Monday" in description
-        assert "3️⃣ Friday" in description
-        assert "vote" not in description
+        assert embed.description == "Pick a night"
         assert [(field.name, field.value) for field in embed.fields] == [
-            ("Votes cast", "7")
+            ("Options", "1️⃣ Monday\n2️⃣ Wednesday\n3️⃣ Friday"),
+            ("Votes cast", "7"),
         ]
-        assert f"#{poll.poll_id}" in (embed.footer.text or "")
+        assert embed.footer.text == (
+            "Pick from the menu below. Results are shown when the poll ends."
+        )
+        assert embed.footer.text == OPEN_FOOTER
+        assert embed.timestamp is None
+
+    def test_an_end_time_is_shown_as_a_discord_timestamp(
+        self,
+        store: PollStore,
+    ) -> None:
+        poll = make_poll(store, ends_at=ENDS_AT)
+
+        embed = open_poll_embed(poll, 0)
+
+        seconds = int(ENDS_AT.timestamp())
+        assert [(field.name, field.value) for field in embed.fields] == [
+            ("Options", "1️⃣ Monday\n2️⃣ Wednesday\n3️⃣ Friday"),
+            ("Ends", f"<t:{seconds}:F> (<t:{seconds}:R>)"),
+            ("Votes cast", "0"),
+        ]
+
+    def test_a_poll_without_a_description_has_none(self, store: PollStore) -> None:
+        assert open_poll_embed(make_poll(store), 0).description is None
 
     def test_the_closed_post_shows_every_tally_and_the_winner(
         self,
@@ -524,7 +560,7 @@ class TestVoteConfirm:
         assert "is recorded" in kwargs["content"]
         bot.get_partial_messageable.assert_called_with(CHANNEL_ID)
         embed = bot.post.edit.await_args.kwargs["embed"]
-        assert embed.fields[0].value == "1"
+        assert (embed.fields[-1].name, embed.fields[-1].value) == ("Votes cast", "1")
 
     async def test_changing_a_vote_leaves_the_count_alone(
         self,
@@ -884,3 +920,168 @@ class TestEndAutocomplete:
             make_interaction(role_ids=()),
             "",
         ) == []
+
+
+class TestEndTime:
+    def test_the_end_time_reads_back(self, store: PollStore) -> None:
+        assert make_poll(store, ends_at=ENDS_AT).ends_at == ENDS_AT
+        assert make_poll(store).ends_at is None
+
+    def test_due_polls_are_the_open_ones_past_their_end_time(
+        self,
+        store: PollStore,
+    ) -> None:
+        due = make_poll(store, name="Due", ends_at=ENDS_AT)
+        make_poll(store, name="Later", ends_at=ENDS_AT + timedelta(days=1))
+        make_poll(store, name="Open-ended")
+        ended = make_poll(store, name="Ended", ends_at=ENDS_AT)
+        store.close_poll(ended.poll_id, OFFICER_ID)
+
+        assert [poll.poll_id for poll in store.due_polls(ENDS_AT)] == [due.poll_id]
+        assert store.due_polls(ENDS_AT - timedelta(seconds=1)) == []
+
+    def test_a_vote_after_the_end_time_is_refused(self, store: PollStore) -> None:
+        poll = make_poll(store, ends_at=ENDS_AT)
+        before = ENDS_AT - timedelta(seconds=1)
+
+        assert store.record_vote(poll.poll_id, 1, 0, now=before) is VoteOutcome.RECORDED
+        assert store.record_vote(poll.poll_id, 2, 0, now=ENDS_AT) is VoteOutcome.CLOSED
+
+    async def test_a_pick_after_the_end_time_is_refused(
+        self,
+        store: PollStore,
+    ) -> None:
+        poll = make_poll(store, ends_at=datetime.now(UTC) - timedelta(seconds=1))
+        interaction = make_interaction(user_id=VOTER_ID, role_ids=())
+
+        await handle_vote_pick(make_bot(store), interaction, poll.poll_id, ["0"])
+
+        assert notice(interaction) == POLL_ENDED_NOTICE
+
+    def test_an_older_database_gains_the_column(self, tmp_path: Path) -> None:
+        path = str(tmp_path / "old.db")
+        PollStore(path).close()
+
+        with sqlite3.connect(path) as connection:
+            connection.execute("ALTER TABLE gw2_polls DROP COLUMN ends_at")
+
+        reopened = PollStore(path)
+        try:
+            poll = make_poll(reopened, ends_at=ENDS_AT)
+            assert poll.ends_at == ENDS_AT
+        finally:
+            reopened.close()
+
+
+class TestCreateWithEndTime:
+    async def test_the_end_time_is_read_in_the_event_timezone(
+        self,
+        store: PollStore,
+    ) -> None:
+        channel = make_channel()
+        modal = PollCreateModal(make_bot(store))
+        fill_modal(modal, "Raid night", "Yes, No", ends="12.31.2099 20:00")
+        interaction = make_interaction(channel=channel)
+
+        await modal.on_submit(interaction)
+
+        [poll] = store.open_polls()
+        expected = datetime(2099, 12, 31, 20, 0, tzinfo=FORM_TIMEZONE)
+        assert poll.ends_at == expected
+        names = [field.name for field in channel.send.await_args.kwargs["embed"].fields]
+        assert names == ["Options", "Ends", "Votes cast"]
+        seconds = int(expected.timestamp())
+        assert f"It ends <t:{seconds}:F>" in notice(interaction)
+
+    async def test_a_blank_end_time_runs_until_poll_end(
+        self,
+        store: PollStore,
+    ) -> None:
+        channel = make_channel()
+        modal = PollCreateModal(make_bot(store))
+        fill_modal(modal, "Raid night", "Yes, No")
+        interaction = make_interaction(channel=channel)
+
+        await modal.on_submit(interaction)
+
+        [poll] = store.open_polls()
+        assert poll.ends_at is None
+        names = [field.name for field in channel.send.await_args.kwargs["embed"].fields]
+        assert names == ["Options", "Votes cast"]
+        assert "End it with `/poll end`" in notice(interaction)
+
+    @pytest.mark.parametrize(
+        ("ends", "reason"),
+        [
+            ("tomorrow", "MM.dd.yyyy HH:mm"),
+            ("01.01.2020 10:00", "must be in the future"),
+        ],
+    )
+    async def test_a_bad_end_time_offers_to_try_again(
+        self,
+        store: PollStore,
+        ends: str,
+        reason: str,
+    ) -> None:
+        channel = make_channel()
+        modal = PollCreateModal(make_bot(store))
+        fill_modal(modal, "Raid night", "Yes, No", ends=ends)
+        interaction = make_interaction(channel=channel)
+
+        await modal.on_submit(interaction)
+
+        channel.send.assert_not_awaited()
+        call = interaction.response.send_message.await_args
+        assert reason in call.args[0]
+        retry = make_interaction()
+        await call.kwargs["view"].retry.callback(retry)
+        reopened = retry.response.send_modal.await_args.args[0]
+        assert reopened.ends_input.default == ends
+
+
+class TestScheduledClosing:
+    async def test_a_due_poll_closes_shows_results_and_is_announced(
+        self,
+        store: PollStore,
+    ) -> None:
+        poll = make_poll(store, ends_at=ENDS_AT)
+        store.record_vote(poll.poll_id, 1, 1, now=CREATED_AT)
+        bot = make_bot(store)
+
+        closed = await close_due_polls(bot, now=ENDS_AT)
+
+        assert closed == 1
+        ended = store.get_poll(poll.poll_id)
+        assert ended is not None
+        assert not ended.is_open
+        assert ended.closed_by is None
+        edit = bot.post.edit.await_args.kwargs
+        assert edit["view"] is None
+        assert edit["embed"].title == "Raid night (closed)"
+        reply = bot.post.reply.await_args
+        assert "Winner: **Wednesday** with 1 vote." in reply.args[0]
+        assert reply.kwargs["allowed_mentions"] is NO_MENTIONS
+
+    async def test_polls_not_yet_due_are_left_open(self, store: PollStore) -> None:
+        later = make_poll(store, ends_at=ENDS_AT + timedelta(hours=1))
+        open_ended = make_poll(store)
+        bot = make_bot(store)
+
+        assert await close_due_polls(bot, now=ENDS_AT) == 0
+
+        assert store.get_poll(later.poll_id).is_open  # type: ignore[union-attr]
+        assert store.get_poll(open_ended.poll_id).is_open  # type: ignore[union-attr]
+        bot.post.edit.assert_not_awaited()
+
+    async def test_a_post_that_cannot_be_edited_is_not_announced(
+        self,
+        store: PollStore,
+    ) -> None:
+        poll = make_poll(store, ends_at=ENDS_AT)
+        bot = make_bot(store)
+        bot.post.edit.side_effect = not_found_error()
+
+        assert await close_due_polls(bot, now=ENDS_AT) == 1
+
+        assert not store.get_poll(poll.poll_id).is_open  # type: ignore[union-attr]
+        bot.post.reply.assert_not_awaited()

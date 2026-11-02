@@ -1043,7 +1043,12 @@ class PollRecord(Base):
     created_by: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     closed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL when the poll was ended by /poll end rather than by reaching its
+    # end time.
     closed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # When the poll closes on its own; NULL for a poll that runs until an
+    # officer ends it.
+    ends_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class PollOptionRecord(Base):
@@ -1533,6 +1538,21 @@ def initialize_database(engine: Engine) -> set[str]:
                 "UPDATE raffle_runs SET announcement_sent = 1"
             )
             added_columns.add("announcement_sent")
+
+        poll_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns(
+                PollRecord.__tablename__
+            )
+        }
+        if "ends_at" not in poll_columns:
+            # Polls created before end times existed run until /poll end,
+            # which is what NULL means.
+            operations.add_column(
+                PollRecord.__tablename__,
+                Column("ends_at", String, nullable=True),
+            )
+            added_columns.add("ends_at")
 
     LOGGER.debug(
         "Database schema initialization completed; added_columns=%s",

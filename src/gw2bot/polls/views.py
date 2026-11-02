@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -136,7 +137,7 @@ async def handle_vote_pick(
             "moment.",
         )
         return
-    if poll is None or not poll.is_open:
+    if poll is None or not poll.accepts_votes(datetime.now(UTC)):
         LOGGER.debug(
             "Refused a pick on a poll that is not open; poll_id=%s found=%s",
             poll_id,

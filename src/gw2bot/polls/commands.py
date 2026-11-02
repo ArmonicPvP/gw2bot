@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import discord
@@ -17,8 +18,14 @@ from gw2bot.core.discord_utils import (
     send_interaction_notice,
     user_has_role,
 )
+from gw2bot.events.formatting import (
+    EVENT_DATETIME_PLACEHOLDER,
+    parse_event_datetime,
+)
+from gw2bot.polls.closing import announce_results, close_post
 from gw2bot.polls.formatting import (
     closed_poll_embed,
+    discord_timestamp,
     open_poll_embed,
     poll_message_link,
 )
@@ -33,7 +40,7 @@ from gw2bot.polls.models import (
     PollResults,
     parse_poll_options,
 )
-from gw2bot.polls.views import NO_MENTIONS, poll_message, poll_vote_view
+from gw2bot.polls.views import NO_MENTIONS, poll_vote_view
 
 if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
@@ -81,6 +88,7 @@ class PollDraft:
     name: str = ""
     options: str = ""
     description: str = ""
+    ends: str = ""
 
 
 class PollCreateModal(discord.ui.Modal, title="Create a poll"):
@@ -125,20 +133,36 @@ class PollCreateModal(discord.ui.Modal, title="Create a poll"):
                 component=self.description_input,
             )
         )
+        # Typed exactly like an event's start time, in the same timezone.
+        self.ends_input = discord.ui.TextInput["PollCreateModal"](
+            default=draft.ends or None,
+            placeholder=EVENT_DATETIME_PLACEHOLDER,
+            max_length=16,
+            required=False,
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=f"When does the poll end? ({EVENT_DATETIME_PLACEHOLDER})",
+                description="Optional. Leave blank to end it with /poll end.",
+                component=self.ends_input,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         draft = PollDraft(
             name=self.name_input.value,
             options=self.options_input.value,
             description=self.description_input.value,
+            ends=self.ends_input.value.strip(),
         )
         LOGGER.debug(
             "Poll creation form submitted; user_id=%s name_characters=%s "
-            "options_characters=%s description_characters=%s",
+            "options_characters=%s description_characters=%s has_end_time=%s",
             interaction.user.id,
             len(draft.name),
             len(draft.options),
             len(draft.description),
+            bool(draft.ends),
         )
         # The form can sit open for a while, so the role is checked again
         # before anything is posted.
@@ -149,7 +173,8 @@ class PollCreateModal(discord.ui.Modal, title="Create a poll"):
             if not name:
                 raise PollOptionsError("The poll needs a name.")
             options = parse_poll_options(draft.options)
-        except PollOptionsError as error:
+            ends_at = self._parse_end_time(draft.ends)
+        except (PollOptionsError, ValueError) as error:
             LOGGER.debug(
                 "Refused poll creation form; user_id=%s",
                 interaction.user.id,
@@ -162,7 +187,16 @@ class PollCreateModal(discord.ui.Modal, title="Create a poll"):
             name=name,
             description=draft.description.strip(),
             options=options,
+            ends_at=ends_at,
         )
+
+    def _parse_end_time(self, text: str) -> datetime | None:
+        if not text:
+            return None
+        ends_at = parse_event_datetime(text, self._bot.event_timezone)
+        if ends_at <= datetime.now(UTC):
+            raise ValueError("The poll's end time must be in the future.")
+        return ends_at
 
 
 class PollRetryView(discord.ui.View):
@@ -212,6 +246,7 @@ async def post_poll(
     name: str,
     description: str,
     options: tuple[str, ...],
+    ends_at: datetime | None = None,
 ) -> None:
     """Store the poll and post it, with its dropdown, in the caller's channel."""
     channel = interaction.channel
@@ -234,6 +269,7 @@ async def post_poll(
             options=options,
             channel_id=channel_id,
             created_by=interaction.user.id,
+            ends_at=ends_at,
         )
     except SQLAlchemyError as error:
         LOGGER.error(
@@ -294,10 +330,17 @@ async def post_poll(
         len(options),
     )
     link = message.jump_url
+    if ends_at is None:
+        ending = "End it with `/poll end` to show the results."
+    else:
+        ending = (
+            f"It ends {discord_timestamp(ends_at)}, or earlier with "
+            "`/poll end`."
+        )
     await send_interaction_notice(
         interaction,
         f"Posted **{escape_markdown(name)}** with {len(options)} options: "
-        f"{link}\nEnd it with `/poll end` to show the results.",
+        f"{link}\n{ending}",
     )
 
 
@@ -322,59 +365,6 @@ def _poll_choice_name(poll: Poll) -> str:
     if len(name) > budget:
         name = name[: budget - 1].rstrip() + "…"
     return f"{name}{suffix}"
-
-
-def _results_summary(results: PollResults) -> str:
-    leaders = results.leaders
-    options = results.poll.options
-    if not leaders:
-        return "No votes were cast."
-    top = results.counts[leaders[0]]
-    votes = f"{top} vote" + ("" if top == 1 else "s")
-    if len(leaders) == 1:
-        return f"🏆 Winner: **{escape_markdown(options[leaders[0]])}** with {votes}."
-    tied = ", ".join(f"**{escape_markdown(options[position])}**" for position in leaders)
-    return f"🤝 Tie between {tied} with {votes} each."
-
-
-async def _close_post(bot: Gw2Bot, results: PollResults) -> bool:
-    """Swap the post's dropdown for the results; False if it could not be."""
-    message = poll_message(bot, results.poll)
-    if message is None:
-        return False
-    try:
-        await message.edit(embed=closed_poll_embed(results), view=None)
-    except discord.HTTPException as error:
-        log_discord_failure(
-            "Could not show a closed poll's results on its post; poll_id=%s",
-            error,
-            results.poll.poll_id,
-        )
-        return False
-    LOGGER.debug("Closed poll post; poll_id=%s", results.poll.poll_id)
-    return True
-
-
-async def _announce_results(bot: Gw2Bot, results: PollResults) -> bool:
-    """Reply to the post, so the channel hears the poll ended."""
-    message = poll_message(bot, results.poll)
-    if message is None:
-        return False
-    content = (
-        f"📊 **{escape_markdown(results.poll.name)}** has ended. "
-        f"{_results_summary(results)} The full results are on the poll."
-    )
-    try:
-        await message.reply(content, allowed_mentions=NO_MENTIONS)
-    except discord.HTTPException as error:
-        log_discord_failure(
-            "Could not announce a poll's results; poll_id=%s",
-            error,
-            results.poll.poll_id,
-        )
-        return False
-    LOGGER.debug("Announced poll results; poll_id=%s", results.poll.poll_id)
-    return True
 
 
 class PollCommands(app_commands.Group):
@@ -442,7 +432,7 @@ class PollCommands(app_commands.Group):
         name="end",
         description="End a poll and post its results",
     )
-    @app_commands.describe(poll="The poll to end (its id is in the post's footer)")
+    @app_commands.describe(poll="The poll to end")
     @app_commands.autocomplete(poll=open_poll_autocomplete)
     async def end(self, interaction: discord.Interaction, poll: int) -> None:
         LOGGER.debug(
@@ -484,13 +474,13 @@ class PollCommands(app_commands.Group):
                 f"There is no poll with id {poll}.",
             )
             return
-        posted = await _close_post(self._bot, results)
+        posted = await close_post(self._bot, results)
         name = escape_markdown(existing.name)
         if just_closed:
             # Announced only the first time, so repairing a post does not
             # tell the channel twice.
             if posted:
-                await _announce_results(self._bot, results)
+                await announce_results(self._bot, results)
             content = f"Ended **{name}**."
         else:
             LOGGER.debug(
