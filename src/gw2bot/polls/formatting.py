@@ -57,19 +57,24 @@ def open_poll_embed(poll: Poll, voter_count: int) -> discord.Embed:
 # the empty remainder of a bar that ends on a whole cell.
 PARTIAL_BLOCKS = ("", "▏", "▎", "▍", "▌", "▋", "▊", "▉")
 FULL_BLOCK = "█"
+# A no-break space rather than a plain one: Discord can collapse a run of
+# ordinary spaces into one, which would shorten every bar that is not full
+# and leave them different lengths.
+BAR_PADDING = "\u00a0"
 
 
 def result_bar(count: int, total: int) -> str:
     """An option's share as a bar ``RESULT_BAR_WIDTH`` cells wide.
 
     Measured in eighths of a cell, so a share that falls between whole cells
-    ends on the matching partial block. The rest of the width is spaces,
-    which keeps every option's text after its bar lined up in the code span.
+    ends on the matching partial block. The rest of the width is padding, so
+    every bar is exactly ``RESULT_BAR_WIDTH`` characters and the text after
+    each one starts in the same column.
     """
     eighths = round(RESULT_BAR_WIDTH * 8 * count / total) if total else 0
     full, remainder = divmod(eighths, 8)
     bar = FULL_BLOCK * full + PARTIAL_BLOCKS[remainder]
-    return bar.ljust(RESULT_BAR_WIDTH)
+    return bar.ljust(RESULT_BAR_WIDTH, BAR_PADDING)
 
 
 def results_lines(results: PollResults) -> str:

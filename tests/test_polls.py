@@ -27,6 +27,7 @@ from gw2bot.polls.closing import close_due_polls
 from gw2bot.polls.formatting import (
     OPEN_FOOTER,
     closed_poll_embed,
+    RESULT_BAR_WIDTH,
     open_poll_embed,
     result_bar,
 )
@@ -435,21 +436,21 @@ class TestFormatting:
     @pytest.mark.parametrize(
         ("count", "total", "bar"),
         [
-            (3, 4, "█████████   "),
-            (1, 4, "███         "),
-            (1, 3, "████        "),
+            (3, 4, "█████████\u00a0\u00a0\u00a0"),
+            (1, 4, "███\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
+            (1, 3, "████\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
             # 12 x 2/7 = 3.43 cells: three full blocks and three eighths.
-            (2, 7, "███▍        "),
+            (2, 7, "███▍\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
             # 12 x 1/9 = 1.33 cells: one full block and three eighths.
-            (1, 9, "█▍          "),
+            (1, 9, "█▍\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
             # 12 / 100 = 0.12 cells, which rounds to one eighth.
-            (1, 100, "▏           "),
+            (1, 100, "▏\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
             (5, 5, "████████████"),
-            (0, 4, "            "),
-            (0, 0, "            "),
+            (0, 4, "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
+            (0, 0, "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
         ],
     )
-    def test_result_bars_use_partial_blocks_and_pad_with_spaces(
+    def test_result_bars_use_partial_blocks_and_pad_the_rest(
         self,
         count: int,
         total: int,
@@ -466,9 +467,21 @@ class TestFormatting:
 
         description = closed_poll_embed(results).description or ""
 
-        assert "1️⃣ Monday\n`█████████   ` **3 votes** (75%)" in description
-        assert "3️⃣ Friday\n`███         ` **1 vote** (25%)" in description
+        pad = "\u00a0"
+        assert f"1️⃣ Monday\n`█████████{pad * 3}` **3 votes** (75%)" in description
+        assert f"3️⃣ Friday\n`███{pad * 9}` **1 vote** (25%)" in description
         assert "░" not in description
+
+    def test_every_bar_is_the_same_width(self) -> None:
+        # The text after each bar only lines up if no bar is longer or shorter
+        # than another, whatever share it shows.
+        widths = {
+            len(result_bar(count, total))
+            for total in range(0, 60)
+            for count in range(0, total + 1)
+        }
+
+        assert widths == {RESULT_BAR_WIDTH}
 
     def test_a_tie_names_every_leader(self, store: PollStore) -> None:
         poll = make_poll(store)
