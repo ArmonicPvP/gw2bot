@@ -1021,6 +1021,66 @@ class RaffleRunWinnerRecord(Base):
     tickets_before_draw: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class PollRecord(Base):
+    """One anonymous poll posted with /poll create.
+
+    ``message_id`` is NULL only between the row being written and the post
+    going up: the post's dropdown carries the poll id in its custom_id, so the
+    id has to exist before the message can be sent.
+    """
+
+    __tablename__ = "gw2_polls"
+
+    poll_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
+    channel_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    closed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    closed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class PollOptionRecord(Base):
+    """One choice on a poll, in the order the officer typed them."""
+
+    __tablename__ = "gw2_poll_options"
+
+    poll_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_polls.poll_id"),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label: Mapped[str] = mapped_column(String, nullable=False)
+    # The tally frozen when the poll closes. NULL while it is open, when the
+    # count lives only in the vote rows below.
+    final_votes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class PollVoteRecord(Base):
+    """One member's current choice on an open poll.
+
+    The member is kept only so a second pick replaces the first instead of
+    counting twice. The rows are deleted when the poll closes, once their
+    tallies are frozen onto the options, so who picked what does not outlive
+    the poll.
+    """
+
+    __tablename__ = "gw2_poll_votes"
+
+    poll_id: Mapped[int] = mapped_column(
+        ForeignKey("gw2_polls.poll_id"),
+        primary_key=True,
+    )
+    discord_user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 def create_database_engine(database_path: str) -> Engine:
     path = Path(database_path)
     path.parent.mkdir(parents=True, exist_ok=True)

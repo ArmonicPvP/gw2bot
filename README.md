@@ -101,7 +101,7 @@ default.
 | --- | --- | --- |
 | `/settings roles raffle_draw` | `1317638909735342201` | `/raffle draw`, `/raffle removetickets`. |
 | `/settings roles raffle_addticket` | `1318357141521825872` | `/raffle addticket`, `/raffle addtickets`, `/raffle bulkaddtickets`. |
-| `/settings roles raffle_officer` | `1317638909735342201` | Recording gold purchases, `/check`, `/track`, `/pending`, `/roster import`, `/gold import`, `/settings`. |
+| `/settings roles raffle_officer` | `1317638909735342201` | Recording gold purchases, `/check`, `/track`, `/pending`, `/roster import`, `/gold import`, `/poll create`, `/poll end`, `/settings`. |
 | `/settings roles guild_roster` | `1317202210152513606` | Who gets account names in the raffle autocompletes. |
 | `/settings roles event_create` | `1318357141521825872` | All `/event` commands and roster editing. |
 | `/settings roles trial` | `1450164501696741597` | Marks a member as a Trial in the Trial reports. |
@@ -174,6 +174,7 @@ Permissions the bot needs:
 | Event text channels | View Channel, Send Messages, Create Public Threads, Manage Threads (to delete signup threads) |
 | Event forum posts | View Channel, Send Messages in Threads, Manage Threads (to reopen archived posts) |
 | Event channels and ping channel | Mention @everyone, @here and All Roles (to ping roles) |
+| Poll channels | View Channel, Send Messages, Embed Links, Read Message History (to reply with the results) |
 
 A `50013 missing_permissions` error in the log means one of these is missing;
 `50001 missing_access` means the bot cannot see the channel at all. Guild log
@@ -382,6 +383,27 @@ To backfill history from before the bot started recording, run each once
   channel.
 - `/gold import` reads the guild log (about the last 100 events) and the
   current bank balance.
+
+### Polls
+
+Officers can post an anonymous poll in any text channel or thread.
+
+| Command | Role | What it does |
+| --- | --- | --- |
+| `/poll create` | `raffle_officer` | Opens a form for the poll's name, its options separated by commas (2 to 9), and an optional description, then posts the poll in the channel you ran it in. |
+| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. The poll's id is in the post's footer. |
+
+- Members vote by picking an option from the post's menu, then confirming it
+  in a reply only they can see. Picking another option and confirming replaces
+  their vote, so each member has one vote.
+- While the poll is open, the post shows how many members have voted but not
+  how many picked each option. The count for every option is shown when the
+  poll ends.
+- Nobody can see who voted for what. The bot keeps each member's vote only
+  while the poll is open, so that a new pick can replace it, and deletes it
+  when the poll ends, keeping only the totals.
+- A poll stays open until `/poll end`, including across restarts. Several polls
+  can be open at once.
 
 ## Web Site
 
