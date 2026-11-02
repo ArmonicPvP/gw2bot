@@ -122,6 +122,24 @@ class PollStore:
             ).all()
             return [_poll_from_record(session, record) for record in records]
 
+    def closed_polls_since(self, since: datetime) -> list[Poll]:
+        """Polls ended at or after ``since``, most recently ended first."""
+        with self._sessions() as session:
+            records = session.scalars(
+                select(PollRecord).where(PollRecord.closed_at.is_not(None))
+            ).all()
+            polls = [_poll_from_record(session, record) for record in records]
+        recent = [
+            poll
+            for poll in polls
+            if poll.closed_at is not None and poll.closed_at >= since
+        ]
+        return sorted(
+            recent,
+            key=lambda poll: poll.closed_at or since,
+            reverse=True,
+        )
+
     def due_polls(self, now: datetime) -> list[Poll]:
         """Open polls whose end time has come, oldest first."""
         with self._sessions() as session:

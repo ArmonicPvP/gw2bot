@@ -391,7 +391,7 @@ Officers can post an anonymous poll in any text channel or thread.
 | Command | Role | What it does |
 | --- | --- | --- |
 | `/poll create` | `raffle_officer` | Opens a form for the poll's name, its options separated by commas (2 to 9), an optional description and an optional end time, then posts the poll in the channel you ran it in. |
-| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. It suggests the open polls as you type. Run it again on a poll that has ended to put the results back on its post. |
+| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. It suggests open polls as you type, and polls that ended in the last 7 days marked "(ended)": run it on one of those to put its results back on its post if they did not get there. |
 
 - Members vote by picking an option from the post's menu, then confirming it
   in a reply only they can see. Picking another option and confirming replaces

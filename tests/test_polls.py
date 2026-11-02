@@ -894,8 +894,26 @@ class TestEndAutocomplete:
         choices = await commands.open_poll_autocomplete(make_interaction(), "raid")
 
         assert choices == [
-            app_commands.Choice(name=f"Raid night — id {raid.poll_id}", value=raid.poll_id)
+            app_commands.Choice(name=f"Raid night — id {raid.poll_id}", value=raid.poll_id),
+            app_commands.Choice(
+                name=f"Raid leader — id {closed.poll_id} (ended)",
+                value=closed.poll_id,
+            ),
         ]
+
+    async def test_only_recently_ended_polls_are_offered_for_repair(
+        self,
+        store: PollStore,
+    ) -> None:
+        recent = make_poll(store, name="Recent")
+        store.close_poll(recent.poll_id, None, now=datetime.now(UTC) - timedelta(days=6))
+        old = make_poll(store, name="Old")
+        store.close_poll(old.poll_id, None, now=datetime.now(UTC) - timedelta(days=8))
+        commands = PollCommands(make_bot(store))
+
+        choices = await commands.open_poll_autocomplete(make_interaction(), "")
+
+        assert [choice.value for choice in choices] == [recent.poll_id]
 
     async def test_a_long_name_is_cut_but_keeps_its_id(
         self,

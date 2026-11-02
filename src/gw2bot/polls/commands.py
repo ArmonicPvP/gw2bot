@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import discord
@@ -51,6 +51,11 @@ POLL_ROLE_SETTING = "raffle_officer_role_id"
 # Discord's limits on an autocomplete answer.
 POLL_CHOICE_NAME_LIMIT = 100
 POLL_AUTOCOMPLETE_LIMIT = 25
+# How long an ended poll stays among /poll end's suggestions. Running the
+# command on one puts its results back on the post, which is the repair when
+# closing - by an officer or at the end time - could not update it, and the
+# open post no longer shows the id an officer would otherwise have to type.
+RECENTLY_ENDED_DAYS = 7
 # How long the "Try again" button under a refused form keeps working.
 RETRY_TIMEOUT_SECONDS = 600
 
@@ -359,7 +364,7 @@ def _discard_poll(bot: Gw2Bot, poll_id: int) -> None:
 def _poll_choice_name(poll: Poll) -> str:
     # The id stays visible even when a long name is cut, since it is the
     # value the officer is really picking.
-    suffix = f" — id {poll.poll_id}"
+    suffix = f" — id {poll.poll_id}" + ("" if poll.is_open else " (ended)")
     budget = POLL_CHOICE_NAME_LIMIT - len(suffix)
     name = poll.name
     if len(name) > budget:
@@ -406,7 +411,13 @@ class PollCommands(app_commands.Group):
         if not _is_poll_officer(self._bot, interaction.user):
             return []
         try:
-            polls = self._bot.poll_store.open_polls()
+            # Open polls first, then the recently ended ones whose results
+            # an officer may need to put back on the post.
+            polls = self._bot.poll_store.open_polls() + (
+                self._bot.poll_store.closed_polls_since(
+                    datetime.now(UTC) - timedelta(days=RECENTLY_ENDED_DAYS)
+                )
+            )
         except SQLAlchemyError as error:
             LOGGER.error(
                 "Could not list open polls for autocomplete; error_type=%s",
@@ -425,7 +436,7 @@ class PollCommands(app_commands.Group):
             )
             if len(choices) >= POLL_AUTOCOMPLETE_LIMIT:
                 break
-        LOGGER.debug("Returning open poll autocomplete choices; choices=%s", len(choices))
+        LOGGER.debug("Returning poll autocomplete choices; choices=%s", len(choices))
         return choices
 
     @app_commands.command(
