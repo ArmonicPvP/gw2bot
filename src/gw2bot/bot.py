@@ -41,6 +41,7 @@ from gw2bot.help import HelpPageButton, create_help_command
 from gw2bot.gw2.guild_members import GuildMemberCache, TrialMemberReportEntry
 from gw2bot.gw2.api import Gw2ApiClient
 from gw2bot.notifications.poll_status import PollStatusTracker
+from gw2bot.polls import PollCommands, PollStore, PollVoteSelect
 from gw2bot.profit.commands import ProfitCommands
 from gw2bot.profit.service import ProfitService
 from gw2bot.profit.store import ProfitStore
@@ -184,6 +185,7 @@ class Gw2Bot(discord.Client):
         self._poll_status = PollStatusTracker(self._secrets)
         self._raffle_store = RaffleStore(config.raffle_db_path, config.gw2_guild_id)
         self._event_store = EventStore(config.raffle_db_path)
+        self._poll_store = PollStore(config.raffle_db_path)
         # WEB_ENABLED is bootstrap-only, so turning the calendar on or off is
         # a restart rather than a settings change: the events already posted
         # are reconciled here as well as on a live change, or their calendar
@@ -216,6 +218,7 @@ class Gw2Bot(discord.Client):
         self.tree.add_command(RosterCommands(self))
         self.tree.add_command(GoldCommands(self))
         self.tree.add_command(ProfitCommands(self))
+        self.tree.add_command(PollCommands(self))
         self.tree.add_command(self._create_check_command())
         self.tree.add_command(self._create_track_command())
         self.tree.add_command(self._create_pending_command())
@@ -241,6 +244,9 @@ class Gw2Bot(discord.Client):
         # The /help page arrows rebuild the clicker's pages on each press, so
         # they too keep working for as long as the reply is on screen.
         self.add_dynamic_items(HelpPageButton)
+        # A poll's dropdown has to keep taking votes until /poll end, however
+        # long that is and however many restarts fall in between.
+        self.add_dynamic_items(PollVoteSelect)
 
     async def setup_hook(self) -> None:
         LOGGER.debug("Initializing HTTP session and GW2 API client")
@@ -670,6 +676,7 @@ class Gw2Bot(discord.Client):
             await self._session.close()
         self._raffle_store.close()
         self._event_store.close()
+        self._poll_store.close()
         self._profit_store.close()
         self._settings_store.close()
         await super().close()
@@ -1128,6 +1135,10 @@ class Gw2Bot(discord.Client):
     @property
     def raffle_store(self) -> RaffleStore:
         return self._raffle_store
+
+    @property
+    def poll_store(self) -> PollStore:
+        return self._poll_store
 
     @property
     def event_timezone(self) -> ZoneInfo:

@@ -188,6 +188,7 @@ class TestVisibleCommands:
             "/check",
             "/track",
             "/pending",
+            "/poll",
         ):
             assert hidden not in text
 
@@ -236,6 +237,8 @@ class TestVisibleCommands:
         assert "`/gold import`" in text
         assert "`/roster import`" in text
         assert "`/settings list`" in text
+        assert "`/poll create`" in text
+        assert "`/poll end poll:<number>`" in text
 
     def test_the_draw_role_sees_draw_and_removetickets(
         self,
