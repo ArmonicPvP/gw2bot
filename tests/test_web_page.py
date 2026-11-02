@@ -1418,6 +1418,26 @@ class TestDashboardChartHover:
         assert "if (text !== undefined) { node.textContent = text; }" in PAGE_JS
         assert "cell.textContent = read(row);" in DASHBOARD_JS
 
+    def test_every_chart_tucks_its_outermost_time_labels(self) -> None:
+        # Centred on the plot's edges, the first and last labels hang half
+        # off the chart and the browser clips them.
+        for page in self.PAGES:
+            own = page.replace(DASHBOARD_JS, "")
+            assert own.count("drawTimeAxis(canvas, true);") == 1
+            assert "drawTimeAxis(canvas, false)" not in own
+
+    def test_every_numeric_heading_sits_over_its_figures(self) -> None:
+        # A heading takes its column's class unless the column names a head
+        # of its own, and only the account column and the feast's User do.
+        assert "table.data-table th.num, table.data-table td.num {" in (
+            CHART_PAGE_STYLE
+        )
+        for page in self.PAGES:
+            plain = re.findall(r'head: null,\n\s*className: "(\w+)",', page)
+            assert len(plain) == page.count("head: null,")
+            assert "num" not in plain
+        assert 'heading: "Members",\n      className: "num",' in ROSTER_PAGE
+
     def test_every_table_is_built_by_the_shared_pager(self) -> None:
         # The Prev and Next buttons are written once, in renderPager.
         assert DASHBOARD_JS.count('el("button", null, "Prev")') == 1
@@ -2309,6 +2329,22 @@ class TestFoodDailyCharts:
             'empty: "No feasts were used in this period.",'
         ) == 5
 
+    def test_the_daily_charts_tuck_their_outermost_day_labels(self) -> None:
+        # They label real days rather than calling drawTimeAxis, so they
+        # set the same classes themselves. A window of one day puts its
+        # only label mid-plot, where it stays centred.
+        loop = FOOD_PAGE.split(
+            "var ticks = Math.min(m.ticks, grid.length - 1);", 1
+        )[1].split("canvas.appendChild(xLabel);", 1)[0]
+        assert (
+            'if (ticks > 0 && tick === 0) { xLabel.classList.add("first"); }'
+            in loop
+        )
+        assert (
+            'if (ticks > 0 && tick === ticks) '
+            '{ xLabel.classList.add("last"); }' in loop
+        )
+
 
 class TestFoodAdditionsSection:
     """The Additions table and the cost editor an officer fills it in with."""
@@ -2330,10 +2366,14 @@ class TestFoodAdditionsSection:
             ("User", ""), ("", "Added"), ("", "Remaining"), ("Cost", ""),
             ("Edit", ""),
         ]
-        # Only the Edit heading takes its column's class.
-        assert body.count("head: null,") == 2
-        assert "      head: null,\n      className: \"num\"," in (
-            FOOD_PAGE.split("function countColumn(heading, key) {", 1)[1]
+        # Every heading but User's takes its column's class, so the counts
+        # and the cost are headed at the right, over their figures.
+        assert body.count("head: null,") == 1
+        assert 'heading: "User",\n      head: null,' in body
+        assert 'heading: "Cost",\n      className: "num",' in body
+        count = FOOD_PAGE.split("function countColumn(heading, key) {", 1)[1]
+        assert "      heading: heading,\n      className: \"num\"," in (
+            count.split("\n  }", 1)[0]
         )
         assert 'heading: "Edit",\n      className: "actions",' in body
 
@@ -2413,6 +2453,18 @@ class TestFoodAdditionsSection:
     def test_a_reloaded_window_closes_the_dialog_over_it(self) -> None:
         # The rows the dialog was opened over have just been replaced.
         assert "closeCostDialog();\n        render();" in FOOD_PAGE
+
+    def test_a_late_close_event_leaves_a_reopened_dialog_alone(self) -> None:
+        # The close event is queued, so it can land after the dialog has been
+        # opened again. Clearing the edit then would leave Save returning
+        # early with nothing to save, so only a dialog still shut clears it.
+        listener = FOOD_PAGE.split(
+            'costDialog.addEventListener("close", function () {', 1
+        )[1].split("\n  });", 1)[0]
+        assert listener.strip() == (
+            "if (!costDialog.open) { state.editing = null; }"
+        )
+        assert "if (!editing) { return; }" in FOOD_PAGE
 
 
 class TestCustomRangePicker:

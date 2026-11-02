@@ -333,8 +333,7 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     resetChart();
     var canvas = chartCanvas("Stock on hand over time, one line per feast");
     drawGrid(canvas, state.scale, scaleY, String);
-    // This chart has always centred its outermost time labels.
-    drawTimeAxis(canvas, false);
+    drawTimeAxis(canvas, true);
 
     // One polyline plus point markers per feast, each in its own colour. Every
     // recorded sample is drawn; the series is never downsampled. Each plotted
@@ -798,6 +797,11 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
         var xLabel = svg("text", {
           "class": "x-label", x: x(grid[at]), y: m.top + innerH + 18
         });
+        // The outermost days sit on the plot's edges, so they are set
+        // inwards as the stock chart's are; a lone day sits mid-plot and
+        // stays centred.
+        if (ticks > 0 && tick === 0) { xLabel.classList.add("first"); }
+        if (ticks > 0 && tick === ticks) { xLabel.classList.add("last"); }
         xLabel.textContent = formatDay(grid[at]);
         canvas.appendChild(xLabel);
       }
@@ -875,12 +879,11 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     });
   }
 
-  // A count read off the row as it is. Its heading stays at the left of the
-  // column, as every heading in these tables but Edit has.
+  // A count read off the row as it is. Its heading takes the column's class,
+  // so it sits at the right over the figures under it.
   function countColumn(heading, key) {
     return {
       heading: heading,
-      head: null,
       className: "num",
       fill: textFill(function (row) { return String(row[key]); })
     };
@@ -972,7 +975,6 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     countColumn("Remaining", "remaining"),
     {
       heading: "Cost",
-      head: null,
       className: "num",
       fill: textFill(function (row) {
         return typeof row.cost === "number" ? formatCoins(row.cost) : "\u2014";
@@ -1129,8 +1131,12 @@ table.additions tr.unpriced td { background: rgba(231, 76, 60, 0.22); }
     closeCostDialog();
   });
   // Escape closes a dialog itself; this keeps the page's own record of what
-  // is open in step with it.
-  costDialog.addEventListener("close", function () { state.editing = null; });
+  // is open in step with it. The close event is queued, so it can arrive
+  // after the dialog has been opened again, and clearing the record then
+  // would leave Save with nothing to save.
+  costDialog.addEventListener("close", function () {
+    if (!costDialog.open) { state.editing = null; }
+  });
   costDialog.addEventListener("click", function (event) {
     // A modal dialog's backdrop is part of the dialog element, so a click
     // that lands on the element itself landed outside the form.
