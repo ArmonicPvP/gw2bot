@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import discord
 
 from gw2bot.polls.models import Poll, PollResults, option_display
@@ -9,6 +11,7 @@ from gw2bot.polls.models import Poll, PollResults, option_display
 OPEN_COLOR = discord.Color.blurple()
 CLOSED_COLOR = discord.Color.dark_grey()
 RESULT_BAR_WIDTH = 12
+OPEN_FOOTER = "Pick from the menu below. Results are shown when the poll ends."
 
 
 def _votes(count: int) -> str:
@@ -19,6 +22,12 @@ def _with_description(poll: Poll, body: str) -> str:
     if not poll.description:
         return body
     return f"{poll.description}\n\n{body}"
+
+
+def discord_timestamp(value: datetime) -> str:
+    """A time every member sees in their own timezone, with how far away it is."""
+    seconds = int(value.timestamp())
+    return f"<t:{seconds}:F> (<t:{seconds}:R>)"
 
 
 def open_poll_embed(poll: Poll, voter_count: int) -> discord.Embed:
@@ -33,24 +42,39 @@ def open_poll_embed(poll: Poll, voter_count: int) -> discord.Embed:
     )
     embed = discord.Embed(
         title=poll.name,
-        description=_with_description(poll, options),
+        description=poll.description or None,
         color=OPEN_COLOR,
-        timestamp=poll.created_at,
     )
+    embed.add_field(name="Options", value=options, inline=False)
+    if poll.ends_at is not None:
+        embed.add_field(name="Ends", value=discord_timestamp(poll.ends_at))
     embed.add_field(name="Votes cast", value=str(voter_count))
-    embed.set_footer(
-        text=(
-            f"Anonymous poll #{poll.poll_id} · Pick from the menu below. "
-            "Nobody can see what you chose, and results are shown when the "
-            "poll ends."
-        )
-    )
+    embed.set_footer(text=OPEN_FOOTER)
     return embed
 
 
-def _bar(count: int, total: int) -> str:
-    filled = round(RESULT_BAR_WIDTH * count / total) if total else 0
-    return "█" * filled + "░" * (RESULT_BAR_WIDTH - filled)
+# The partial blocks from one eighth to seven eighths of a cell; index 0 is
+# the empty remainder of a bar that ends on a whole cell.
+PARTIAL_BLOCKS = ("", "▏", "▎", "▍", "▌", "▋", "▊", "▉")
+FULL_BLOCK = "█"
+# A no-break space rather than a plain one: Discord can collapse a run of
+# ordinary spaces into one, which would shorten every bar that is not full
+# and leave them different lengths.
+BAR_PADDING = "\u00a0"
+
+
+def result_bar(count: int, total: int) -> str:
+    """An option's share as a bar ``RESULT_BAR_WIDTH`` cells wide.
+
+    Measured in eighths of a cell, so a share that falls between whole cells
+    ends on the matching partial block. The rest of the width is padding, so
+    every bar is exactly ``RESULT_BAR_WIDTH`` characters and the text after
+    each one starts in the same column.
+    """
+    eighths = round(RESULT_BAR_WIDTH * 8 * count / total) if total else 0
+    full, remainder = divmod(eighths, 8)
+    bar = FULL_BLOCK * full + PARTIAL_BLOCKS[remainder]
+    return bar.ljust(RESULT_BAR_WIDTH, BAR_PADDING)
 
 
 def results_lines(results: PollResults) -> str:
@@ -61,7 +85,7 @@ def results_lines(results: PollResults) -> str:
         share = round(100 * count / total) if total else 0
         lines.append(
             f"{option_display(results.poll.options, position)}\n"
-            f"`{_bar(count, total)}` **{_votes(count)}** ({share}%)"
+            f"`{result_bar(count, total)}` **{_votes(count)}** ({share}%)"
         )
     leaders = results.leaders
     if not leaders:

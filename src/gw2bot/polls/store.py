@@ -49,6 +49,7 @@ class PollStore:
         options: Sequence[str],
         channel_id: int,
         created_by: int,
+        ends_at: datetime | None = None,
         now: datetime | None = None,
     ) -> Poll:
         created_at = now if now is not None else datetime.now(UTC)
@@ -60,6 +61,7 @@ class PollStore:
                 message_id=None,
                 created_by=created_by,
                 created_at=_serialize_time(created_at),
+                ends_at=None if ends_at is None else _serialize_time(ends_at),
             )
             session.add(record)
             session.flush()
@@ -73,9 +75,10 @@ class PollStore:
             )
             poll_id = record.poll_id
         LOGGER.debug(
-            "Created poll; poll_id=%s options=%s",
+            "Created poll; poll_id=%s options=%s has_end_time=%s",
             poll_id,
             len(options),
+            ends_at is not None,
         )
         poll = self.get_poll(poll_id)
         assert poll is not None
@@ -119,6 +122,40 @@ class PollStore:
             ).all()
             return [_poll_from_record(session, record) for record in records]
 
+    def closed_polls_since(self, since: datetime) -> list[Poll]:
+        """Polls ended at or after ``since``, most recently ended first."""
+        with self._sessions() as session:
+            records = session.scalars(
+                select(PollRecord).where(PollRecord.closed_at.is_not(None))
+            ).all()
+            polls = [_poll_from_record(session, record) for record in records]
+        recent = [
+            poll
+            for poll in polls
+            if poll.closed_at is not None and poll.closed_at >= since
+        ]
+        return sorted(
+            recent,
+            key=lambda poll: poll.closed_at or since,
+            reverse=True,
+        )
+
+    def due_polls(self, now: datetime) -> list[Poll]:
+        """Open polls whose end time has come, oldest first."""
+        with self._sessions() as session:
+            records = session.scalars(
+                select(PollRecord)
+                .where(
+                    PollRecord.closed_at.is_(None),
+                    PollRecord.ends_at.is_not(None),
+                )
+                .order_by(PollRecord.poll_id)
+            ).all()
+            polls = [_poll_from_record(session, record) for record in records]
+        # Compared as datetimes rather than in SQL: the stored text is only
+        # ordered like the times it holds while every value has the same shape.
+        return [poll for poll in polls if poll.is_due(now)]
+
     def voter_count(self, poll_id: int) -> int:
         with self._sessions() as session:
             return session.scalar(
@@ -138,15 +175,25 @@ class PollStore:
         poll_id: int,
         discord_user_id: int,
         position: int,
+        now: datetime | None = None,
     ) -> VoteOutcome:
         """Store a confirmed vote, replacing the member's earlier one.
 
         The poll is re-read inside the same transaction, so a confirmation
-        left open while the poll was ended is refused rather than counted.
+        left open while the poll was ended, or past its end time, is refused
+        rather than counted.
         """
+        current_time = now if now is not None else datetime.now(UTC)
         with self._sessions.begin() as session:
             poll = session.get(PollRecord, poll_id)
-            if poll is None or poll.closed_at is not None:
+            if (
+                poll is None
+                or poll.closed_at is not None
+                or (
+                    poll.ends_at is not None
+                    and _parse_time(poll.ends_at) <= current_time
+                )
+            ):
                 outcome = VoteOutcome.CLOSED
             elif session.get(PollOptionRecord, (poll_id, position)) is None:
                 raise ValueError(f"poll {poll_id} has no option {position}")
@@ -179,13 +226,14 @@ class PollStore:
     def close_poll(
         self,
         poll_id: int,
-        closed_by: int,
+        closed_by: int | None,
         now: datetime | None = None,
     ) -> PollResults | None:
         """End a poll, freeze its tallies, and forget who voted for what.
 
-        Returns None when the poll is gone or was already ended, which only
-        happens when two officers end the same poll at once.
+        ``closed_by`` is None when the poll reached its end time. Returns None
+        when the poll is gone or was already ended, which only happens when
+        two closes - two officers, or an officer and the end time - collide.
         """
         closed_at = now if now is not None else datetime.now(UTC)
         with self._sessions.begin() as session:
@@ -266,4 +314,5 @@ def _poll_from_record(session: Session, record: PollRecord) -> Poll:
             None if record.closed_at is None else _parse_time(record.closed_at)
         ),
         closed_by=record.closed_by,
+        ends_at=None if record.ends_at is None else _parse_time(record.ends_at),
     )

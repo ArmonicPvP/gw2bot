@@ -373,6 +373,7 @@ class TestBotWebServer:
             _poll_raffle_contributions=AsyncMock(),
             _poll_guild_member_count_topic=AsyncMock(),
             _poll_event_updates=AsyncMock(),
+            _poll_scheduled_poll_closings=AsyncMock(),
         )
 
     @patch("gw2bot.bot.GuildMemberCache")
@@ -463,6 +464,7 @@ class TestOptionalConfiguration:
     ALWAYS_RUNNING = {
         "gw2-raffle-contribution-poller",
         "gw2-event-scheduler",
+        "gw2-poll-closer",
         # Members bring their own Trading Post keys, so this one does not
         # depend on the guild-wide GW2 settings.
         "gw2-profit-sync",
@@ -497,6 +499,7 @@ class TestOptionalConfiguration:
             _poll_raffle_contributions=AsyncMock(),
             _poll_guild_member_count_topic=AsyncMock(),
             _poll_event_updates=AsyncMock(),
+            _poll_scheduled_poll_closings=AsyncMock(),
         )
 
     async def _started_poll_task_names(self, config: Config) -> tuple[set[str], Gw2Bot]:
@@ -867,6 +870,7 @@ class TestSettingsHotApply:
     ALWAYS_RUNNING = {
         "gw2-raffle-contribution-poller",
         "gw2-event-scheduler",
+        "gw2-poll-closer",
         "gw2-profit-sync",
     }
     GW2_POLLERS = {
@@ -895,6 +899,7 @@ class TestSettingsHotApply:
             _poll_raffle_contributions=AsyncMock(),
             _poll_guild_member_count_topic=AsyncMock(),
             _poll_event_updates=AsyncMock(),
+            _poll_scheduled_poll_closings=AsyncMock(),
         )
 
     async def _started(self, config: Config, **stored: str) -> Gw2Bot:

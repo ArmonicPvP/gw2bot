@@ -79,7 +79,7 @@ anyone with `Administrator` (so a bad role value can never lock everyone out).
 | `/settings gw2_poll_interval_seconds` | `300` | Guild Storage and stash polling interval (minimum `30`). |
 | `/settings guild_log_poll_interval_seconds` | `60` | Guild log polling interval (minimum `30`). |
 | `/settings gw2_guild_member_cache_seconds` | `900` | Guild member cache lifetime. |
-| `/settings timezone` | `UTC` | IANA timezone for typed event times, thread names and weekly repeat days. |
+| `/settings timezone` | `UTC` | IANA timezone for typed event times and poll end times, thread names and weekly repeat days. |
 | `/settings web_base_url` | unset | Public base URL of the web site, such as `https://gw2bot.example.com`. Must be a host root, not a path. |
 | `/settings discord_oauth_client_id` | unset | OAuth2 client ID of the bot's Discord application. |
 | `/settings discord_oauth_client_secret` | unset | OAuth2 client secret. **Encrypted.** |
@@ -390,8 +390,8 @@ Officers can post an anonymous poll in any text channel or thread.
 
 | Command | Role | What it does |
 | --- | --- | --- |
-| `/poll create` | `raffle_officer` | Opens a form for the poll's name, its options separated by commas (2 to 9), and an optional description, then posts the poll in the channel you ran it in. |
-| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. The poll's id is in the post's footer. Run it again on a poll that has ended to put the results back on its post. |
+| `/poll create` | `raffle_officer` | Opens a form for the poll's name, its options separated by commas (2 to 9), an optional description and an optional end time, then posts the poll in the channel you ran it in. |
+| `/poll end poll:<poll>` | `raffle_officer` | Ends a poll, shows the final results on its post, and replies to the post to announce the winner. It suggests open polls as you type, and polls that ended in the last 7 days marked "(ended)": run it on one of those to put its results back on its post if they did not get there. |
 
 - Members vote by picking an option from the post's menu, then confirming it
   in a reply only they can see. Picking another option and confirming replaces
@@ -402,8 +402,13 @@ Officers can post an anonymous poll in any text channel or thread.
 - Nobody can see who voted for what. The bot keeps each member's vote only
   while the poll is open, so that a new pick can replace it, and deletes it
   when the poll ends, keeping only the totals.
-- A poll stays open until `/poll end`, including across restarts. Several polls
-  can be open at once.
+- The end time is typed like an event's start time, `MM.dd.yyyy HH:mm`, in
+  the `/settings timezone` timezone. The post shows it under **Ends** in each member's own
+  time. A poll with an end time closes within 30 seconds of it, and its
+  results are posted and announced as if an officer had run `/poll end`.
+  Votes are refused from the end time onwards.
+- A poll without an end time stays open until `/poll end`. Either way it
+  survives restarts, and several polls can be open at once.
 
 ## Web Site
 
