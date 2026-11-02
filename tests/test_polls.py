@@ -24,7 +24,12 @@ from gw2bot.polls.commands import (
     PollRetryView,
 )
 from gw2bot.polls.closing import close_due_polls
-from gw2bot.polls.formatting import OPEN_FOOTER, closed_poll_embed, open_poll_embed
+from gw2bot.polls.formatting import (
+    OPEN_FOOTER,
+    closed_poll_embed,
+    open_poll_embed,
+    result_bar,
+)
 from gw2bot.polls.models import (
     MAX_POLL_OPTIONS,
     POLL_OPTION_MAX_LENGTH,
@@ -426,6 +431,44 @@ class TestFormatting:
         assert [(field.name, field.value) for field in embed.fields] == [
             ("Votes cast", "3")
         ]
+
+    @pytest.mark.parametrize(
+        ("count", "total", "bar"),
+        [
+            (3, 4, "█████████   "),
+            (1, 4, "███         "),
+            (1, 3, "████        "),
+            # 12 x 2/7 = 3.43 cells: three full blocks and three eighths.
+            (2, 7, "███▍        "),
+            # 12 x 1/9 = 1.33 cells: one full block and three eighths.
+            (1, 9, "█▍          "),
+            # 12 / 100 = 0.12 cells, which rounds to one eighth.
+            (1, 100, "▏           "),
+            (5, 5, "████████████"),
+            (0, 4, "            "),
+            (0, 0, "            "),
+        ],
+    )
+    def test_result_bars_use_partial_blocks_and_pad_with_spaces(
+        self,
+        count: int,
+        total: int,
+        bar: str,
+    ) -> None:
+        assert result_bar(count, total) == bar
+
+    def test_the_closed_post_shows_the_bars(self, store: PollStore) -> None:
+        poll = make_poll(store)
+        for voter, position in ((1, 0), (2, 0), (3, 0), (4, 2)):
+            store.record_vote(poll.poll_id, voter, position)
+        results = store.close_poll(poll.poll_id, OFFICER_ID)
+        assert results is not None
+
+        description = closed_poll_embed(results).description or ""
+
+        assert "1️⃣ Monday\n`█████████   ` **3 votes** (75%)" in description
+        assert "3️⃣ Friday\n`███         ` **1 vote** (25%)" in description
+        assert "░" not in description
 
     def test_a_tie_names_every_leader(self, store: PollStore) -> None:
         poll = make_poll(store)

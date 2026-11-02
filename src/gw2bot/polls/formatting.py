@@ -53,9 +53,23 @@ def open_poll_embed(poll: Poll, voter_count: int) -> discord.Embed:
     return embed
 
 
-def _bar(count: int, total: int) -> str:
-    filled = round(RESULT_BAR_WIDTH * count / total) if total else 0
-    return "█" * filled + "░" * (RESULT_BAR_WIDTH - filled)
+# The partial blocks from one eighth to seven eighths of a cell; index 0 is
+# the empty remainder of a bar that ends on a whole cell.
+PARTIAL_BLOCKS = ("", "▏", "▎", "▍", "▌", "▋", "▊", "▉")
+FULL_BLOCK = "█"
+
+
+def result_bar(count: int, total: int) -> str:
+    """An option's share as a bar ``RESULT_BAR_WIDTH`` cells wide.
+
+    Measured in eighths of a cell, so a share that falls between whole cells
+    ends on the matching partial block. The rest of the width is spaces,
+    which keeps every option's text after its bar lined up in the code span.
+    """
+    eighths = round(RESULT_BAR_WIDTH * 8 * count / total) if total else 0
+    full, remainder = divmod(eighths, 8)
+    bar = FULL_BLOCK * full + PARTIAL_BLOCKS[remainder]
+    return bar.ljust(RESULT_BAR_WIDTH)
 
 
 def results_lines(results: PollResults) -> str:
@@ -66,7 +80,7 @@ def results_lines(results: PollResults) -> str:
         share = round(100 * count / total) if total else 0
         lines.append(
             f"{option_display(results.poll.options, position)}\n"
-            f"`{_bar(count, total)}` **{_votes(count)}** ({share}%)"
+            f"`{result_bar(count, total)}` **{_votes(count)}** ({share}%)"
         )
     leaders = results.leaders
     if not leaders:
