@@ -61,6 +61,10 @@ FULL_BLOCK = "█"
 # ordinary spaces into one, which would shorten every bar that is not full
 # and leave them different lengths.
 BAR_PADDING = "\u00a0"
+# What an empty bar starts with. Discord squashes a code span holding nothing
+# but no-break spaces, so a bar with no votes would come out narrower than
+# the rest; a plain space in front keeps it at full width.
+EMPTY_BAR_START = " "
 
 
 def result_bar(count: int, total: int) -> str:
@@ -74,6 +78,8 @@ def result_bar(count: int, total: int) -> str:
     eighths = round(RESULT_BAR_WIDTH * 8 * count / total) if total else 0
     full, remainder = divmod(eighths, 8)
     bar = FULL_BLOCK * full + PARTIAL_BLOCKS[remainder]
+    if not bar:
+        bar = EMPTY_BAR_START
     return bar.ljust(RESULT_BAR_WIDTH, BAR_PADDING)
 
 

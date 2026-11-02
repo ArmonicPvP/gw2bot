@@ -446,8 +446,8 @@ class TestFormatting:
             # 12 / 100 = 0.12 cells, which rounds to one eighth.
             (1, 100, "▏\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
             (5, 5, "████████████"),
-            (0, 4, "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
-            (0, 0, "\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0"),
+            (0, 4, " " + "\u00a0" * 11),
+            (0, 0, " " + "\u00a0" * 11),
         ],
     )
     def test_result_bars_use_partial_blocks_and_pad_the_rest(
@@ -471,6 +471,15 @@ class TestFormatting:
         assert f"1️⃣ Monday\n`█████████{pad * 3}` **3 votes** (75%)" in description
         assert f"3️⃣ Friday\n`███{pad * 9}` **1 vote** (25%)" in description
         assert "░" not in description
+
+    def test_an_empty_bar_is_not_only_no_break_spaces(self) -> None:
+        # Discord squashes a code span made only of no-break spaces, which made
+        # a bar with no votes narrower than the others.
+        bar = result_bar(0, 3)
+
+        assert bar[0] == " "
+        assert set(bar[1:]) == {"\u00a0"}
+        assert len(bar) == RESULT_BAR_WIDTH
 
     def test_every_bar_is_the_same_width(self) -> None:
         # The text after each bar only lines up if no bar is longer or shorter
