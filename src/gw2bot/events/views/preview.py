@@ -24,6 +24,7 @@ from gw2bot.events.formatting import (
     details_preview_embed,
     edit_confirm_embed,
     event_embed,
+    format_series_end,
     roster_edit_embed,
 )
 from gw2bot.events.models import (
@@ -153,7 +154,15 @@ def build_event_preview(
         )
         confirmation = confirm_embed()
         view = EventConfirmView(bot, draft)
-    repeat_text = describe_repeat(draft.repeat_frequency, draft.repeat_days)
+    repeat_text = describe_repeat(
+        draft.repeat_frequency,
+        draft.repeat_days,
+        (
+            format_series_end(draft.repeat_until, bot.event_timezone)
+            if draft.repeat_until is not None
+            else None
+        ),
+    )
     if (
         draft.repeat_frequency is not RepeatFrequency.NONE
         and draft.delete_previous_on_repeat

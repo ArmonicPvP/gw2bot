@@ -352,6 +352,23 @@ hour before, 15 minutes before, and at the start.
 **Repeating events** run daily, weekly or monthly. Each new run is posted when
 the previous one ends, and the previous post can be deleted automatically.
 
+**Ending a repeating event.** A repeating event runs until it is deleted unless
+it is given an end, typed after a comma in the start box:
+
+| Typed | Repeats |
+| --- | --- |
+| `04.11.2026 20:00` | With no end. |
+| `04.11.2026 20:00,04.13.2026` | Through April 13. A date on its own lasts until 23:59, so a run that day still happens. |
+| `04.11.2026 20:00,04.13.2026 18:00` | Until 18:00 on April 13. A run starting at or before then happens; a later one does not. |
+
+The end uses the `/settings timezone` timezone and cannot fall before the
+start. An event that does not repeat refuses one, since how long a run lasts is
+the duration. The preview shows the end, and `/event edit` shows it after the
+start so it can be moved or removed; turning the repeat off clears it. After
+the last run, no more are posted and the calendar stops showing the series.
+Cancelling the last run deletes the event, as it does for a one-off event, and
+that run does not offer automatic sign-up or remembered roles.
+
 Members who leave the Discord server are removed from rosters automatically.
 
 **Restoring.** `/event restore` undoes the last deletion or edit of an event,

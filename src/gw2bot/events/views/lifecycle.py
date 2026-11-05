@@ -512,6 +512,7 @@ async def apply_event_edit(
             requirements=edited.requirements,
             mentee_enabled=edited.mentee_enabled,
             max_participants=edited.max_participants,
+            repeat_until=edited.repeat_until,
             remember_previous=not undoing,
             consume_snapshot=undoing,
         )
@@ -698,19 +699,20 @@ class EventDeleteConfirmView(discord.ui.View):
         bot: Gw2Bot,
         event: Event,
         *,
-        only_while_one_off: bool = False,
+        only_while_final_run: bool = False,
     ):
         super().__init__(timeout=FLOW_TIMEOUT_SECONDS)
         self._bot = bot
         self._event = event
         self._deleting = False
-        # Set when `/event cancel` opened this confirmation because the event
-        # does not repeat, which is the only reason cancelling one run means
-        # deleting the whole event. If an edit gives the event a repeat while
-        # this sits open, that reason is gone and the deletion has to be
-        # refused: `/event cancel` never removes more than the next run of a
-        # repeating event.
-        self._only_while_one_off = only_while_one_off
+        # Set when `/event cancel` opened this confirmation because nothing
+        # comes after the run being called off - the event does not repeat, or
+        # its repeat ends with that run - which is the only reason cancelling
+        # one run means deleting the whole event. If an edit gives the event
+        # more runs while this sits open, that reason is gone and the deletion
+        # has to be refused: `/event cancel` never removes more than the next
+        # run of a series that goes on.
+        self._only_while_final_run = only_while_final_run
 
     @discord.ui.button(label="Delete event", style=discord.ButtonStyle.danger)
     async def delete(
@@ -793,16 +795,20 @@ class EventDeleteConfirmView(discord.ui.View):
             )
             return
         event = stored if stored is not None else self._event
-        if self._only_while_one_off:
-            from gw2bot.events.posting import leading_occurrence
+        if self._only_while_final_run:
+            from gw2bot.events.posting import (
+                is_last_run_of_series,
+                leading_occurrence,
+            )
 
-            still_upcoming = stored is not None and (
+            leading = (
                 leading_occurrence(self._bot, stored, datetime.now(UTC))
-                is not None
+                if stored is not None
+                else None
             )
             refusal: str | None = None
             reason = ""
-            if stored is not None and not still_upcoming:
+            if stored is not None and leading is None:
                 # The run ended while this confirmation sat open. `/event
                 # cancel` calls off runs still to come, so deleting now would
                 # retire an event whose runs are all behind it - through a
@@ -814,14 +820,16 @@ class EventDeleteConfirmView(discord.ui.View):
                 )
             elif (
                 stored is not None
+                and leading is not None
                 and stored.repeat_frequency is not RepeatFrequency.NONE
+                and not is_last_run_of_series(self._bot, stored, leading)
             ):
                 reason = "an event that now repeats"
                 refusal = (
-                    "That event repeats now, so cancelling it would only call "
-                    "off its next run rather than delete it. Run "
-                    "`/event cancel` again to do that, or `/event delete` to "
-                    "remove the whole event."
+                    "That event repeats now, with runs after this one, so "
+                    "cancelling it would only call off its next run rather "
+                    "than delete it. Run `/event cancel` again to do that, or "
+                    "`/event delete` to remove the whole event."
                 )
             if refusal is not None:
                 self._deleting = False
@@ -977,7 +985,10 @@ class EventCancelConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[EventCancelConfirmView],
     ) -> None:
-        from gw2bot.events.posting import cancel_occurrence
+        from gw2bot.events.posting import (
+            cancel_occurrence,
+            is_last_run_of_series,
+        )
 
         # The confirmation can sit open for minutes; recheck the role before
         # the irreversible cancel, mirroring the delete/edit/post paths.
@@ -1122,6 +1133,28 @@ class EventCancelConfirmView(discord.ui.View):
                 "That event no longer repeats, so this occurrence is all "
                 "there is of it. Run `/event cancel` again to delete the "
                 "event instead.",
+                workflow="event cancel refusal",
+                event_id=self._event.event_id,
+            )
+            return
+        if is_last_run_of_series(self._bot, event, occurrence):
+            # An edit pulled the series' end in to this run while the
+            # confirmation sat open. Cancelling would seed no successor and
+            # leave the event with nothing still to come, which `/event
+            # cancel` now offers to handle as a deletion.
+            self._cancelling = False
+            LOGGER.debug(
+                "Event cancel rejected for the last run of a series; "
+                "user_id=%s event_id=%s occurrence_id=%s",
+                interaction.user.id,
+                event.event_id,
+                occurrence.occurrence_id,
+            )
+            await _send_flow_result(
+                interaction,
+                "That event's repeat now ends with this occurrence, so "
+                "there is no next one for it to continue with. Run "
+                "`/event cancel` again to delete the event instead.",
                 workflow="event cancel refusal",
                 event_id=self._event.event_id,
             )

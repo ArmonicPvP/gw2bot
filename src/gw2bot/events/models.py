@@ -272,6 +272,10 @@ class Event:
     # existed reads as. A role-based squad is fixed by its composition, so
     # only a category with no roles ever honours one.
     max_participants: int | None = None
+    # The last moment a repeating series may start a run, in UTC. A run that
+    # starts at exactly this moment still happens; None repeats forever. Always
+    # None for an event that does not repeat.
+    repeat_until: datetime | None = None
 
     @property
     def capacity(self) -> CategoryCapacity:
@@ -279,6 +283,16 @@ class Event:
         if self.max_participants is None or capacity.has_roles:
             return capacity
         return replace(capacity, total=self.max_participants or None)
+
+    def repeats_through(self, start: datetime) -> bool:
+        """Whether the series goes on to run an occurrence starting at start.
+
+        Only asked of a run after the first: the first is the event itself, and
+        exists whatever the end says.
+        """
+        if self.repeat_frequency is RepeatFrequency.NONE:
+            return False
+        return self.repeat_until is None or start <= self.repeat_until
 
 
 @dataclass(frozen=True, slots=True)

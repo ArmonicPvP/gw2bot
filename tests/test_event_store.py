@@ -145,6 +145,44 @@ def test_migration_adds_requirements_to_existing_db(
         store.close()
 
 
+def test_migration_adds_repeat_until_to_existing_db(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "legacy.db")
+    engine = create_database_engine(db_path)
+    # Build the current schema, then simulate a database created before a
+    # series could end by dropping the column and inserting a legacy row.
+    initialize_database(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE gw2_events DROP COLUMN repeat_until")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO gw2_events (category, title, description, "
+                "channel_id, leader_discord_id, start_time, duration_minutes, "
+                "repeat_frequency, repeat_days, created_at, cancelled, "
+                "delete_previous_on_repeat, ping_role_ids, requirements) "
+                "VALUES ('Fractal', 't', 'd', 1, 2, "
+                "'2027-01-30T20:00:00+00:00', 90, 'daily', '', "
+                "'2027-01-01T00:00:00+00:00', 0, 0, '', '')"
+            )
+        )
+
+    added = initialize_database(engine)
+    engine.dispose()
+
+    assert "repeat_until" in added
+    store = EventStore(db_path)
+    try:
+        legacy = store.get_event(1)
+        assert legacy is not None
+        # A series created before the feature existed repeats forever.
+        assert legacy.repeat_until is None
+    finally:
+        store.close()
+
+
 def test_migration_adds_edit_token_columns_to_existing_db(
     tmp_path: Path,
 ) -> None:
@@ -711,6 +749,66 @@ class TestEventStoreEvents:
         reloaded = store.get_event(event.event_id)
         assert reloaded is not None
         assert reloaded.requirements == "Exotic gear"
+
+    def test_create_event_round_trips_the_series_end(
+        self,
+        store: EventStore,
+    ) -> None:
+        end = START + timedelta(days=14)
+        created = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_until=end,
+        )
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        assert loaded.repeat_until == end
+        assert loaded.repeat_until is not None
+        assert loaded.repeat_until.tzinfo == UTC
+
+    def test_a_series_has_no_end_by_default(self, store: EventStore) -> None:
+        created = create_event(store, repeat_frequency=RepeatFrequency.DAILY)
+
+        loaded = store.get_event(created.event_id)
+
+        assert loaded is not None
+        assert loaded.repeat_until is None
+
+    def test_update_event_moves_and_clears_the_series_end(
+        self,
+        store: EventStore,
+    ) -> None:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_until=START + timedelta(days=14),
+        )
+        common: dict = {
+            "event_id": event.event_id,
+            "category": event.category,
+            "title": event.title,
+            "description": event.description,
+            "channel_id": event.channel_id,
+            "leader_discord_id": event.leader_discord_id,
+            "start_time": event.start_time,
+            "duration_minutes": event.duration_minutes,
+            "repeat_frequency": event.repeat_frequency,
+            "repeat_days": event.repeat_days,
+        }
+
+        moved = store.update_event(
+            **common,
+            repeat_until=START + timedelta(days=7),
+        )
+        cleared = store.update_event(**common)
+
+        assert moved.repeat_until == START + timedelta(days=7)
+        assert cleared.repeat_until is None
+        reloaded = store.get_event(event.event_id)
+        assert reloaded is not None
+        assert reloaded.repeat_until is None
 
     def test_update_event_unknown_id_raises(self, store: EventStore) -> None:
         with pytest.raises(ValueError, match="Unknown event"):

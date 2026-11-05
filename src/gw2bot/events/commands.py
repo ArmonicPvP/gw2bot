@@ -18,7 +18,7 @@ from gw2bot.events.models import (
     SNAPSHOT_RETENTION,
     SnapshotKind,
 )
-from gw2bot.events.posting import split_event_history
+from gw2bot.events.posting import is_last_run_of_series, split_event_history
 from gw2bot.events.reminders import (
     occurrence_finished,
     reminder_participants,
@@ -427,33 +427,41 @@ class EventCommands(app_commands.Group):
                 ephemeral=True,
             )
             return
-        if event.repeat_frequency is RepeatFrequency.NONE:
-            # A one-off event has nothing after the run being called off, so
-            # cancelling it is deleting it. Hand over to the delete
+        one_off = event.repeat_frequency is RepeatFrequency.NONE
+        if one_off or is_last_run_of_series(self._bot, event, occurrence):
+            # A one-off event has nothing after the run being called off, and
+            # neither does the last run before a series' end, so cancelling
+            # either is deleting the event. Hand over to the delete
             # confirmation rather than leaving an event row behind with no
             # occurrence for the scheduler to ever post.
             LOGGER.debug(
-                "Event cancel fell back to deletion for a one-off event; "
-                "user_id=%s event_id=%s",
+                "Event cancel fell back to deletion for an event with no "
+                "runs after this one; user_id=%s event_id=%s one_off=%s",
                 interaction.user.id,
                 event_id,
+                one_off,
             )
             kept, _ = split_event_history(
                 event,
                 self._bot.event_store.get_event_occurrences(event_id),
                 datetime.now(UTC),
             )
+            reason = (
+                "does not repeat"
+                if one_off
+                else "is on its last run before its repeat ends"
+            )
             await interaction.response.send_message(
-                f"**{event.title}** (event **{event.event_id}**) does not "
-                "repeat, so cancelling it deletes the event. This removes "
-                "the run it is on: its message, any signup thread the bot "
-                "opened for it and everyone's sign-ups for it."
+                f"**{event.title}** (event **{event.event_id}**) {reason}, "
+                "so cancelling it deletes the event. This removes the run it "
+                "is on: its message, any signup thread the bot opened for it "
+                "and everyone's sign-ups for it."
                 f"{_kept_history_note(len(kept))} A forum post the event was "
                 f"posted into is kept. {RESTORE_NOTE}",
                 view=EventDeleteConfirmView(
                     self._bot,
                     event,
-                    only_while_one_off=True,
+                    only_while_final_run=True,
                 ),
                 ephemeral=True,
             )
