@@ -5,9 +5,9 @@ API, so no report data is ever interpolated into this markup.
 """
 
 from gw2bot.web.pages.shared import (
-    ACCOUNT_CONTROLS_MARKUP,
     CUSTOM_RANGE_PANEL,
     RANGE_PICKER_NAV,
+    SIGNOUT_CONTROLS,
 )
 
 # Rows per page a paginated table opens on, and the largest it will accept.
@@ -151,9 +151,8 @@ PROFIT_MARKUP = (
   <span class="spacer"></span>
   <a href="/calendar">Calendar</a>
 """
-    + ACCOUNT_CONTROLS_MARKUP
-    + """
-"""
+    + SIGNOUT_CONTROLS
+    + "\n"
     + CUSTOM_RANGE_PANEL
     + """
 </header>

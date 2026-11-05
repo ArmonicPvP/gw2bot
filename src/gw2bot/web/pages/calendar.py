@@ -7,20 +7,15 @@ with ``textContent`` on the client, never as an HTML string.
 from __future__ import annotations
 
 from gw2bot.web.pages.shared import (
-    ACCOUNT_CONTROLS_MARKUP,
     DASHBOARD_HEADER_STYLE,
+    PAGE_JS,
     SHARED_STYLE,
+    SIGNOUT_CONTROLS,
+    document_head,
 )
 
 CALENDAR_PAGE = (
-    """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Guild Events</title>
-<style>"""
+    document_head("Guild Events")
     + SHARED_STYLE
     + DASHBOARD_HEADER_STYLE
     + """
@@ -33,11 +28,6 @@ body {
   overflow: hidden;
 }
 .controls, .views { display: flex; gap: 0.25rem; }
-button.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
-}
 #period { font-weight: 600; font-size: 0.95rem; min-width: 11rem; }
 main {
   /* min-height:0 lets this flex child shrink to the viewport so its own
@@ -421,7 +411,7 @@ main {
   <span class="spacer"></span>
   <a href="/profit">Profit</a>
 """
-    + ACCOUNT_CONTROLS_MARKUP
+    + SIGNOUT_CONTROLS
     + """
 </header>
 <main>
@@ -432,6 +422,9 @@ main {
 <script>
 "use strict";
 (function () {
+"""
+    + PAGE_JS
+    + """
   var grid = document.getElementById("grid");
   var scroller = document.querySelector("main");
   var tooltip = document.getElementById("tooltip");
@@ -443,10 +436,8 @@ main {
   var tooltipChip = null;
   var collapseFrame = 0;
 
-  // A single breakpoint drives every behavioural difference on small screens:
+  // The one breakpoint drives every behavioural difference on small screens:
   // the 3-day week, single-letter month, tap-to-open days and swipe steps.
-  var mobileQuery = window.matchMedia("(max-width: 640px)");
-  function isMobile() { return mobileQuery.matches; }
   // The week view collapses to three days on mobile so it never scrolls
   // sideways; the step size follows the same span.
   function weekSpan() { return isMobile() ? 3 : 7; }
@@ -545,13 +536,6 @@ main {
     over: "st-over",
     scheduled: "st-scheduled"
   };
-
-  function el(tag, className, text) {
-    var node = document.createElement(tag);
-    if (className) { node.className = className; }
-    if (text !== undefined) { node.textContent = text; }
-    return node;
-  }
 
   // Renders the Discord markdown subset used in event descriptions by
   // building DOM nodes directly. Event text only ever becomes text nodes,
@@ -1360,17 +1344,9 @@ main {
     writeHash();
     var range = rangeFor();
     statusLine.textContent = "Loading\\u2026";
-    fetch("/api/events?start=" +
+    fetchJson("/api/events?start=" +
       Math.floor(range.start.getTime() / 1000) + "&end=" +
       Math.floor(range.end.getTime() / 1000))
-      .then(function (response) {
-        if (response.status === 401) {
-          location.href = "/login";
-          throw new Error("unauthorized");
-        }
-        if (!response.ok) { throw new Error("failed"); }
-        return response.json();
-      })
       .then(function (payload) {
         entries = payload.entries || [];
         render();
@@ -1423,19 +1399,7 @@ main {
   });
   window.addEventListener("resize", scheduleMonthCollapse);
 
-  fetch("/api/me")
-    .then(function (response) {
-      if (response.status === 401) {
-        location.href = "/login";
-        throw new Error("unauthorized");
-      }
-      return response.json();
-    })
-    .then(function (payload) {
-      document.getElementById("whoami").textContent = payload.name || "";
-    })
-    .catch(function () {});
-
+  showWhoami();
   readHash();
   syncViewButtons();
   refresh();

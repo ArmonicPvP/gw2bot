@@ -4,12 +4,14 @@ from gw2bot.web.pages.shared import (
     DASHBOARD_HEADER_STYLE,
     RANGE_PICKER_STYLE,
     SHARED_STYLE,
+    UTILITY_STYLE,
 )
 
 PROFIT_STYLE = (
     SHARED_STYLE
     + DASHBOARD_HEADER_STYLE
     + RANGE_PICKER_STYLE
+    + UTILITY_STYLE
     + """
 body { display: flex; flex-direction: column; }
 /* The range buttons and the reload beside them travel together, so they move
@@ -159,29 +161,7 @@ main { width: 100%; margin: 0; padding: 1rem; }
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation-duration: 2.4s; }
 }
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
-}
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.3rem;
-  background: transparent;
-  border-color: transparent;
-  color: var(--muted);
-  line-height: 0;
-}
-.icon-button:hover { color: var(--text); background: var(--panel-2); }
-.icon-button svg { pointer-events: none; }
+.icon-button { padding: 0.3rem; }
 .row-action {
   display: inline-flex;
   align-items: center;
@@ -258,7 +238,6 @@ th.actions, td.actions { text-align: center; }
    the rows on screen dim while it is out rather than vanishing under the
    reader. */
 #trades-table.refreshing tbody { opacity: 0.55; }
-.table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 th, td {
   padding: 0.65rem 0.8rem;

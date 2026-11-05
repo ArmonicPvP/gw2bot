@@ -26,7 +26,7 @@ from gw2bot.config import (
     Config,
     missing_configuration_message,
 )
-from gw2bot.core.discord_utils import send_interaction_notice, user_has_role
+from gw2bot.core.discord_utils import require_role, send_interaction_notice
 from gw2bot.events import scheduler as event_scheduler
 from gw2bot.events.commands import EventCommands
 from gw2bot.events.formatting import calendar_link
@@ -835,25 +835,12 @@ class Gw2Bot(discord.Client):
         interaction: discord.Interaction,
         required_role_id: int,
     ) -> bool:
-        if user_has_role(interaction.user, required_role_id):
-            LOGGER.debug(
-                "Authorized raffle command for Discord user %s with role %s",
-                interaction.user.id,
-                required_role_id,
-            )
-            return True
-        LOGGER.warning(
-            "Rejected raffle command from Discord user %s; required role %s, "
-            "resolved member roles: %s",
-            interaction.user.id,
+        return await require_role(
+            interaction,
             required_role_id,
-            [role.id for role in getattr(interaction.user, "roles", ())],
+            action="raffle command",
+            denial="You do not have the required role for this raffle command.",
         )
-        await interaction.response.send_message(
-            "You do not have the required role for this raffle command.",
-            ephemeral=True,
-        )
-        return False
 
     async def send_notification(
         self,
