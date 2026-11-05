@@ -9,6 +9,8 @@ Those live here so a change to any of it is one edit rather than four.
 
 from __future__ import annotations
 
+import re
+
 SHARED_STYLE = """
 :root {
   --bg: #1e2124;
@@ -203,42 +205,6 @@ main {
   padding: 1rem;
 }
 .card h2 { font-size: 0.95rem; }
-/* A chart's heading shares its row with the button that changes how the line
-   is drawn. */
-.chart-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.6rem;
-}
-.chart-mode {
-  min-width: 2rem;
-  padding: 0.25rem 0.45rem;
-  font-size: 1rem;
-  line-height: 1;
-}
-/* The legend sits under its chart as a centred row of colour swatches. */
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem 1.25rem;
-  margin-top: 0.6rem;
-}
-.legend .item {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.82rem;
-  color: var(--text);
-}
-.legend .swatch {
-  width: 0.9rem;
-  height: 0.9rem;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
 /* Each chart is a fixed-viewBox SVG that scales to its container width, so
    every plotted coordinate is computed once against the viewBox and the
    browser handles resizing without a re-render. */
@@ -278,21 +244,6 @@ main {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
 .chart-tooltip .tip-time { color: var(--muted); margin-bottom: 0.3rem; }
-/* A tooltip row: a swatch, what it stands for, and its figure against the
-   right edge. The row nearest the pointer is set in bold. */
-.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
-.chart-tooltip .tip-row .swatch {
-  width: 0.7rem;
-  height: 0.7rem;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.chart-tooltip .tip-row .val {
-  margin-left: auto;
-  padding-left: 0.75rem;
-  font-variant-numeric: tabular-nums;
-}
-.chart-tooltip .tip-row.em { font-weight: 600; }
 .chart-tooltip .tip-note { color: var(--muted); margin-top: 0.25rem; }
 /* The line under a chart or a section saying what it is doing: loading,
    empty, or failed. */
@@ -329,6 +280,64 @@ table.data-table th.num, table.data-table td.num {
   main { padding: 0.6rem 0.5rem; }
   .card { padding: 0.6rem; }
 }
+"""
+
+# The rules for the feast, gold and roster charts, which draw several colours:
+# the heading row with its staircase button, the legend under the chart, and
+# tooltip rows that lead with a swatch. A page that takes it puts it before its
+# own rules, which can still override it.
+LEGEND_STYLE = """
+/* A chart's heading shares its row with the button that changes how the line
+   is drawn. */
+.chart-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.chart-mode {
+  min-width: 2rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+/* The legend sits under its chart as a centred row of colour swatches. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem 1.25rem;
+  margin-top: 0.6rem;
+}
+.legend .item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+.legend .swatch {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+/* A tooltip row: a swatch, what it stands for, and its figure against the
+   right edge. The row nearest the pointer is set in bold. */
+.chart-tooltip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
+.chart-tooltip .tip-row .swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.chart-tooltip .tip-row .val {
+  margin-left: auto;
+  padding-left: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+.chart-tooltip .tip-row.em { font-weight: 600; }
 """
 
 # The rules the gold and roster history pages add: the figure the window
@@ -1567,6 +1576,31 @@ def history_main(
 """
 
 
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+
+def compact_style(css: str) -> str:
+    """A stylesheet as a dashboard serves it, without its comments.
+
+    The comments are for the source's readers, and they are about a third of
+    the shared stylesheet and script, so the page goes out without them.
+    """
+    kept = _CSS_COMMENT.sub("", css).split("\n")
+    return "\n".join(line for line in kept if line.strip()) + "\n"
+
+
+def compact_script(js: str) -> str:
+    """A script as a dashboard serves it, without its whole-line comments.
+
+    Only a line that is nothing but a comment goes: the scripts hold no
+    template literals, so such a line is never part of a string.
+    """
+    kept = (line for line in js.split("\n") if line.strip())
+    return "\n".join(
+        line for line in kept if not line.lstrip().startswith("//")
+    ) + "\n"
+
+
 def chart_dashboard(
     title: str,
     subject: str,
@@ -1587,16 +1621,19 @@ def chart_dashboard(
     ``parts`` are the optional shared scripts it draws on, such as
     ``COIN_JS``, and ``start`` runs once its first load has been asked for.
     ``title`` is both the document's title and the header's, and ``subject``
-    names the page in its console traces and nothing else.
+    names the page in its console traces and nothing else. The stylesheet and
+    script go out through ``compact_style`` and ``compact_script``.
     """
     traced = (_CHART_TRACES_JS + "".join(parts)).replace("__SUBJECT__", subject)
     return (
         document_head(title)
-        + SHARED_STYLE
-        + DASHBOARD_HEADER_STYLE
-        + RANGE_PICKER_STYLE
-        + CHART_PAGE_STYLE
-        + style
+        + compact_style(
+            SHARED_STYLE
+            + DASHBOARD_HEADER_STYLE
+            + RANGE_PICKER_STYLE
+            + CHART_PAGE_STYLE
+            + style
+        )
         + "</style>\n</head>\n<body>\n<header>\n"
         + f'  <h1 id="brand">{title}</h1>\n'
         + RANGE_PICKER_NAV
@@ -1607,15 +1644,17 @@ def chart_dashboard(
         + "\n</header>\n"
         + body
         + '<script>\n"use strict";\n(function () {\n'
-        + PAGE_JS
-        + DASHBOARD_JS
-        + CHART_HOVER_JS
-        + traced
-        + range_picker_js(subject)
-        + script
-        + RANGE_PICKER_LISTENERS_JS
-        + _DASHBOARD_START_JS
-        + start
+        + compact_script(
+            PAGE_JS
+            + DASHBOARD_JS
+            + CHART_HOVER_JS
+            + traced
+            + range_picker_js(subject)
+            + script
+            + RANGE_PICKER_LISTENERS_JS
+            + _DASHBOARD_START_JS
+            + start
+        )
         + "})();\n</script>\n</body>\n</html>\n"
     )
 

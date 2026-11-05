@@ -11,6 +11,7 @@ from gw2bot.web.pages.shared import (
     CHART_MODE_JS,
     CHART_STATUS_LINE,
     COIN_JS,
+    LEGEND_STYLE,
     UTILITY_STYLE,
     chart_dashboard,
 )
@@ -50,6 +51,7 @@ FOOD_PAGE = chart_dashboard(
     "Feast Usage",
     "feast",
     style=UTILITY_STYLE
+    + LEGEND_STYLE
     + """
 /* Each legend swatch is a button, so a tap can switch the feast it stands
    for, and its square corners set the feasts apart from the round dots of

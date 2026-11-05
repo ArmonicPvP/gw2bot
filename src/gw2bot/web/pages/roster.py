@@ -10,6 +10,7 @@ from gw2bot.web.pages.shared import (
     CHART_MODE_JS,
     HISTORY_JS,
     HISTORY_STYLE,
+    LEGEND_STYLE,
     chart_dashboard,
     history_main,
 )
@@ -17,7 +18,8 @@ from gw2bot.web.pages.shared import (
 ROSTER_PAGE = chart_dashboard(
     "Guild Roster",
     "roster",
-    style=HISTORY_STYLE
+    style=LEGEND_STYLE
+    + HISTORY_STYLE
     + """
 /* Who did the kicking is an account name too, so it is bounded the same way. */
 table.changes td.by { overflow-wrap: anywhere; }
@@ -329,6 +331,7 @@ table.changes td.unmatched { color: var(--muted); }
   }
 
   function renderTotals() {
+    if (!state.data) { renderTotalsLine([]); return; }
     renderTotalsLine([
       [String(state.data.joins || 0), "joined"],
       [String(state.data.leaves || 0), "left"],

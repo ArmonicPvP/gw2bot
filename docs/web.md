@@ -113,7 +113,7 @@ The shared script comes in parts, in the order they run:
 | `PAGE_JS` | What every signed-in page opens with, the calendar's included: the phone breakpoint, `el`, `fetchJson` (which sends a signed-out reader to sign in, so no page writes that check itself), and `showWhoami`. |
 | `DASHBOARD_JS` | The charted dashboards' helpers: the stock chart's box and status line, `chartMetrics` (the shared proportions a page adjusts), `windowState`, `scaleX` and `scaleY`, `niceStep`, the tick and moment formats, the pointer narrowing, `logFailure`, `resetChart`, `chartCanvas`, the grid, axes, lines and dots, `showChart`, `renderPagedTable` with its pager, and `loadWindow`. Its header lists what a page must supply. |
 | `CHART_HOVER_JS` | The hover and tap selection, `attachChartHover`, and the two ways of grouping dots into columns. |
-| `CHART_MODE_JS`, `COIN_JS`, `HISTORY_JS` | Parts a page asks for in `parts`: the staircase toggle (feast, gold, roster), coin arithmetic (feast, gold), and what the two history pages share beyond the rest - the boxes `history_main` lays out, the legend, the totals line, the closing figure, the account column, the table of changes, and how the page loads and draws. `HISTORY_STYLE` and `history_main` are that pair's rules and markup. |
+| `CHART_MODE_JS`, `COIN_JS`, `HISTORY_JS` | Parts a page asks for in `parts`: the staircase toggle (feast, gold, roster), coin arithmetic (feast, gold), and what the two history pages share beyond the rest - the boxes `history_main` lays out, the legend, the totals line, the closing figure, the account column, the table of changes, and how the page loads and draws. `HISTORY_STYLE` and `history_main` are that pair's rules and markup, and `LEGEND_STYLE` holds the legend, heading row and swatch rows of the three charts drawn in several colours, which the single-line events chart has no use for. |
 
 A page's own `attachHover` passes `attachChartHover` the tooltip's host, the
 fixed reason a skipped tap is traced with, the ring colour, and a
@@ -123,6 +123,13 @@ column's class is its heading's too unless it names a `head` of its own, so
 every numeric heading right-aligns over its figures, and a class that hides
 a column on a phone, such as the events table's `last`, hides its heading
 with it. Only the account column and the feast's User name `head: null`.
+
+A dashboard goes out without the comments in its stylesheet and script:
+`chart_dashboard` passes both through `compact_style` and `compact_script`,
+because the comments are for the source's readers and were about a third of
+every page. `compact_script` drops only lines that are nothing but a `//`
+comment, which is safe while the scripts hold no template literals; a
+template literal with such a line in it would lose that line.
 
 The calendar and the profit page are not charted dashboards and are built by
 hand, but they take the same `document_head` and `SIGNOUT_CONTROLS`, the
@@ -172,8 +179,10 @@ separate modules assembled in `__init__.py`:
 hidden-item and hidden-trade dialogs, so one control definition serves every
 paginated table above and below its rows.
 
-The sibling pages keep their single module. They are around a thousand lines
-each, which is a size worth leaving alone.
+The sibling pages keep their single module. What the four charted dashboards
+share is in `shared.py`, so each holds only its own data and tables: from about
+300 lines for the gold page to about 1,200 for the feast page, which is a size
+worth leaving alone.
 
 ## Watch the escaping
 

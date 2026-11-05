@@ -11,6 +11,7 @@ from gw2bot.web.pages.shared import (
     COIN_JS,
     HISTORY_JS,
     HISTORY_STYLE,
+    LEGEND_STYLE,
     chart_dashboard,
     history_main,
 )
@@ -18,7 +19,8 @@ from gw2bot.web.pages.shared import (
 GOLD_PAGE = chart_dashboard(
     "Guild Bank",
     "gold",
-    style=HISTORY_STYLE
+    style=LEGEND_STYLE
+    + HISTORY_STYLE
     + """
 table.changes td.amount { white-space: nowrap; }
 @media (max-width: 640px) {
@@ -255,6 +257,7 @@ table.changes td.amount { white-space: nowrap; }
   function renderLegend() { renderKeyLegend(NET_CHANGES); }
 
   function renderTotals() {
+    if (!state.data) { renderTotalsLine([]); return; }
     var net = state.data.net || 0;
     // A net of nothing is written plainly: a sign in front of a zero claims a
     // direction the window did not go.

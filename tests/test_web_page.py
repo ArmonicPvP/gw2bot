@@ -25,10 +25,13 @@ from gw2bot.web.pages.shared import (
     DASHBOARD_JS,
     HISTORY_JS,
     HISTORY_STYLE,
+    LEGEND_STYLE,
     PAGE_JS,
     SHARED_STYLE,
     SIGNOUT_CONTROLS,
     UTILITY_STYLE,
+    compact_script,
+    compact_style,
 )
 from gw2bot.web.server import MAX_CUSTOM_WINDOW_SECONDS
 from gw2bot.web.pages.profit import (
@@ -1336,11 +1339,24 @@ class TestDashboardChartHover:
         self,
     ) -> None:
         for page in self.PAGES:
-            assert page.count(PAGE_JS) == 1
-            assert page.count(DASHBOARD_JS) == 1
-            assert page.count(CHART_HOVER_JS) == 1
-            assert page.count(CHART_PAGE_STYLE) == 1
+            assert page.count(compact_script(PAGE_JS)) == 1
+            assert page.count(compact_script(DASHBOARD_JS)) == 1
+            assert page.count(compact_script(CHART_HOVER_JS)) == 1
+            assert page.count(compact_style(CHART_PAGE_STYLE)) == 1
             assert page.count(SIGNOUT_CONTROLS) == 1
+
+    def test_dashboards_go_out_without_comments(self) -> None:
+        # The comments are for the source's readers and were a third of each
+        # page. The code they sat beside is all still there.
+        for page in self.PAGES:
+            assert "/*" not in page
+            assert not re.search(r"(?m)^\s*//", page)
+        assert compact_script("  // note\n  var a = 1;\n\n  // more\n") == (
+            "  var a = 1;\n"
+        )
+        assert compact_style("/* a\n   b */\n.x { color: red; }\n") == (
+            ".x { color: red; }\n"
+        )
 
     def test_the_optional_parts_reach_the_pages_that_use_them(self) -> None:
         def part(js: str, subject: str) -> str:
@@ -1350,12 +1366,17 @@ class TestDashboardChartHover:
             # Every trace a shared part writes names the page it runs on.
             assert "__SUBJECT__" not in page
             has_mode = subject != "events"
-            assert (page.count(part(CHART_MODE_JS, subject)) == 1) is has_mode
-            assert (page.count(COIN_JS) == 1) is (subject in ("feast", "gold"))
+            mode_js = compact_script(part(CHART_MODE_JS, subject))
+            assert (page.count(mode_js) == 1) is has_mode
+            assert (page.count(compact_style(LEGEND_STYLE)) == 1) is has_mode
+            coins = subject in ("feast", "gold")
+            assert (page.count(compact_script(COIN_JS)) == 1) is coins
             history = subject in ("gold", "roster")
-            assert (page.count(HISTORY_JS) == 1) is history
-            assert (page.count(HISTORY_STYLE) == 1) is history
-        assert FOOD_PAGE.count(UTILITY_STYLE) == 1
+            assert (page.count(compact_script(HISTORY_JS)) == 1) is history
+            assert (page.count(compact_style(HISTORY_STYLE)) == 1) is history
+        # The events chart draws one colour, so it has no legend to style.
+        assert ".legend" not in EVENTS_PAGE
+        assert FOOD_PAGE.count(compact_style(UTILITY_STYLE)) == 1
         assert PROFIT_PAGE.count(UTILITY_STYLE) == 1
         assert CALENDAR_PAGE.count(PAGE_JS) == 1
         assert CALENDAR_PAGE.count(SIGNOUT_CONTROLS) == 1
@@ -1376,7 +1397,8 @@ class TestDashboardChartHover:
         # A page's own rules follow CHART_PAGE_STYLE, so it may still override
         # one of them, but a full second copy is the drift this replaced.
         for page in self.PAGES:
-            own = page.replace(CHART_PAGE_STYLE, "")
+            own = page.replace(compact_style(CHART_PAGE_STYLE), "").replace(
+                compact_style(LEGEND_STYLE), "")
             assert ".card {\n" not in own
             assert ".chart-svg .x-label {" not in own
             assert ".chart-svg .x-label.first" not in own
@@ -1387,8 +1409,11 @@ class TestDashboardChartHover:
             assert ".legend {" not in own
             assert "main { padding: 0.6rem 0.5rem; }" not in own
             assert "fill: none; stroke-width: 2;" not in own
-        for page in (FOOD_PAGE, PROFIT_PAGE):
-            own = page.replace(UTILITY_STYLE, "")
+        for page, utility in (
+            (FOOD_PAGE, compact_style(UTILITY_STYLE)),
+            (PROFIT_PAGE, UTILITY_STYLE),
+        ):
+            own = page.replace(utility, "")
             assert ".visually-hidden {" not in own
             assert ".table-scroll { overflow-x: auto; }" not in own
 
@@ -1442,14 +1467,17 @@ class TestDashboardChartHover:
         # The Prev and Next buttons are written once, in renderPager.
         assert DASHBOARD_JS.count('el("button", null, "Prev")') == 1
         for page in self.PAGES:
-            own = page.replace(DASHBOARD_JS, "")
+            own = page.replace(compact_script(DASHBOARD_JS), "")
             assert '"Prev"' not in own
             assert "renderPagedTable({" in own
 
     def test_every_dashboard_loads_through_one_json_read(self) -> None:
         # The signed-out redirect is written once, in fetchJson.
-        for page in (*self.PAGES, CALENDAR_PAGE):
-            own = page.replace(PAGE_JS, "")
+        for page, page_js in (
+            *((page, compact_script(PAGE_JS)) for page in self.PAGES),
+            (CALENDAR_PAGE, PAGE_JS),
+        ):
+            own = page.replace(page_js, "")
             assert "response.status === 401" not in own
             assert "fetch(" not in own
 
@@ -2970,7 +2998,7 @@ class TestRosterPendingInvites:
 
 class TestGoldPage:
     def test_coin_values_match_the_profit_pages_spaced_denominations(self) -> None:
-        assert GOLD_PAGE.count(COIN_JS) == 1
+        assert GOLD_PAGE.count(compact_script(COIN_JS)) == 1
         assert "function formatCoins(copper)" in COIN_JS
         assert 'parts.push(coins.gold.toLocaleString() + "g")' in COIN_JS
         assert 'parts.push(coins.silver + "s")' in COIN_JS
