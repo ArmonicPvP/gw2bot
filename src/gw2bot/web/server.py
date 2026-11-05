@@ -6,7 +6,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 from urllib.parse import urlencode
 
 import aiohttp
@@ -68,6 +68,7 @@ from gw2bot.profit.service import (
     serialize_profit_report,
     serialize_trades,
 )
+
 from gw2bot.roster import ROSTER_RANGES, RosterEvent, build_roster_series
 from gw2bot.version import __version__
 from gw2bot.web import auth
@@ -98,6 +99,15 @@ if TYPE_CHECKING:
     from gw2bot.bot import Gw2Bot
 
 LOGGER = logging.getLogger(__name__)
+
+_PROFIT_READ_ERRORS = (
+    MissingProfitApiKey,
+    aiohttp.ClientError,
+    TimeoutError,
+    ProfitApiError,
+    SQLAlchemyError,
+    ValueError,
+)
 
 MAX_RANGE_DAYS = 62
 NAME_CACHE_TTL_SECONDS = 3600
@@ -455,6 +465,37 @@ class WebServer:
             status=status,
             headers={"Cache-Control": NO_STORE},
         )
+
+    def _profit_failure_response(
+        self,
+        user_id: int,
+        error: Exception,
+        *,
+        scope: Literal["report", "section", "trades"],
+        section: str | None = None,
+    ) -> web.Response:
+        """Map known profit failures without exposing their payloads."""
+        context = "user_id=%s" if section is None else "user_id=%s section=%s"
+        values = (user_id,) if section is None else (user_id, section)
+        if isinstance(error, MissingProfitApiKey):
+            LOGGER.debug(
+                "Rejected profit %s; " + context + " reason=api-key-unset",
+                scope, *values,
+            )
+            return self._json({"error": "api_key_missing"}, status=409)
+        if isinstance(error, (aiohttp.ClientError, TimeoutError, ProfitApiError)):
+            LOGGER.warning(
+                "Could not serve profit %s; " + context + " error_type=%s",
+                scope, *values, type(error).__name__,
+            )
+            return self._json({"error": "upstream unavailable"}, status=502)
+        if isinstance(error, (SQLAlchemyError, ValueError)):
+            LOGGER.error(
+                "Could not build profit %s; " + context + " error_type=%s",
+                scope, *values, type(error).__name__,
+            )
+            return self._json({"error": f"{scope} unavailable"}, status=500)
+        raise error
 
     def _set_cookie(
         self,
@@ -901,26 +942,10 @@ class WebServer:
                 resolved.window,
                 force=self._forced(request),
             )
-        except MissingProfitApiKey:
-            LOGGER.debug(
-                "Rejected profit report; user_id=%s reason=api-key-unset",
-                session.user_id,
+        except _PROFIT_READ_ERRORS as exc:
+            return self._profit_failure_response(
+                session.user_id, exc, scope="report"
             )
-            return self._json({"error": "api_key_missing"}, status=409)
-        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
-            LOGGER.warning(
-                "Could not serve profit report; user_id=%s error_type=%s",
-                session.user_id,
-                type(exc).__name__,
-            )
-            return self._json({"error": "upstream unavailable"}, status=502)
-        except (SQLAlchemyError, ValueError) as exc:
-            LOGGER.error(
-                "Could not build profit report; user_id=%s error_type=%s",
-                session.user_id,
-                type(exc).__name__,
-            )
-            return self._json({"error": "report unavailable"}, status=500)
         payload = serialize_profit_report(report)
         payload["remembered_window"] = resolved.remembered
         LOGGER.debug(
@@ -1045,32 +1070,10 @@ class WebServer:
                         force=self._forced(request),
                     )
                 )
-        except MissingProfitApiKey:
-            LOGGER.debug(
-                "Rejected profit section; user_id=%s section=%s "
-                "reason=api-key-unset",
-                session.user_id,
-                section,
+        except _PROFIT_READ_ERRORS as exc:
+            return self._profit_failure_response(
+                session.user_id, exc, scope="section", section=section
             )
-            return self._json({"error": "api_key_missing"}, status=409)
-        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
-            LOGGER.warning(
-                "Could not serve profit section; user_id=%s section=%s "
-                "error_type=%s",
-                session.user_id,
-                section,
-                type(exc).__name__,
-            )
-            return self._json({"error": "upstream unavailable"}, status=502)
-        except (SQLAlchemyError, ValueError) as exc:
-            LOGGER.error(
-                "Could not build profit section; user_id=%s section=%s "
-                "error_type=%s",
-                session.user_id,
-                section,
-                type(exc).__name__,
-            )
-            return self._json({"error": "section unavailable"}, status=500)
         LOGGER.debug(
             "Served profit section; user_id=%s section=%s",
             session.user_id,
@@ -1124,26 +1127,10 @@ class WebServer:
                 descending=query.descending,
                 search=query.search,
             )
-        except MissingProfitApiKey:
-            LOGGER.debug(
-                "Rejected profit trades; user_id=%s reason=api-key-unset",
-                session.user_id,
+        except _PROFIT_READ_ERRORS as exc:
+            return self._profit_failure_response(
+                session.user_id, exc, scope="trades"
             )
-            return self._json({"error": "api_key_missing"}, status=409)
-        except (aiohttp.ClientError, TimeoutError, ProfitApiError) as exc:
-            LOGGER.warning(
-                "Could not serve profit trades; user_id=%s error_type=%s",
-                session.user_id,
-                type(exc).__name__,
-            )
-            return self._json({"error": "upstream unavailable"}, status=502)
-        except (SQLAlchemyError, ValueError) as exc:
-            LOGGER.error(
-                "Could not build profit trades; user_id=%s error_type=%s",
-                session.user_id,
-                type(exc).__name__,
-            )
-            return self._json({"error": "trades unavailable"}, status=500)
         LOGGER.debug(
             "Served profit trades; user_id=%s total=%s page=%s rows=%s "
             "hidden=%s",

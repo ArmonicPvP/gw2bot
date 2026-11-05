@@ -62,6 +62,12 @@ posts to `/api/food/cost` as whole copper against the stock log row the restock
 was observed as, gated by the same role the page is; the profit dashboard's
 hidden-item and hidden-trade controls post the same way.
 
+The profit report, section and trade read routes share
+`_profit_failure_response` for known failures: 409 for a missing key, 502 for
+an upstream failure, and 500 with the route's own label for a database or
+value error. Logs record the exception type without its payload. Request
+validation and response serialization remain with each route.
+
 The profit dashboard's Matched Trades table is the one table on the site paged
 on the server: `/api/profit/trades` answers one page in the order and search
 asked for, with totals across every page. A busy trader matches thousands of

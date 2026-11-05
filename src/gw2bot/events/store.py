@@ -439,6 +439,20 @@ _PER_EVENT_RECORDS = (
 )
 
 
+def _delete_occurrence_dependents(session: Session, occurrence_ids: Sequence[int]) -> None:
+    for record_type in (EventSignupRecord, EventReminderRecord):
+        session.execute(delete(record_type).where(
+            record_type.occurrence_id.in_(occurrence_ids)
+        ))
+
+
+def _delete_event_preferences(session: Session, event_id: int) -> None:
+    # Remembered roles and mentee answers serve future runs, so they go with
+    # automatic signups when an event is deleted or retired.
+    for _, record_type in _PER_EVENT_RECORDS:
+        session.execute(delete(record_type).where(record_type.event_id == event_id))
+
+
 def _deletion_payload(
     session: Session,
     event: EventRecord,
@@ -1390,16 +1404,7 @@ class EventStore:
 
     def delete_occurrence(self, occurrence_id: int) -> None:
         with self._sessions() as session:
-            session.execute(
-                delete(EventSignupRecord).where(
-                    EventSignupRecord.occurrence_id == occurrence_id
-                )
-            )
-            session.execute(
-                delete(EventReminderRecord).where(
-                    EventReminderRecord.occurrence_id == occurrence_id
-                )
-            )
+            _delete_occurrence_dependents(session, [occurrence_id])
             session.execute(
                 delete(EventOccurrenceRecord).where(
                     EventOccurrenceRecord.occurrence_id == occurrence_id
@@ -1438,34 +1443,8 @@ class EventStore:
                 else None
             )
             if occurrence_ids:
-                session.execute(
-                    delete(EventSignupRecord).where(
-                        EventSignupRecord.occurrence_id.in_(occurrence_ids)
-                    )
-                )
-                session.execute(
-                    delete(EventReminderRecord).where(
-                        EventReminderRecord.occurrence_id.in_(occurrence_ids)
-                    )
-                )
-            session.execute(
-                delete(EventAutoSignupRecord).where(
-                    EventAutoSignupRecord.event_id == event_id
-                )
-            )
-            # Remembered roles are per event too, so they go with it rather
-            # than outliving the event they were remembered for - and so is a
-            # member's answer to the mentee question.
-            session.execute(
-                delete(EventSignupPreferenceRecord).where(
-                    EventSignupPreferenceRecord.event_id == event_id
-                )
-            )
-            session.execute(
-                delete(EventMenteeOptOutRecord).where(
-                    EventMenteeOptOutRecord.event_id == event_id
-                )
-            )
+                _delete_occurrence_dependents(session, occurrence_ids)
+            _delete_event_preferences(session, event_id)
             session.execute(
                 delete(EventOccurrenceRecord).where(
                     EventOccurrenceRecord.event_id == event_id
@@ -1539,16 +1518,7 @@ class EventStore:
             ):
                 payload = None
             if occurrence_ids:
-                session.execute(
-                    delete(EventSignupRecord).where(
-                        EventSignupRecord.occurrence_id.in_(occurrence_ids)
-                    )
-                )
-                session.execute(
-                    delete(EventReminderRecord).where(
-                        EventReminderRecord.occurrence_id.in_(occurrence_ids)
-                    )
-                )
+                _delete_occurrence_dependents(session, occurrence_ids)
                 session.execute(
                     delete(EventOccurrenceRecord).where(
                         EventOccurrenceRecord.occurrence_id.in_(
@@ -1556,21 +1526,7 @@ class EventStore:
                         )
                     )
                 )
-            session.execute(
-                delete(EventAutoSignupRecord).where(
-                    EventAutoSignupRecord.event_id == event_id
-                )
-            )
-            session.execute(
-                delete(EventSignupPreferenceRecord).where(
-                    EventSignupPreferenceRecord.event_id == event_id
-                )
-            )
-            session.execute(
-                delete(EventMenteeOptOutRecord).where(
-                    EventMenteeOptOutRecord.event_id == event_id
-                )
-            )
+            _delete_event_preferences(session, event_id)
             # Everything the deletes above left behind is kept history, so
             # the retirement is expressed as a predicate rather than an id
             # list: a series with years of runs behind it would otherwise pass
@@ -2303,3 +2259,4 @@ class EventStore:
             len(entries),
         )
         return entries
+

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
 from sqlalchemy.exc import SQLAlchemyError
@@ -123,23 +124,43 @@ async def send_pending_raffle_notifications(bot: Gw2Bot) -> None:
         ):
             bot._raffle_store.mark_notification_sent(deposit.event_id)
 
+class _PendingNotification(Protocol):
+    @property
+    def event_id(self) -> int: ...
+
+    @property
+    def message(self) -> str: ...
+
+
+async def _deliver_pending(
+    pending: Sequence[_PendingNotification],
+    send: Callable[[str], Awaitable[bool]],
+    mark_sent: Callable[[int], None],
+    *,
+    label: str,
+) -> None:
+    """Keep a notification pending until its delivery succeeds."""
+    LOGGER.debug("Found %s pending %s notifications", len(pending), label)
+    for notification in pending:
+        if await send(notification.message):
+            mark_sent(notification.event_id)
+
+
 async def send_pending_gold_withdrawal_notifications(bot: Gw2Bot) -> None:
-    pending = bot._raffle_store.get_pending_gold_withdrawal_notifications()
-    LOGGER.debug("Found %s pending gold withdrawal notifications", len(pending))
-    for withdrawal in pending:
-        if await bot._try_send_notification(withdrawal.message):
-            bot._raffle_store.mark_gold_withdrawal_notification_sent(
-                withdrawal.event_id
-            )
+    await _deliver_pending(
+        bot._raffle_store.get_pending_gold_withdrawal_notifications(),
+        bot._try_send_notification,
+        bot._raffle_store.mark_gold_withdrawal_notification_sent,
+        label="gold withdrawal",
+    )
 
 async def send_pending_deposit_audit_notifications(bot: Gw2Bot) -> None:
-    pending = bot._raffle_store.get_pending_deposit_audit_notifications()
-    LOGGER.debug("Found %s pending raffle deposit audit notifications", len(pending))
-    for deposit in pending:
-        if await bot._try_send_notification(deposit.message):
-            bot._raffle_store.mark_deposit_audit_notification_sent(
-                deposit.event_id
-            )
+    await _deliver_pending(
+        bot._raffle_store.get_pending_deposit_audit_notifications(),
+        bot._try_send_notification,
+        bot._raffle_store.mark_deposit_audit_notification_sent,
+        label="raffle deposit audit",
+    )
 
 async def send_pending_raffle_milestones(bot: Gw2Bot) -> None:
     pending = bot._raffle_store.get_pending_milestones()
@@ -151,34 +172,33 @@ async def send_pending_raffle_milestones(bot: Gw2Bot) -> None:
             )
 
 async def send_pending_leave_notifications(bot: Gw2Bot) -> None:
-    pending = bot._raffle_store.get_pending_leave_notifications()
-    LOGGER.debug("Found %s pending guild-leave notifications", len(pending))
-    for leave in pending:
-        if await bot._try_send_notification(leave.message):
-            bot._raffle_store.mark_leave_notification_sent(leave.event_id)
+    await _deliver_pending(
+        bot._raffle_store.get_pending_leave_notifications(),
+        bot._try_send_notification,
+        bot._raffle_store.mark_leave_notification_sent,
+        label="guild-leave",
+    )
 
 async def send_pending_join_notifications(bot: Gw2Bot) -> None:
-    pending = bot._raffle_store.get_pending_join_notifications()
-    LOGGER.debug("Found %s pending guild-join notifications", len(pending))
-    for join in pending:
-        if await bot._try_send_notification(join.message):
-            bot._raffle_store.mark_join_notification_sent(join.event_id)
+    await _deliver_pending(
+        bot._raffle_store.get_pending_join_notifications(),
+        bot._try_send_notification,
+        bot._raffle_store.mark_join_notification_sent,
+        label="guild-join",
+    )
 
 async def send_pending_invite_notifications(bot: Gw2Bot) -> None:
-    pending = bot._raffle_store.get_pending_invite_notifications()
-    LOGGER.debug("Found %s pending guild-invite notifications", len(pending))
-    for invite in pending:
-        if await bot._try_send_notification(invite.message):
-            bot._raffle_store.mark_invite_notification_sent(invite.event_id)
+    await _deliver_pending(
+        bot._raffle_store.get_pending_invite_notifications(),
+        bot._try_send_notification,
+        bot._raffle_store.mark_invite_notification_sent,
+        label="guild-invite",
+    )
 
 async def send_pending_rank_change_notifications(bot: Gw2Bot) -> None:
-    pending = bot._raffle_store.get_pending_rank_change_notifications()
-    LOGGER.debug(
-        "Found %s pending guild-rank-change notifications",
-        len(pending),
+    await _deliver_pending(
+        bot._raffle_store.get_pending_rank_change_notifications(),
+        bot._try_send_notification,
+        bot._raffle_store.mark_rank_change_notification_sent,
+        label="guild-rank-change",
     )
-    for rank_change in pending:
-        if await bot._try_send_notification(rank_change.message):
-            bot._raffle_store.mark_rank_change_notification_sent(
-                rank_change.event_id
-            )

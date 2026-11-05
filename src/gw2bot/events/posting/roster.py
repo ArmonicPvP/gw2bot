@@ -28,6 +28,7 @@ from gw2bot.events.formatting import (
 )
 from gw2bot.events.models import (
     AutoSignupChoice,
+    CategoryCapacity,
     Event,
     EventOccurrence,
     EventRole,
@@ -95,6 +96,25 @@ async def complete_signup(
         now,
     )
     return signup
+
+
+def _admission_solution(
+    capacity: CategoryCapacity,
+    signups: list[EventSignup],
+    discord_user_id: int,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+) -> dict[int, EventRole] | None:
+    candidates = seated_candidates(signups)
+    candidates.append(RosterCandidate(
+        discord_user_id=discord_user_id,
+        preferences=preferred_role_order(role, flex_roles),
+    ))
+    return (
+        solve_roster(capacity, candidates)
+        if can_admit(capacity, signups, role, flex_roles)
+        else None
+    )
 
 
 async def seat_signup(
@@ -188,17 +208,8 @@ async def seat_signup(
         # unseat them; when even that cannot fit the newcomer, or fits them
         # only in a seat the roster's missing boons or heals still need, they
         # are waitlisted.
-        candidates = seated_candidates(signups)
-        candidates.append(
-            RosterCandidate(
-                discord_user_id=discord_user_id,
-                preferences=preferred_role_order(role, flex_roles),
-            )
-        )
-        solution = (
-            solve_roster(event.capacity, candidates)
-            if can_admit(event.capacity, signups, role, flex_roles)
-            else None
+        solution = _admission_solution(
+            event.capacity, signups, discord_user_id, role, flex_roles
         )
         waitlisted = solution is None
         if solution is not None:
@@ -1768,6 +1779,188 @@ def _without_member(update: RosterUpdate, discord_user_id: int) -> RosterUpdate:
     )
 
 
+async def _write_signup_edit(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+    current: EventSignup,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+    *,
+    keeps_seat: bool,
+    tokens: float,
+    current_time: datetime,
+    checked: RosterUpdate,
+) -> None:
+    """Spend a token and save the declaration, refunding a refused write."""
+    discord_user_id = current.discord_user_id
+    try:
+        bot.event_store.set_signup_edit_tokens(
+            occurrence.occurrence_id,
+            discord_user_id,
+            tokens - 1.0,
+            current_time,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not spend an edit token; occurrence_id=%s user_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        await notify_roster_update(bot, occurrence, checked)
+        raise ValueError(
+            "Your signup could not be updated just now. Try again in a "
+            "moment."
+        ) from exc
+    try:
+        bot.event_store.update_signup_roles(
+            occurrence.occurrence_id,
+            discord_user_id,
+            role=role,
+            flex_roles=flex_roles,
+            assigned_role=current.assigned_role if keeps_seat else None,
+            waitlisted=not keeps_seat,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not write a signup edit; occurrence_id=%s user_id=%s "
+            "error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        # The token above is committed and bought nothing, so it is handed
+        # back before the member is sent to a retry that would spend a
+        # second one. Guarded in turn: a store refusing the write may refuse
+        # this too, and the member is owed an answer either way.
+        try:
+            bot.event_store.set_signup_edit_tokens(
+                occurrence.occurrence_id,
+                discord_user_id,
+                tokens,
+                current_time,
+            )
+        except SQLAlchemyError as refund_error:
+            LOGGER.error(
+                "Could not hand back an edit token the edit did not use; "
+                "occurrence_id=%s user_id=%s error_type=%s",
+                occurrence.occurrence_id,
+                discord_user_id,
+                type(refund_error).__name__,
+            )
+        await notify_roster_update(bot, occurrence, checked)
+        raise ValueError(
+            "Your signup could not be updated just now. Try again in a "
+            "moment."
+        ) from exc
+
+
+def _read_edited_signup(
+    bot: Gw2Bot,
+    occurrence: EventOccurrence,
+    current: EventSignup,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+    keeps_seat: bool,
+    update: RosterUpdate,
+) -> EventSignup | None:
+    discord_user_id = current.discord_user_id
+    # The edit is committed by here, so this read is outside the guard above:
+    # answering a refusal with "try again" would spend a second edit token on
+    # a change that is already on the roster, and lose the announcement and
+    # the message refresh below with it. The row is described from what was
+    # just written instead, corrected by what the resettle reported about
+    # this member - it re-solves the seated set, so it can have promoted them
+    # or moved their assigned role since.
+    try:
+        updated = bot.event_store.get_signup(
+            occurrence.occurrence_id,
+            discord_user_id,
+        )
+    except SQLAlchemyError as exc:
+        LOGGER.error(
+            "Could not read a signup back after editing it; "
+            "occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+        updated = replace(
+            current,
+            role=role,
+            flex_roles=flex_roles,
+            assigned_role=current.assigned_role if keeps_seat else None,
+            waitlisted=not keeps_seat,
+        )
+        seated = next(
+            (
+                signup
+                for signup in update.promoted
+                if signup.discord_user_id == discord_user_id
+            ),
+            None,
+        )
+        moved = next(
+            (
+                change
+                for change in update.reassigned
+                if change.discord_user_id == discord_user_id
+            ),
+            None,
+        )
+        if seated is not None:
+            updated = seated
+        elif moved is not None:
+            updated = replace(updated, assigned_role=moved.new_role)
+    return updated
+
+
+def _sync_auto_signup_roles(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+    discord_user_id: int,
+    role: EventRole,
+    flex_roles: tuple[EventRole, ...],
+) -> bool:
+    """Carry the saved roles forward; return whether automatic signup is stale."""
+    # A stored auto sign-up snapshots the roles it will use for future
+    # occurrences, so an enabled one must follow the edit or next week's
+    # roster would resurrect the old selection.
+    #
+    # Guarded on its own rather than with the phase above, because the edit
+    # this follows is committed: refusing it now would tell the member their
+    # change failed when it is sitting on the roster. A failure here is not
+    # silent either - the snapshot decides next week's roster, and nothing
+    # retries it - so the member is told their automatic sign-up still holds
+    # the old selection and can put it right themselves.
+    auto_signup_stale = False
+    try:
+        auto = bot.event_store.get_auto_signup(
+            event.event_id,
+            discord_user_id,
+        )
+        if auto is not None and auto.choice is AutoSignupChoice.YES:
+            bot.event_store.set_auto_signup(
+                event.event_id,
+                discord_user_id,
+                AutoSignupChoice.YES,
+                role,
+                flex_roles,
+            )
+    except SQLAlchemyError as exc:
+        auto_signup_stale = True
+        LOGGER.error(
+            "Could not carry a signup edit into its automatic sign-up; "
+            "occurrence_id=%s user_id=%s error_type=%s",
+            occurrence.occurrence_id,
+            discord_user_id,
+            type(exc).__name__,
+        )
+    return auto_signup_stale
+
+
 async def apply_signup_edit(
     bot: Gw2Bot,
     event: Event,
@@ -1925,67 +2118,10 @@ async def apply_signup_edit(
     #
     # Each of these commits on its own, so they are guarded one at a time
     # and answered by how far the edit actually got.
-    try:
-        bot.event_store.set_signup_edit_tokens(
-            occurrence.occurrence_id,
-            discord_user_id,
-            tokens - 1.0,
-            current_time,
-        )
-    except SQLAlchemyError as exc:
-        LOGGER.error(
-            "Could not spend an edit token; occurrence_id=%s user_id=%s "
-            "error_type=%s",
-            occurrence.occurrence_id,
-            discord_user_id,
-            type(exc).__name__,
-        )
-        await notify_roster_update(bot, occurrence, checked)
-        raise ValueError(
-            "Your signup could not be updated just now. Try again in a "
-            "moment."
-        ) from exc
-    try:
-        bot.event_store.update_signup_roles(
-            occurrence.occurrence_id,
-            discord_user_id,
-            role=role,
-            flex_roles=flex_roles,
-            assigned_role=current.assigned_role if keeps_seat else None,
-            waitlisted=not keeps_seat,
-        )
-    except SQLAlchemyError as exc:
-        LOGGER.error(
-            "Could not write a signup edit; occurrence_id=%s user_id=%s "
-            "error_type=%s",
-            occurrence.occurrence_id,
-            discord_user_id,
-            type(exc).__name__,
-        )
-        # The token above is committed and bought nothing, so it is handed
-        # back before the member is sent to a retry that would spend a
-        # second one. Guarded in turn: a store refusing the write may refuse
-        # this too, and the member is owed an answer either way.
-        try:
-            bot.event_store.set_signup_edit_tokens(
-                occurrence.occurrence_id,
-                discord_user_id,
-                tokens,
-                current_time,
-            )
-        except SQLAlchemyError as refund_error:
-            LOGGER.error(
-                "Could not hand back an edit token the edit did not use; "
-                "occurrence_id=%s user_id=%s error_type=%s",
-                occurrence.occurrence_id,
-                discord_user_id,
-                type(refund_error).__name__,
-            )
-        await notify_roster_update(bot, occurrence, checked)
-        raise ValueError(
-            "Your signup could not be updated just now. Try again in a "
-            "moment."
-        ) from exc
+    await _write_signup_edit(
+        bot, occurrence, current, role, flex_roles,
+        keeps_seat=keeps_seat, tokens=tokens, current_time=current_time, checked=checked,
+    )
     # The declaration is committed from here, so nothing below reports this
     # edit as having failed.
     #
@@ -2021,53 +2157,9 @@ async def apply_signup_edit(
             ),
         ]
     )
-    # The edit is committed by here, so this read is outside the guard above:
-    # answering a refusal with "try again" would spend a second edit token on
-    # a change that is already on the roster, and lose the announcement and
-    # the message refresh below with it. The row is described from what was
-    # just written instead, corrected by what the resettle reported about
-    # this member - it re-solves the seated set, so it can have promoted them
-    # or moved their assigned role since.
-    try:
-        updated = bot.event_store.get_signup(
-            occurrence.occurrence_id,
-            discord_user_id,
-        )
-    except SQLAlchemyError as exc:
-        LOGGER.error(
-            "Could not read a signup back after editing it; "
-            "occurrence_id=%s user_id=%s error_type=%s",
-            occurrence.occurrence_id,
-            discord_user_id,
-            type(exc).__name__,
-        )
-        updated = replace(
-            current,
-            role=role,
-            flex_roles=flex_roles,
-            assigned_role=current.assigned_role if keeps_seat else None,
-            waitlisted=not keeps_seat,
-        )
-        seated = next(
-            (
-                signup
-                for signup in update.promoted
-                if signup.discord_user_id == discord_user_id
-            ),
-            None,
-        )
-        moved = next(
-            (
-                change
-                for change in update.reassigned
-                if change.discord_user_id == discord_user_id
-            ),
-            None,
-        )
-        if seated is not None:
-            updated = seated
-        elif moved is not None:
-            updated = replace(updated, assigned_role=moved.new_role)
+    updated = _read_edited_signup(
+        bot, occurrence, current, role, flex_roles, keeps_seat, update
+    )
     if updated is None:
         # The resettle above committed too, so both halves are announced
         # rather than lost with the row.
@@ -2077,39 +2169,9 @@ async def apply_signup_edit(
             merge_roster_updates([checked, update]),
         )
         raise ValueError("You are not signed up for this event.")
-    # A stored auto sign-up snapshots the roles it will use for future
-    # occurrences, so an enabled one must follow the edit or next week's
-    # roster would resurrect the old selection.
-    #
-    # Guarded on its own rather than with the phase above, because the edit
-    # this follows is committed: refusing it now would tell the member their
-    # change failed when it is sitting on the roster. A failure here is not
-    # silent either - the snapshot decides next week's roster, and nothing
-    # retries it - so the member is told their automatic sign-up still holds
-    # the old selection and can put it right themselves.
-    auto_signup_stale = False
-    try:
-        auto = bot.event_store.get_auto_signup(
-            event.event_id,
-            discord_user_id,
-        )
-        if auto is not None and auto.choice is AutoSignupChoice.YES:
-            bot.event_store.set_auto_signup(
-                event.event_id,
-                discord_user_id,
-                AutoSignupChoice.YES,
-                role,
-                flex_roles,
-            )
-    except SQLAlchemyError as exc:
-        auto_signup_stale = True
-        LOGGER.error(
-            "Could not carry a signup edit into its automatic sign-up; "
-            "occurrence_id=%s user_id=%s error_type=%s",
-            occurrence.occurrence_id,
-            discord_user_id,
-            type(exc).__name__,
-        )
+    auto_signup_stale = _sync_auto_signup_roles(
+        bot, event, occurrence, discord_user_id, role, flex_roles
+    )
     LOGGER.debug(
         "Applied signup edit; occurrence_id=%s user_id=%s role=%s "
         "flex_count=%s waitlisted=%s assigned_role=%s reassigned=%s "
@@ -2233,17 +2295,8 @@ def _seat_on_unseen_roster(
     """
     assigned_role: EventRole | None = None
     if event.capacity.has_roles and role is not None:
-        candidates = seated_candidates(signups)
-        candidates.append(
-            RosterCandidate(
-                discord_user_id=discord_user_id,
-                preferences=preferred_role_order(role, flex_roles),
-            )
-        )
-        solution = (
-            solve_roster(event.capacity, candidates)
-            if can_admit(event.capacity, signups, role, flex_roles)
-            else None
+        solution = _admission_solution(
+            event.capacity, signups, discord_user_id, role, flex_roles
         )
         waitlisted = solution is None
         if solution is not None:
@@ -2412,3 +2465,4 @@ def disable_auto_signup(
         withdrawn=tuple(withdrawn),
         still_seated=tuple(still_seated),
     )
+

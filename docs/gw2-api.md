@@ -6,8 +6,8 @@ The API base URL is `https://api.guildwars2.com`. Authenticated requests use:
 Authorization: Bearer <GW2 API key or subtoken>
 ```
 
-The bot's API client implements every endpoint listed below. Guild data is not
-yet polled by the bot because notification rules have not been defined.
+The bot's API clients implement the endpoints listed below. Guild log,
+storage, stash and member reads feed the configured pollers and reports.
 
 ## Authentication
 
@@ -297,6 +297,12 @@ the same account. A `kick` event with a different `kicked_by` account means
 someone removed the member and is not reported as a voluntary leave. The bot
 persists voluntary departures before posting the exact leave message to
 Discord. It also persists `joined` events before posting the exact join message.
+
+In `gw2/guild_log.py`, the notification-channel senders share
+`_deliver_pending`: each row is marked sent only after its delivery returns
+success. A failed delivery remains pending for the next pass. Raffle
+contribution embeds retain their sub-gold suppression, and reward milestones
+retain their separate channel and threshold-based delivery marker.
 
 Raffle gold deposits are also aggregated into fixed six-hour UTC reporting
 windows ending at `00:00`, `06:00`, `12:00`, and `18:00`. The bot refreshes the

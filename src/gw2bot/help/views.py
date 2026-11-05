@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import discord
 
-from gw2bot.core.discord_utils import log_discord_failure
+from gw2bot.core.discord_utils import (
+    add_pager_buttons,
+    clamp_page,
+    log_discord_failure,
+    page_button,
+)
 from gw2bot.help.pages import build_help_messages, registered_commands
 
 if TYPE_CHECKING:
@@ -51,11 +56,9 @@ class HelpPageButton(
         self.page = page
         self.direction = direction
         super().__init__(
-            discord.ui.Button(
-                label="<" if direction < 0 else ">",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"gw2bot:help:{page}:{direction}",
-                disabled=disabled,
+            page_button(
+                f'gw2bot:help:{page}:{direction}',
+                direction, disabled=disabled,
             )
         )
 
@@ -79,7 +82,7 @@ class HelpPageButton(
         )
         # The page count can shrink between clicks if a role was taken away,
         # so the target is clamped to what exists now.
-        page = max(0, min(self.page + self.direction, len(pages) - 1))
+        page = clamp_page(self.page, self.direction, len(pages))
         LOGGER.debug(
             "Changing help page; user_id=%s direction=%s page=%s page_count=%s",
             interaction.user.id,
@@ -101,8 +104,7 @@ class HelpPagerView(discord.ui.View):
         # timeout=None marks the view persistent; each button carries a
         # custom_id the bot's dynamic items dispatch after a restart.
         super().__init__(timeout=None)
-        page = max(0, min(page, page_count - 1))
-        self.add_item(HelpPageButton(page, -1, disabled=page == 0))
-        self.add_item(
-            HelpPageButton(page, 1, disabled=page >= page_count - 1)
+        add_pager_buttons(
+            self, page_count, page,
+            button_factory=HelpPageButton,
         )

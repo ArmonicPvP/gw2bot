@@ -18,7 +18,8 @@ be replayed on top of a total that already includes it.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Generic, Protocol, TypeVar
 
 
 class Change(Protocol):
@@ -29,6 +30,44 @@ class Change(Protocol):
 
     @property
     def delta(self) -> int: ...
+
+
+ChangeT = TypeVar("ChangeT", bound=Change)
+
+
+@dataclass(frozen=True)
+class WindowValues(Generic[ChangeT]):
+    points: tuple[tuple[float, int], ...]
+    changes: tuple[tuple[ChangeT, int | None], ...]
+
+
+def build_window(
+    changes: Sequence[ChangeT],
+    anchor: tuple[float, int] | None,
+    since: float,
+    until: float,
+) -> WindowValues[ChangeT]:
+    """Select a window and frame its line around the newest observation.
+
+    Changes outside the window still determine the values inside it. A
+    change exactly at the start follows the opening point; one at the end
+    is included in the closing point. Without an anchor, changes are kept
+    with unknown values and no line is invented.
+    """
+    ordered = sorted(changes, key=lambda change: change.occurred_at)
+    in_window = [
+        index for index, change in enumerate(ordered)
+        if since <= change.occurred_at <= until
+    ]
+    if anchor is None:
+        return WindowValues((), tuple((ordered[index], None) for index in in_window))
+    values, baseline = derive_values(ordered, *anchor)
+    points = [(since, value_before(ordered, values, baseline, since))]
+    points.extend((ordered[index].occurred_at, values[index]) for index in in_window)
+    points.append((until, value_through(ordered, values, baseline, until)))
+    return WindowValues(
+        tuple(points), tuple((ordered[index], values[index]) for index in in_window)
+    )
 
 
 def derive_values(
@@ -92,3 +131,4 @@ def value_through(
             break
         result = values_after[index]
     return result
+

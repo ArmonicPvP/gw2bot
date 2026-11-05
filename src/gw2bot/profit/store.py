@@ -398,16 +398,44 @@ class ProfitStore:
             window.custom,
         )
 
-    def get_excluded_order_items(self, discord_user_id: int) -> frozenset[int]:
+    def _excluded_items(
+        self,
+        record_type: type[ProfitOrderExclusionRecord] | type[ProfitItemExclusionRecord],
+        discord_user_id: int,
+    ) -> frozenset[int]:
         with self._sessions() as session:
-            item_ids = frozenset(
-                session.scalars(
-                    select(ProfitOrderExclusionRecord.item_id).where(
-                        ProfitOrderExclusionRecord.discord_user_id
-                        == discord_user_id
-                    )
+            return frozenset(session.scalars(
+                select(record_type.item_id).where(
+                    record_type.discord_user_id == discord_user_id
                 )
-            )
+            ))
+
+    def _set_item_exclusion(
+        self,
+        record_type: type[ProfitOrderExclusionRecord] | type[ProfitItemExclusionRecord],
+        discord_user_id: int,
+        item_id: int,
+        excluded: bool,
+        created_at: str,
+    ) -> bool:
+        with self._sessions.begin() as session:
+            record = session.get(record_type, (discord_user_id, item_id))
+            if excluded:
+                if record is not None:
+                    return False
+                session.add(record_type(
+                    discord_user_id=discord_user_id,
+                    item_id=item_id,
+                    created_at=created_at,
+                ))
+            else:
+                if record is None:
+                    return False
+                session.delete(record)
+            return True
+
+    def get_excluded_order_items(self, discord_user_id: int) -> frozenset[int]:
+        item_ids = self._excluded_items(ProfitOrderExclusionRecord, discord_user_id)
         LOGGER.debug(
             "Read profit order exclusions; user_id=%s items=%s",
             discord_user_id,
@@ -427,25 +455,9 @@ class ProfitStore:
         if item_id <= 0:
             raise ValueError("Profit order exclusions need a positive item id")
         created_at = (datetime.now(UTC) if now is None else now).isoformat()
-        with self._sessions.begin() as session:
-            record = session.get(
-                ProfitOrderExclusionRecord,
-                (discord_user_id, item_id),
-            )
-            if excluded:
-                changed = record is None
-                if record is None:
-                    session.add(
-                        ProfitOrderExclusionRecord(
-                            discord_user_id=discord_user_id,
-                            item_id=item_id,
-                            created_at=created_at,
-                        )
-                    )
-            else:
-                changed = record is not None
-                if record is not None:
-                    session.delete(record)
+        changed = self._set_item_exclusion(
+            ProfitOrderExclusionRecord, discord_user_id, item_id, excluded, created_at
+        )
         LOGGER.debug(
             "Stored profit order exclusion; user_id=%s item_id=%s "
             "excluded=%s changed=%s",
@@ -458,15 +470,7 @@ class ProfitStore:
 
     def get_excluded_profit_items(self, discord_user_id: int) -> frozenset[int]:
         """The items this member left out of their realized profit."""
-        with self._sessions() as session:
-            item_ids = frozenset(
-                session.scalars(
-                    select(ProfitItemExclusionRecord.item_id).where(
-                        ProfitItemExclusionRecord.discord_user_id
-                        == discord_user_id
-                    )
-                )
-            )
+        item_ids = self._excluded_items(ProfitItemExclusionRecord, discord_user_id)
         LOGGER.debug(
             "Read profit item exclusions; user_id=%s items=%s",
             discord_user_id,
@@ -486,25 +490,9 @@ class ProfitStore:
         if item_id <= 0:
             raise ValueError("Profit item exclusions need a positive item id")
         created_at = (datetime.now(UTC) if now is None else now).isoformat()
-        with self._sessions.begin() as session:
-            record = session.get(
-                ProfitItemExclusionRecord,
-                (discord_user_id, item_id),
-            )
-            if excluded:
-                changed = record is None
-                if record is None:
-                    session.add(
-                        ProfitItemExclusionRecord(
-                            discord_user_id=discord_user_id,
-                            item_id=item_id,
-                            created_at=created_at,
-                        )
-                    )
-            else:
-                changed = record is not None
-                if record is not None:
-                    session.delete(record)
+        changed = self._set_item_exclusion(
+            ProfitItemExclusionRecord, discord_user_id, item_id, excluded, created_at
+        )
         LOGGER.debug(
             "Stored profit item exclusion; user_id=%s item_id=%s "
             "excluded=%s changed=%s",
@@ -1213,20 +1201,7 @@ class ProfitStore:
                     index_elements=("discord_user_id", "checkpoint_at")
                 )
             )
-            rows = [
-                {
-                    "discord_user_id": discord_user_id,
-                    "checkpoint_at": stamp,
-                    "item_id": item_id,
-                    "lot_index": index,
-                    "remaining": lot.remaining,
-                    "unit_price": lot.unit_price,
-                    "occurred_at": lot.occurred_at.isoformat(),
-                    "transaction_id": lot.transaction_id,
-                }
-                for item_id, item_lots in lots.items()
-                for index, lot in enumerate(item_lots)
-            ]
+            rows = _lot_rows(discord_user_id, lots, checkpoint_at=stamp)
             if rows:
                 session.execute(insert(ProfitLotCheckpointRecord), rows)
             _trim_lot_checkpoints(session, discord_user_id)
@@ -1275,28 +1250,13 @@ class ProfitStore:
             checkpoint_at = parse_gw2_time(chosen)
         except (TypeError, ValueError):
             return None
-        lots: dict[int, list[BuyLot]] = {}
-        for record in records:
-            try:
-                occurred_at = parse_gw2_time(record.occurred_at)
-            except (TypeError, ValueError):
-                continue
-            lots.setdefault(record.item_id, []).append(
-                BuyLot(
-                    record.remaining,
-                    record.unit_price,
-                    occurred_at,
-                    record.transaction_id or "",
-                )
-            )
+        lots = _lots_from_records(records)
         LOGGER.debug(
             "Read a profit lot checkpoint; user_id=%s items=%s",
             discord_user_id,
             len(lots),
         )
-        return checkpoint_at, {
-            item_id: tuple(rows) for item_id, rows in lots.items()
-        }
+        return checkpoint_at, lots
 
     def discard_rollups_from(
         self,
@@ -1396,51 +1356,14 @@ class ProfitStore:
             if rollups:
                 session.execute(
                     insert(ProfitRollupRecord),
-                    [
-                        {
-                            "discord_user_id": discord_user_id,
-                            "sold_day": sold_day,
-                            "item_id": item_id,
-                            "matched_quantity": totals.matched_quantity,
-                            "cost": totals.cost,
-                            "net_revenue": totals.net_revenue,
-                            "profit": totals.profit,
-                            "hold_seconds": totals.hold_seconds,
-                        }
-                        for (item_id, sold_day), totals in rollups.items()
-                    ],
+                    _rollup_rows(discord_user_id, rollups),
                 )
-            lot_rows = [
-                {
-                    "discord_user_id": discord_user_id,
-                    "item_id": item_id,
-                    "lot_index": index,
-                    "remaining": lot.remaining,
-                    "unit_price": lot.unit_price,
-                    "occurred_at": lot.occurred_at.isoformat(),
-                    "transaction_id": lot.transaction_id,
-                }
-                for item_id, lots in open_lots.items()
-                for index, lot in enumerate(lots)
-            ]
+            lot_rows = _lot_rows(discord_user_id, open_lots)
             if lot_rows:
                 session.execute(insert(ProfitOpenLotRecord), lot_rows)
-            record = session.get(ProfitRollupStateRecord, discord_user_id)
-            through = (
-                None if computed_through is None
-                else computed_through.isoformat()
+            _save_rollup_state(
+                session, discord_user_id, computed_through, computed_at
             )
-            if record is None:
-                session.add(
-                    ProfitRollupStateRecord(
-                        discord_user_id=discord_user_id,
-                        computed_through=through,
-                        computed_at=computed_at,
-                    )
-                )
-            else:
-                record.computed_through = through
-                record.computed_at = computed_at
         LOGGER.debug(
             "Stored profit rollups; user_id=%s rows=%s open_lots=%s "
             "trades=%s",
@@ -1522,52 +1445,19 @@ class ProfitStore:
                             ),
                         },
                     ),
-                    [
-                        {
-                            "discord_user_id": discord_user_id,
-                            "sold_day": sold_day,
-                            "item_id": item_id,
-                            "matched_quantity": totals.matched_quantity,
-                            "cost": totals.cost,
-                            "net_revenue": totals.net_revenue,
-                            "profit": totals.profit,
-                            "hold_seconds": totals.hold_seconds,
-                        }
-                        for (item_id, sold_day), totals in rollups.items()
-                    ],
+                    _rollup_rows(discord_user_id, rollups),
                 )
             session.execute(
                 delete(ProfitOpenLotRecord).where(
                     ProfitOpenLotRecord.discord_user_id == discord_user_id
                 )
             )
-            lot_rows = [
-                {
-                    "discord_user_id": discord_user_id,
-                    "item_id": item_id,
-                    "lot_index": index,
-                    "remaining": lot.remaining,
-                    "unit_price": lot.unit_price,
-                    "occurred_at": lot.occurred_at.isoformat(),
-                    "transaction_id": lot.transaction_id,
-                }
-                for item_id, lots in open_lots.items()
-                for index, lot in enumerate(lots)
-            ]
+            lot_rows = _lot_rows(discord_user_id, open_lots)
             if lot_rows:
                 session.execute(insert(ProfitOpenLotRecord), lot_rows)
-            record = session.get(ProfitRollupStateRecord, discord_user_id)
-            if record is None:
-                session.add(
-                    ProfitRollupStateRecord(
-                        discord_user_id=discord_user_id,
-                        computed_through=computed_through.isoformat(),
-                        computed_at=computed_at,
-                    )
-                )
-            else:
-                record.computed_through = computed_through.isoformat()
-                record.computed_at = computed_at
+            _save_rollup_state(
+                session, discord_user_id, computed_through, computed_at
+            )
         LOGGER.debug(
             "Merged profit rollups; user_id=%s rows=%s open_lots=%s "
             "trades=%s",
@@ -1643,26 +1533,13 @@ class ProfitStore:
                     .order_by(ProfitOpenLotRecord.lot_index)
                 )
             )
-        lots: dict[int, list[BuyLot]] = {}
-        for record in records:
-            try:
-                occurred_at = parse_gw2_time(record.occurred_at)
-            except (TypeError, ValueError):
-                continue
-            lots.setdefault(record.item_id, []).append(
-                BuyLot(
-                    record.remaining,
-                    record.unit_price,
-                    occurred_at,
-                    record.transaction_id or "",
-                )
-            )
+        lots = _lots_from_records(records)
         LOGGER.debug(
             "Read profit open lots; user_id=%s items=%s",
             discord_user_id,
             len(lots),
         )
-        return {item_id: tuple(rows) for item_id, rows in lots.items()}
+        return lots
 
     def count_transactions(
         self,
@@ -1817,6 +1694,87 @@ def _trade_rows(
         }
         for trade in trades
     ]
+
+
+def _rollup_rows(
+    discord_user_id: int,
+    rollups: dict[tuple[int, str], ItemDayProfit],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "discord_user_id": discord_user_id,
+            "sold_day": sold_day,
+            "item_id": item_id,
+            "matched_quantity": totals.matched_quantity,
+            "cost": totals.cost,
+            "net_revenue": totals.net_revenue,
+            "profit": totals.profit,
+            "hold_seconds": totals.hold_seconds,
+        }
+        for (item_id, sold_day), totals in rollups.items()
+    ]
+
+
+def _lot_rows(
+    discord_user_id: int,
+    lots: dict[int, tuple[BuyLot, ...]],
+    *,
+    checkpoint_at: str | None = None,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = [
+        {
+            "discord_user_id": discord_user_id,
+            "item_id": item_id,
+            "lot_index": index,
+            "remaining": lot.remaining,
+            "unit_price": lot.unit_price,
+            "occurred_at": lot.occurred_at.isoformat(),
+            "transaction_id": lot.transaction_id,
+        }
+        for item_id, item_lots in lots.items()
+        for index, lot in enumerate(item_lots)
+    ]
+    if checkpoint_at is not None:
+        for row in rows:
+            row["checkpoint_at"] = checkpoint_at
+    return rows
+
+
+def _lots_from_records(
+    records: Sequence[ProfitOpenLotRecord | ProfitLotCheckpointRecord],
+) -> dict[int, tuple[BuyLot, ...]]:
+    lots: dict[int, list[BuyLot]] = {}
+    for record in records:
+        try:
+            occurred_at = parse_gw2_time(record.occurred_at)
+        except (TypeError, ValueError):
+            continue
+        lots.setdefault(record.item_id, []).append(BuyLot(
+            record.remaining,
+            record.unit_price,
+            occurred_at,
+            record.transaction_id or "",
+        ))
+    return {item_id: tuple(rows) for item_id, rows in lots.items()}
+
+
+def _save_rollup_state(
+    session: Session,
+    discord_user_id: int,
+    computed_through: datetime | None,
+    computed_at: str,
+) -> None:
+    through = None if computed_through is None else computed_through.isoformat()
+    record = session.get(ProfitRollupStateRecord, discord_user_id)
+    if record is None:
+        session.add(ProfitRollupStateRecord(
+            discord_user_id=discord_user_id,
+            computed_through=through,
+            computed_at=computed_at,
+        ))
+    else:
+        record.computed_through = through
+        record.computed_at = computed_at
 
 
 def _trades_from_records(
@@ -2069,3 +2027,4 @@ def _clear_member_cache(session: Session, discord_user_id: int) -> None:
     )
     # The rollups were matched from the rows just dropped, so they go too.
     _clear_member_rollups(session, discord_user_id)
+

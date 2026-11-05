@@ -4,11 +4,7 @@ import logging
 import re
 from collections.abc import Sequence
 
-from gw2bot.core.anchored_series import (
-    derive_values,
-    value_before,
-    value_through,
-)
+from gw2bot.core.anchored_series import build_window
 from gw2bot.roster.models import (
     JOIN,
     KICK,
@@ -88,60 +84,33 @@ def build_roster_series(
     Without an anchor nothing can be placed on a count axis, so the events come
     back with no count and the line is empty rather than invented.
     """
-    ordered = sorted(events, key=lambda event: event.occurred_at)
-    in_window = [
-        index
-        for index, event in enumerate(ordered)
-        if since <= event.occurred_at <= until
-    ]
+    window = build_window(
+        events,
+        None if anchor is None else (anchor.recorded_at, anchor.member_count),
+        since,
+        until,
+    )
+    series = RosterSeries(
+        points=tuple(RosterPoint(at=at, member_count=value) for at, value in window.points),
+        events=tuple(_plot(change, value) for change, value in window.changes),
+    )
     if anchor is None:
         LOGGER.debug(
             "Built roster series without an observed member count; "
             "events=%s in_window=%s",
-            len(ordered),
-            len(in_window),
+            len(events),
+            len(window.changes),
         )
-        return RosterSeries(
-            points=(),
-            events=tuple(
-                _plot(ordered[index], None) for index in in_window
-            ),
-        )
+        return series
 
-    counts_after, baseline = derive_values(
-        ordered, anchor.recorded_at, anchor.member_count
-    )
-    count_at_end = value_through(ordered, counts_after, baseline, until)
-    points = [
-        RosterPoint(
-            at=since,
-            member_count=value_before(
-                ordered, counts_after, baseline, since
-            ),
-        )
-    ]
-    points.extend(
-        RosterPoint(
-            at=ordered[index].occurred_at,
-            member_count=counts_after[index],
-        )
-        for index in in_window
-    )
-    points.append(RosterPoint(at=until, member_count=count_at_end))
-    series = RosterSeries(
-        points=tuple(points),
-        events=tuple(
-            _plot(ordered[index], counts_after[index]) for index in in_window
-        ),
-    )
     LOGGER.debug(
         "Built roster series; events=%s in_window=%s points=%s "
         "anchor_offset_seconds=%s end_count=%s",
-        len(ordered),
-        len(in_window),
+        len(events),
+        len(window.changes),
         len(series.points),
         int(until - anchor.recorded_at),
-        count_at_end,
+        series.points[-1].member_count,
     )
     return series
 
@@ -155,3 +124,4 @@ def _plot(event: MembershipEvent, member_count: int | None) -> RosterEvent:
         member_count=member_count,
         imported=event.imported,
     )
+

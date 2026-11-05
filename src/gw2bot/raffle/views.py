@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Any, cast
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.core.discord_utils import (
+    add_pager_buttons,
+    clamp_page as _clamp_page,
+    page_button,
+)
 from gw2bot.gw2.member_lookup import resolve_member_or_reply
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
@@ -51,10 +56,6 @@ def _raffle_ticket_page_count(row_count: int) -> int:
     )
 
 
-def _clamp_page(page: int, direction: int, page_count: int) -> int:
-    return max(0, min(page + direction, page_count - 1))
-
-
 class RaffleTicketsListButton(
     discord.ui.DynamicItem[discord.ui.Button[Any]],
     template=(
@@ -65,11 +66,9 @@ class RaffleTicketsListButton(
         self.page = page
         self.direction = direction
         super().__init__(
-            discord.ui.Button(
-                label="<" if direction < 0 else ">",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"gw2bot:raffle-tickets-list:{page}:{direction}",
-                disabled=disabled,
+            page_button(
+                f'gw2bot:raffle-tickets-list:{page}:{direction}',
+                direction, disabled=disabled,
             )
         )
 
@@ -119,16 +118,9 @@ class RaffleTicketsListView(discord.ui.View):
     def __init__(self, active_count: int, page: int = 0):
         super().__init__(timeout=None)
         page_count = _raffle_ticket_page_count(active_count)
-        page = max(0, min(page, page_count - 1))
-        self.add_item(
-            RaffleTicketsListButton(page, -1, disabled=page == 0)
-        )
-        self.add_item(
-            RaffleTicketsListButton(
-                page,
-                1,
-                disabled=page >= page_count - 1,
-            )
+        add_pager_buttons(
+            self, page_count, page,
+            button_factory=RaffleTicketsListButton,
         )
 
 
@@ -151,13 +143,9 @@ class RaffleLeaderboardButton(
         self.page = page
         self.direction = direction
         super().__init__(
-            discord.ui.Button(
-                label="<" if direction < 0 else ">",
-                style=discord.ButtonStyle.secondary,
-                custom_id=(
-                    f"gw2bot:raffle-leaderboard:{sort_key}:{page}:{direction}"
-                ),
-                disabled=disabled,
+            page_button(
+                f'gw2bot:raffle-leaderboard:{sort_key}:{page}:{direction}',
+                direction, disabled=disabled,
             )
         )
 
@@ -231,17 +219,11 @@ class RaffleLeaderboardView(discord.ui.View):
     def __init__(self, sort_key: str, row_count: int, page: int = 0):
         super().__init__(timeout=None)
         page_count = _raffle_ticket_page_count(row_count)
-        page = max(0, min(page, page_count - 1))
-        self.add_item(
-            RaffleLeaderboardButton(sort_key, page, -1, disabled=page == 0)
-        )
-        self.add_item(
-            RaffleLeaderboardButton(
-                sort_key,
-                page,
-                1,
-                disabled=page >= page_count - 1,
-            )
+        add_pager_buttons(
+            self, page_count, page,
+            button_factory=lambda page, direction, *, disabled: RaffleLeaderboardButton(
+                sort_key, page, direction, disabled=disabled
+            ),
         )
 
 
@@ -270,14 +252,9 @@ class RaffleContributionReportButton(
         self.page = page
         self.direction = direction
         super().__init__(
-            discord.ui.Button(
-                label="<" if direction < 0 else ">",
-                style=discord.ButtonStyle.secondary,
-                custom_id=(
-                    f"gw2bot:raffle-contributions:{report_start}:"
-                    f"{report_end}:{page}:{direction}"
-                ),
-                disabled=disabled,
+            page_button(
+                f'gw2bot:raffle-contributions:{report_start}:{report_end}:{page}:{direction}',
+                direction, disabled=disabled,
             )
         )
 
@@ -346,24 +323,11 @@ class RaffleContributionReportView(discord.ui.View):
         start_epoch = int(report_start.astimezone(UTC).timestamp())
         end_epoch = int(report_end.astimezone(UTC).timestamp())
         page_count = _raffle_ticket_page_count(contributor_count)
-        page = max(0, min(page, page_count - 1))
-        self.add_item(
-            RaffleContributionReportButton(
-                start_epoch,
-                end_epoch,
-                page,
-                -1,
-                disabled=page == 0,
-            )
-        )
-        self.add_item(
-            RaffleContributionReportButton(
-                start_epoch,
-                end_epoch,
-                page,
-                1,
-                disabled=page >= page_count - 1,
-            )
+        add_pager_buttons(
+            self, page_count, page,
+            button_factory=lambda page, direction, *, disabled: RaffleContributionReportButton(
+                start_epoch, end_epoch, page, direction, disabled=disabled
+            ),
         )
 
 
@@ -398,13 +362,9 @@ class RaffleAuditRangesButton(
         self.page = page
         self.direction = direction
         super().__init__(
-            discord.ui.Button(
-                label="<" if direction < 0 else ">",
-                style=discord.ButtonStyle.secondary,
-                custom_id=(
-                    f"gw2bot:raffle-audit-ranges:{run_id}:{page}:{direction}"
-                ),
-                disabled=disabled,
+            page_button(
+                f'gw2bot:raffle-audit-ranges:{run_id}:{page}:{direction}',
+                direction, disabled=disabled,
             )
         )
 
@@ -448,7 +408,7 @@ class RaffleAuditRangesButton(
             return
 
         page_count = _raffle_audit_ranges_page_count(len(audit.entrants))
-        page = max(0, min(self.page + self.direction, page_count - 1))
+        page = _clamp_page(self.page, self.direction, page_count)
         LOGGER.debug(
             "Changing raffle audit ranges page; run_id=%s direction=%s "
             "page=%s page_count=%s",
@@ -474,17 +434,11 @@ class RaffleAuditRangesView(discord.ui.View):
         # button registration in Gw2Bot.
         super().__init__(timeout=None)
         page_count = _raffle_audit_ranges_page_count(entrant_count)
-        page = max(0, min(page, page_count - 1))
-        self.add_item(
-            RaffleAuditRangesButton(run_id, page, -1, disabled=page == 0)
-        )
-        self.add_item(
-            RaffleAuditRangesButton(
-                run_id,
-                page,
-                1,
-                disabled=page >= page_count - 1,
-            )
+        add_pager_buttons(
+            self, page_count, page,
+            button_factory=lambda page, direction, *, disabled: RaffleAuditRangesButton(
+                run_id, page, direction, disabled=disabled
+            ),
         )
 
 

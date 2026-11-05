@@ -4,8 +4,34 @@
 
 `core/` holds what every feature shares and nothing that knows about a
 feature: the SQLite engine and its migrations, the redacting log formatter,
-the Discord role and failure helpers, the anchored-series maths, and the
-vocabulary a dashboard range is written in.
+the Discord role and failure helpers, the anchored-series maths, the
+vocabulary a dashboard range is written in, and message framing.
+
+`database.initialize_database` keeps upgrades in their existing order.
+`_column_names` reads a table's columns and `_add_missing_column` records an
+added column's migration label and returns whether it was added. Backfill SQL
+and table rebuilds stay in `initialize_database`, so a backfill runs only when
+its column was newly added.
+
+`anchored_series.build_window` selects a history window and builds its
+boundary points. Its input must include the changes between the window and
+the observation used as its anchor, including changes after the window when
+the observation is newer. The opening point precedes changes exactly at the
+start; the closing point includes changes exactly at the end. Without an
+observation, changes have unknown values and the line is empty. Feature
+modules turn those values into their own page models.
+
+`message_chunks.pack_message_lines` repeats a prefix and suffix around whole
+entries, reserving room for the suffix when splitting. An entry too large for
+an empty frame is kept alone rather than split or dropped; it can still
+exceed Discord's size limit. Callers retain their own whitespace and
+empty-report policies. Event reminders remain separate because each message
+also carries the exact user IDs it may mention.
+
+`discord_utils` owns the pager primitives: `clamp_page`, `page_button`, and
+`add_pager_buttons`. A view supplies a typed button factory, so raffle and
+help retain their own persistent IDs, dynamic-item patterns, data reads and
+rendering while sharing arrow styling and disabled-state calculations.
 
 The dependency only ever points one way. Any package may import `core/`;
 nothing in `core/` may import anything else under `gw2bot` - not a feature
@@ -40,3 +66,4 @@ When something in `core/` looks like it needs a feature:
 `gw2/guild_log.py` imports `raffle` to parse gold deposits and render their
 embed, so the layer is deliberately not pure, and extending the assertion to
 `gw2/` would fail until that import is dealt with.
+
