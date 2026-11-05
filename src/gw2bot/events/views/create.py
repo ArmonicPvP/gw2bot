@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import require_role
 from gw2bot.events.audit import event_created_audit, send_event_audit
 from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
@@ -565,19 +565,17 @@ class EventConfirmView(_PreviewConfirmView):
         # The preview can sit open for minutes; the creator role may have
         # been revoked since /event new, so recheck before the irreversible
         # save/post path.
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
-        ):
-            LOGGER.warning(
-                "Rejected event post from Discord user %s; required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            return await refuse(
-                "You do not have the required role to create events.",
+            action="event post",
+            denial="You do not have the required role to create events.",
+            reply=lambda _interaction, denial: refuse(
+                denial,
                 correctable=False,
-            )
+            ),
+        ):
+            return False
         if self._draft.posted:
             return await refuse(
                 "This event was already posted.",
@@ -985,20 +983,12 @@ class EventEditConfirmView(_PreviewConfirmView):
             return
         # The preview can sit open for minutes; recheck the role before the
         # save path, mirroring post_event.
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event edit save",
+            denial="You do not have the required role to edit events.",
         ):
-            LOGGER.warning(
-                "Rejected event edit save from Discord user %s; required "
-                "role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to edit events.",
-                ephemeral=True,
-            )
             return
         if not self._draft.is_complete():
             await interaction.response.send_message(

@@ -19,6 +19,7 @@ from gw2bot.core.command_access import (
     access_extras,
 )
 from gw2bot.core.discord_utils import (
+    autocomplete_allowed,
     forum_tags_for_ids,
     log_discord_failure,
     safe_int,
@@ -942,11 +943,13 @@ def _autocomplete_for(
         current: str,
     ) -> list[app_commands.Choice[str]]:
         # Autocomplete must never raise: an unauthorized caller simply sees no
-        # suggestions, and the command itself still enforces the gate.
-        if not user_has_role(
-            interaction.user,
+        # suggestions, and the command itself still enforces the gate. The
+        # owner and administrators pass the way they pass the command's own.
+        if not _is_owner_or_admin(interaction) and not autocomplete_allowed(
+            interaction,
             commands._bot._config.raffle_officer_role_id,
-        ) and not _is_owner_or_admin(interaction):
+            action="settings",
+        ):
             return []
         try:
             choices = await _suggestions(commands, definition, interaction)

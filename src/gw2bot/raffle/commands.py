@@ -10,7 +10,8 @@ from discord import app_commands
 from sqlalchemy.exc import SQLAlchemyError
 
 from gw2bot.core.command_access import Everyone, RoleSetting, access_extras
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import autocomplete_allowed
+from gw2bot.gw2.member_lookup import resolve_member_or_reply
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
     RAFFLE_TICKETS_PAGE_SIZE,
@@ -61,13 +62,11 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.guild_roster_role_id,
+            action="raffle guild member",
         ):
-            LOGGER.debug(
-                "Skipped raffle guild member autocomplete; authorized=false"
-            )
             return []
         if not self._bot.gw2_api_enabled:
             LOGGER.debug(
@@ -93,13 +92,11 @@ class RaffleCommands(app_commands.Group):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        if not user_has_role(
-            interaction.user,
+        if not autocomplete_allowed(
+            interaction,
             self._bot._config.raffle_draw_role_id,
+            action="purchased ticket holder",
         ):
-            LOGGER.debug(
-                "Skipped purchased ticket holder autocomplete; authorized=false"
-            )
             return []
         if not self._bot.gw2_api_enabled:
             # These names come from the persisted ledger rather than the GW2
@@ -403,22 +400,13 @@ class RaffleCommands(app_commands.Group):
             return
 
         await interaction.response.defer(ephemeral=True)
-        try:
-            canonical_username = await self._bot.resolve_guild_member(username)
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            LOGGER.error("Could not refresh the guild member cache")
-            await interaction.followup.send(
-                "Could not verify guild membership. Try again later.",
-                ephemeral=True,
-            )
-            return
-
+        canonical_username = await resolve_member_or_reply(
+            self._bot,
+            interaction,
+            username,
+            action="Manual raffle ticket",
+        )
         if canonical_username is None:
-            LOGGER.debug("Manual raffle ticket rejected; guild member was not found")
-            await interaction.followup.send(
-                f"`{username}` is not a member of the configured guild.",
-                ephemeral=True,
-            )
             return
 
         if amount is not None:
@@ -601,21 +589,13 @@ class RaffleCommands(app_commands.Group):
             return
 
         await interaction.response.defer(ephemeral=True)
-        try:
-            canonical_username = await self._bot.resolve_guild_member(username)
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            LOGGER.error("Could not refresh the guild member cache")
-            await interaction.followup.send(
-                "Could not verify guild membership. Try again later.",
-                ephemeral=True,
-            )
-            return
-
+        canonical_username = await resolve_member_or_reply(
+            self._bot,
+            interaction,
+            username,
+            action="Purchased raffle ticket removal",
+        )
         if canonical_username is None:
-            await interaction.followup.send(
-                f"`{username}` is not a member of the configured guild.",
-                ephemeral=True,
-            )
             return
 
         try:
@@ -689,21 +669,13 @@ class RaffleCommands(app_commands.Group):
             return
 
         await interaction.response.defer(ephemeral=True)
-        try:
-            canonical_username = await self._bot.resolve_guild_member(username)
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            LOGGER.error("Could not refresh the guild member cache")
-            await interaction.followup.send(
-                "Could not verify guild membership. Try again later.",
-                ephemeral=True,
-            )
-            return
-
+        canonical_username = await resolve_member_or_reply(
+            self._bot,
+            interaction,
+            username,
+            action="Raffle tickets lookup",
+        )
         if canonical_username is None:
-            await interaction.followup.send(
-                f"`{username}` is not a member of the configured guild.",
-                ephemeral=True,
-            )
             return
 
         await interaction.followup.send(

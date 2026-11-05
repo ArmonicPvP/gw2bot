@@ -1038,7 +1038,10 @@ class TestRaffleTicketsCommand:
         await tickets.callback(group, interaction, "member.1234")  # type: ignore[arg-type]
 
         interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-        bot.resolve_guild_member.assert_awaited_once_with("member.1234")
+        bot.resolve_guild_member.assert_awaited_once_with(
+            "member.1234",
+            force_refresh=False,
+        )
         embed = interaction.followup.send.await_args.kwargs["embed"]
         assert embed.title == "Raffle Tickets: Member.1234"
 

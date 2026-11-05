@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
-from gw2bot.core.discord_utils import user_has_role
+from gw2bot.core.discord_utils import require_role
 from gw2bot.events.audit import (
     event_deleted_audit,
     event_edited_audit,
@@ -68,20 +68,12 @@ class ChannelMoveConfirmView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button[ChannelMoveConfirmView],
     ) -> None:
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event channel move",
+            denial="You do not have the required role to edit events.",
         ):
-            LOGGER.warning(
-                "Rejected event channel move from Discord user %s; required "
-                "role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to edit events.",
-                ephemeral=True,
-            )
             return
         await apply_event_edit(
             self._bot,
@@ -673,19 +665,12 @@ class EventDeleteConfirmView(discord.ui.View):
 
         # The confirmation can sit open for minutes; recheck the role before the
         # irreversible delete, mirroring the edit/post paths.
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event delete",
+            denial="You do not have the required role to delete events.",
         ):
-            LOGGER.warning(
-                "Rejected event delete from Discord user %s; required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to delete events.",
-                ephemeral=True,
-            )
             return
         # Guard a double click racing two callbacks before the first removes the
         # buttons; the check and set are synchronous, so the second observes it.
@@ -935,19 +920,12 @@ class EventCancelConfirmView(discord.ui.View):
 
         # The confirmation can sit open for minutes; recheck the role before
         # the irreversible cancel, mirroring the delete/edit/post paths.
-        if not user_has_role(
-            interaction.user,
+        if not await require_role(
+            interaction,
             self._bot._config.event_create_role_id,
+            action="event cancel",
+            denial="You do not have the required role to cancel events.",
         ):
-            LOGGER.warning(
-                "Rejected event cancel from Discord user %s; required role %s",
-                interaction.user.id,
-                self._bot._config.event_create_role_id,
-            )
-            await interaction.response.send_message(
-                "You do not have the required role to cancel events.",
-                ephemeral=True,
-            )
             return
         # Guard a double click racing two callbacks before the first removes
         # the buttons; the check and set are synchronous, so the second

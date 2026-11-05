@@ -4,7 +4,11 @@ Every table is rendered empty here and filled by the script from the JSON
 API, so no report data is ever interpolated into this markup.
 """
 
-from gw2bot.web.pages.shared import CUSTOM_RANGE_PANEL, RANGE_PICKER_NAV
+from gw2bot.web.pages.shared import (
+    CUSTOM_RANGE_PANEL,
+    RANGE_PICKER_NAV,
+    SIGNOUT_CONTROLS,
+)
 
 # Rows per page a paginated table opens on, and the largest it will accept.
 PAGE_SIZE_DEFAULT = 10
@@ -146,20 +150,9 @@ PROFIT_MARKUP = (
   </div>
   <span class="spacer"></span>
   <a href="/calendar">Calendar</a>
-  <span id="whoami"></span>
-  <form method="post" action="/logout">
-    <button type="submit" class="signout" aria-label="Sign out">
-      <svg class="signout-icon" viewBox="0 0 24 24" width="18" height="18"
-        fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
-      </svg>
-      <span class="signout-label">Sign out</span>
-    </button>
-  </form>
 """
+    + SIGNOUT_CONTROLS
+    + "\n"
     + CUSTOM_RANGE_PANEL
     + """
 </header>

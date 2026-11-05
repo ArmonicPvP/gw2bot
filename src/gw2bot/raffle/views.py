@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-import aiohttp
 import discord
 from sqlalchemy.exc import SQLAlchemyError
 
+from gw2bot.gw2.member_lookup import resolve_member_or_reply
 from gw2bot.raffle.formatting import (
     RAFFLE_AUDIT_RANGES_PAGE_SIZE,
     RAFFLE_TICKET_ROW_SORT_KEYS,
@@ -503,24 +502,14 @@ class RaffleAccountLinkModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        try:
-            canonical_username = await self._bot.resolve_guild_member(
-                self.username.value,
-                force_refresh=True,
-            )
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            LOGGER.error("Could not refresh the guild member cache")
-            await interaction.followup.send(
-                "Could not verify guild membership. Try again later.",
-                ephemeral=True,
-            )
-            return
-
+        canonical_username = await resolve_member_or_reply(
+            self._bot,
+            interaction,
+            self.username.value,
+            action="Raffle account link",
+            force_refresh=True,
+        )
         if canonical_username is None:
-            await interaction.followup.send(
-                f"`{self.username.value}` is not a member of the configured guild.",
-                ephemeral=True,
-            )
             return
 
         self._bot.link_raffle_account(interaction.user.id, canonical_username)

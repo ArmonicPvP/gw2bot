@@ -7,7 +7,10 @@ import discord
 import pytest
 
 from gw2bot.core.discord_utils import (
+    ROLE_DENIAL,
     GuildMembership,
+    autocomplete_allowed,
+    require_role,
     resolve_display_name,
     resolve_display_names,
     resolve_guild_membership,
@@ -336,6 +339,138 @@ class TestResolveGuildMembership:
 
         assert memberships == {}
         assert guild.fetched == []
+
+
+def _role_interaction(*role_ids: int) -> Any:
+    return SimpleNamespace(
+        user=SimpleNamespace(
+            id=42,
+            roles=[SimpleNamespace(id=role_id) for role_id in role_ids],
+        ),
+        response=SimpleNamespace(
+            is_done=MagicMock(return_value=False),
+            send_message=AsyncMock(),
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+
+class TestRequireRole:
+    async def test_lets_a_member_with_the_role_through_silently(self) -> None:
+        interaction = _role_interaction(7, 9)
+
+        allowed = await require_role(interaction, 9, action="test command")
+
+        assert allowed
+        interaction.response.send_message.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+
+    async def test_refuses_a_member_without_the_role_privately(self) -> None:
+        interaction = _role_interaction(7)
+
+        allowed = await require_role(interaction, 9, action="test command")
+
+        assert not allowed
+        interaction.response.send_message.assert_awaited_once_with(
+            ROLE_DENIAL,
+            ephemeral=True,
+        )
+
+    async def test_sends_the_denial_it_is_given(self) -> None:
+        interaction = _role_interaction()
+
+        await require_role(
+            interaction,
+            9,
+            action="event edit command",
+            denial="You do not have the required role to edit events.",
+        )
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "You do not have the required role to edit events.",
+            ephemeral=True,
+        )
+
+    async def test_a_custom_reply_carries_the_refusal(self) -> None:
+        # The dashboards' import groups answer through send_interaction_notice
+        # so a refusal Discord also refuses is logged rather than raised.
+        interaction = _role_interaction()
+        reply = AsyncMock()
+
+        allowed = await require_role(
+            interaction,
+            9,
+            action="roster command",
+            reply=reply,
+        )
+
+        assert not allowed
+        reply.assert_awaited_once_with(interaction, ROLE_DENIAL)
+        interaction.response.send_message.assert_not_awaited()
+
+    async def test_logs_the_decision_with_the_action_and_roles(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        interaction = _role_interaction(7)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            await require_role(interaction, 9, action="event delete command")
+            interaction.user.roles.append(SimpleNamespace(id=9))
+            await require_role(interaction, 9, action="event delete command")
+
+        assert (
+            "Rejected event delete command from Discord user 42; required "
+            "role 9, resolved member roles: [7]"
+        ) in caplog.text
+        assert (
+            "Authorized event delete command; user_id=42 required_role=9"
+            in caplog.text
+        )
+
+
+class TestAutocompleteAllowed:
+    def test_offers_suggestions_to_a_member_with_the_role(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        interaction = _role_interaction(7, 9)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            allowed = autocomplete_allowed(
+                interaction,
+                9,
+                action="active event",
+            )
+
+        assert allowed
+        assert "Skipped" not in caplog.text
+
+    def test_withholds_them_from_a_member_without_it_and_says_so(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # An autocomplete cannot answer with a message, so the refusal is the
+        # empty list the caller returns; only the debug line records it.
+        interaction = _role_interaction(7)
+
+        with caplog.at_level(logging.DEBUG, logger="gw2bot"):
+            allowed = autocomplete_allowed(
+                interaction,
+                9,
+                action="active event",
+            )
+
+        assert not allowed
+        assert "Skipped active event autocomplete; authorized=false" in (
+            caplog.text
+        )
+        assert [
+            record.levelno
+            for record in caplog.records
+            if "autocomplete" in record.getMessage()
+        ] == [logging.DEBUG]
+        interaction.response.send_message.assert_not_awaited()
 
 
 class TestSendInteractionNotice:
