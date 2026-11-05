@@ -149,8 +149,10 @@ async def handle_track_command(
         return
     try:
         overdue = await bot.is_overdue_trial_member(canonical_username)
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        await report_unverified_membership(interaction)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        await report_unverified_membership(
+            interaction, error, action="Trial member track"
+        )
         return
 
     # Only starting a warning needs the 14-day mark. An already tracked member

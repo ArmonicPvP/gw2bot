@@ -657,7 +657,10 @@ class TestResolveMemberOrReply:
         )
 
         assert canonical == "Member.1234"
-        resolver.resolve_guild_member.assert_awaited_once_with("member.1234")
+        resolver.resolve_guild_member.assert_awaited_once_with(
+            "member.1234",
+            force_refresh=False,
+        )
         interaction.followup.send.assert_not_awaited()
 
     async def test_forwards_a_forced_refresh(self) -> None:
@@ -724,5 +727,10 @@ class TestResolveMemberOrReply:
             MEMBERSHIP_UNVERIFIED,
             ephemeral=True,
         )
-        assert "Could not refresh the guild member cache" in caplog.text
+        # The line names the command and the error's type, and nothing the
+        # error says.
+        assert (
+            "Could not refresh the guild member cache; action=Test lookup "
+            f"error_type={type(error).__name__}"
+        ) in caplog.text
         assert "roster-read-secret" not in caplog.text

@@ -28,9 +28,23 @@ class GuildMemberResolver(Protocol):
     ) -> str | None: ...
 
 
-async def report_unverified_membership(interaction: discord.Interaction) -> None:
-    """Tell a deferred caller the roster could not be read."""
-    LOGGER.error("Could not refresh the guild member cache")
+async def report_unverified_membership(
+    interaction: discord.Interaction,
+    error: BaseException,
+    *,
+    action: str,
+) -> None:
+    """Tell a deferred caller the roster could not be read.
+
+    ``action`` names the command in the log line, which carries the error's
+    type and nothing it says: a transport error's message can hold the
+    request it failed on.
+    """
+    LOGGER.error(
+        "Could not refresh the guild member cache; action=%s error_type=%s",
+        action,
+        type(error).__name__,
+    )
     await interaction.followup.send(MEMBERSHIP_UNVERIFIED, ephemeral=True)
 
 
@@ -50,15 +64,12 @@ async def resolve_member_or_reply(
     the account name, which is the one thing here a caller typed.
     """
     try:
-        if force_refresh:
-            canonical = await resolver.resolve_guild_member(
-                username,
-                force_refresh=True,
-            )
-        else:
-            canonical = await resolver.resolve_guild_member(username)
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        await report_unverified_membership(interaction)
+        canonical = await resolver.resolve_guild_member(
+            username,
+            force_refresh=force_refresh,
+        )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        await report_unverified_membership(interaction, error, action=action)
         return None
     if canonical is None:
         LOGGER.debug("%s rejected; guild member was not found", action)
