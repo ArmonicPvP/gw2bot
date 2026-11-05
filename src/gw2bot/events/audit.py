@@ -72,7 +72,17 @@ def _details(event: Event, start_time: datetime) -> tuple[_Detail, ...]:
     An edit's line names the labels whose values differ, so what it says
     changed is exactly what differs between its two embeds.
     """
-    repeat = describe_repeat(event.repeat_frequency, event.repeat_days)
+    # The end is a Discord timestamp, like the start beside it: the line has no
+    # timezone of its own to write the end the way the commander typed it.
+    repeat = describe_repeat(
+        event.repeat_frequency,
+        event.repeat_days,
+        (
+            f"<t:{int(event.repeat_until.timestamp())}:f>"
+            if event.repeat_until is not None
+            else None
+        ),
+    )
     if (
         event.repeat_frequency is not RepeatFrequency.NONE
         and event.delete_previous_on_repeat

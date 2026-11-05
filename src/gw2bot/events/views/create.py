@@ -20,8 +20,10 @@ from gw2bot.core.discord_utils import require_role
 from gw2bot.events.audit import event_created_audit, send_event_audit
 from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
-    parse_event_datetime,
+    EVENT_SCHEDULE_HINT,
+    EVENT_SCHEDULE_MAX_LENGTH,
     parse_event_duration,
+    parse_event_schedule,
     parse_repeat_days,
 )
 from gw2bot.events.models import (
@@ -250,11 +252,12 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
         self.start_input = discord.ui.TextInput["EventScheduleModal"](
             placeholder=EVENT_DATETIME_PLACEHOLDER,
             default=draft.start_text or None,
-            max_length=16,
+            max_length=EVENT_SCHEDULE_MAX_LENGTH,
         )
         self.add_item(
             discord.ui.Label(
                 text=f"When will your event be? ({EVENT_DATETIME_PLACEHOLDER})",
+                description=EVENT_SCHEDULE_HINT,
                 component=self.start_input,
             )
         )
@@ -318,9 +321,10 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
         self._draft.mentee_enabled = self.mentee.values[0] == "yes"
         repeats = self.repeat.values[0] == "yes"
         try:
-            start_time = parse_event_datetime(
+            start_time, repeat_until = parse_event_schedule(
                 self._draft.start_text,
                 self._bot.event_timezone,
+                repeats=repeats,
             )
             if start_time <= datetime.now(UTC):
                 raise ValueError("The event start must be in the future.")
@@ -333,13 +337,15 @@ class EventScheduleModal(discord.ui.Modal, title="Create new event"):
             )
             return
         self._draft.start_time = start_time
+        self._draft.repeat_until = repeat_until
         self._draft.duration_minutes = duration_minutes
         LOGGER.debug(
             "Event schedule step submitted; user_id=%s repeats=%s "
-            "duration_minutes=%s requirements_characters=%s "
+            "ends=%s duration_minutes=%s requirements_characters=%s "
             "mentee_enabled=%s",
             interaction.user.id,
             repeats,
+            repeat_until is not None,
             duration_minutes,
             len(self._draft.requirements),
             self._draft.mentee_enabled,
@@ -654,6 +660,7 @@ class EventConfirmView(_PreviewConfirmView):
                 requirements=draft_event.requirements,
                 mentee_enabled=draft_event.mentee_enabled,
                 max_participants=draft_event.max_participants,
+                repeat_until=draft_event.repeat_until,
             )
             occurrence = self._bot.event_store.create_occurrence(
                 event.event_id,
@@ -1064,5 +1071,6 @@ class RepeatChoiceView(discord.ui.View):
         self._draft.repeat_days = ()
         self._draft.repeat_days_text = ""
         self._draft.delete_previous_on_repeat = False
+        self._draft.clear_series_end(self._bot.event_timezone)
         await send_event_preview(self._bot, interaction, self._draft)
 

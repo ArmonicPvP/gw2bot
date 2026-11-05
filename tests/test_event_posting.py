@@ -54,6 +54,8 @@ from gw2bot.events.posting import (
     delete_event_posts,
     departed_roster_members,
     disable_auto_signup,
+    ensure_next_recurring_occurrence,
+    is_last_run_of_series,
     merge_roster_updates,
     notify_roster_update,
     occurrence_status,
@@ -351,6 +353,7 @@ def create_event(
     ping_role_ids: tuple[int, ...] = (),
     requirements: str = "",
     max_participants: int | None = None,
+    repeat_until: datetime | None = None,
 ):
     return store.create_event(
         category=category,
@@ -366,6 +369,7 @@ def create_event(
         ping_role_ids=ping_role_ids,
         requirements=requirements,
         max_participants=max_participants,
+        repeat_until=repeat_until,
     )
 
 
@@ -8795,6 +8799,205 @@ class TestDeleteEventPosts:
         # with its parent channel) is not a failure worth logging as an error.
         assert deleted == 1
         channel.thread.delete.assert_awaited_once()
+
+
+class TestSeriesEnd:
+    # START is 20:00 UTC and the fake bot reads times in UTC, so a date-only
+    # end typed for the day after START lands on this instant.
+    END_OF_NEXT_DAY = datetime(2027, 1, 31, 23, 59, tzinfo=UTC)
+    AFTER_FIRST_RUN = START + timedelta(minutes=90)
+
+    async def make_series(
+        self,
+        bot: Any,
+        store: EventStore,
+        repeat_until: datetime | None,
+    ) -> Any:
+        event = create_event(
+            store,
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_until=repeat_until,
+        )
+        occurrence = store.create_occurrence(event.event_id, START)
+        posted = await post_occurrence(bot, event, occurrence, BEFORE_START)
+        return event, posted
+
+    async def test_the_run_on_the_end_day_still_happens(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(
+            bot,
+            store,
+            self.END_OF_NEXT_DAY,
+        )
+
+        await refresh_occurrence_message(
+            bot,
+            event,
+            posted,
+            self.AFTER_FIRST_RUN,
+        )
+
+        starts = [
+            occurrence.start_time
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ]
+        assert starts == [START, START + timedelta(days=1)]
+
+    async def test_a_run_starting_exactly_at_the_end_still_happens(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(
+            bot,
+            store,
+            START + timedelta(days=1),
+        )
+
+        seeded = ensure_next_recurring_occurrence(
+            bot,
+            event,
+            posted,
+            self.AFTER_FIRST_RUN,
+        )
+
+        assert seeded is not None
+        assert seeded.start_time == START + timedelta(days=1)
+
+    async def test_nothing_is_seeded_past_the_end(
+        self,
+        bot: Any,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.DEBUG, logger="gw2bot")
+        event, posted = await self.make_series(
+            bot,
+            store,
+            START + timedelta(days=1) - timedelta(minutes=1),
+        )
+
+        status = await refresh_occurrence_message(
+            bot,
+            event,
+            posted,
+            self.AFTER_FIRST_RUN,
+        )
+
+        assert status is EventStatus.OVER
+        assert [
+            occurrence.occurrence_id
+            for occurrence in store.get_event_occurrences(event.event_id)
+        ] == [posted.occurrence_id]
+        assert "Recurring series has reached its end" in caplog.text
+        assert event.title not in caplog.text
+
+    async def test_a_catch_up_past_the_end_seeds_nothing(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The bot was down across the last two runs inside the end. Skipping
+        # them must not land on a run past it.
+        event, posted = await self.make_series(
+            bot,
+            store,
+            START + timedelta(days=2),
+        )
+
+        seeded = ensure_next_recurring_occurrence(
+            bot,
+            event,
+            posted,
+            START + timedelta(days=5),
+        )
+
+        assert seeded is None
+        assert len(store.get_event_occurrences(event.event_id)) == 1
+
+    async def test_a_catch_up_keeps_a_last_run_still_in_progress(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(
+            bot,
+            store,
+            START + timedelta(days=2),
+        )
+
+        seeded = ensure_next_recurring_occurrence(
+            bot,
+            event,
+            posted,
+            START + timedelta(days=2, minutes=10),
+        )
+
+        assert seeded is not None
+        assert seeded.start_time == START + timedelta(days=2)
+
+    async def test_the_last_run_inside_the_end_is_recognised(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(
+            bot,
+            store,
+            START + timedelta(hours=1),
+        )
+
+        assert is_last_run_of_series(bot, event, posted)
+
+    async def test_a_run_with_another_inside_the_end_is_not_the_last(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(
+            bot,
+            store,
+            self.END_OF_NEXT_DAY,
+        )
+
+        assert not is_last_run_of_series(bot, event, posted)
+
+    async def test_a_series_without_an_end_has_no_last_run(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await self.make_series(bot, store, None)
+
+        assert not is_last_run_of_series(bot, event, posted)
+
+    async def test_a_one_off_event_is_not_a_series_last_run(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, posted = await post_new_event(bot, store)
+
+        assert not is_last_run_of_series(bot, event, posted)
+
+    async def test_a_run_already_seeded_past_a_new_end_still_counts(
+        self,
+        bot: Any,
+        store: EventStore,
+    ) -> None:
+        # An edit pulled the end in after the next run was seeded. That run is
+        # still in the store, so the one before it is not the series' last.
+        event, posted = await self.make_series(
+            bot,
+            store,
+            START + timedelta(hours=1),
+        )
+        store.create_occurrence(event.event_id, START + timedelta(days=1))
+
+        assert not is_last_run_of_series(bot, event, posted)
 
 
 class TestPruneSupersededOccurrences:

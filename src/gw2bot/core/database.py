@@ -753,6 +753,10 @@ class EventRecord(Base):
         Integer,
         nullable=True,
     )
+    # The last moment a repeating series may start a run, as an ISO timestamp
+    # in UTC. NULL repeats forever, which is what every row written before
+    # series could end reads as.
+    repeat_until: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class EventOccurrenceRecord(Base):
@@ -1339,6 +1343,14 @@ def initialize_database(engine: Engine) -> set[str]:
                 nullable=False,
                 server_default="0",
             ),
+            added_columns,
+        )
+
+        # Series created before an end could be set repeat forever, which is
+        # exactly what NULL records.
+        _add_missing_column(
+            operations, event_columns, EventRecord.__tablename__,
+            Column("repeat_until", String, nullable=True),
             added_columns,
         )
 

@@ -38,6 +38,20 @@ from gw2bot.core.message_chunks import DISCORD_MESSAGE_LIMIT, pack_message_lines
 
 EVENT_DATETIME_FORMAT = "%m.%d.%Y %H:%M"
 EVENT_DATETIME_PLACEHOLDER = "MM.dd.yyyy HH:mm"
+EVENT_DATE_FORMAT = "%m.%d.%Y"
+# A repeating event's end is written after its start, past this separator:
+# `04.11.2026 20:00,04.13.2026`. The time may be left off the end, which then
+# lasts the whole of that day.
+SERIES_END_SEPARATOR = ","
+# What the start box holds at most: a start, the separator, an end with its own
+# time, and room for a space either side of the separator.
+EVENT_SCHEDULE_MAX_LENGTH = 40
+EVENT_SCHEDULE_HINT = (
+    "Repeating? End it after a comma, as MM.dd.yyyy or MM.dd.yyyy HH:mm"
+)
+# An end given as a date alone lasts until the last minute of that day, so a
+# run starting at any time on it still happens.
+_END_OF_DAY = (23, 59)
 EVENT_DURATION_PATTERN = re.compile(r"^(\d{1,3}):([0-5]\d)$")
 MAX_PARTICIPANTS_PATTERN = re.compile(r"^(-1|\d{1,3})$")
 # What a commander types to put a headcount event back on its category's size.
@@ -101,6 +115,89 @@ def parse_event_datetime(text: str, timezone: ZoneInfo) -> datetime:
 
 def format_event_datetime(value: datetime, timezone: ZoneInfo) -> str:
     return value.astimezone(timezone).strftime(EVENT_DATETIME_FORMAT)
+
+
+def parse_series_end(text: str, timezone: ZoneInfo) -> datetime:
+    """Read a repeating event's end, with or without a time of day.
+
+    A date alone means the whole of that day: it is read as 23:59 there, so a
+    run starting at any time on the end date still takes place.
+    """
+    cleaned = text.strip()
+    try:
+        parsed = datetime.strptime(cleaned, EVENT_DATETIME_FORMAT)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(cleaned, EVENT_DATE_FORMAT).replace(
+                hour=_END_OF_DAY[0],
+                minute=_END_OF_DAY[1],
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "The end after the comma must match `MM.dd.yyyy` or "
+                f"`{EVENT_DATETIME_PLACEHOLDER}`, for example `12.31.2026` "
+                "or `12.31.2026 20:00`."
+            ) from exc
+    return parsed.replace(tzinfo=timezone).astimezone(UTC)
+
+
+def parse_event_schedule(
+    text: str,
+    timezone: ZoneInfo,
+    *,
+    repeats: bool,
+) -> tuple[datetime, datetime | None]:
+    """Read the start box: a start, then optionally the series' end.
+
+    Returns the start and the end, both in UTC; the end is None when none was
+    given. An end is refused on an event that does not repeat, because there
+    it could only be mistaken for when the run finishes - which is the
+    duration's job - and silently dropping it would hide that. It is also
+    refused when it falls before the start, which would leave no run at all.
+    Whether the start is in the future is the caller's to check.
+    """
+    start_text, separator, end_text = text.partition(SERIES_END_SEPARATOR)
+    start = parse_event_datetime(start_text, timezone)
+    if not separator or not end_text.strip():
+        # A trailing comma with nothing after it ends nothing, so it is read
+        # as no end rather than refused over a stray keystroke.
+        return start, None
+    if not repeats:
+        raise ValueError(
+            "Only a repeating event can have an end date. Remove the part "
+            "after the comma, or set the event to repeat. How long each run "
+            "lasts is the duration."
+        )
+    end = parse_series_end(end_text, timezone)
+    if end < start:
+        raise ValueError(
+            "The end must be on or after the event's start, "
+            f"{format_event_datetime(start, timezone)}."
+        )
+    return start, end
+
+
+def format_series_end(value: datetime, timezone: ZoneInfo) -> str:
+    # An end read from a date alone is written back the same way, so the
+    # start box shows what the commander typed rather than a 23:59 they never
+    # chose.
+    local = value.astimezone(timezone)
+    if (local.hour, local.minute) == _END_OF_DAY:
+        return local.strftime(EVENT_DATE_FORMAT)
+    return local.strftime(EVENT_DATETIME_FORMAT)
+
+
+def format_event_schedule(
+    start: datetime,
+    repeat_until: datetime | None,
+    timezone: ZoneInfo,
+) -> str:
+    """The start box's text for a start and, when there is one, its end."""
+    text = format_event_datetime(start, timezone)
+    if repeat_until is None:
+        return text
+    end = format_series_end(repeat_until, timezone)
+    return f"{text}{SERIES_END_SEPARATOR}{end}"
 
 
 def parse_event_duration(text: str) -> int:
@@ -994,15 +1091,23 @@ def describe_ping_roles(role_ids: Sequence[int]) -> str:
 def describe_repeat(
     frequency: RepeatFrequency,
     repeat_days: tuple[int, ...],
+    until_text: str | None = None,
 ) -> str:
+    # until_text is the series' end as format_series_end writes it, so the
+    # preview names the last day in the same form the commander typed it.
     if frequency is RepeatFrequency.NONE:
         return "Does not repeat"
     if frequency is RepeatFrequency.DAILY:
-        return "Repeats daily"
-    days = format_repeat_days(frequency, repeat_days)
-    if frequency is RepeatFrequency.WEEKLY:
-        return f"Repeats weekly on {days}"
-    return f"Repeats monthly on day(s) {days}"
+        text = "Repeats daily"
+    else:
+        days = format_repeat_days(frequency, repeat_days)
+        if frequency is RepeatFrequency.WEEKLY:
+            text = f"Repeats weekly on {days}"
+        else:
+            text = f"Repeats monthly on day(s) {days}"
+    if until_text is not None:
+        text += f" until {until_text}"
+    return text
 
 
 def category_choices() -> list[EventCategory]:

@@ -28,12 +28,16 @@ from gw2bot.events.formatting import (
     event_embed,
     event_thread_name,
     format_duration,
+    format_event_schedule,
     format_role_groups,
+    format_series_end,
     next_occurrence_start,
     parse_event_datetime,
     parse_event_duration,
     parse_max_participants,
+    parse_event_schedule,
     parse_repeat_days,
+    parse_series_end,
     roster_update_messages,
     signup_edit_limit_message,
 )
@@ -200,6 +204,173 @@ class TestParseMaxParticipants:
         for text in ("501", "999", "-2", "-0", "1.5", "ten", "", "0500"):
             with pytest.raises(ValueError, match=r"0 \(no limit\) to 500"):
                 parse_max_participants(text)
+
+
+class TestParseEventSchedule:
+    def test_a_start_alone_has_no_end(self) -> None:
+        start, end = parse_event_schedule(
+            "04.11.2027 20:00",
+            UTC_ZONE,
+            repeats=True,
+        )
+
+        assert start == datetime(2027, 4, 11, 20, 0, tzinfo=UTC)
+        assert end is None
+
+    def test_an_end_date_alone_lasts_the_whole_day(self) -> None:
+        start, end = parse_event_schedule(
+            "04.11.2027 20:00,04.13.2027",
+            UTC_ZONE,
+            repeats=True,
+        )
+
+        assert start == datetime(2027, 4, 11, 20, 0, tzinfo=UTC)
+        assert end == datetime(2027, 4, 13, 23, 59, tzinfo=UTC)
+
+    def test_an_end_may_carry_its_own_time(self) -> None:
+        _, end = parse_event_schedule(
+            "04.11.2027 20:00,04.13.2027 18:30",
+            UTC_ZONE,
+            repeats=True,
+        )
+
+        assert end == datetime(2027, 4, 13, 18, 30, tzinfo=UTC)
+
+    def test_spaces_around_the_comma_are_ignored(self) -> None:
+        _, end = parse_event_schedule(
+            " 04.11.2027 20:00 , 04.13.2027 ",
+            UTC_ZONE,
+            repeats=True,
+        )
+
+        assert end == datetime(2027, 4, 13, 23, 59, tzinfo=UTC)
+
+    def test_the_end_is_read_in_the_configured_timezone(self) -> None:
+        _, end = parse_event_schedule(
+            "04.11.2027 20:00,04.13.2027",
+            NEW_YORK,
+            repeats=True,
+        )
+
+        # 23:59 on April 13 in New York (EDT, UTC-4) is 03:59 UTC the next day.
+        assert end == datetime(2027, 4, 14, 3, 59, tzinfo=UTC)
+        assert end is not None and end.tzinfo == UTC
+
+    def test_a_trailing_comma_is_no_end(self) -> None:
+        _, end = parse_event_schedule(
+            "04.11.2027 20:00,  ",
+            UTC_ZONE,
+            repeats=False,
+        )
+
+        assert end is None
+
+    def test_an_end_on_the_start_day_is_accepted(self) -> None:
+        start, end = parse_event_schedule(
+            "04.11.2027 20:00,04.11.2027",
+            UTC_ZONE,
+            repeats=True,
+        )
+
+        assert end is not None and end > start
+
+    def test_an_end_at_the_start_itself_is_accepted(self) -> None:
+        start, end = parse_event_schedule(
+            "04.11.2027 20:00,04.11.2027 20:00",
+            UTC_ZONE,
+            repeats=True,
+        )
+
+        assert end == start
+
+    def test_rejects_an_end_before_the_start(self) -> None:
+        with pytest.raises(ValueError, match="on or after the event's start"):
+            parse_event_schedule(
+                "04.11.2027 20:00,04.10.2027",
+                UTC_ZONE,
+                repeats=True,
+            )
+
+    def test_rejects_an_end_time_earlier_on_the_start_day(self) -> None:
+        with pytest.raises(ValueError, match="on or after the event's start"):
+            parse_event_schedule(
+                "04.11.2027 20:00,04.11.2027 19:00",
+                UTC_ZONE,
+                repeats=True,
+            )
+
+    def test_rejects_an_end_on_an_event_that_does_not_repeat(self) -> None:
+        with pytest.raises(ValueError, match="Only a repeating event"):
+            parse_event_schedule(
+                "04.11.2027 20:00,04.13.2027",
+                UTC_ZONE,
+                repeats=False,
+            )
+
+    def test_rejects_a_malformed_end_with_both_formats(self) -> None:
+        with pytest.raises(ValueError, match="MM.dd.yyyy") as raised:
+            parse_event_schedule(
+                "04.11.2027 20:00,next tuesday",
+                UTC_ZONE,
+                repeats=True,
+            )
+
+        assert "MM.dd.yyyy HH:mm" in str(raised.value)
+
+    def test_a_malformed_start_still_names_the_start_format(self) -> None:
+        with pytest.raises(ValueError, match="date and time must match"):
+            parse_event_schedule(
+                "2027-04-11 20:00,04.13.2027",
+                UTC_ZONE,
+                repeats=True,
+            )
+
+
+class TestSeriesEndText:
+    def test_an_end_of_day_is_written_as_a_date(self) -> None:
+        end = parse_series_end("04.13.2027", NEW_YORK)
+
+        assert format_series_end(end, NEW_YORK) == "04.13.2027"
+
+    def test_an_end_with_a_time_keeps_it(self) -> None:
+        end = parse_series_end("04.13.2027 18:30", NEW_YORK)
+
+        assert format_series_end(end, NEW_YORK) == "04.13.2027 18:30"
+
+    def test_the_schedule_round_trips_through_the_start_box(self) -> None:
+        for text in (
+            "04.11.2027 20:00",
+            "04.11.2027 20:00,04.13.2027",
+            "04.11.2027 20:00,04.13.2027 18:30",
+        ):
+            start, end = parse_event_schedule(text, NEW_YORK, repeats=True)
+
+            assert format_event_schedule(start, end, NEW_YORK) == text
+
+
+class TestRepeatsThrough:
+    def test_a_series_without_an_end_always_continues(self) -> None:
+        event = make_event(repeat_frequency=RepeatFrequency.DAILY)
+
+        assert event.repeats_through(datetime(2099, 1, 1, tzinfo=UTC))
+
+    def test_a_run_starting_at_the_end_still_happens(self) -> None:
+        end = datetime(2027, 4, 13, 23, 59, tzinfo=UTC)
+        event = replace(
+            make_event(repeat_frequency=RepeatFrequency.DAILY),
+            repeat_until=end,
+        )
+
+        assert event.repeats_through(datetime(2027, 4, 13, 20, 0, tzinfo=UTC))
+        assert event.repeats_through(end)
+        assert not event.repeats_through(
+            datetime(2027, 4, 14, 20, 0, tzinfo=UTC)
+        )
+
+    def test_a_one_off_event_never_continues(self) -> None:
+        event = make_event()
+
+        assert not event.repeats_through(event.start_time)
 
 
 class TestParseEventDuration:
@@ -1292,6 +1463,22 @@ class TestDescribeRepeat:
             == "Repeats monthly on day(s) 1, 30"
         )
 
+    def test_names_the_end_of_a_series(self) -> None:
+        assert (
+            describe_repeat(RepeatFrequency.DAILY, (), "04.13.2027")
+            == "Repeats daily until 04.13.2027"
+        )
+        assert (
+            describe_repeat(RepeatFrequency.WEEKLY, (6,), "04.13.2027 18:30")
+            == "Repeats weekly on Sunday until 04.13.2027 18:30"
+        )
+
+    def test_a_one_off_event_never_names_an_end(self) -> None:
+        assert (
+            describe_repeat(RepeatFrequency.NONE, (), "04.13.2027")
+            == "Does not repeat"
+        )
+
 
 def _audit_fields(embed: discord.Embed) -> dict[str, str]:
     return {
@@ -1358,6 +1545,40 @@ class TestEventAudit:
         assert fields["Mentee slot"] == "Not offered"
         assert fields["Requirements"] == "None"
         assert fields["Repeats"] == "Does not repeat"
+
+    def test_a_series_end_is_shown_with_the_repeat(self) -> None:
+        end = datetime(2027, 2, 13, 23, 59, tzinfo=UTC)
+        event = replace(
+            make_event(repeat_frequency=RepeatFrequency.DAILY),
+            repeat_until=end,
+        )
+
+        embed = event_audit_embed(
+            event,
+            self.START,
+            heading="Created",
+            color=0x2ECC71,
+        )
+
+        assert _audit_fields(embed)["Repeats"] == (
+            f"Repeats daily until <t:{int(end.timestamp())}:f>"
+        )
+
+    def test_moving_only_the_end_is_named_as_a_repeat_change(self) -> None:
+        before = replace(
+            make_event(repeat_frequency=RepeatFrequency.DAILY),
+            repeat_until=datetime(2027, 2, 13, 23, 59, tzinfo=UTC),
+        )
+        after = replace(
+            before,
+            repeat_until=datetime(2027, 2, 20, 23, 59, tzinfo=UTC),
+        )
+
+        audit = event_edited_audit(99, before, self.START, after, self.START)
+
+        assert audit.content == (
+            "<@99> edited event **7**. Changed: Repeats."
+        )
 
     def test_a_headcount_cap_is_the_squad_size_it_shows(self) -> None:
         event = replace(make_event(EventCategory.WVW), max_participants=20)

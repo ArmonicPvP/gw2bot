@@ -10,12 +10,13 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from gw2bot.events.formatting import compute_status
+from gw2bot.events.formatting import compute_status, next_occurrence_start
 from gw2bot.events.models import (
     Event,
     EventOccurrence,
     EventSignup,
     EventStatus,
+    RepeatFrequency,
     is_roster_full,
 )
 
@@ -118,3 +119,40 @@ def occurrence_finished(
     return current_time >= occurrence.start_time + timedelta(
         minutes=event.duration_minutes
     )
+
+
+def is_last_run_of_series(
+    bot: Gw2Bot,
+    event: Event,
+    occurrence: EventOccurrence,
+) -> bool:
+    """Whether a repeating series' end leaves no run after this occurrence.
+
+    False for an event that does not repeat, which has no series to end, and
+    for a series with no end. A later occurrence already in the store is a run
+    after this one whatever the end says now: an edit that pulled the end in
+    does not take back a run that was already seeded.
+    """
+    if (
+        event.repeat_frequency is RepeatFrequency.NONE
+        or event.repeat_until is None
+    ):
+        return False
+    if bot.event_store.has_later_occurrence(
+        event.event_id,
+        occurrence.start_time,
+    ):
+        return False
+    try:
+        next_start = next_occurrence_start(
+            event.repeat_frequency,
+            event.repeat_days,
+            occurrence.start_time,
+            bot.event_timezone,
+        )
+    except ValueError:
+        # Repeat settings with no day to repeat on have no next start at all.
+        # That is a broken series rather than a finished one, and the paths
+        # that seed a successor already report it as such.
+        return False
+    return not event.repeats_through(next_start)

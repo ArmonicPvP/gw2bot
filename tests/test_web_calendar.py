@@ -883,6 +883,37 @@ class TestProjectedEntries:
 
         assert entries == []
 
+    def test_projection_stops_at_the_series_end(
+        self,
+        store: EventStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        anchor = datetime(2027, 1, 1, 20, 0, tzinfo=UTC)
+        event = create_event(
+            store,
+            start_time=anchor,
+            repeat_frequency=RepeatFrequency.DAILY,
+            # A date-only end: the run on January 4 still takes place.
+            repeat_until=datetime(2027, 1, 4, 23, 59, tzinfo=UTC),
+        )
+        store.create_occurrence(event.event_id, anchor)
+
+        entries = calendar_entries(
+            store,
+            UTC_ZONE,
+            datetime(2027, 1, 2, 0, 0, tzinfo=UTC),
+            datetime(2027, 2, 1, 0, 0, tzinfo=UTC),
+            NOW,
+        )
+
+        assert [entry.start_epoch for entry in entries] == [
+            int(datetime(2027, 1, day, 20, 0, tzinfo=UTC).timestamp())
+            for day in (2, 3, 4)
+        ]
+        assert all(entry.projected for entry in entries)
+        # Stopping at the end is not the step cap running out.
+        assert "step cap" not in caplog.text
+
     def test_daily_event_still_projects_far_beyond_the_anchor(
         self,
         store: EventStore,

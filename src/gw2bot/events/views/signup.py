@@ -1546,6 +1546,26 @@ class SignupFlow:
         )
         return False
 
+    def on_last_run_of_series(self) -> bool:
+        """Whether this run is the last before the series' repeat ends.
+
+        Remembered roles and automatic sign-up only serve later runs, and
+        this one has none, so neither is offered on it. The series' other
+        runs keep asking as usual.
+        """
+        from gw2bot.events.posting import is_last_run_of_series
+
+        if not is_last_run_of_series(self.bot, self.event, self.occurrence):
+            return False
+        LOGGER.debug(
+            "Skipped the series sign-up prompts on its last run; "
+            "event_id=%s occurrence_id=%s user_id=%s",
+            self.event.event_id,
+            self.occurrence.occurrence_id,
+            self.discord_user_id,
+        )
+        return True
+
     def roster_for_labels(self) -> list[EventSignup]:
         # The signups the role-picker labels are computed against; an edit
         # flow narrows this (see EditSignupFlow).
@@ -1557,7 +1577,11 @@ class SignupFlow:
         self,
         interaction: discord.Interaction,
     ) -> None:
-        if self.skip_remember_prompt or not _role_memory_offered(self.event):
+        if (
+            self.skip_remember_prompt
+            or not _role_memory_offered(self.event)
+            or self.on_last_run_of_series()
+        ):
             await self.finalize(interaction)
             return
         await interaction.response.edit_message(
@@ -1665,8 +1689,10 @@ class SignupFlow:
         )
         # A plain "No" only declines for now; just "Yes" and "No, never
         # ask again" persist across future manual signups.
-        if self.event.repeat_frequency is not RepeatFrequency.NONE and (
-            auto is None or auto.choice is AutoSignupChoice.NO
+        if (
+            self.event.repeat_frequency is not RepeatFrequency.NONE
+            and (auto is None or auto.choice is AutoSignupChoice.NO)
+            and not self.on_last_run_of_series()
         ):
             # The mentee question, when it applies, follows this one's
             # answer: it is always the last thing asked.

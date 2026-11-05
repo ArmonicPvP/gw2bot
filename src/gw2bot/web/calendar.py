@@ -282,6 +282,10 @@ def calendar_entries(
                 break
             if cursor >= range_end:
                 break
+            if not event.repeats_through(cursor):
+                # The series ends before this run, and every later one is
+                # further past the end still.
+                break
             # Steps taken to reach a window far ahead of the anchor are not
             # projections; only emitted entries count against the entry cap.
             if cursor < range_start:

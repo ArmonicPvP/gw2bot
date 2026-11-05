@@ -74,6 +74,10 @@ def _serialize_time(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
 
+def _serialize_optional_time(value: datetime | None) -> str | None:
+    return _serialize_time(value) if value is not None else None
+
+
 def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
 
@@ -163,6 +167,11 @@ def _event_from_record(record: EventRecord) -> Event:
         requirements=record.requirements,
         mentee_enabled=record.mentee_enabled,
         max_participants=record.max_participants,
+        repeat_until=(
+            _parse_time(record.repeat_until)
+            if record.repeat_until is not None
+            else None
+        ),
     )
 
 
@@ -603,6 +612,7 @@ class EventStore:
         requirements: str = "",
         mentee_enabled: bool = False,
         max_participants: int | None = None,
+        repeat_until: datetime | None = None,
         now: datetime | None = None,
     ) -> Event:
         created_at = now if now is not None else datetime.now(UTC)
@@ -624,6 +634,7 @@ class EventStore:
                 requirements=requirements,
                 mentee_enabled=mentee_enabled,
                 max_participants=max_participants,
+                repeat_until=_serialize_optional_time(repeat_until),
             )
             # SQLite hands the highest deleted id to the next row, which would
             # give a new event the id of one `/event restore` can still put
@@ -642,7 +653,7 @@ class EventStore:
             LOGGER.debug(
                 "Created event; event_id=%s category=%s repeat=%s "
                 "title_characters=%s ping_roles=%s mentee_enabled=%s "
-                "max_participants=%s",
+                "max_participants=%s ends=%s",
                 record.event_id,
                 category.value,
                 repeat_frequency.value,
@@ -650,6 +661,7 @@ class EventStore:
                 len(ping_role_ids),
                 mentee_enabled,
                 max_participants,
+                repeat_until is not None,
             )
             return _event_from_record(record)
 
@@ -671,6 +683,7 @@ class EventStore:
         requirements: str = "",
         mentee_enabled: bool = False,
         max_participants: int | None = None,
+        repeat_until: datetime | None = None,
         remember_previous: bool = False,
         consume_snapshot: bool = False,
         now: datetime | None = None,
@@ -703,6 +716,7 @@ class EventStore:
             record.requirements = requirements
             record.mentee_enabled = mentee_enabled
             record.max_participants = max_participants
+            record.repeat_until = _serialize_optional_time(repeat_until)
             if leader_changed:
                 # The new leader may hold, or be waiting for, the mentee slot
                 # on a run still to come. The slot is settled again on each of
@@ -734,7 +748,8 @@ class EventStore:
             LOGGER.debug(
                 "Updated event; event_id=%s category=%s repeat=%s "
                 "title_characters=%s ping_roles=%s mentee_enabled=%s "
-                "max_participants=%s snapshot_kept=%s snapshot_consumed=%s",
+                "max_participants=%s ends=%s snapshot_kept=%s "
+                "snapshot_consumed=%s",
                 event_id,
                 category.value,
                 repeat_frequency.value,
@@ -742,6 +757,7 @@ class EventStore:
                 len(ping_role_ids),
                 mentee_enabled,
                 max_participants,
+                repeat_until is not None,
                 remembered,
                 consume_snapshot,
             )

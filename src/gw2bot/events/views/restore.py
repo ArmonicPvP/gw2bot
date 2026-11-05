@@ -124,7 +124,12 @@ def _plan_edit_undo(
         "title": event.title != restored.title,
         "description": event.description != restored.description,
         "channel": event.channel_id != restored.channel_id,
-        "start": primary.start_time != start_time,
+        # The series' end is typed in the same box as the start, after a
+        # comma, so putting it back is putting back the date & time.
+        "start": (
+            primary.start_time != start_time
+            or event.repeat_until != restored.repeat_until
+        ),
         "duration": event.duration_minutes != restored.duration_minutes,
         "requirements": event.requirements != restored.requirements,
         "max_participants": (

@@ -12,8 +12,10 @@ import discord
 from gw2bot.core.discord_utils import user_has_role
 from gw2bot.events.formatting import (
     EVENT_DATETIME_PLACEHOLDER,
-    parse_event_datetime,
+    EVENT_SCHEDULE_HINT,
+    EVENT_SCHEDULE_MAX_LENGTH,
     parse_event_duration,
+    parse_event_schedule,
     parse_max_participants,
 )
 from gw2bot.events.models import (
@@ -21,6 +23,7 @@ from gw2bot.events.models import (
     EventCategory,
     MAX_PARTICIPANTS_LIMIT,
     MAX_PING_ROLES,
+    RepeatFrequency,
 )
 from gw2bot.events.views.create import RepeatChoiceView
 from gw2bot.events.views.preview import send_event_preview
@@ -209,10 +212,11 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
             )
         elif field_name == "start":
             label = f"When will your event be? ({EVENT_DATETIME_PLACEHOLDER})"
+            description = EVENT_SCHEDULE_HINT
             self.field_input = discord.ui.TextInput["EventFieldEditModal"](
                 default=draft.start_text or None,
                 placeholder=EVENT_DATETIME_PLACEHOLDER,
-                max_length=16,
+                max_length=EVENT_SCHEDULE_MAX_LENGTH,
             )
         else:
             label = "How long will your event be? (HH:mm)"
@@ -263,13 +267,20 @@ class EventFieldEditModal(discord.ui.Modal, title="Change something"):
                 )
             elif self._field_name == "start":
                 self._draft.start_text = value
-                start_time = parse_event_datetime(
+                # Repeating is its own field here, so the end is judged
+                # against the repeat the draft already has.
+                start_time, repeat_until = parse_event_schedule(
                     value,
                     self._bot.event_timezone,
+                    repeats=(
+                        self._draft.repeat_frequency
+                        is not RepeatFrequency.NONE
+                    ),
                 )
                 if start_time <= datetime.now(UTC):
                     raise ValueError("The event start must be in the future.")
                 self._draft.start_time = start_time
+                self._draft.repeat_until = repeat_until
             else:
                 self._draft.duration_text = value
                 self._draft.duration_minutes = parse_event_duration(value)

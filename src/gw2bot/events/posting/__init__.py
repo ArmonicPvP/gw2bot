@@ -51,6 +51,7 @@ from gw2bot.events.posting.roster import (
     set_mentee_request as set_mentee_request,
 )
 from gw2bot.events.posting.state import (
+    is_last_run_of_series as is_last_run_of_series,
     leading_occurrence as leading_occurrence,
     occurrence_channel_id as occurrence_channel_id,
     occurrence_finished as occurrence_finished,

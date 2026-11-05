@@ -24,7 +24,7 @@ from gw2bot.events.formatting import (
     compute_status,
     describe_ping_roles,
     format_duration_input,
-    format_event_datetime,
+    format_event_schedule,
     format_repeat_days,
     message_link,
 )
@@ -205,6 +205,11 @@ class EventDraft:
     repeat_days: tuple[int, ...] = field(default_factory=tuple)
     repeat_days_text: str = ""
     delete_previous_on_repeat: bool = False
+    # The series' end, read from after the comma in start_text. Only a
+    # repeating event keeps one: to_event drops it from a draft that does not
+    # repeat, so an end kept by a schedule step whose repeat modal was never
+    # answered cannot reach the store on an event posted as a one-off.
+    repeat_until: datetime | None = None
     # Roles the event post pings, in the order they were picked.
     ping_role_ids: tuple[int, ...] = field(default_factory=tuple)
     # Optional, so an empty string is a finished answer rather than a gap.
@@ -279,7 +284,24 @@ class EventDraft:
                 if _offers_participant_cap(self.category)
                 else None
             ),
+            repeat_until=(
+                self.repeat_until
+                if self.repeat_frequency is not RepeatFrequency.NONE
+                else None
+            ),
         )
+
+    def clear_series_end(self, timezone: ZoneInfo) -> None:
+        # Called when the draft stops repeating. The end goes from the start
+        # box as well as from the draft, so reopening Date & time does not
+        # show - and then refuse - an end the event can no longer have.
+        self.repeat_until = None
+        if self.start_time is not None:
+            self.start_text = format_event_schedule(
+                self.start_time,
+                None,
+                timezone,
+            )
 
 
 def draft_from_event(
@@ -308,7 +330,11 @@ def draft_from_event(
         description=event.description,
         channel_id=event.channel_id,
         start_time=start_time,
-        start_text=format_event_datetime(start_time, timezone),
+        start_text=format_event_schedule(
+            start_time,
+            event.repeat_until,
+            timezone,
+        ),
         duration_minutes=event.duration_minutes,
         duration_text=format_duration_input(event.duration_minutes),
         repeat_frequency=event.repeat_frequency,
@@ -321,6 +347,7 @@ def draft_from_event(
         requirements=event.requirements,
         mentee_enabled=event.mentee_enabled,
         max_participants=event.max_participants,
+        repeat_until=event.repeat_until,
         editing_event_id=event.event_id,
         roster_only=roster_only,
         editing_occurrence_id=editing_occurrence_id,
@@ -807,6 +834,7 @@ def _restore_event_channel(
             requirements=event.requirements,
             mentee_enabled=event.mentee_enabled,
             max_participants=event.max_participants,
+            repeat_until=event.repeat_until,
         )
     except SQLAlchemyError as exc:
         LOGGER.error(

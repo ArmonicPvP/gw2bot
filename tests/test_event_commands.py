@@ -21,6 +21,7 @@ from gw2bot.events.posting import (
 )
 from gw2bot.config import DEFAULT_EVENT_CREATE_ROLE_ID as EVENT_CREATE_ROLE_ID
 from gw2bot.events.formatting import (
+    EVENT_SCHEDULE_HINT,
     format_event_datetime,
     next_occurrence_start,
 )
@@ -7989,7 +7990,7 @@ class TestCancelDeleteFallbackView:
         channel: FakeChannel,
     ) -> None:
         event, occurrence = self._one_off_event(store)
-        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_final_run=True)
         # An edit gives the event a repeat while the confirmation sits open.
         store.update_event(
             event_id=event.event_id,
@@ -8028,7 +8029,7 @@ class TestCancelDeleteFallbackView:
         store: EventStore,
     ) -> None:
         event, occurrence = self._one_off_event(store)
-        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_final_run=True)
         interaction = make_interaction(
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
@@ -8060,7 +8061,7 @@ class TestCancelDeleteFallbackView:
         )
         occurrence = store.create_occurrence(event.event_id, started)
         store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
-        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_final_run=True)
         interaction = make_interaction(
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
@@ -8086,7 +8087,7 @@ class TestCancelDeleteFallbackView:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         event, _ = self._one_off_event(store)
-        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_final_run=True)
         interaction = make_interaction(
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
@@ -8112,7 +8113,7 @@ class TestCancelDeleteFallbackView:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         event, _ = self._one_off_event(store)
-        view = EventDeleteConfirmView(fake_bot, event, only_while_one_off=True)
+        view = EventDeleteConfirmView(fake_bot, event, only_while_final_run=True)
         interaction = make_interaction(
             role_ids=(EVENT_CREATE_ROLE_ID,),
             message=ephemeral_message(),
@@ -13296,3 +13297,483 @@ class TestRestoreDeletedEvent:
         assert "/event restore" not in reply
 
 
+# A series in the far future: daily from January 30, 2107 at 20:00 UTC, with an
+# end typed as a date alone on February 1, which lasts until 23:59 that day.
+SERIES_END_START_TEXT = "01.30.2107 20:00,02.01.2107"
+SERIES_END = datetime(2107, 2, 1, 23, 59, tzinfo=UTC)
+
+
+def make_ending_series(
+    store: EventStore,
+    repeat_until: datetime | None,
+) -> Any:
+    event = store.create_event(
+        category=EventCategory.FRACTAL,
+        title="Short series",
+        description="Bring food.",
+        channel_id=1234,
+        leader_discord_id=42,
+        start_time=FAR_FUTURE,
+        duration_minutes=90,
+        repeat_frequency=RepeatFrequency.DAILY,
+        repeat_days=(),
+        repeat_until=repeat_until,
+    )
+    occurrence = store.create_occurrence(event.event_id, FAR_FUTURE)
+    store.set_occurrence_message(occurrence.occurrence_id, 1234, 555, 777)
+    stored = store.get_occurrence(occurrence.occurrence_id)
+    assert stored is not None
+    return event, stored
+
+
+def reschedule_series_end(
+    store: EventStore,
+    event: Any,
+    repeat_until: datetime | None,
+) -> None:
+    store.update_event(
+        event_id=event.event_id,
+        category=event.category,
+        title=event.title,
+        description=event.description,
+        channel_id=event.channel_id,
+        leader_discord_id=event.leader_discord_id,
+        start_time=event.start_time,
+        duration_minutes=event.duration_minutes,
+        repeat_frequency=event.repeat_frequency,
+        repeat_days=event.repeat_days,
+        repeat_until=repeat_until,
+    )
+
+
+class TestSeriesEndInTheScheduleStep:
+    def make_draft(self) -> EventDraft:
+        return EventDraft(
+            leader_discord_id=42,
+            category=EventCategory.FRACTAL,
+            title="Kitty Cleanup",
+            description="Bring food.",
+            channel_id=1234,
+        )
+
+    def submit(
+        self,
+        draft: EventDraft,
+        text: str,
+        repeats: str,
+    ) -> EventScheduleModal:
+        modal = EventScheduleModal(make_bot(), draft)
+        modal.start_input._value = text
+        modal.duration_input._value = "01:30"
+        modal.repeat._values = [repeats]
+        modal.mentee._values = ["no"]
+        return modal
+
+    def test_the_start_box_explains_the_end_and_has_room_for_it(
+        self,
+    ) -> None:
+        modal = EventScheduleModal(make_bot(), self.make_draft())
+        start = next(
+            item
+            for item in modal.children
+            if isinstance(item, discord.ui.Label)
+            and item.component is modal.start_input
+        )
+
+        assert start.description == EVENT_SCHEDULE_HINT
+        longest = "01.30.2107 20:00 , 02.01.2107 20:00"
+        assert modal.start_input.max_length is not None
+        assert modal.start_input.max_length >= len(longest)
+
+    async def test_a_repeating_event_keeps_the_end(self) -> None:
+        draft = self.make_draft()
+        modal = self.submit(draft, SERIES_END_START_TEXT, "yes")
+
+        await modal.on_submit(make_interaction(message=ephemeral_message()))
+
+        assert draft.start_time == FAR_FUTURE
+        assert draft.repeat_until == SERIES_END
+
+    async def test_an_end_on_a_one_off_event_is_refused_with_retry(
+        self,
+    ) -> None:
+        draft = self.make_draft()
+        modal = self.submit(draft, SERIES_END_START_TEXT, "no")
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.start_time is None
+        assert draft.repeat_until is None
+        assert interaction.response.send_message.await_args is not None
+        text = interaction.response.send_message.await_args.args[0]
+        assert "Only a repeating event" in text
+        assert "Try again" in text
+
+    async def test_an_end_before_the_start_is_refused(self) -> None:
+        draft = self.make_draft()
+        modal = self.submit(draft, "01.30.2107 20:00,01.29.2107", "yes")
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.start_time is None
+        assert interaction.response.send_message.await_args is not None
+        assert (
+            "on or after"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    def test_the_preview_names_the_end(self) -> None:
+        draft = replace(
+            make_complete_draft(),
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_until=SERIES_END,
+        )
+
+        embeds, _ = build_event_preview(make_bot(), draft)
+
+        assert "Repeats daily until 02.01.2107" in cast(
+            str,
+            embeds[1].description,
+        )
+
+    async def test_an_end_left_by_an_abandoned_repeat_step_is_not_posted(
+        self,
+    ) -> None:
+        # "Yes, it repeats" keeps the end, but the frequency is the repeat
+        # modal's to set. A preview completing the draft before then posts a
+        # one-off event, which cannot carry an end.
+        draft = self.make_draft()
+        modal = self.submit(draft, SERIES_END_START_TEXT, "yes")
+        await modal.on_submit(make_interaction(message=ephemeral_message()))
+
+        assert draft.to_event().repeat_until is None
+
+    async def test_posting_stores_the_end(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        draft = replace(
+            make_complete_draft(),
+            repeat_frequency=RepeatFrequency.DAILY,
+            repeat_until=SERIES_END,
+        )
+        view = EventConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.followup.send = AsyncMock()
+
+        await press_post(view, interaction)
+
+        stored = store.get_event(1)
+        assert stored is not None
+        assert stored.repeat_until == SERIES_END
+
+
+class TestSeriesEndInTheChangeFlow:
+    def make_draft(
+        self,
+        repeat_frequency: RepeatFrequency = RepeatFrequency.DAILY,
+    ) -> EventDraft:
+        return replace(
+            make_complete_draft(),
+            start_text=FUTURE_START_TEXT,
+            duration_text="01:30",
+            repeat_frequency=repeat_frequency,
+        )
+
+    async def test_date_and_time_sets_the_end_on_a_repeating_event(
+        self,
+    ) -> None:
+        draft = self.make_draft()
+        modal = EventFieldEditModal(make_bot(), draft, "start")
+        modal.field_input._value = SERIES_END_START_TEXT
+
+        await modal.on_submit(make_interaction(message=ephemeral_message()))
+
+        assert draft.start_time == FAR_FUTURE
+        assert draft.repeat_until == SERIES_END
+        assert draft.start_text == SERIES_END_START_TEXT
+
+    async def test_date_and_time_removes_the_end(self) -> None:
+        draft = replace(self.make_draft(), repeat_until=SERIES_END)
+        modal = EventFieldEditModal(make_bot(), draft, "start")
+        modal.field_input._value = FUTURE_START_TEXT
+
+        await modal.on_submit(make_interaction(message=ephemeral_message()))
+
+        assert draft.repeat_until is None
+
+    async def test_date_and_time_refuses_an_end_on_a_one_off_event(
+        self,
+    ) -> None:
+        draft = self.make_draft(RepeatFrequency.NONE)
+        modal = EventFieldEditModal(make_bot(), draft, "start")
+        modal.field_input._value = SERIES_END_START_TEXT
+        interaction = make_interaction()
+
+        await modal.on_submit(interaction)
+
+        assert draft.repeat_until is None
+        assert interaction.response.send_message.await_args is not None
+        assert (
+            "Only a repeating event"
+            in interaction.response.send_message.await_args.args[0]
+        )
+
+    async def test_turning_the_repeat_off_clears_the_end(self) -> None:
+        draft = replace(
+            self.make_draft(),
+            start_text=SERIES_END_START_TEXT,
+            repeat_until=SERIES_END,
+        )
+        view = RepeatChoiceView(make_bot(), draft)
+
+        await cast(Any, view.repeat_no.callback)(
+            make_interaction(message=ephemeral_message())
+        )
+
+        assert draft.repeat_frequency is RepeatFrequency.NONE
+        assert draft.repeat_until is None
+        # Reopening Date & time must not show an end the event can no longer
+        # take, which the modal would then refuse.
+        assert draft.start_text == FUTURE_START_TEXT
+
+    def test_editing_an_event_shows_its_end_after_the_start(
+        self,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_ending_series(store, SERIES_END)
+
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+
+        assert draft.start_text == SERIES_END_START_TEXT
+        assert draft.repeat_until == SERIES_END
+
+    async def test_saving_an_edit_stores_the_new_end(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, _ = make_ending_series(store, SERIES_END)
+        draft = draft_from_event(event, ZoneInfo("UTC"))
+        later = datetime(2107, 2, 10, 23, 59, tzinfo=UTC)
+        draft.repeat_until = later
+        view = EventEditConfirmView(fake_bot, draft)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.save_changes.callback(interaction)
+
+        updated = store.get_event(event.event_id)
+        assert updated is not None
+        assert updated.repeat_until == later
+
+
+class TestCancellingTheLastRunOfASeries:
+    # Ends an hour after the first run starts, before the next day's run.
+    LAST_RUN_END = FAR_FUTURE + timedelta(hours=1)
+
+    async def test_cancel_offers_deletion_on_the_last_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, occurrence = make_ending_series(store, self.LAST_RUN_END)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventDeleteConfirmView)
+        assert (
+            "last run before its repeat ends"
+            in interaction.response.send_message.await_args.args[0]
+        )
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+
+    async def test_cancel_still_calls_off_a_run_with_more_to_come(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        group = EventCommands(fake_bot)
+        event, _ = make_ending_series(store, SERIES_END)
+        interaction = make_interaction(role_ids=(EVENT_CREATE_ROLE_ID,))
+
+        await cast(Any, group.cancel.callback)(
+            group, interaction, event.event_id
+        )
+
+        kwargs = interaction.response.send_message.await_args.kwargs
+        assert isinstance(kwargs["view"], EventCancelConfirmView)
+
+    async def test_the_deletion_goes_ahead_on_the_last_run(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        event, occurrence = make_ending_series(store, self.LAST_RUN_END)
+        view = EventDeleteConfirmView(
+            fake_bot,
+            event,
+            only_while_final_run=True,
+        )
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        assert store.get_event(event.event_id) is None
+        assert store.get_occurrence(occurrence.occurrence_id) is None
+
+    async def test_the_deletion_is_refused_once_the_end_moves_out(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_ending_series(store, self.LAST_RUN_END)
+        view = EventDeleteConfirmView(
+            fake_bot,
+            event,
+            only_while_final_run=True,
+        )
+        # An edit gives the series more runs while the confirmation is open.
+        reschedule_series_end(store, event, SERIES_END)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.delete.callback(interaction)
+
+        assert store.get_event(event.event_id) is not None
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "repeats now"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+    async def test_cancelling_is_refused_once_the_end_moves_in(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        channel: FakeChannel,
+    ) -> None:
+        event, occurrence = make_ending_series(store, SERIES_END)
+        view = EventCancelConfirmView(fake_bot, event, occurrence)
+        # An edit pulls the end in to this run while the confirmation is open.
+        reschedule_series_end(store, event, self.LAST_RUN_END)
+        interaction = make_interaction(
+            role_ids=(EVENT_CREATE_ROLE_ID,),
+            message=ephemeral_message(),
+        )
+        interaction.edit_original_response = AsyncMock()
+
+        await view.cancel_occurrence.callback(interaction)
+
+        assert store.get_occurrence(occurrence.occurrence_id) is not None
+        channel.partial_message.delete.assert_not_awaited()
+        assert interaction.edit_original_response.await_args is not None
+        assert (
+            "repeat now ends with this occurrence"
+            in interaction.edit_original_response.await_args.kwargs["content"]
+        )
+
+
+class TestSignupPromptsOnTheLastRun:
+    def make_flow(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+        repeat_until: datetime | None,
+    ) -> SignupFlow:
+        event, occurrence = make_ending_series(store, repeat_until)
+        flow = SignupFlow(fake_bot, event, occurrence, 21)
+        flow.role = EventRole.DPS
+        return flow
+
+    def make_flow_interaction(self) -> Any:
+        interaction = make_interaction(message=ephemeral_message())
+        interaction.response.is_done = MagicMock(return_value=False)
+        interaction.edit_original_response = AsyncMock()
+        return interaction
+
+    async def test_the_last_run_asks_nothing_about_later_runs(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = self.make_flow(
+            fake_bot,
+            store,
+            FAR_FUTURE + timedelta(hours=1),
+        )
+        interaction = self.make_flow_interaction()
+
+        await flow.continue_after_roles(interaction)
+
+        # Straight to the seat: no remember-my-roles question, and no offer to
+        # sign up automatically for runs that are not coming.
+        assert store.get_signup(flow.occurrence.occurrence_id, 21) is not None
+        interaction.edit_original_response.assert_awaited_once()
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        assert "automatically" not in await_args.kwargs["content"]
+        assert await_args.kwargs["view"] is None
+
+    async def test_an_earlier_run_still_offers_automatic_sign_up(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        flow = self.make_flow(fake_bot, store, SERIES_END)
+        interaction = self.make_flow_interaction()
+
+        await flow.finalize(interaction)
+
+        await_args = interaction.edit_original_response.await_args
+        assert await_args is not None
+        assert "automatically" in await_args.kwargs["content"]
+        assert isinstance(await_args.kwargs["view"], AutoSignupChoiceView)
+
+
+class TestUndoingASeriesEndEdit:
+    async def test_an_edit_that_only_moved_the_end_can_be_undone(
+        self,
+        fake_bot: Any,
+        store: EventStore,
+    ) -> None:
+        # The end is typed in the date & time box, so moving it alone is a
+        # date & time change the undo has to see - not "nothing to undo".
+        event, _ = make_ending_series(store, SERIES_END)
+        later = datetime(2107, 2, 10, 23, 59, tzinfo=UTC)
+        await save_edit(fake_bot, event, repeat_until=later)
+        edited = store.get_event(event.event_id)
+        assert edited is not None
+        assert edited.repeat_until == later
+
+        answer = await open_restore(fake_bot, event.event_id)
+
+        assert "puts back its date & time" in answer["content"]
+        await press_restore(answer["view"])
+        restored = store.get_event(event.event_id)
+        assert restored is not None
+        assert restored.repeat_until == SERIES_END

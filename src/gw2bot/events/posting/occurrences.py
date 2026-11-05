@@ -378,8 +378,9 @@ def ensure_next_recurring_occurrence(
 ) -> EventOccurrence | None:
     """Seed the next occurrence of a recurring series when one is due.
 
-    Returns the created occurrence, or None for a non-repeating event or when a
-    later occurrence already exists (so callers never create duplicates).
+    Returns the created occurrence, or None for a non-repeating event, when a
+    later occurrence already exists (so callers never create duplicates), or
+    when the series has reached its end.
     """
     if event.repeat_frequency is RepeatFrequency.NONE:
         return None
@@ -396,7 +397,7 @@ def _create_next_occurrence(
     event: Event,
     occurrence: EventOccurrence,
     now: datetime,
-) -> EventOccurrence:
+) -> EventOccurrence | None:
     next_start = next_occurrence_start(
         event.repeat_frequency,
         event.repeat_days,
@@ -415,6 +416,17 @@ def _create_next_occurrence(
             next_start,
             bot.event_timezone,
         )
+    # Judged after the catch-up, on the run that would actually be created: a
+    # run inside the end that was skipped for having finished during downtime
+    # must not stand in for one past it.
+    if not event.repeats_through(next_start):
+        LOGGER.debug(
+            "Recurring series has reached its end; event_id=%s "
+            "last_occurrence_id=%s",
+            event.event_id,
+            occurrence.occurrence_id,
+        )
+        return None
     new_occurrence = bot.event_store.create_occurrence(
         event.event_id,
         next_start,
